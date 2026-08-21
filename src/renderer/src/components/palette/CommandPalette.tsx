@@ -9,6 +9,7 @@ import {
   Copy,
   Terminal as TerminalIcon,
   Activity,
+  Download,
   CornerDownLeft
 } from 'lucide-react'
 import { useApp } from '../../store/app'
@@ -99,6 +100,17 @@ export function CommandPalette(): React.JSX.Element {
       { id: 'a-ws', group: 'Actions', title: 'New Workspace', icon: <Plus size={16} />, run: () => store.setModal('workspaces') },
       { id: 'a-mon', group: 'Actions', title: 'Open Fleet Monitor', icon: <Activity size={16} />, run: () => store.setActivity('monitor') },
       { id: 'a-term', group: 'Actions', title: 'Open Connections', icon: <TerminalIcon size={16} />, run: () => store.setActivity('connections') },
+      {
+        id: 'a-import',
+        group: 'Actions',
+        title: 'Import Servers from ~/.ssh/config',
+        sub: 'Bulk-import hosts you already have, ProxyJump included',
+        icon: <Download size={16} />,
+        run: () => {
+          store.setActivity('connections')
+          store.setModal('import-ssh')
+        }
+      },
       { id: 'a-set', group: 'Settings', title: 'Open Settings', icon: <Settings size={16} />, run: () => store.setActivity('settings') }
     ]
     return [...actions, ...list]

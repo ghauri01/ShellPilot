@@ -309,7 +309,7 @@ to run the highlighted entry.
 
 | Group | What it does |
 |---|---|
-| **Actions** | Add Server, New Workspace, Open Fleet Monitor, Open Connections |
+| **Actions** | Add Server, New Workspace, Import from `~/.ssh/config`, Open Fleet Monitor, Open Connections |
 | **Settings** | Jump straight into Settings |
 | **Workspaces** | Switch to any visible workspace by name |
 | **Servers** | Open a terminal on any server in the current workspace — matches on name *and* on `user@host` |

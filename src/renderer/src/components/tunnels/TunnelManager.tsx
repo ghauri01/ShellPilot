@@ -26,16 +26,27 @@ export function TunnelManager(): React.JSX.Element {
   const [busy, setBusy] = useState<Record<string, boolean>>({})
 
   // Subscribe to status for every tunnel in the workspace.
+  //
+  // Keyed on the ids rather than the tunnel objects. A status write replaces
+  // the object it touches, so depending on the list itself would tear down and
+  // rebuild every subscription each time a status arrived — and a busy tunnel
+  // reports one per connection. The name is resolved when an error actually
+  // fires, which keeps renames out of this dependency too.
+  const tunnelIds = tunnels.map((t) => t.id).join(',')
   useEffect(() => {
-    const offs = tunnels.map((t) =>
-      window.shellpilot?.tunnel.onStatus(t.id, (s) => {
-        setLive((m) => ({ ...m, [t.id]: s }))
-        setTunnelStatus(t.id, s.state === 'active' ? 'active' : 'inactive')
-        if (s.state === 'error' && s.error) toast(`${t.name}: ${s.error}`, 'error')
+    const ids = tunnelIds ? tunnelIds.split(',') : []
+    const offs = ids.map((id) =>
+      window.shellpilot?.tunnel.onStatus(id, (s) => {
+        setLive((m) => ({ ...m, [id]: s }))
+        setTunnelStatus(id, s.state === 'active' ? 'active' : 'inactive')
+        if (s.state === 'error' && s.error) {
+          const name = useApp.getState().tunnels.find((t) => t.id === id)?.name ?? 'Tunnel'
+          toast(`${name}: ${s.error}`, 'error')
+        }
       })
     )
     return () => offs.forEach((off) => off?.())
-  }, [tunnels, setTunnelStatus])
+  }, [tunnelIds, setTunnelStatus])
 
   // Reconcile with what is actually running (e.g. after a view remount).
   useEffect(() => {

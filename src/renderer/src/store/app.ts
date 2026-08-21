@@ -716,8 +716,18 @@ export const useApp = create<AppState>((set, get) => ({
 
   deleteTunnel: (id) => set((s) => ({ tunnels: s.tunnels.filter((t) => t.id !== id) })),
 
+  // A live tunnel re-emits its status on every connection open and close, so
+  // this is called constantly with a status that has not moved. Writing it
+  // anyway would still allocate a fresh tunnel object, and anything selecting
+  // the list by identity would read that as a change — so bail out when
+  // nothing actually differs. Returning the state object unchanged makes it a
+  // true no-op: zustand skips notifying subscribers at all.
   setTunnelStatus: (id, status) =>
-    set((s) => ({ tunnels: s.tunnels.map((t) => (t.id === id ? { ...t, status } : t)) })),
+    set((s) =>
+      s.tunnels.some((t) => t.id === id && t.status !== status)
+        ? { tunnels: s.tunnels.map((t) => (t.id === id ? { ...t, status } : t)) }
+        : s
+    ),
 
   moveDatabaseToFolder: (databaseId, folderId) =>
     set((s) => ({
