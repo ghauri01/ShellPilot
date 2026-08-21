@@ -65,8 +65,57 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # GitHub lists release assets as one flat block, so the platform
+      # grouping has to live in the notes. Built here rather than kept as a
+      # static file because every link carries the version.
+      - name: Build release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          {
+            echo "## Downloads"
+            echo
+            echo "### Windows"
+            echo
+            echo "| File | Notes |"
+            echo "|---|---|"
+            echo "| [\`ShellPilot-${VERSION}-setup.exe\`]($BASE/ShellPilot-${VERSION}-setup.exe) | Installer with desktop and Start-menu shortcuts. **Pick this one if unsure.** |"
+            echo "| [\`ShellPilot-${VERSION}-portable.exe\`]($BASE/ShellPilot-${VERSION}-portable.exe) | Single file, no install, keeps its data beside the \`.exe\` — runs from a USB stick |"
+            echo
+            echo "### macOS"
+            echo
+            echo "| File | Notes |"
+            echo "|---|---|"
+            echo "| [\`ShellPilot-${VERSION}-arm64.dmg\`]($BASE/ShellPilot-${VERSION}-arm64.dmg) | Apple Silicon (M1 and later) |"
+            echo "| [\`ShellPilot-${VERSION}-x64.dmg\`]($BASE/ShellPilot-${VERSION}-x64.dmg) | Intel Macs |"
+            echo
+            echo "### Linux"
+            echo
+            echo "| File | Notes |"
+            echo "|---|---|"
+            echo "| [\`ShellPilot-${VERSION}-x86_64.AppImage\`]($BASE/ShellPilot-${VERSION}-x86_64.AppImage) | Any distribution — \`chmod +x\` and run |"
+            echo "| [\`ShellPilot-${VERSION}-amd64.deb\`]($BASE/ShellPilot-${VERSION}-amd64.deb) | Debian and Ubuntu — \`sudo apt install ./ShellPilot-${VERSION}-amd64.deb\` |"
+            echo
+            echo "---"
+            echo
+            echo "The remaining assets are build metadata, not downloads: \`.blockmap\` files"
+            echo "describe binary deltas between versions, and \`latest*.yml\` are update-feed"
+            echo "manifests. You never need either."
+            echo
+            echo "Builds are **not code-signed**. Windows SmartScreen will warn on first run —"
+            echo "choose *More info → Run anyway*. On macOS run"
+            echo "\`xattr -cr /Applications/ShellPilot.app\` if Gatekeeper blocks it. Each asset"
+            echo "lists its SHA-256, which is the strongest integrity check available here."
+            echo
+          } > release-notes.md
+          cat release-notes.md
+
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**
+          body_path: release-notes.md
+          append_body: true
           generate_release_notes: true
           draft: false
