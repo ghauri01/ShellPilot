@@ -27,6 +27,19 @@ Your DevOps workstation, everywhere. Windows · macOS · Linux.
 
 ---
 
+> [!CAUTION]
+> **Windows and macOS will show a security warning the first time you run ShellPilot.
+> This is expected, and it is not a virus.**
+>
+> The app is **not code-signed** — a code-signing certificate costs $200–$400 a year for
+> Windows and $99 a year for Apple, which a free MIT-licensed project has no income to
+> cover. The warning means your operating system cannot confirm **who published** the
+> app. It says nothing about whether the file is safe.
+>
+> Every release is **scanned by 70+ antivirus engines** and publishes a **SHA-256** for
+> each file, so you can verify the download yourself.
+> → [How to get past the warning, and the scan results](#first-run-why-your-computer-shows-a-warning)
+
 ShellPilot is a **free and open-source alternative to MobaXterm, PuTTY, Termius, SecureCRT and MobaXterm Personal Edition**, built for engineers who spend the day moving between bastions, production boxes and databases. It combines an **SSH terminal**, **SFTP file browser**, **server monitoring**, **SSH tunnels**, a **multi-engine database client** and an **encrypted password vault** in a single window — with no account, no telemetry and no subscription.
 
 ![ShellPilot main window](docs/images/main-window.png)
@@ -171,6 +184,37 @@ chmod +x ShellPilot-*.AppImage
 > **Will this be fixed?** Yes — signing is planned once the project can cover the annual
 > certificate cost. Until then the SHA-256 checksums on each release are the way to
 > verify what you downloaded is what was built.
+
+### Antivirus scan
+
+Because the builds are unsigned, every release is scanned automatically as part of the
+build, by three independent scanners, before anything is published:
+
+| Scanner | What it is | Runs on |
+|---|---|---|
+| **Microsoft Defender** | The engine that ships with Windows — the same one that will scan the installer on your own machine | The Windows build runner, on the `.exe` files it just produced |
+| **ClamAV** | The open-source engine, with signatures refreshed at build time | The Linux release job, across every artifact |
+| **[VirusTotal](https://www.virustotal.com)** | Aggregates **70+ commercial engines** in one report | The release job, with a per-file report linked in the notes |
+
+A detection from Defender or ClamAV **fails the build**, so a release that exists at all
+has passed both. The results — and the VirusTotal links for each file — are printed in
+every release's notes.
+
+If you would rather check for yourself rather than trust a link in a README, you can:
+
+- **Look the file up by its hash.** Every release lists a SHA-256 per asset. Paste it
+  into [virustotal.com](https://www.virustotal.com) — searching by hash proves the report
+  belongs to the exact bytes you downloaded, which a link alone does not.
+- **Upload the file** to VirusTotal yourself.
+- **Build from source.** The entire application is in this repository; see
+  [Build from source](#build-from-source).
+
+> **A note on false positives.** Unsigned Electron applications are flagged by one or two
+> minor engines fairly often — an installer that unpacks an executable and opens network
+> connections is, structurally, what a lot of malware also does. A handful of detections
+> from engines you have never heard of, against a clean result from the major ones, is the
+> normal picture for an unsigned open-source desktop app. Code signing is what removes it,
+> and that is a cost problem rather than a technical one.
 
 ### Verifying a download
 

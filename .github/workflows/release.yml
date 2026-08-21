@@ -58,6 +58,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Defender is already installed on the Windows runner, so scanning the
+      # installers we just produced costs nothing and catches a problem before
+      # anything is published rather than after someone downloads it.
+      - name: Scan installers with Microsoft Defender
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          if (-not (Test-Path $mp)) {
+            Write-Warning "Defender not present on this runner"
+            "not available on this runner" | Out-File -Encoding utf8 release/_defender.txt
+            exit 0
+          }
+          & $mp -SignatureUpdate | Out-Null
+          $bad = 0
+          Get-ChildItem release -Include *.exe -Recurse | ForEach-Object {
+            Write-Host "Scanning $($_.Name)"
+            & $mp -Scan -ScanType 3 -File $_.FullName -DisableRemediation
+            # 0 = no threat, 2 = threat found
+            if ($LASTEXITCODE -eq 2) { Write-Error "Defender flagged $($_.Name)"; $bad = 1 }
+          }
+          if ($bad -eq 0) { "no threats found" | Out-File -Encoding utf8 release/_defender.txt }
+          exit $bad
+
       - uses: actions/upload-artifact@v4
         with:
           name: shellpilot-${{ matrix.os }}
@@ -67,6 +91,7 @@ jobs:
             release/*.AppImage
             release/*.deb
             release/*.blockmap
+            release/_defender.txt
           if-no-files-found: warn
 
   release:
@@ -80,13 +105,63 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # The builds are unsigned, so independent scans are the only reassurance a
+      # downloader gets. ClamAV needs no account and runs entirely in the job,
+      # so it always runs; VirusTotal needs a free API key and is skipped rather
+      # than failed when one is not configured, so a fork can still cut a release.
+      - name: Scan installers with ClamAV
+        id: clamav
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clamav
+          sudo systemctl stop clamav-freshclam 2>/dev/null || true
+          sudo freshclam --quiet || echo "::warning::freshclam could not update; using shipped signatures"
+          VER=$(clamscan --version)
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          # The installers are 100 MB+, well past clamscan's 25 MB default caps.
+          set +e
+          clamscan --recursive --infected --no-summary \
+                   --max-filesize=1024M --max-scansize=1024M \
+                   artifacts | tee clamav.txt
+          CODE=${PIPESTATUS[0]}
+          set -e
+          echo "engine: $VER"
+          case "$CODE" in
+            0) echo "status=clean"     >> "$GITHUB_OUTPUT" ;;
+            1) echo "status=INFECTED"  >> "$GITHUB_OUTPUT"
+               echo "::error::ClamAV reported an infected file"; exit 1 ;;
+            *) echo "status=error"     >> "$GITHUB_OUTPUT"
+               echo "::warning::ClamAV exited $CODE" ;;
+          esac
+
+      - name: Scan installers with VirusTotal
+        id: virustotal
+        if: env.VT_API_KEY != ''
+        continue-on-error: true
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        uses: crazy-max/ghaction-virustotal@v5
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          files: |
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/*.AppImage
+            artifacts/*.deb
+
       # GitHub lists release assets as one flat block, so the platform
       # grouping has to live in the notes. Built here rather than kept as a
       # static file because every link carries the version.
       - name: Build release notes
         env:
           TAG: ${{ github.ref_name }}
+          VT_RESULTS: ${{ steps.virustotal.outputs.analysis }}
+          CLAMAV_STATUS: ${{ steps.clamav.outputs.status }}
+          CLAMAV_VERSION: ${{ steps.clamav.outputs.version }}
         run: |
+          DEFENDER_STATUS=$(cat artifacts/_defender.txt 2>/dev/null | tr -d '\r\n' || true)
+          DEFENDER_STATUS=${DEFENDER_STATUS:-not run}
+          rm -f artifacts/_defender.txt          # marker only; never a release asset
           VERSION="${TAG#v}"
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
           {
@@ -112,6 +187,32 @@ jobs:
             echo "|---|---|"
             echo "| [\`ShellPilot-${VERSION}-x86_64.AppImage\`]($BASE/ShellPilot-${VERSION}-x86_64.AppImage) | Any distribution — \`chmod +x\` and run |"
             echo "| [\`ShellPilot-${VERSION}-amd64.deb\`]($BASE/ShellPilot-${VERSION}-amd64.deb) | Debian and Ubuntu — \`sudo apt install ./ShellPilot-${VERSION}-amd64.deb\` |"
+            echo
+            echo "---"
+            echo
+            echo "### Antivirus scan"
+            echo
+            echo "These builds are unsigned, so every release is scanned before publishing."
+            echo
+            echo "| Scanner | Result |"
+            echo "|---|---|"
+            echo "| Microsoft Defender (Windows runner) | ${DEFENDER_STATUS:-no threats} |"
+            echo "| ClamAV \`${CLAMAV_VERSION}\` | ${CLAMAV_STATUS:-clean} |"
+            if [ -n "$VT_RESULTS" ]; then
+              echo "| VirusTotal (70+ engines) | per-file reports below |"
+            else
+              echo "| VirusTotal (70+ engines) | not run for this release |"
+            fi
+            echo
+            if [ -n "$VT_RESULTS" ]; then
+              echo "$VT_RESULTS" | tr ',' '\n' | while IFS='=' read -r f url; do
+                [ -n "$url" ] && echo "- [\`$(basename "$f")\`]($url)"
+              done
+              echo
+            fi
+            echo "One or two detections from minor engines are normal for an unsigned"
+            echo "Electron installer. Verify the SHA-256 of what you downloaded against"
+            echo "the value listed on this page, or build from source."
             echo
             echo "---"
             echo
