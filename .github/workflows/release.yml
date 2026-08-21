@@ -49,22 +49,6 @@ jobs:
             exit 1
           fi
 
-      # Route installs through the Chainsaw proxy. The heredoc is deliberately
-      # unquoted: <<'EOF' would write the literal ${CHAINSAW_CLIENT_ID} into
-      # .npmrc rather than the secret, and authentication would fail. shell:
-      # bash is required because this job also runs on the Windows runner.
-      - name: Configure npm registry for Chainsaw
-        shell: bash
-        env:
-          CHAINSAW_CLIENT_ID: ${{ secrets.CHAINSAW_CLIENT_ID }}
-          CHAINSAW_CLIENT_SECRET: ${{ secrets.CHAINSAW_CLIENT_SECRET }}
-        run: |
-          cat > .npmrc <<EOF
-          registry=https://chain305.com/chainproxy/repository/@shellpilot/npmjs/
-          //chain305.com/chainproxy/repository/@shellpilot/npmjs/:_authToken=${CHAINSAW_CLIENT_ID}:${CHAINSAW_CLIENT_SECRET}
-          always-auth=true
-          EOF
-
       - run: npm ci
 
       - run: npm run typecheck
