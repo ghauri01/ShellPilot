@@ -356,6 +356,22 @@ They are designed not to interrupt you:
 - Alerts are evaluated from metrics **already being sampled**, so switching them
   on adds no extra SSH load
 
+## Fleet Monitor
+
+Press <kbd>Ctrl</kbd>+<kbd>M</kbd> for a live wall of every server in the workspace —
+CPU, memory, disk and network for each, with the estate totalled across the top.
+
+![ShellPilot Fleet Monitor showing grouped servers with live CPU, memory, disk and network metrics](docs/images/fleet-monitor.png)
+
+Cards are **grouped**, so databases, application servers and bastions stay visually
+separate rather than becoming one long list. Drag a card between groups, or create a
+group from the button in the top right; anything unplaced collects in **Ungrouped**, and
+groups collapse when you want them out of the way.
+
+The header totals what you actually have: servers reporting, vCPU across the fleet, and
+RAM and disk as used-against-capacity. Every figure comes from the metrics already being
+sampled for open sessions, so opening this view adds no extra SSH load.
+
 ## Command palette
 
 Press <kbd>Ctrl</kbd>+<kbd>K</kbd> anywhere — including with focus inside a
