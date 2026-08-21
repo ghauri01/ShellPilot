@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Download, Loader2, Check, FolderPlus } from 'lucide-react'
 import { Modal } from '../common/Modal'
-import { useApp } from '../../store/app'
+import { useApp, useWorkspaceServers } from '../../store/app'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
 import type { SshConfigHost } from '../../../../shared/sshconfig'
@@ -47,7 +47,7 @@ export function SshConfigImport(): React.JSX.Element {
   const setModal = useApp((s) => s.setModal)
   const addServer = useApp((s) => s.addServer)
   const addFolder = useApp((s) => s.addFolder)
-  const servers = useApp((s) => s.workspaceServers())
+  const servers = useWorkspaceServers()
 
   const [loading, setLoading] = useState(true)
   const [hosts, setHosts] = useState<SshConfigHost[]>([])

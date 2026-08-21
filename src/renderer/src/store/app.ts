@@ -311,6 +311,13 @@ export const useApp = create<AppState>((set, get) => ({
   // activeWorkspace() always fell back to the first workspace while the filters
   // below used the raw id, so a stale id showed a workspace in the header with
   // nothing under it. Both sides resolve the id the same way now.
+  // The workspace* getters below filter, so each call returns a new array.
+  // Never call one straight from a component as useApp((s) => s.workspaceX()):
+  // useSyncExternalStore compares snapshots with Object.is, a fresh array never
+  // matches, and the component re-renders itself to death (React error #185).
+  // Use the useWorkspaceX hooks at the bottom of this file — they wrap the same
+  // getters in useShallow. Getters returning an existing element (activeTab,
+  // activeWorkspace) are stable and safe either way.
   activeId: () => resolveWorkspaceId(get().workspaces, get().activeWorkspaceId),
 
   activeWorkspace: () =>
