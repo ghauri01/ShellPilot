@@ -89,14 +89,14 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@types/ssh2": "^1.15.5",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "^5.2.0",
     "electron": "^43.4.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.2",
-    "vite": "^8.2.2"
+    "vite": "^7.3.6"
   },
   "productName": "ShellPilot",
   "engines": {
