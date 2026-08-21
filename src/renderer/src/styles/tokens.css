@@ -1,0 +1,136 @@
+/* ShellPilot design tokens
+   Dark is the primary theme. Light is a full override on [data-theme="light"]. */
+
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* Background hierarchy — subtle depth, never pure black */
+  --bg-app: #0d1017;
+  --bg-sidebar: #12161f;
+  --bg-panel: #161b26;
+  --bg-card: #1b2130;
+  --bg-elevated: #1f2635;
+  --bg-input: #1a2130;
+  --bg-terminal: #0b0e14;
+  --bg-hover: #212a3a;
+  --bg-active: #263149;
+  --bg-scrim: rgba(6, 9, 14, 0.62);
+
+  /* Borders */
+  --border: #262d3d;
+  --border-strong: #333c50;
+  --border-subtle: #1e2431;
+
+  /* Text */
+  --text: #e6edf3;
+  --text-muted: #9aa4b2;
+  --text-faint: #6b7484;
+  --text-inverse: #0d1017;
+
+  /* Brand — ShellPilot cyan/teal */
+  --accent: #22c7d6;
+  --accent-hover: #45d6e2;
+  --accent-press: #17aab8;
+  --accent-soft: rgba(34, 199, 214, 0.14);
+  --accent-border: rgba(34, 199, 214, 0.45);
+  --accent-text: #0b1013;
+
+  /* Status */
+  --ok: #3fb950;
+  --ok-soft: rgba(63, 185, 80, 0.15);
+  --warn: #d29922;
+  --warn-soft: rgba(210, 153, 34, 0.15);
+  --danger: #f85149;
+  --danger-soft: rgba(248, 81, 73, 0.15);
+  --info: #58a6ff;
+  --info-soft: rgba(88, 166, 255, 0.15);
+
+  /* Workspace accent colors */
+  --ws-green: #3fb950;
+  --ws-purple: #a371f7;
+  --ws-blue: #58a6ff;
+  --ws-orange: #e3873c;
+  --ws-red: #f85149;
+  --ws-cyan: #22c7d6;
+  --ws-pink: #db61a2;
+
+  /* Typography */
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Menlo', Consolas, monospace;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+
+  /* Spacing scale (4px base) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* Radius — restrained, desktop-app feel */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-pill: 999px;
+
+  /* Shadows — subtle depth, not heavy */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.5);
+
+  /* Chrome */
+  --titlebar-h: 40px;
+  --activitybar-w: 52px;
+  --statusbar-h: 24px;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg-app: #f4f6fa;
+  --bg-sidebar: #eceff4;
+  --bg-panel: #f7f9fc;
+  --bg-card: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-input: #ffffff;
+  --bg-terminal: #f7f9fc;
+  --bg-hover: #e6eaf1;
+  --bg-active: #dbe6f6;
+  --bg-scrim: rgba(30, 41, 59, 0.28);
+
+  --border: #d6dced;
+  --border-strong: #c2cadd;
+  --border-subtle: #e4e8f0;
+
+  --text: #1c2333;
+  --text-muted: #55617a;
+  --text-faint: #8a93a6;
+  --text-inverse: #ffffff;
+
+  --accent: #0e9aa8;
+  --accent-hover: #12aebe;
+  --accent-press: #0b808c;
+  --accent-soft: rgba(14, 154, 168, 0.12);
+  --accent-border: rgba(14, 154, 168, 0.4);
+  --accent-text: #ffffff;
+
+  --ok: #1a7f37;
+  --ok-soft: rgba(26, 127, 55, 0.12);
+  --warn: #9a6700;
+  --warn-soft: rgba(154, 103, 0, 0.12);
+  --danger: #cf222e;
+  --danger-soft: rgba(207, 34, 46, 0.12);
+  --info: #0969da;
+  --info-soft: rgba(9, 105, 218, 0.12);
+
+  --shadow-sm: 0 1px 2px rgba(30, 41, 59, 0.1);
+  --shadow-md: 0 8px 24px rgba(30, 41, 59, 0.12);
+  --shadow-lg: 0 20px 50px rgba(30, 41, 59, 0.18);
+}

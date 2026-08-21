@@ -1,0 +1,82 @@
+appId: com.shellpilot.app
+productName: ShellPilot
+copyright: Copyright © 2026 ShellPilot contributors
+
+publish:
+  provider: github
+  owner: ghauri01
+  repo: ShellPilot
+
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - out/**
+  - resources/**
+  - package.json
+
+# ssh2 pulls in an optional native crypto binding; keep it unpacked so it can
+# be dlopen'd from outside the asar archive.
+asarUnpack:
+  - '**/node_modules/cpu-features/**'
+  - '**/node_modules/ssh2/**'
+
+win:
+  icon: build/icon.ico
+  target:
+    # Installer with Start-menu and desktop shortcuts.
+    - target: nsis
+      arch: [x64]
+    # Single self-contained .exe — no install, runs from a USB stick.
+    - target: portable
+      arch: [x64]
+
+# Named per target: ${target} is not a valid artifactName macro, so the two
+# Windows outputs are distinguished in their own sections instead.
+nsis:
+  artifactName: ${productName}-${version}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: ShellPilot
+
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}
+  # Keep settings/vault next to the exe rather than in the Windows profile, so
+  # the whole thing really is portable.
+  unpackDirName: ShellPilot
+
+mac:
+  icon: build/icon.icns
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+linux:
+  icon: build/icon.png
+  category: Development
+  maintainer: ghauri01 <aliwaqarofficial@gmail.com>
+  synopsis: Your DevOps workstation, everywhere.
+  description: >-
+    Free, open-source SSH client, SFTP browser, SSH tunnel manager, multi-engine
+    database GUI and encrypted secrets vault in one desktop app. An open
+    alternative to MobaXterm, PuTTY and Termius.
+  desktop:
+    entry:
+      Name: ShellPilot
+      Comment: SSH, SFTP, tunnels and databases in one place
+      Categories: Development;Utility;
+      Terminal: 'false'
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}

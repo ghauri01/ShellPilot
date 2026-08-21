@@ -1,0 +1,494 @@
+import net from 'node:net'
+import { Client, type ConnectConfig } from 'ssh2'
+import type { ClientChannel } from 'ssh2'
+import { readFileSync, existsSync } from 'node:fs'
+import { WebContents } from 'electron'
+import type { SshCloseInfo, SshConnectConfig, SshHop, SshStatus, SshStatusPhase } from '../../shared/ssh'
+import { verifyHostKey } from './knownhosts'
+
+interface Session {
+  conn: PooledConnection | null
+  stream: ClientChannel | null
+}
+
+const sessions = new Map<string, Session>()
+
+export interface KeyboardPrompt {
+  prompt: string
+  echo: boolean
+}
+export interface KeyboardRequest {
+  host: string
+  username: string
+  // Present when the hop maps to a saved server, so an answer can be stored.
+  serverId?: string
+  name: string
+  instructions: string
+  prompts: KeyboardPrompt[]
+}
+export type Prompter = (req: KeyboardRequest) => Promise<string[]>
+
+// Servers enforcing multi-factor auth (AuthenticationMethods
+// publickey,keyboard-interactive) accept the key and then ask for a second
+// factor. Without answering that challenge the connection fails with a generic
+// "All configured authentication methods failed".
+let prompter: Prompter | null = null
+export function setSshPrompter(p: Prompter): void {
+  prompter = p
+}
+
+function send(wc: WebContents, channel: string, ...args: unknown[]): void {
+  if (!wc.isDestroyed()) wc.send(channel, ...args)
+}
+
+function status(wc: WebContents, sessionId: string, phase: SshStatusPhase, extra: Partial<SshStatus> = {}): void {
+  send(wc, `ssh:status:${sessionId}`, { sessionId, phase, ...extra } satisfies SshStatus)
+}
+
+// "All configured authentication methods failed" is what ssh2 reports for
+// every auth problem, including ones we can identify precisely here. Check the
+// key material up front and fail with something actionable instead.
+function loadPrivateKey(hop: SshHop): string {
+  if (hop.privateKey) return hop.privateKey
+  if (!hop.keyPath) {
+    throw new Error(
+      `No private key is configured for ${hop.username}@${hop.host}. Edit the server and select a key file, or switch it to password/agent authentication.`
+    )
+  }
+  const path = hop.keyPath.replace(/^"(.*)"$/, '$1').trim()
+  if (!existsSync(path)) {
+    throw new Error(`Private key not found: ${path}`)
+  }
+
+  let key: string
+  try {
+    key = readFileSync(path, 'utf8')
+  } catch (err) {
+    throw new Error(`Could not read private key ${path}: ${(err as Error).message}`)
+  }
+
+  if (key.startsWith('PuTTY-User-Key-File')) {
+    throw new Error(
+      `${path} is a PuTTY .ppk key, which is not supported. Convert it in PuTTYgen with Conversions → Export OpenSSH key, then select the converted file.`
+    )
+  }
+  if (/^ssh-(rsa|ed25519|dss)\s|^ecdsa-sha2-/.test(key.trim())) {
+    throw new Error(
+      `${path} is a public key, not a private key. Select the matching private key file (the one without the .pub suffix).`
+    )
+  }
+  if (!/-----BEGIN [^-]*PRIVATE KEY-----/.test(key)) {
+    throw new Error(`${path} does not look like a private key file.`)
+  }
+  // OpenSSH marks encrypted new-format keys by naming a cipher other than none.
+  const encrypted =
+    /ENCRYPTED/.test(key) || (key.includes('OPENSSH PRIVATE KEY') && !/\bnone\b/.test(key.slice(0, 200)))
+  if (encrypted && !hop.passphrase) {
+    throw new Error(
+      `${path} is passphrase-protected. Edit the server and enter the key passphrase.`
+    )
+  }
+  return key
+}
+
+function authFor(hop: SshHop): Partial<ConnectConfig> {
+  const agent = process.env.SSH_AUTH_SOCK || (process.platform === 'win32' ? 'pageant' : undefined)
+  switch (hop.auth) {
+    case 'password':
+      return { password: hop.password }
+    case 'agent':
+      return { agent }
+    case 'key':
+    default:
+      return { privateKey: loadPrivateKey(hop), passphrase: hop.passphrase }
+  }
+}
+
+// Interactive typing feels laggy without this. Node sockets have Nagle's
+// algorithm on by default, which holds a small keystroke packet back waiting
+// for more data — up to ~40ms per character round trip. OpenSSH sets
+// TCP_NODELAY for exactly this reason; ssh2 does not.
+function tcpSocket(host: string, port: number): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host, port })
+    socket.setNoDelay(true)
+    socket.once('connect', () => {
+      socket.removeListener('error', reject)
+      resolve(socket)
+    })
+    socket.once('error', reject)
+  })
+}
+
+async function connectClient(hop: SshHop, sock?: NodeJS.ReadableStream): Promise<Client> {
+  // Hops ride an SSH channel, which has no TCP options of its own; only the
+  // first, real socket needs the flag.
+  const transport = sock ?? (await tcpSocket(hop.host, hop.port || 22))
+  return new Promise((resolve, reject) => {
+    const client = new Client()
+    const config: ConnectConfig = {
+      host: hop.host,
+      port: hop.port || 22,
+      username: hop.username,
+      readyTimeout: 20000,
+      keepaliveInterval: 15000,
+      // Required for the second factor after a public key is accepted.
+      tryKeyboard: true,
+      // Trust-on-first-use: unknown hosts prompt, changed keys are refused.
+      hostVerifier: ((key: Buffer, cb: (ok: boolean) => void) => {
+        void verifyHostKey(hop.host, hop.port || 22, key).then(cb)
+      }) as never,
+      ...authFor(hop),
+      // A pre-established socket: our own TCP connection, or the channel
+      // opened through the previous hop.
+      sock: transport as never
+    }
+    client.on('ready', () => resolve(client))
+    // ssh2's typings for this event are narrower than its runtime signature.
+    ;(client as unknown as { on: (e: string, cb: (...a: never[]) => void) => void }).on(
+      'keyboard-interactive',
+      ((
+        name: string,
+        instructions: string,
+        _lang: string,
+        prompts: KeyboardPrompt[],
+        finish: (answers: string[]) => void
+      ) => {
+        // A single hidden prompt on a password-auth server is the password
+        // itself; anything else is a real challenge for the user.
+        const single = prompts.length === 1 && !prompts[0].echo
+        if (hop.auth === 'password' && hop.password && single) {
+          finish([hop.password])
+          return
+        }
+        if (!prompter) {
+          finish([])
+          return
+        }
+        void prompter({
+          host: hop.host,
+          username: hop.username,
+          serverId: (hop as SshHop & { serverId?: string }).serverId,
+          name,
+          instructions,
+          prompts: prompts.map((p) => ({ prompt: p.prompt, echo: p.echo }))
+        })
+          .then(finish)
+          .catch(() => finish([]))
+      }) as never
+    )
+    client.on('error', (err) => reject(err))
+    client.connect(config)
+  })
+}
+
+// forwardOut on the previous hop opens a channel to the next hop's host:port,
+// which becomes the transport socket for the next SSH client — a jump chain.
+function hopForward(prev: Client, target: SshHop): Promise<NodeJS.ReadableStream> {
+  return new Promise((resolve, reject) => {
+    prev.forwardOut('127.0.0.1', 0, target.host, target.port || 22, (err, stream) => {
+      if (err) reject(err)
+      else resolve(stream as unknown as NodeJS.ReadableStream)
+    })
+  })
+}
+
+// Walk the jump chain, each hop tunnelled through the previous, then connect
+// to the target. Shared by the shell (sshConnect) and SFTP services.
+export async function openChain(
+  cfg: SshHop & { hops?: SshHop[] },
+  onHop?: (index: number, count: number) => void
+): Promise<{ clients: Client[]; client: Client }> {
+  const hops = cfg.hops ?? []
+  const clients: Client[] = []
+  let sock: NodeJS.ReadableStream | undefined
+  for (let i = 0; i < hops.length; i++) {
+    onHop?.(i, hops.length)
+    const client = await connectClient(hops[i], sock)
+    clients.push(client)
+    sock = await hopForward(client, i + 1 < hops.length ? hops[i + 1] : cfg)
+  }
+  const client = await connectClient(cfg, sock)
+  clients.push(client)
+  return { clients, client }
+}
+
+// ---------------------------------------------------------------- pooling
+//
+// One authenticated connection per server, shared by every terminal session,
+// SFTP browser and metrics sampler — the equivalent of OpenSSH's
+// ControlMaster. Without it each new session re-runs authentication, which on
+// a server with two-factor auth means another code prompt every time.
+
+export interface PooledConnection {
+  key: string
+  host: string
+  username: string
+  client: Client
+  refs: number
+  idle?: ReturnType<typeof setTimeout>
+  // The hop this connection was opened through, held for as long as this
+  // connection lives so a shared bastion is not torn down underneath it.
+  parent?: PooledConnection
+}
+
+const pool = new Map<string, PooledConnection>()
+const connecting = new Map<string, Promise<PooledConnection>>()
+
+// Identity of a single hop. Includes the parent so the same host reached by a
+// different route is not mistaken for the same connection.
+function hopKey(hop: SshHop & { serverId?: string }, parentKey?: string): string {
+  const self = hop.serverId
+    ? `srv:${hop.serverId}`
+    : `${hop.username}@${hop.host}:${hop.port || 22}`
+  return parentKey ? `${parentKey}>${self}` : self
+}
+
+function destroy(conn: PooledConnection): void {
+  try {
+    conn.client.end()
+  } catch {
+    /* ignore */
+  }
+  // Let the bastion go once nothing is riding on it any more.
+  if (conn.parent) release(conn.parent)
+}
+
+// Acquires one hop, reusing a live connection when there is one. `parent` must
+// already be ref-held by the caller; ownership transfers to the returned
+// connection, or is released when an existing one is reused instead.
+async function acquireOne(
+  hop: SshHop & { serverId?: string },
+  parent: PooledConnection | null
+): Promise<PooledConnection> {
+  const key = hopKey(hop, parent?.key)
+
+  const existing = pool.get(key)
+  if (existing) {
+    existing.refs++
+    if (existing.idle) clearTimeout(existing.idle)
+    existing.idle = undefined
+    if (parent) release(parent)
+    return existing
+  }
+
+  // Collapse concurrent opens so a terminal and a metrics poll starting
+  // together authenticate once, not twice.
+  const inflight = connecting.get(key)
+  if (inflight) {
+    const conn = await inflight
+    conn.refs++
+    if (parent) release(parent)
+    return conn
+  }
+
+  const promise = (async () => {
+    // Reached through the bastion when there is one.
+    const sock = parent ? await hopForward(parent.client, hop) : undefined
+    const client = await connectClient(hop, sock)
+    const conn: PooledConnection = {
+      key,
+      host: hop.host,
+      username: hop.username,
+      client,
+      refs: 1,
+      parent: parent ?? undefined
+    }
+    pool.set(key, conn)
+    client.on('close', () => {
+      if (pool.get(key) === conn) pool.delete(key)
+    })
+    return conn
+  })().finally(() => connecting.delete(key))
+
+  connecting.set(key, promise)
+  try {
+    return await promise
+  } catch (err) {
+    if (parent) release(parent)
+    throw err
+  }
+}
+
+// Every hop is pooled in its own right, so several servers behind the same
+// bastion share one authenticated bastion connection — the code is requested
+// once, not once per destination.
+export async function acquire(
+  cfg: SshHop & { serverId?: string; hops?: SshHop[] },
+  onHop?: (index: number, count: number) => void
+): Promise<PooledConnection> {
+  const hops = cfg.hops ?? []
+  let parent: PooledConnection | null = null
+  for (let i = 0; i < hops.length; i++) {
+    onHop?.(i, hops.length)
+    parent = await acquireOne(hops[i], parent)
+  }
+  return acquireOne(cfg, parent)
+}
+
+// How long an authenticated connection is kept after its last session closes.
+// This is what decides how often a two-factor code has to be re-entered:
+// while the master is alive, new sessions reuse it and skip authentication.
+// 0 closes immediately; Infinity keeps it until the app exits.
+let idleMs = 15 * 60_000
+
+export function setPoolIdle(minutes: number): void {
+  idleMs = minutes < 0 ? Infinity : minutes * 60_000
+}
+
+export function release(conn: PooledConnection): void {
+  conn.refs--
+  if (conn.refs > 0) return
+  if (idleMs === 0) {
+    if (pool.get(conn.key) === conn) pool.delete(conn.key)
+    destroy(conn)
+    return
+  }
+  if (idleMs === Infinity) return
+  conn.idle = setTimeout(() => {
+    if (conn.refs > 0) return
+    if (pool.get(conn.key) === conn) pool.delete(conn.key)
+    destroy(conn)
+  }, idleMs)
+}
+
+export interface PoolEntry {
+  key: string
+  host: string
+  username: string
+  sessions: number
+}
+
+export function poolList(): PoolEntry[] {
+  return [...pool.values()].map((c) => ({
+    key: c.key,
+    host: c.host,
+    username: c.username,
+    sessions: c.refs
+  }))
+}
+
+// Drops a shared connection now, forcing the next connect to authenticate.
+export function poolClose(key: string): void {
+  const conn = pool.get(key)
+  if (!conn) return
+  if (conn.idle) clearTimeout(conn.idle)
+  pool.delete(key)
+  destroy(conn)
+}
+
+export function poolDisposeAll(): void {
+  for (const conn of [...pool.values()]) {
+    if (conn.idle) clearTimeout(conn.idle)
+    destroy(conn)
+  }
+  pool.clear()
+}
+
+export async function sshConnect(wc: WebContents, cfg: SshConnectConfig): Promise<void> {
+  const { sessionId } = cfg
+  sessions.set(sessionId, { conn: null, stream: null })
+
+  try {
+    status(wc, sessionId, 'connecting')
+    const conn = await acquire(cfg, (i, count) =>
+      status(wc, sessionId, 'hop', { hopIndex: i, hopCount: count })
+    )
+    const current = sessions.get(sessionId)
+    if (!current) {
+      // Closed while connecting.
+      release(conn)
+      return
+    }
+    current.conn = conn
+    const target = conn.client
+
+    status(wc, sessionId, 'authenticating', { hopCount: cfg.hops?.length ?? 0 })
+
+    target.shell({ term: 'xterm-256color', cols: cfg.cols, rows: cfg.rows }, (err, stream) => {
+      if (err) {
+        status(wc, sessionId, 'error', { message: err.message })
+        cleanup(sessionId)
+        return
+      }
+      const s = sessions.get(sessionId)
+      if (!s) {
+        stream.close()
+        return
+      }
+      s.stream = stream
+      status(wc, sessionId, 'ready')
+
+      // Commands like `cat` on a large file arrive as hundreds of small
+      // chunks. One IPC message each floods the renderer and stalls input, so
+      // coalesce into at most one message per tick. A single keystroke echo
+      // still goes out immediately — the timer only ever batches what arrives
+      // within the same millisecond window.
+      let pending: string[] = []
+      let flushTimer: ReturnType<typeof setTimeout> | null = null
+      const flush = (): void => {
+        flushTimer = null
+        if (pending.length === 0) return
+        const payload = pending.length === 1 ? pending[0] : pending.join('')
+        pending = []
+        send(wc, `ssh:data:${sessionId}`, payload)
+      }
+      const push = (d: Buffer): void => {
+        pending.push(d.toString('utf8'))
+        if (!flushTimer) flushTimer = setTimeout(flush, 0)
+      }
+
+      stream.on('data', push)
+      stream.stderr.on('data', push)
+
+      // 'exit' carries why the shell ended and always arrives before 'close'.
+      // Worth forwarding: "signal HUP" is a server-side idle timeout, while
+      // "exit 0" is someone typing `exit` — the same closed tab, very
+      // different causes.
+      let exit: SshCloseInfo = {}
+      stream.on('exit', (code: number | null, signal?: string) => {
+        exit = { code: code ?? undefined, signal: signal || undefined }
+      })
+
+      stream.on('close', () => {
+        if (flushTimer) clearTimeout(flushTimer)
+        flush()
+        send(wc, `ssh:close:${sessionId}`, exit)
+        cleanup(sessionId)
+      })
+    })
+  } catch (err) {
+    status(wc, sessionId, 'error', { message: err instanceof Error ? err.message : String(err) })
+    cleanup(sessionId)
+  }
+}
+
+export function sshWrite(sessionId: string, data: string): void {
+  sessions.get(sessionId)?.stream?.write(data)
+}
+
+export function sshResize(sessionId: string, cols: number, rows: number): void {
+  sessions.get(sessionId)?.stream?.setWindow(rows, cols, 0, 0)
+}
+
+export function sshClose(sessionId: string): void {
+  cleanup(sessionId)
+}
+
+export function sshDisposeAll(): void {
+  for (const id of [...sessions.keys()]) cleanup(id)
+  poolDisposeAll()
+}
+
+function cleanup(sessionId: string): void {
+  const s = sessions.get(sessionId)
+  if (!s) return
+  sessions.delete(sessionId)
+  try {
+    s.stream?.close()
+  } catch {
+    /* ignore */
+  }
+  // The connection itself is shared, so hand it back rather than closing it.
+  if (s.conn) release(s.conn)
+}

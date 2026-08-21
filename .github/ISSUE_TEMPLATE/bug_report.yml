@@ -1,0 +1,42 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please redact hostnames, usernames, IPs and key material from anything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: ShellPilot version
+      placeholder: "0.1.0 — installer / portable / built from source"
+    validations: { required: true }
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux]
+    validations: { required: true }
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations: { required: true }
+  - type: textarea
+    id: error
+    attributes:
+      label: Exact error text
+      render: text
+  - type: checkboxes
+    id: involves
+    attributes:
+      label: Does it involve any of these?
+      description: These paths have the most moving parts.
+      options:
+        - label: A jump host / bastion
+        - label: Two-factor or keyboard-interactive authentication
+        - label: An SSH tunnel
+        - label: A database connection
+        - label: The vault or a backup
