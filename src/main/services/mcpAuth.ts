@@ -51,13 +51,39 @@ export function setMcpConfig(patch: Partial<McpGlobalConfig>): McpGlobalConfig {
 // this file carries no more sensitivity than the audit log.
 let sessions: McpAgentSession[] | null = null
 
+// Sessions saved before a session could be granted more than one workspace
+// are still `{ workspaceId, workspaceName }` on disk, not `{ workspaces }` —
+// upgrading ShellPilot must not turn every pre-existing session into a
+// crash the first time something reads `.workspaces`.
+function migrateSession(raw: unknown): McpAgentSession {
+  const r = raw as McpAgentSession & { workspaceId?: string; workspaceName?: string }
+  if (Array.isArray(r.workspaces)) return r
+  const workspaces: WorkspaceRef[] =
+    typeof r.workspaceId === 'string' && typeof r.workspaceName === 'string'
+      ? [{ id: r.workspaceId, name: r.workspaceName }]
+      : []
+  return {
+    id: r.id,
+    agentName: r.agentName,
+    workspaces,
+    groupId: r.groupId,
+    groupName: r.groupName,
+    tokenHash: r.tokenHash,
+    tokenPreview: r.tokenPreview,
+    createdAt: r.createdAt,
+    expiresAt: r.expiresAt,
+    lastActiveAt: r.lastActiveAt,
+    revoked: r.revoked
+  }
+}
+
 function loadSessions(): McpAgentSession[] {
   if (sessions) return sessions
   try {
     if (existsSync(SESSIONS_FILE)) {
       const parsed = JSON.parse(readFileSync(SESSIONS_FILE, 'utf8'))
       if (Array.isArray(parsed)) {
-        sessions = parsed as McpAgentSession[]
+        sessions = parsed.map(migrateSession)
         return sessions
       }
     }

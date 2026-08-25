@@ -226,31 +226,38 @@ export function AiAgents({ sessionsOnly = false }: { sessionsOnly?: boolean }): 
 
       {sessions.length === 0 && <div className="s-desc">No sessions yet.</div>}
 
-      {sessions.map((s) => (
-        <div className="list-row" key={s.id}>
-          <div>
-            <div className="r-title">{s.agentName}</div>
-            <div className="r-sub">
-              Workspace{s.workspaces.length > 1 ? 's' : ''}: {s.workspaces.map((w) => w.name).join(', ') || '—'} ·
-              Access group: {s.groupName} · Started {fmtTime(s.createdAt)}
-              {s.expiresAt ? ` · Expires ${fmtTime(s.expiresAt)}` : ' · No expiration'}
+      {sessions.map((s) => {
+        // Defensive: mcpAuth.ts migrates old single-workspace session
+        // records on load, but never trust a render path on a field that
+        // has changed shape once already — a missing/malformed array here
+        // should render as empty, not crash the whole panel.
+        const ws = Array.isArray(s.workspaces) ? s.workspaces : []
+        return (
+          <div className="list-row" key={s.id}>
+            <div>
+              <div className="r-title">{s.agentName}</div>
+              <div className="r-sub">
+                Workspace{ws.length > 1 ? 's' : ''}: {ws.map((w) => w.name).join(', ') || '—'} · Access group:{' '}
+                {s.groupName} · Started {fmtTime(s.createdAt)}
+                {s.expiresAt ? ` · Expires ${fmtTime(s.expiresAt)}` : ' · No expiration'}
+              </div>
             </div>
+            <div className="spacer" />
+            <div className="r-stat">{isLive(s) ? 'Active' : s.revoked ? 'Revoked' : 'Expired'}</div>
+            <button
+              className="btn sm danger"
+              disabled={!isLive(s)}
+              onClick={async () => {
+                await window.shellpilot?.aiMcp.revokeSession(s.id)
+                toast(`Revoked ${s.agentName}`)
+                load()
+              }}
+            >
+              <Ban size={13} /> Revoke
+            </button>
           </div>
-          <div className="spacer" />
-          <div className="r-stat">{isLive(s) ? 'Active' : s.revoked ? 'Revoked' : 'Expired'}</div>
-          <button
-            className="btn sm danger"
-            disabled={!isLive(s)}
-            onClick={async () => {
-              await window.shellpilot?.aiMcp.revokeSession(s.id)
-              toast(`Revoked ${s.agentName}`)
-              load()
-            }}
-          >
-            <Ban size={13} /> Revoke
-          </button>
-        </div>
-      ))}
+        )
+      })}
 
       {sessions.some(isLive) && (
         <button className="btn danger" style={{ marginTop: 18 }} onClick={killAll}>

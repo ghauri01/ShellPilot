@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { app } from 'electron'
 import {
   authenticate,
   createSession,
   revokeSession,
   killAllSessions,
+  listSessions,
   getMcpConfig,
   setMcpConfig,
   resetMcpAuthForTests
@@ -92,5 +96,32 @@ describe('MCP authentication', () => {
     expect(before.port).toBeGreaterThan(0)
     setMcpConfig({ port: 9999 })
     expect(getMcpConfig().port).toBe(9999)
+  })
+
+  it('migrates a pre-multi-workspace session record instead of crashing on it', () => {
+    // Sessions saved before a session could span several workspaces are
+    // { workspaceId, workspaceName } on disk, not { workspaces }. Loading
+    // one must not leave `.workspaces` undefined for a renderer to crash on.
+    const legacy = [
+      {
+        id: 'sess-legacy',
+        agentName: 'Claude Code',
+        workspaceId: 'ws-old',
+        workspaceName: 'Old Workspace',
+        groupId: 'grp-read-only',
+        groupName: 'Read Only',
+        tokenHash: 'a'.repeat(64),
+        tokenPreview: 'abcd',
+        createdAt: new Date().toISOString(),
+        expiresAt: null,
+        lastActiveAt: new Date().toISOString(),
+        revoked: false
+      }
+    ]
+    writeFileSync(join(app.getPath('userData'), 'shellpilot-mcp-sessions.json'), JSON.stringify(legacy))
+
+    const [migrated] = listSessions()
+    expect(Array.isArray(migrated.workspaces)).toBe(true)
+    expect(migrated.workspaces).toEqual([{ id: 'ws-old', name: 'Old Workspace' }])
   })
 })
