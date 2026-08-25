@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 1040" font-family="Segoe UI, -apple-system, Helvetica, Arial, sans-serif">
+  <title>How an AI agent reaches a server through ShellPilot</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b98a5"/>
+    </marker>
+  </defs>
+
+  <rect width="860" height="1040" fill="#0d1119"/>
+
+  <!-- 1. AI Agent -->
+  <rect x="230" y="24" width="400" height="72" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="430" y="54" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="600">AI Agent</text>
+  <text x="430" y="78" text-anchor="middle" fill="#8b98a5" font-size="13">Claude Code · Claude Desktop · Codex · Gemini CLI</text>
+
+  <line x1="430" y1="96" x2="430" y2="132" stroke="#8b98a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="446" y="118" fill="#8b98a5" font-size="12">MCP — stdio or HTTP + Bearer token</text>
+
+  <!-- trust boundary -->
+  <rect x="60" y="140" width="740" height="760" rx="14" fill="none" stroke="#22c7d6" stroke-width="1.5" stroke-dasharray="6 5"/>
+  <text x="80" y="168" fill="#22c7d6" font-size="13" font-weight="600">Inside ShellPilot, on your machine — the AI agent never sees past this line</text>
+
+  <!-- 2. MCP Server -->
+  <rect x="230" y="188" width="400" height="72" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="430" y="218" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="600">ShellPilot MCP Server</text>
+  <text x="430" y="242" text-anchor="middle" fill="#8b98a5" font-size="13">127.0.0.1 only · resolves "Production API" → real host</text>
+
+  <line x1="430" y1="260" x2="430" y2="296" stroke="#8b98a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="446" y="282" fill="#8b98a5" font-size="12">capability lookup</text>
+
+  <!-- 3. Access Policy -->
+  <rect x="230" y="312" width="400" height="88" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="430" y="342" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="600">Access Group Policy</text>
+  <text x="430" y="364" text-anchor="middle" fill="#8b98a5" font-size="13">Per capability: ALLOW · ASK · DENY</text>
+  <text x="430" y="384" text-anchor="middle" fill="#8b98a5" font-size="13">sudo -i / su / unrestricted shells: always denied</text>
+
+  <line x1="430" y1="400" x2="430" y2="436" stroke="#8b98a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="446" y="422" fill="#8b98a5" font-size="12">decision = ASK</text>
+
+  <!-- 4. Approval -->
+  <rect x="230" y="452" width="400" height="88" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="430" y="482" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="600">Human Approval</text>
+  <text x="430" y="504" text-anchor="middle" fill="#8b98a5" font-size="13">You click Approve or Deny in ShellPilot</text>
+  <text x="430" y="524" text-anchor="middle" fill="#8b98a5" font-size="13">the agent cannot approve its own request</text>
+
+  <line x1="430" y1="540" x2="430" y2="576" stroke="#8b98a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="446" y="562" fill="#8b98a5" font-size="12">decision = ALLOW</text>
+
+  <!-- 5. Credential Resolver -->
+  <rect x="230" y="592" width="400" height="88" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="430" y="622" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="600">Credential Resolver</text>
+  <text x="430" y="644" text-anchor="middle" fill="#8b98a5" font-size="13">SSH key / password / DB credential looked up here,</text>
+  <text x="430" y="664" text-anchor="middle" fill="#8b98a5" font-size="13">used to connect — never returned to the agent</text>
+
+  <line x1="430" y1="680" x2="430" y2="716" stroke="#8b98a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="446" y="702" fill="#8b98a5" font-size="12">SSH / SFTP / SQL</text>
+
+  <!-- 6. SSH/SFTP/DB -->
+  <rect x="230" y="732" width="400" height="72" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="430" y="762" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="600">SSH / SFTP / Database</text>
+  <text x="430" y="786" text-anchor="middle" fill="#8b98a5" font-size="13">Output redacted for known secrets before it goes back up</text>
+
+  <line x1="430" y1="804" x2="430" y2="874" stroke="#8b98a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 7. Servers (outside boundary) -->
+  <rect x="230" y="890" width="400" height="72" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="430" y="920" text-anchor="middle" fill="#e6edf3" font-size="18" font-weight="600">Your Servers</text>
+  <text x="430" y="944" text-anchor="middle" fill="#8b98a5" font-size="13">Production, staging, bastions, databases</text>
+
+  <!-- caption -->
+  <text x="430" y="1000" text-anchor="middle" fill="#f85149" font-size="13" font-weight="600">Never crosses back up to the AI agent: SSH passwords, private keys, database credentials, Vault secrets</text>
+  <text x="430" y="1022" text-anchor="middle" fill="#8b98a5" font-size="12">The agent only ever sees a friendly server name and the final text result</text>
+</svg>

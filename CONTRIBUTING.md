@@ -18,8 +18,12 @@ Before opening a pull request:
 
 ```bash
 npm run typecheck    # must pass — main, preload and renderer
-npm run build        # must succeed
+npm run build        # must succeed — must run before `test`, see note below
+npm run test         # must pass
 ```
+
+> The AI/MCP test suite (`tests/`) spawns the compiled CLI at `out/cli/index.js`, so `build` has
+> to run before `test` — CI enforces the same order.
 
 Build installers on the platform you are targeting — a Windows installer has to
 be built on Windows.
@@ -37,16 +41,24 @@ processes, three source trees:
 ```
 src/
   main/         Node.js. Owns all I/O: SSH, SFTP, databases, crypto, files.
-    services/   One module per subsystem.
+    services/   One module per subsystem — includes the AI/MCP bridge
+                (mcpServer.ts, mcpAuth.ts, policyEngine.ts, approvals.ts, ...)
   preload/      The only bridge between main and renderer. Defines the IPC API.
   renderer/     React UI. No Node access at all.
     src/
-      components/   Feature-grouped UI
+      components/   Feature-grouped UI — components/ai/ is the AI & MCP settings panel
       store/        zustand state (app.ts) and persistence (persist.ts)
       hooks/        Shortcuts, metrics polling, click-outside
       lib/          Small shared helpers
   shared/       Types and pure functions used by more than one process
+  cli/          The `shellpilot` CLI launcher (pairing, bridge, per-client registration),
+                compiled separately to out/cli/ and wrapped by bin/shellpilot.{cmd,sh}
+tests/          vitest suite — currently covers the AI/MCP services end to end
 ```
+
+Working on the AI/MCP bridge specifically? [docs/AI-MCP.md](docs/AI-MCP.md) covers its
+architecture, and [docs/AI-SECURITY.md](docs/AI-SECURITY.md) covers the security model any change
+there needs to preserve.
 
 ### Rules that keep it safe
 
@@ -115,9 +127,9 @@ lists what is already planned, and the roadmap is kept there.
 
 ## Where help is most needed
 
-- **Tests.** There is no test suite yet. The parsers in `shared/sshconfig.ts`
-  and `main/services/relaxed-json.ts` and the crypto in `main/services/` are
-  pure and easy to cover.
+- **Tests.** `tests/` covers the AI/MCP services end to end, but the rest of the app has no
+  coverage yet. The parsers in `shared/sshconfig.ts` and `main/services/relaxed-json.ts` and the
+  crypto in `main/services/` are pure and easy to cover.
 - **Replacing placeholder UI.** Several Settings controls hold local state and
   do nothing; they are tracked as issues.
 - **Accessibility.** Keyboard navigation and screen-reader labels.
