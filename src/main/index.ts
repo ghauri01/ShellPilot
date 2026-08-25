@@ -54,7 +54,34 @@ import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './se
 import { backupExport, backupImport, backupInspect, relaunchApp } from './services/backup'
 import { parseSshConfig } from '../shared/sshconfig'
 import { loadData, saveData } from './services/store'
-import type { SshConnectConfig, SshHop } from '../shared/ssh'
+import type { SshConnectConfig } from '../shared/ssh'
+import { resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
+import { refreshMcpDataCache, listCachedWorkspaces, listCachedServers } from './services/mcpDataCache'
+import {
+  listGroups,
+  createGroup,
+  saveGroup,
+  deleteGroup,
+  listAssignments,
+  setAssignment,
+  removeAssignment,
+  listServerMeta,
+  setServerAliases
+} from './services/policyStore'
+import type { AccessGroup, McpGlobalConfig, PolicyAssignment } from '../shared/mcp'
+import {
+  getMcpConfig,
+  setMcpConfig,
+  createSession,
+  listSessions,
+  revokeSession,
+  killAllSessions,
+  type CreateSessionInput
+} from './services/mcpAuth'
+import { listPendingApprovals, respondToApproval, onApprovalEvent, denyAllPending } from './services/approvals'
+import { onCliPairingEvent, cancelCliPairing } from './services/cliPairing'
+import { listAudit } from './services/auditLog'
+import { startMcpServer, stopMcpServer, mcpServerStatus } from './services/mcpServer'
 
 const isDev = !app.isPackaged
 
@@ -310,43 +337,6 @@ setSshPrompter((req: KeyboardRequest) => {
   })
 })
 
-interface SecretBlob {
-  password?: string
-  keyPath?: string
-  passphrase?: string
-  // Saved answer to a single keyboard-interactive prompt (a static second
-  // password). One-time codes are never stored — the UI does not offer it.
-  kbAnswer?: string
-}
-
-// Merge stored credentials (never sent to the renderer) unless the renderer
-// supplied inline secrets (e.g. from a one-time password prompt).
-function resolveSecrets<T extends SshHop & { serverId?: string }>(cfg: T): T {
-  if (cfg.serverId && !cfg.password && !cfg.privateKey && !cfg.keyPath) {
-    const raw = getSecret(cfg.serverId)
-    if (raw) {
-      try {
-        const blob = JSON.parse(raw) as SecretBlob
-        cfg.password = cfg.password ?? blob.password
-        cfg.keyPath = cfg.keyPath ?? blob.keyPath
-        cfg.passphrase = cfg.passphrase ?? blob.passphrase
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  return cfg
-}
-
-// Every jump hop authenticates independently, so each one needs its own
-// credentials resolved — not just the final target.
-function resolveChainSecrets<T extends SshHop & { serverId?: string; hops?: SshHop[] }>(cfg: T): T {
-  const resolved = resolveSecrets(cfg)
-  if (Array.isArray(resolved.hops)) {
-    resolved.hops = resolved.hops.map((h) => resolveSecrets({ ...h } as SshHop & { serverId?: string }))
-  }
-  return resolved
-}
 
 ipcMain.handle('ssh:connect', (e, cfg: SshConnectConfig & { serverId?: string }) =>
   sshConnect(e.sender, resolveChainSecrets(cfg))
@@ -493,7 +483,75 @@ ipcMain.handle('secrets:delete', (_e, id: string) => deleteSecret(id))
 
 // ---- Data persistence ----
 ipcMain.handle('data:load', () => loadData())
-ipcMain.handle('data:save', (_e, data: unknown) => saveData(data))
+ipcMain.handle('data:save', (_e, data: unknown) => {
+  saveData(data)
+  // The MCP bridge resolves friendly server/workspace names from this same
+  // file (see mcpDataCache.ts) rather than round-tripping through the
+  // renderer on every tool call, so its cache is refreshed right after the
+  // write that would otherwise make it stale.
+  refreshMcpDataCache(data)
+})
+
+// ---- AI & MCP: access groups ----
+ipcMain.handle('aiPolicy:listGroups', () => listGroups())
+ipcMain.handle('aiPolicy:createGroup', (_e, name: string) => createGroup(name))
+ipcMain.handle('aiPolicy:saveGroup', (_e, group: AccessGroup) => saveGroup(group))
+ipcMain.handle('aiPolicy:deleteGroup', (_e, id: string) => deleteGroup(id))
+ipcMain.handle('aiPolicy:listAssignments', () => listAssignments())
+ipcMain.handle('aiPolicy:setAssignment', (_e, scope: PolicyAssignment['scope'], groupId: string | null) =>
+  setAssignment(scope, groupId)
+)
+ipcMain.handle('aiPolicy:removeAssignment', (_e, id: string) => removeAssignment(id))
+ipcMain.handle('aiPolicy:listServerMeta', () => listServerMeta())
+ipcMain.handle('aiPolicy:setServerAliases', (_e, serverId: string, aliases: string[]) =>
+  setServerAliases(serverId, aliases)
+)
+
+// ---- AI & MCP: server/workspace directory (read-only view for the UI) ----
+ipcMain.handle('aiPolicy:listWorkspaces', () => listCachedWorkspaces())
+ipcMain.handle('aiPolicy:listServers', (_e, workspaceId?: string) => listCachedServers(workspaceId))
+
+// ---- AI & MCP: global config + server lifecycle ----
+ipcMain.handle('aiMcp:getConfig', () => getMcpConfig())
+ipcMain.handle('aiMcp:setConfig', async (_e, patch: Partial<McpGlobalConfig>) => {
+  const next = setMcpConfig(patch)
+  if (next.enabled && mcpServerStatus().running === false) {
+    const result = await startMcpServer()
+    if (!result.ok) return { config: next, error: result.error }
+  } else if (!next.enabled) {
+    await stopMcpServer()
+  }
+  return { config: next }
+})
+ipcMain.handle('aiMcp:status', () => mcpServerStatus())
+
+// ---- AI & MCP: agent sessions ----
+ipcMain.handle('aiMcp:createSession', (_e, input: CreateSessionInput) => createSession(input))
+ipcMain.handle('aiMcp:listSessions', () => listSessions())
+ipcMain.handle('aiMcp:revokeSession', (_e, id: string) => revokeSession(id))
+ipcMain.handle('aiMcp:killAllSessions', () => {
+  const count = killAllSessions()
+  const denied = denyAllPending()
+  return { revoked: count, denied }
+})
+
+// ---- AI & MCP: approvals ----
+ipcMain.handle('aiMcp:listApprovals', () => listPendingApprovals())
+ipcMain.handle('aiMcp:respondApproval', (_e, id: string, decision: 'approved' | 'denied') =>
+  respondToApproval(id, decision)
+)
+onApprovalEvent((e) => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('ai:approval-event', e)
+})
+
+// ---- AI & MCP: CLI pairing (the `shellpilot claude|codex|run` launcher) ----
+ipcMain.handle('aiMcp:cancelPairing', (_e, id: string) => cancelCliPairing(id))
+onCliPairingEvent((e) => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('ai:pairing-event', e)
+})
+
+// ---- AI & MCP: audit log ----
+ipcMain.handle('aiMcp:listAudit', (_e, limit?: number) => listAudit(limit))
 
 app.on('before-quit', () => {
   sshDisposeAll()
@@ -503,6 +561,7 @@ app.on('before-quit', () => {
   tunnelDisposeAll()
   externalEditDisposeAll()
   vaultDispose()
+  void stopMcpServer()
 })
 
 // Safety net: never let a stray async error (e.g. a failed child_process
@@ -574,6 +633,14 @@ app.whenReady().then(() => {
   installCsp()
   createWindow()
   installMenu()
+  // Primed once at launch so the MCP bridge can resolve server/workspace
+  // names even before the renderer's first data:save call.
+  refreshMcpDataCache()
+  if (getMcpConfig().enabled) {
+    void startMcpServer().then((r) => {
+      if (!r.ok) console.error('[mcp] failed to start on launch:', r.error)
+    })
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

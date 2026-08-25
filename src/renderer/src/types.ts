@@ -127,7 +127,7 @@ export interface DatabaseConn {
 }
 
 export type PanelView = 'terminal' | 'monitor' | 'files'
-export type ActivityView = 'connections' | 'databases' | 'tunnels' | 'monitor' | 'vault' | 'settings'
+export type ActivityView = 'connections' | 'databases' | 'tunnels' | 'monitor' | 'vault' | 'ai' | 'settings'
 
 export interface Tab {
   id: UUID

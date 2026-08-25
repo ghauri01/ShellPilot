@@ -27,6 +27,16 @@ import type { TunnelConfig, TunnelResult, TunnelSshConfig, TunnelStatus } from '
 import type { KnownHost } from '../main/services/knownhosts'
 import type { SshConfigHost } from '../shared/sshconfig'
 import type { BackupResult } from '../shared/backup'
+import type {
+  AccessGroup,
+  PolicyAssignment,
+  ServerAiMeta,
+  McpGlobalConfig,
+  McpAgentSession,
+  ApprovalRequest,
+  AuditEntry,
+  CliPairingRequest
+} from '../shared/mcp'
 
 type WindowAction = 'minimize' | 'toggle-maximize' | 'close'
 type ThemeMode = 'dark' | 'light' | 'system'
@@ -211,6 +221,64 @@ const api = {
   data: {
     load: <T>(): Promise<T | null> => ipcRenderer.invoke('data:load'),
     save: (data: unknown): Promise<void> => ipcRenderer.invoke('data:save', data)
+  },
+  aiPolicy: {
+    listGroups: (): Promise<AccessGroup[]> => ipcRenderer.invoke('aiPolicy:listGroups'),
+    createGroup: (name: string): Promise<AccessGroup> => ipcRenderer.invoke('aiPolicy:createGroup', name),
+    saveGroup: (group: AccessGroup): Promise<AccessGroup> => ipcRenderer.invoke('aiPolicy:saveGroup', group),
+    deleteGroup: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('aiPolicy:deleteGroup', id),
+    listAssignments: (): Promise<PolicyAssignment[]> => ipcRenderer.invoke('aiPolicy:listAssignments'),
+    setAssignment: (scope: PolicyAssignment['scope'], groupId: string | null): Promise<PolicyAssignment> =>
+      ipcRenderer.invoke('aiPolicy:setAssignment', scope, groupId),
+    removeAssignment: (id: string): Promise<void> => ipcRenderer.invoke('aiPolicy:removeAssignment', id),
+    listServerMeta: (): Promise<ServerAiMeta[]> => ipcRenderer.invoke('aiPolicy:listServerMeta'),
+    setServerAliases: (serverId: string, aliases: string[]): Promise<ServerAiMeta> =>
+      ipcRenderer.invoke('aiPolicy:setServerAliases', serverId, aliases),
+    listWorkspaces: (): Promise<{ id: string; name: string }[]> => ipcRenderer.invoke('aiPolicy:listWorkspaces'),
+    listServers: (workspaceId?: string): Promise<{ id: string; workspaceId: string; name: string }[]> =>
+      ipcRenderer.invoke('aiPolicy:listServers', workspaceId)
+  },
+  aiMcp: {
+    getConfig: (): Promise<McpGlobalConfig> => ipcRenderer.invoke('aiMcp:getConfig'),
+    setConfig: (
+      patch: Partial<McpGlobalConfig>
+    ): Promise<{ config: McpGlobalConfig; error?: string }> => ipcRenderer.invoke('aiMcp:setConfig', patch),
+    status: (): Promise<{ running: boolean; port: number | null }> => ipcRenderer.invoke('aiMcp:status'),
+    createSession: (input: {
+      agentName: string
+      workspaceId: string
+      workspaceName: string
+      groupId: string | null
+      groupName: string
+      ttlMinutes: number | null
+    }): Promise<{ session: McpAgentSession; token: string }> => ipcRenderer.invoke('aiMcp:createSession', input),
+    listSessions: (): Promise<McpAgentSession[]> => ipcRenderer.invoke('aiMcp:listSessions'),
+    revokeSession: (id: string): Promise<void> => ipcRenderer.invoke('aiMcp:revokeSession', id),
+    killAllSessions: (): Promise<{ revoked: number; denied: number }> =>
+      ipcRenderer.invoke('aiMcp:killAllSessions'),
+    listApprovals: (): Promise<ApprovalRequest[]> => ipcRenderer.invoke('aiMcp:listApprovals'),
+    respondApproval: (id: string, decision: 'approved' | 'denied'): Promise<boolean> =>
+      ipcRenderer.invoke('aiMcp:respondApproval', id, decision),
+    listAudit: (limit?: number): Promise<AuditEntry[]> => ipcRenderer.invoke('aiMcp:listAudit', limit),
+    onApprovalEvent: (
+      cb: (e: { type: 'created' | 'resolved'; request: ApprovalRequest }) => void
+    ): (() => void) => {
+      const h = (_e: IpcRendererEvent, ev: { type: 'created' | 'resolved'; request: ApprovalRequest }): void => cb(ev)
+      ipcRenderer.on('ai:approval-event', h)
+      return () => ipcRenderer.removeListener('ai:approval-event', h)
+    },
+    cancelPairing: (id: string): Promise<void> => ipcRenderer.invoke('aiMcp:cancelPairing', id),
+    onPairingEvent: (
+      cb: (e: { type: 'created' | 'resolved' | 'expired'; request: CliPairingRequest }) => void
+    ): (() => void) => {
+      const h = (
+        _e: IpcRendererEvent,
+        ev: { type: 'created' | 'resolved' | 'expired'; request: CliPairingRequest }
+      ): void => cb(ev)
+      ipcRenderer.on('ai:pairing-event', h)
+      return () => ipcRenderer.removeListener('ai:pairing-event', h)
+    }
   }
 }
 

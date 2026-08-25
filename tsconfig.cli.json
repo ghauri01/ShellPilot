@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "out/cli",
+    "rootDir": "src/cli",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "types": ["node"]
+  },
+  "include": ["src/cli/**/*.ts"]
+}

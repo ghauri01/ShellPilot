@@ -13,14 +13,18 @@ directories:
 
 files:
   - out/**
+  - bin/**
   - resources/**
   - package.json
 
 # ssh2 pulls in an optional native crypto binding; keep it unpacked so it can
-# be dlopen'd from outside the asar archive.
+# be dlopen'd from outside the asar archive. out/cli is the `shellpilot`
+# CLI launcher (bin/shellpilot.cmd|.sh) — it's invoked directly by a plain
+# `node`, which can't read into an asar archive, so it must stay unpacked too.
 asarUnpack:
   - '**/node_modules/cpu-features/**'
   - '**/node_modules/ssh2/**'
+  - 'out/cli/**'
 
 win:
   icon: build/icon.ico

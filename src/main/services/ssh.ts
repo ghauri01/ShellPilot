@@ -475,6 +475,92 @@ export function sshClose(sessionId: string): void {
   cleanup(sessionId)
 }
 
+export interface ExecResult {
+  ok: boolean
+  stdout: string
+  stderr: string
+  code: number | null
+  signal: string | null
+  error?: string
+  truncated: boolean
+}
+
+const EXEC_OUTPUT_CAP = 200_000 // bytes per stream, enough for inspection output without unbounded memory use
+
+// Non-interactive command execution over the same pooled connection the
+// interactive terminal uses (ssh2's exec channel rather than shell), for the
+// MCP bridge's execute_command tool. A single command in, buffered result
+// out — never a persistent shell.
+export async function sshExec(
+  cfg: SshHop & { serverId?: string; hops?: SshHop[] },
+  command: string,
+  timeoutMs = 30_000
+): Promise<ExecResult> {
+  let conn: PooledConnection | null = null
+  try {
+    conn = await acquire(cfg)
+    const client = conn.client
+    return await new Promise<ExecResult>((resolve) => {
+      let settled = false
+      const done = (result: ExecResult): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(result)
+      }
+      const timer = setTimeout(() => {
+        done({
+          ok: false,
+          stdout: '',
+          stderr: '',
+          code: null,
+          signal: null,
+          truncated: false,
+          error: `Command timed out after ${timeoutMs}ms`
+        })
+      }, timeoutMs)
+
+      client.exec(command, (err, stream) => {
+        if (err) {
+          done({ ok: false, stdout: '', stderr: '', code: null, signal: null, truncated: false, error: err.message })
+          return
+        }
+        let stdout = ''
+        let stderr = ''
+        let truncated = false
+        const append = (current: string, chunk: Buffer): string => {
+          if (current.length >= EXEC_OUTPUT_CAP) {
+            truncated = true
+            return current
+          }
+          return current + chunk.toString('utf8')
+        }
+        stream.on('data', (d: Buffer) => {
+          stdout = append(stdout, d)
+        })
+        stream.stderr.on('data', (d: Buffer) => {
+          stderr = append(stderr, d)
+        })
+        stream.on('close', (code: number | null, signal?: string) => {
+          done({ ok: true, stdout, stderr, code: code ?? null, signal: signal ?? null, truncated })
+        })
+      })
+    })
+  } catch (err) {
+    return {
+      ok: false,
+      stdout: '',
+      stderr: '',
+      code: null,
+      signal: null,
+      truncated: false,
+      error: err instanceof Error ? err.message : String(err)
+    }
+  } finally {
+    if (conn) release(conn)
+  }
+}
+
 export function sshDisposeAll(): void {
   for (const id of [...sessions.keys()]) cleanup(id)
   poolDisposeAll()
