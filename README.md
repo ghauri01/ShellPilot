@@ -140,8 +140,8 @@ override individual file paths on top of the blanket read/write setting:
 **You ask Claude Code:** *"Check my production Nginx server."*
 
 1. Claude Code calls ShellPilot's `list_servers` tool. It gets back friendly names for whatever
-   the session's workspace and access group can see — say, `Nginx Server Prod` — never a host, IP
-   or username.
+   the session's workspace(s) and access group can see — say, `Nginx Server Prod` — never a host,
+   IP or username.
 2. It calls `get_server_metrics` (or `execute_command` with something like `systemctl status
    nginx`) naming that server. ShellPilot resolves `"Nginx Server Prod"` to the real server record,
    checks the access group governing it, and — if that capability is ALLOW — looks up the actual
@@ -883,9 +883,10 @@ distribution. Building from source needs Node.js 20 or later.
 
 Yes — see [AI Agent Access](#ai-agent-access). ShellPilot runs a local
 [MCP](https://modelcontextprotocol.io) server that Claude Code, Claude Desktop, Codex, Gemini CLI
-and other MCP-compatible clients can connect to, scoped to one workspace and one access group per
-session. The agent never sees a password, private key, database credential or Vault secret — it
-only ever gets a friendly server name and whatever that session's access group allows.
+and other MCP-compatible clients can connect to, each session scoped to the workspace(s) and
+access group chosen for it. The agent never sees a password, private key, database credential or
+Vault secret — it only ever gets a friendly server name and whatever that session's access group
+allows.
 
 ### Is it safe to let an AI agent run commands on my servers?
 

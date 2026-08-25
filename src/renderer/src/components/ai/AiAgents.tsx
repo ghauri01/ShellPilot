@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, Copy, Ban, Octagon } from 'lucide-react'
 import { toast } from '../../store/toast'
+import { clsx } from '../../lib/format'
 import type { McpAgentSession, AccessGroup } from '../../../../shared/mcp'
 
 interface WorkspaceOpt {
@@ -27,35 +28,38 @@ function CreateSessionForm({
   onCreated: () => void
 }): React.JSX.Element {
   const [agentName, setAgentName] = useState('Claude Code')
-  const [workspaceId, setWorkspaceId] = useState(workspaces[0]?.id ?? '')
+  const [workspaceIds, setWorkspaceIds] = useState<string[]>(workspaces[0] ? [workspaces[0].id] : [])
   const [groupId, setGroupId] = useState(groups[0]?.id ?? '')
   const [ttl, setTtl] = useState(60)
   const [issued, setIssued] = useState<{ token: string; port: number | null } | null>(null)
 
   // workspaces/groups arrive async (an IPC round-trip after this form has
   // already mounted with empty props), so the useState initializers above
-  // usually capture '' and never get a second chance — the dropdowns then
+  // usually capture '' and never get a second chance — the controls then
   // *look* selected but the state backing them is empty, and Create fails
-  // with "create a workspace first" even though one exists. Backfill once
-  // real data shows up, but only while the user hasn't picked something.
+  // with "select at least one workspace" even though one exists. Backfill
+  // once real data shows up, but only while the user hasn't picked anything.
   useEffect(() => {
-    if (!workspaceId && workspaces.length > 0) setWorkspaceId(workspaces[0].id)
-  }, [workspaces, workspaceId])
+    if (workspaceIds.length === 0 && workspaces.length > 0) setWorkspaceIds([workspaces[0].id])
+  }, [workspaces, workspaceIds])
   useEffect(() => {
     if (!groupId && groups.length > 0) setGroupId(groups[0].id)
   }, [groups, groupId])
 
+  const toggleWorkspace = (id: string): void => {
+    setWorkspaceIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
   const create = async (): Promise<void> => {
-    const workspace = workspaces.find((w) => w.id === workspaceId)
+    const selected = workspaces.filter((w) => workspaceIds.includes(w.id))
     const group = groups.find((g) => g.id === groupId)
-    if (!workspace) {
-      toast('Create a workspace first')
+    if (selected.length === 0) {
+      toast('Select at least one workspace')
       return
     }
     const result = await window.shellpilot?.aiMcp.createSession({
       agentName: agentName.trim() || 'Unnamed agent',
-      workspaceId: workspace.id,
-      workspaceName: workspace.name,
+      workspaces: selected.map((w) => ({ id: w.id, name: w.name })),
       groupId: group?.id ?? null,
       groupName: group?.name ?? 'No AI Access',
       ttlMinutes: ttl === 0 ? null : ttl
@@ -131,18 +135,25 @@ function CreateSessionForm({
         </div>
         <input className="input" value={agentName} onChange={(e) => setAgentName(e.target.value)} />
       </div>
-      <div className="setting-row">
+      <div className="setting-row" style={{ alignItems: 'flex-start' }}>
         <div className="s-info">
-          <div className="s-title">Workspace</div>
-          <div className="s-desc">This session only ever sees servers inside this workspace.</div>
+          <div className="s-title">Workspaces</div>
+          <div className="s-desc">
+            This session only ever sees servers inside the workspace(s) selected here — pick as
+            many as this agent needs.
+          </div>
         </div>
-        <select className="input" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
           {workspaces.map((w) => (
-            <option key={w.id} value={w.id}>
+            <label key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
               {w.name}
-            </option>
+              <span
+                className={clsx('switch', workspaceIds.includes(w.id) && 'on')}
+                onClick={() => toggleWorkspace(w.id)}
+              />
+            </label>
           ))}
-        </select>
+        </div>
       </div>
       <div className="setting-row">
         <div className="s-info">
@@ -207,7 +218,7 @@ export function AiAgents({ sessionsOnly = false }: { sessionsOnly?: boolean }): 
       <h2>{sessionsOnly ? 'Active Sessions' : 'AI Agents'}</h2>
       <div className="sub">
         {sessionsOnly
-          ? 'Every agent currently authorized to talk to ShellPilot, with its workspace and access group.'
+          ? 'Every agent currently authorized to talk to ShellPilot, with its workspace(s) and access group.'
           : 'Create a scoped session for each AI client, then paste its token into that client\'s MCP configuration.'}
       </div>
 
@@ -220,7 +231,8 @@ export function AiAgents({ sessionsOnly = false }: { sessionsOnly?: boolean }): 
           <div>
             <div className="r-title">{s.agentName}</div>
             <div className="r-sub">
-              Workspace: {s.workspaceName} · Access group: {s.groupName} · Started {fmtTime(s.createdAt)}
+              Workspace{s.workspaces.length > 1 ? 's' : ''}: {s.workspaces.map((w) => w.name).join(', ') || '—'} ·
+              Access group: {s.groupName} · Started {fmtTime(s.createdAt)}
               {s.expiresAt ? ` · Expires ${fmtTime(s.expiresAt)}` : ' · No expiration'}
             </div>
           </div>

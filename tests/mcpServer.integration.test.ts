@@ -10,7 +10,10 @@ import { startMcpServer, stopMcpServer } from '../src/main/services/mcpServer'
 const PORT = 58732
 
 const sampleData = {
-  workspaces: [{ id: 'ws-prod', name: 'Production' }],
+  workspaces: [
+    { id: 'ws-prod', name: 'Production' },
+    { id: 'ws-dev', name: 'Development' }
+  ],
   servers: [
     {
       id: 's1',
@@ -20,6 +23,17 @@ const sampleData = {
       port: 22,
       username: 'root',
       auth: 'key',
+      os: 'Linux',
+      route: []
+    },
+    {
+      id: 's2',
+      workspaceId: 'ws-dev',
+      name: 'Dev Box',
+      host: '10.0.1.1',
+      port: 22,
+      username: 'dev',
+      auth: 'password',
       os: 'Linux',
       route: []
     }
@@ -37,23 +51,35 @@ async function connectedClient(token: string): Promise<Client> {
 
 describe('MCP server (integration)', () => {
   let token: string
+  let multiWorkspaceToken: string
 
   beforeAll(async () => {
     resetMcpAuthForTests()
     resetPolicyCacheForTests()
     refreshMcpDataCache(sampleData)
-    // Production defaults to Read Only for AI.
+    // Production and Development both default to Read Only for AI.
     setAssignment({ level: 'workspace', workspaceId: 'ws-prod' }, 'grp-read-only')
+    setAssignment({ level: 'workspace', workspaceId: 'ws-dev' }, 'grp-read-only')
     setMcpConfig({ enabled: true, port: PORT, approvalTimeoutSeconds: 5 })
     const created = createSession({
       agentName: 'Test Agent',
-      workspaceId: 'ws-prod',
-      workspaceName: 'Production',
+      workspaces: [{ id: 'ws-prod', name: 'Production' }],
       groupId: 'grp-read-only',
       groupName: 'Read Only',
       ttlMinutes: 60
     })
     token = created.token
+    const createdMulti = createSession({
+      agentName: 'Multi-workspace Agent',
+      workspaces: [
+        { id: 'ws-prod', name: 'Production' },
+        { id: 'ws-dev', name: 'Development' }
+      ],
+      groupId: 'grp-read-only',
+      groupName: 'Read Only',
+      ttlMinutes: 60
+    })
+    multiWorkspaceToken = createdMulti.token
     const result = await startMcpServer()
     expect(result.ok).toBe(true)
   })
@@ -118,6 +144,35 @@ describe('MCP server (integration)', () => {
       arguments: { serverName: 'totally-unknown-host' }
     })
     expect(result.isError).toBe(true)
+    await client.close()
+  })
+
+  it('a single-workspace session cannot see a server outside its grant', async () => {
+    const client = await connectedClient(token)
+    const list = await client.callTool({ name: 'list_servers', arguments: {} })
+    const listText = (list.content as { type: string; text: string }[])[0].text
+    expect(listText).not.toContain('Dev Box')
+
+    const details = await client.callTool({ name: 'get_server_details', arguments: { serverName: 'Dev Box' } })
+    expect(details.isError).toBe(true)
+    await client.close()
+  })
+
+  it('a multi-workspace session sees servers from every workspace it was granted', async () => {
+    const client = await connectedClient(multiWorkspaceToken)
+    const list = await client.callTool({ name: 'list_servers', arguments: {} })
+    const listText = (list.content as { type: string; text: string }[])[0].text
+    expect(listText).toContain('Nginx Server Prod')
+    expect(listText).toContain('Dev Box')
+
+    const workspaces = await client.callTool({ name: 'list_workspaces', arguments: {} })
+    const workspacesText = (workspaces.content as { type: string; text: string }[])[0].text
+    expect(workspacesText).toContain('Production')
+    expect(workspacesText).toContain('Development')
+
+    const details = await client.callTool({ name: 'get_server_details', arguments: { serverName: 'Dev Box' } })
+    const detailsText = (details.content as { type: string; text: string }[])[0].text
+    expect(detailsText).toContain('Workspace: Development')
     await client.close()
   })
 })

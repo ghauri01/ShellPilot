@@ -12,8 +12,7 @@ import {
 function makeSession(ttlMinutes: number | null = 60) {
   return createSession({
     agentName: 'Claude Code',
-    workspaceId: 'ws-1',
-    workspaceName: 'Production',
+    workspaces: [{ id: 'ws-1', name: 'Production' }],
     groupId: 'grp-read-only',
     groupName: 'Read Only',
     ttlMinutes

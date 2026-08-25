@@ -97,14 +97,16 @@ export function confirmCliPairing(
   pending.delete(id)
   emitter.emit('event', { type: 'resolved', request: toRequest(id, p) } satisfies CliPairingEvent)
 
-  const workspace = listCachedWorkspaces()[0]
-  if (!workspace) return { ok: false, error: 'No workspace exists in ShellPilot yet — create one first.' }
+  const workspaces = listCachedWorkspaces()
+  if (workspaces.length === 0) return { ok: false, error: 'No workspace exists in ShellPilot yet — create one first.' }
   const group = listGroups()[0]
 
+  // There's no workspace picker at pairing time, so a CLI-paired session is
+  // granted every workspace that exists right now — narrower access still
+  // needs a session created by hand under AI & MCP → AI Agents.
   const { session, token } = createSession({
     agentName: p.agentName,
-    workspaceId: workspace.id,
-    workspaceName: workspace.name,
+    workspaces: workspaces.map((w) => ({ id: w.id, name: w.name })),
     groupId: group?.id ?? null,
     groupName: group?.name ?? 'No AI Access',
     ttlMinutes: TTL_MINUTES

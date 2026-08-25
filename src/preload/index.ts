@@ -247,8 +247,7 @@ const api = {
     status: (): Promise<{ running: boolean; port: number | null }> => ipcRenderer.invoke('aiMcp:status'),
     createSession: (input: {
       agentName: string
-      workspaceId: string
-      workspaceName: string
+      workspaces: { id: string; name: string }[]
       groupId: string | null
       groupName: string
       ttlMinutes: number | null

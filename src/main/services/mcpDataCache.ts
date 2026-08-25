@@ -123,8 +123,10 @@ export function listCachedWorkspaces(): CachedWorkspace[] {
   return workspaces
 }
 
-export function listCachedServers(workspaceId?: string): CachedServer[] {
-  return workspaceId ? servers.filter((s) => s.workspaceId === workspaceId) : servers
+export function listCachedServers(workspaceId?: string | string[]): CachedServer[] {
+  if (!workspaceId) return servers
+  const ids = Array.isArray(workspaceId) ? workspaceId : [workspaceId]
+  return servers.filter((s) => ids.includes(s.workspaceId))
 }
 
 export function getCachedServer(id: string): CachedServer | null {

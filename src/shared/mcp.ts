@@ -81,16 +81,25 @@ export interface McpGlobalConfig {
   approvalTimeoutSeconds: number
 }
 
+export interface WorkspaceRef {
+  id: string
+  name: string
+}
+
 // Each agent connects with its own bearer token: the session — not one
 // shared secret for the whole app — so Claude Code and Codex can be pointed
 // at different workspaces/access groups at the same time, each individually
 // revocable. The raw token is shown to the user once, at creation, and only
 // its SHA-256 hash plus a display preview are ever persisted.
+//
+// A session can be granted several workspaces at once (chosen explicitly at
+// creation, never "all workspaces including future ones") — every tool that
+// lists or resolves a server filters against this exact set, so a workspace
+// left out is invisible to the session, not merely denied.
 export interface McpAgentSession {
   id: string
   agentName: string
-  workspaceId: string
-  workspaceName: string
+  workspaces: WorkspaceRef[]
   groupId: string | null
   groupName: string
   tokenHash: string

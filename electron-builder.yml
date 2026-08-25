@@ -18,13 +18,15 @@ files:
   - package.json
 
 # ssh2 pulls in an optional native crypto binding; keep it unpacked so it can
-# be dlopen'd from outside the asar archive. out/cli is the `shellpilot`
-# CLI launcher (bin/shellpilot.cmd|.sh) — it's invoked directly by a plain
-# `node`, which can't read into an asar archive, so it must stay unpacked too.
+# be dlopen'd from outside the asar archive. bin/ (shellpilot.cmd|.sh) and
+# out/cli (what they invoke) are the `shellpilot` CLI launcher — cmd.exe/a
+# shell can't execute a script or load a module from inside an asar archive
+# at all, so both must stay unpacked, real files on disk.
 asarUnpack:
   - '**/node_modules/cpu-features/**'
   - '**/node_modules/ssh2/**'
   - 'out/cli/**'
+  - 'bin/**'
 
 win:
   icon: build/icon.ico
@@ -46,6 +48,9 @@ nsis:
   createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: ShellPilot
+  # Adds the CLI launcher's folder to the user's PATH on install — see the
+  # script itself for why it deliberately does not undo that on uninstall.
+  include: build/installer.nsh
 
 portable:
   artifactName: ${productName}-${version}-portable.${ext}

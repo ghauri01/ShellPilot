@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto'
-import type { McpAgentSession, McpGlobalConfig } from '../../shared/mcp'
+import type { McpAgentSession, McpGlobalConfig, WorkspaceRef } from '../../shared/mcp'
 import { DEFAULT_MCP_PORT } from '../../shared/mcp'
 
 const CONFIG_FILE = join(app.getPath('userData'), 'shellpilot-mcp-config.json')
@@ -83,8 +83,7 @@ function isExpired(session: McpAgentSession): boolean {
 
 export interface CreateSessionInput {
   agentName: string
-  workspaceId: string
-  workspaceName: string
+  workspaces: WorkspaceRef[]
   groupId: string | null
   groupName: string
   ttlMinutes: number | null // null = no expiration
@@ -96,8 +95,7 @@ export function createSession(input: CreateSessionInput): { session: McpAgentSes
   const session: McpAgentSession = {
     id: `sess-${randomBytes(6).toString('hex')}`,
     agentName: input.agentName,
-    workspaceId: input.workspaceId,
-    workspaceName: input.workspaceName,
+    workspaces: input.workspaces,
     groupId: input.groupId,
     groupName: input.groupName,
     tokenHash: hashToken(raw),

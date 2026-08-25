@@ -67,7 +67,7 @@ function Overview(): React.JSX.Element {
       <ol className="s-desc" style={{ lineHeight: 1.8 }}>
         <li>Create an access group (or use a default) describing what AI is allowed to do.</li>
         <li>Assign your workspaces/servers to an access group — most servers default to No AI Access.</li>
-        <li>Create an AI Agent session scoped to one workspace and access group, and copy its token.</li>
+        <li>Create an AI Agent session scoped to one or more workspaces and an access group, and copy its token.</li>
         <li>Point Claude Code, Codex or another MCP client at ShellPilot's local MCP server with that token.</li>
         <li>Approve or deny sensitive actions as they come up — the AI waits for your answer.</li>
       </ol>

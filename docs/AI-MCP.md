@@ -50,7 +50,7 @@ another MCP client. For the short pitch and the security summary, see the
 
 | Tool | Capability gating it | What it returns |
 |---|---|---|
-| `list_workspaces` | — | The single workspace this session is scoped to |
+| `list_workspaces` | — | The workspace(s) this session is scoped to |
 | `list_servers` | `viewServer` | Friendly names only, filtered to what the session can see |
 | `get_server_details` | `viewServer` | Name, OS, access group, effective ALLOW/ASK/DENY per capability — **never host/IP/username** |
 | `execute_command` | `terminal` (+ `sudo` if the command is sudo/doas) | stdout/stderr/exit code, redacted |
@@ -73,7 +73,7 @@ A session (`McpAgentSession`, `shared/mcp.ts`) is created from **AI & MCP → AI
 CLI pairing. Each one has:
 
 - an **agent name** (a label, e.g. "Claude Code")
-- exactly **one workspace**
+- **one or more workspaces**, chosen explicitly — never "all workspaces including future ones"
 - exactly **one access-group ceiling**
 - an **expiry**: 15 minutes, 1 hour, 8 hours, 7 days, or never (CLI pairing always issues 8 hours —
   `TTL_MINUTES = 480` in `cliPairing.ts`)
@@ -90,10 +90,22 @@ Sessions are stored at `shellpilot-mcp-sessions.json` in ShellPilot's userData d
 
 ## Workspaces
 
-A session's workspace is a hard boundary, not a filter applied after the fact:
-`listCachedServers(session.workspaceId)` (`mcpDataCache.ts`) only ever loads servers belonging to
-that workspace in the first place. A server in another workspace isn't denied to the session — it
-is invisible, because it's never in the candidate list `serverResolver.ts` searches.
+A session's workspace grant is a hard boundary, not a filter applied after the fact. A session
+can be created with one workspace or several — chosen explicitly at creation, never "all
+workspaces including future ones" — and every tool resolves servers against exactly that set:
+`listCachedServers(session.workspaces.map(w => w.id))` (`mcpDataCache.ts`) only ever loads servers
+belonging to a granted workspace in the first place. A workspace left out isn't denied to the
+session — it is invisible, because it's never in the candidate list `serverResolver.ts` searches.
+
+Policy resolution still happens per server, not per session: `serverGroupFor()` (`mcpServer.ts`)
+looks up the access group governing a server using **that server's own workspace**, not "the
+session's workspace" — which matters once a session spans more than one, since a server's
+governing group can differ per workspace even inside the same multi-workspace session.
+
+CLI-paired sessions (`shellpilot claude`/`codex`/`run`) are a special case: there's no workspace
+picker at pairing time, so a paired session is granted every workspace that exists at the moment
+of pairing (`confirmCliPairing`, `cliPairing.ts`). A session scoped to specific workspaces still
+has to be created by hand under **AI & MCP → AI Agents**.
 
 ## Access Groups
 

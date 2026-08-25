@@ -8,7 +8,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 
 import { authenticate, getMcpConfig, type AuthFailureReason } from './mcpAuth'
 import { startCliPairing, confirmCliPairing } from './cliPairing'
-import { listCachedServers, listCachedWorkspaces, getCachedWorkspace, serverToSshConfig } from './mcpDataCache'
+import { listCachedServers, listCachedWorkspaces, getCachedWorkspace, getCachedServer, serverToSshConfig } from './mcpDataCache'
 import { resolveServerByName, formatAmbiguity, type ServerMatch } from './serverResolver'
 import {
   resolveGroupId,
@@ -70,11 +70,13 @@ function resolveServerOrError(
   session: McpAgentSession,
   serverName: string
 ): { match: ServerMatch } | { error: CallToolResult } {
-  const servers = listCachedServers(session.workspaceId)
+  const servers = listCachedServers(session.workspaces.map((w) => w.id))
   const workspaces = listCachedWorkspaces()
   const result = resolveServerByName(serverName, servers, workspaces)
   if (result.type === 'not-found') {
-    return { error: errorText(`No server matching "${serverName}" was found in workspace "${session.workspaceName}".`) }
+    const names = session.workspaces.map((w) => getCachedWorkspace(w.id)?.name ?? w.name).join(', ')
+    const label = session.workspaces.length > 1 ? `workspaces "${names}"` : `workspace "${names}"`
+    return { error: errorText(`No server matching "${serverName}" was found in ${label}.`) }
   }
   if (result.type === 'ambiguous') {
     return { error: errorText(formatAmbiguity(result.matches)) }
@@ -86,9 +88,13 @@ function resolveServerOrError(
 // given server; the session's own group (chosen when it was created) is a
 // ceiling on top of that. Every check below evaluates both sides and takes
 // whichever is more restrictive — a session can never do more than either
-// side allows.
-function serverGroupFor(session: McpAgentSession, serverId: string): AccessGroup | null {
-  const groupId = resolveGroupId(listAssignments(), serverId, session.workspaceId)
+// side allows. The group lookup is keyed on the server's OWN workspace, not
+// the session's — a session can now span several workspaces, so the two are
+// no longer interchangeable.
+function serverGroupFor(serverId: string): AccessGroup | null {
+  const server = getCachedServer(serverId)
+  if (!server) return null
+  const groupId = resolveGroupId(listAssignments(), serverId, server.workspaceId)
   return groupId ? getGroup(groupId) : null
 }
 
@@ -97,7 +103,7 @@ function sessionGroupFor(session: McpAgentSession): AccessGroup | null {
 }
 
 function effectiveCapability(session: McpAgentSession, serverId: string, capability: AiCapability): Decision {
-  const serverGroup = serverGroupFor(session, serverId)
+  const serverGroup = serverGroupFor(serverId)
   if (!serverGroup) return { decision: 'deny', reason: 'No AI access is assigned to this server.' }
   const sessionGroup = sessionGroupFor(session)
   const fromServer = evaluateCapability(serverGroup, capability)
@@ -106,7 +112,7 @@ function effectiveCapability(session: McpAgentSession, serverId: string, capabil
 }
 
 function effectiveCommand(session: McpAgentSession, serverId: string, command: string): Decision {
-  const serverGroup = serverGroupFor(session, serverId)
+  const serverGroup = serverGroupFor(serverId)
   if (!serverGroup) return { decision: 'deny', reason: 'No AI access is assigned to this server.' }
   const sessionGroup = sessionGroupFor(session)
   const fromServer = evaluateCommand(serverGroup, command)
@@ -115,7 +121,7 @@ function effectiveCommand(session: McpAgentSession, serverId: string, command: s
 }
 
 function effectiveFilePath(session: McpAgentSession, serverId: string, path: string, mode: 'read' | 'write'): Decision {
-  const serverGroup = serverGroupFor(session, serverId)
+  const serverGroup = serverGroupFor(serverId)
   if (!serverGroup) return { decision: 'deny', reason: 'No AI access is assigned to this server.' }
   const sessionGroup = sessionGroupFor(session)
   const fromServer = evaluateFilePath(serverGroup, path, mode)
@@ -125,6 +131,11 @@ function effectiveFilePath(session: McpAgentSession, serverId: string, path: str
 
 interface AuditContext {
   session: McpAgentSession
+  // The specific server's own workspace, not the session's — a session can
+  // span several workspaces now, so only the resolved server's workspace is
+  // correct for an audit entry about acting on it.
+  workspaceId: string | null
+  workspaceName: string | null
   serverId: string | null
   serverName: string | null
   action: string
@@ -140,8 +151,8 @@ async function gate(
     recordAudit({
       agentName: ctx.session.agentName,
       sessionId: ctx.session.id,
-      workspaceId: ctx.session.workspaceId,
-      workspaceName: ctx.session.workspaceName,
+      workspaceId: ctx.workspaceId,
+      workspaceName: ctx.workspaceName,
       serverId: ctx.serverId,
       serverName: ctx.serverName,
       action: ctx.action,
@@ -154,14 +165,14 @@ async function gate(
   }
 
   if (check.decision === 'ask') {
-    if (!ctx.serverId || !ctx.serverName || !ctx.capability) {
+    if (!ctx.serverId || !ctx.serverName || !ctx.capability || !ctx.workspaceId || !ctx.workspaceName) {
       return { ok: false, result: errorText('Denied: this action requires approval but has no server context.') }
     }
     const decision = await requestApproval({
       sessionId: ctx.session.id,
       agentName: ctx.session.agentName,
-      workspaceId: ctx.session.workspaceId,
-      workspaceName: ctx.session.workspaceName,
+      workspaceId: ctx.workspaceId,
+      workspaceName: ctx.workspaceName,
       serverId: ctx.serverId,
       serverName: ctx.serverName,
       capability: ctx.capability,
@@ -172,8 +183,8 @@ async function gate(
       recordAudit({
         agentName: ctx.session.agentName,
         sessionId: ctx.session.id,
-        workspaceId: ctx.session.workspaceId,
-        workspaceName: ctx.session.workspaceName,
+        workspaceId: ctx.workspaceId,
+        workspaceName: ctx.workspaceName,
         serverId: ctx.serverId,
         serverName: ctx.serverName,
         action: ctx.action,
@@ -199,8 +210,8 @@ function auditSuccess(ctx: AuditContext, approval: 'not-required' | 'approved', 
   recordAudit({
     agentName: ctx.session.agentName,
     sessionId: ctx.session.id,
-    workspaceId: ctx.session.workspaceId,
-    workspaceName: ctx.session.workspaceName,
+    workspaceId: ctx.workspaceId,
+    workspaceName: ctx.workspaceName,
     serverId: ctx.serverId,
     serverName: ctx.serverName,
     action: ctx.action,
@@ -218,13 +229,13 @@ function buildServer(): McpServer {
     'list_workspaces',
     {
       description:
-        "Lists the workspace this AI session is scoped to. ShellPilot sessions are created for one workspace at a time; this never reveals workspaces outside the session's grant."
+        "Lists the workspace(s) this AI session is scoped to. This never reveals a workspace outside the session's grant."
     },
     async (extra) => {
       const auth = authenticateExtra(extra)
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
-      const ws = getCachedWorkspace(auth.session.workspaceId)
-      return text(ws ? `Workspace:\n${ws.name}` : 'No workspace is available for this session.')
+      const names = auth.session.workspaces.map((w) => getCachedWorkspace(w.id)?.name ?? w.name)
+      return text(names.length ? `Workspaces:\n${names.join('\n')}` : 'No workspace is available for this session.')
     }
   )
 
@@ -235,15 +246,28 @@ function buildServer(): McpServer {
       const auth = authenticateExtra(extra)
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
       const { session } = auth
-      const ws = getCachedWorkspace(session.workspaceId)
-      const servers = listCachedServers(session.workspaceId).filter(
+      const workspaceIds = session.workspaces.map((w) => w.id)
+      const workspaceNames = session.workspaces.map((w) => getCachedWorkspace(w.id)?.name ?? w.name)
+      const servers = listCachedServers(workspaceIds).filter(
         (s) => effectiveCapability(session, s.id, 'viewServer').decision !== 'deny'
       )
+      const header = `Workspace${workspaceNames.length > 1 ? 's' : ''}:\n${workspaceNames.join(', ')}`
       if (servers.length === 0) {
-        return text(`Workspace:\n${ws?.name ?? session.workspaceName}\n\nNo servers are available to AI access in this workspace.`)
+        return text(`${header}\n\nNo servers are available to AI access in this session's workspace(s).`)
       }
-      const lines = servers.map((s) => `- ${s.name}`)
-      return text(`Workspace:\n${ws?.name ?? session.workspaceName}\n\nServers:\n${lines.join('\n')}`)
+      if (workspaceNames.length === 1) {
+        const lines = servers.map((s) => `- ${s.name}`)
+        return text(`${header}\n\nServers:\n${lines.join('\n')}`)
+      }
+      const byWorkspace = new Map<string, string[]>()
+      for (const s of servers) {
+        const wsName = getCachedWorkspace(s.workspaceId)?.name ?? s.workspaceId
+        byWorkspace.set(wsName, [...(byWorkspace.get(wsName) ?? []), s.name])
+      }
+      const groups = [...byWorkspace.entries()].map(
+        ([wsName, names]) => `${wsName}:\n${names.map((n) => `- ${n}`).join('\n')}`
+      )
+      return text(`${header}\n\nServers:\n${groups.join('\n\n')}`)
     }
   )
 
@@ -261,7 +285,7 @@ function buildServer(): McpServer {
       const { server: s, workspace } = resolved.match
       const view = effectiveCapability(auth.session, s.id, 'viewServer')
       if (view.decision !== 'allow') return errorText(`Denied: ${view.reason}`)
-      const serverGroup = serverGroupFor(auth.session, s.id)
+      const serverGroup = serverGroupFor(s.id)
       const caps = AI_CAPABILITIES.map(
         ({ id, label }) => `- ${label}: ${effectiveCapability(auth.session, s.id, id).decision.toUpperCase()}`
       ).join('\n')
@@ -292,10 +316,12 @@ function buildServer(): McpServer {
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
       const resolved = resolveServerOrError(auth.session, serverName)
       if ('error' in resolved) return resolved.error
-      const { server: s } = resolved.match
+      const { server: s, workspace } = resolved.match
       const check = effectiveCommand(auth.session, s.id, command)
       const ctx: AuditContext = {
         session: auth.session,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
         serverId: s.id,
         serverName: s.name,
         action: command,
@@ -312,8 +338,8 @@ function buildServer(): McpServer {
         recordAudit({
           agentName: auth.session.agentName,
           sessionId: auth.session.id,
-          workspaceId: auth.session.workspaceId,
-          workspaceName: auth.session.workspaceName,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
           serverId: s.id,
           serverName: s.name,
           action: command,
@@ -343,10 +369,12 @@ function buildServer(): McpServer {
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
       const resolved = resolveServerOrError(auth.session, serverName)
       if ('error' in resolved) return resolved.error
-      const { server: s } = resolved.match
+      const { server: s, workspace } = resolved.match
       const check = effectiveFilePath(auth.session, s.id, path, 'read')
       const ctx: AuditContext = {
         session: auth.session,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
         serverId: s.id,
         serverName: s.name,
         action: `read ${path}`,
@@ -382,10 +410,12 @@ function buildServer(): McpServer {
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
       const resolved = resolveServerOrError(auth.session, serverName)
       if ('error' in resolved) return resolved.error
-      const { server: s } = resolved.match
+      const { server: s, workspace } = resolved.match
       const check = effectiveFilePath(auth.session, s.id, path, 'write')
       const ctx: AuditContext = {
         session: auth.session,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
         serverId: s.id,
         serverName: s.name,
         action: `write ${path} (${content.length} bytes)`,
@@ -420,10 +450,12 @@ function buildServer(): McpServer {
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
       const resolved = resolveServerOrError(auth.session, serverName)
       if ('error' in resolved) return resolved.error
-      const { server: s } = resolved.match
+      const { server: s, workspace } = resolved.match
       const check = effectiveFilePath(auth.session, s.id, path, 'read')
       const ctx: AuditContext = {
         session: auth.session,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
         serverId: s.id,
         serverName: s.name,
         action: `list ${path}`,
@@ -456,10 +488,12 @@ function buildServer(): McpServer {
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
       const resolved = resolveServerOrError(auth.session, serverName)
       if ('error' in resolved) return resolved.error
-      const { server: s } = resolved.match
+      const { server: s, workspace } = resolved.match
       const check = effectiveCapability(auth.session, s.id, 'serverMetrics')
       const ctx: AuditContext = {
         session: auth.session,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
         serverId: s.id,
         serverName: s.name,
         action: 'get_server_metrics',
@@ -494,8 +528,8 @@ function buildServer(): McpServer {
 function auditBase(ctx: AuditContext): {
   agentName: string
   sessionId: string
-  workspaceId: string
-  workspaceName: string
+  workspaceId: string | null
+  workspaceName: string | null
   serverId: string | null
   serverName: string | null
   action: string
@@ -504,8 +538,8 @@ function auditBase(ctx: AuditContext): {
   return {
     agentName: ctx.session.agentName,
     sessionId: ctx.session.id,
-    workspaceId: ctx.session.workspaceId,
-    workspaceName: ctx.session.workspaceName,
+    workspaceId: ctx.workspaceId,
+    workspaceName: ctx.workspaceName,
     serverId: ctx.serverId,
     serverName: ctx.serverName,
     action: ctx.action,
