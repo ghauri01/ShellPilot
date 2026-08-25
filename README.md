@@ -4,7 +4,7 @@
 
 # ShellPilot
 
-**A free, open-source SSH client, SFTP browser, database manager and secrets vault — in one desktop app.**
+**A free, open-source SSH client, SFTP browser, database manager, secrets vault and secure AI-agent gateway — in one desktop app.**
 
 Your DevOps workstation, everywhere. Windows · macOS · Linux.
 
@@ -21,7 +21,7 @@ Your DevOps workstation, everywhere. Windows · macOS · Linux.
 [![Stars](https://img.shields.io/github/stars/ghauri01/ShellPilot?style=flat-square&label=stars&color=22c7d6&labelColor=30363d)](https://github.com/ghauri01/ShellPilot/stargazers)
 [![License](https://img.shields.io/badge/license-MIT-22c7d6?style=flat-square&labelColor=30363d)](LICENSE)
 
-[Features](#features) · [Install](#install) · [Quick start](#quick-start) · [Comparison](#shellpilot-vs-mobaxterm-putty-termius-and-securecrt) · [Workspaces](#workspaces) · [Command palette](#command-palette) · [Shortcuts](#keyboard-shortcuts) · [Databases](#databases) · [Vault](#vault) · [FAQ](#faq) · [Contributing](#contributing) · [Licence](#licence)
+[Features](#features) · [Install](#install) · [Quick start](#quick-start) · [Comparison](#shellpilot-vs-mobaxterm-putty-termius-and-securecrt) · [Workspaces](#workspaces) · [Command palette](#command-palette) · [Shortcuts](#keyboard-shortcuts) · [Databases](#databases) · [Vault](#vault) · [AI & MCP](#ai--mcp) · [FAQ](#faq) · [Contributing](#contributing) · [Licence](#licence)
 
 </div>
 
@@ -40,7 +40,7 @@ Your DevOps workstation, everywhere. Windows · macOS · Linux.
 > each file, so you can verify the download yourself.
 > → [How to get past the warning, and the scan results](#first-run-why-your-computer-shows-a-warning)
 
-ShellPilot is a **free and open-source alternative to MobaXterm, PuTTY, Termius, SecureCRT and MobaXterm Personal Edition**, built for engineers who spend the day moving between bastions, production boxes and databases. It combines an **SSH terminal**, **SFTP file browser**, **server monitoring**, **SSH tunnels**, a **multi-engine database client** and an **encrypted password vault** in a single window — with no account, no telemetry and no subscription.
+ShellPilot is a **free and open-source alternative to MobaXterm, PuTTY, Termius, SecureCRT and MobaXterm Personal Edition**, built for engineers who spend the day moving between bastions, production boxes and databases — and increasingly, for AI coding agents that need to as well. It combines an **SSH terminal**, **SFTP file browser**, **server monitoring**, **SSH tunnels**, a **multi-engine database client**, an **encrypted password vault** and a **secure [MCP](#ai--mcp) bridge for Claude Code, Claude Desktop, Codex and other AI agents** in a single window — with no account, no telemetry and no subscription.
 
 ![ShellPilot main window](docs/images/main-window.png)
 
@@ -51,6 +51,7 @@ Most terminal tools do one thing. A typical DevOps task needs four: open a shell
 - **No lock-in** — connections import from your existing `~/.ssh/config`
 - **No account** — nothing is uploaded, nothing phones home
 - **No cost** — MIT licensed, free forever, contributions welcome
+- **No exposed credentials, even to AI** — Claude Code, Claude Desktop and Codex can run commands and read files through it, but never see a password, private key, IP or username — see [AI & MCP](#ai--mcp)
 
 ## ShellPilot vs MobaXterm, PuTTY, Termius and SecureCRT
 
@@ -73,6 +74,7 @@ this is the short version:
 | Encrypted secrets vault | **Yes, AES-256-GCM** | Password store | No | Cloud vault | No |
 | Live server monitoring | **Yes** | Basic | No | No | No |
 | Rebindable shortcuts | **Every one** | Partial | Partial | Partial | Yes |
+| AI agent integration (MCP) | **Yes, access-group scoped** | No | No | No | No |
 
 The point of difference is the **database client and the vault**. Every other tool in that table
 sends you to a second application the moment you need to query a table or look up an API key.
@@ -95,6 +97,7 @@ sends you to a second application the moment you need to query a table or look u
 | **Encrypted backup** | One passphrase-protected file containing everything, portable across machines |
 | **Host key verification** | Trust-on-first-use, with a hard stop when a key changes |
 | **Rebindable shortcuts** | Every shortcut is remappable per context, with conflict detection and export/import |
+| **AI & MCP** | Let Claude Code, Claude Desktop, Codex and other MCP clients operate your servers — scoped by access group, with human approval on sensitive actions |
 
 ## Install
 
@@ -166,6 +169,29 @@ Gatekeeper refuses to open the app. Either:
 
 The second command removes the quarantine flag macOS adds to anything downloaded from
 the internet. First run only.
+
+</details>
+
+<details>
+<summary><b>macOS (Apple Silicon) — "ShellPilot is damaged and can't be opened. You should move it to the Trash."</b></summary>
+
+**The download is not actually damaged.** On Apple Silicon (M1/M2/M3/M4), Gatekeeper shows this
+alarming message — instead of the "developer cannot be verified" one above — for the exact same
+reason: no valid code signature, combined with the quarantine flag macOS attaches to anything a
+browser downloads. It is Gatekeeper's wording for an arm64 app it cannot verify, not evidence of
+a corrupted file. If you want to confirm that yourself before doing anything else, check the
+release's SHA-256 against your download — see
+[Verifying a download](#verifying-a-download).
+
+Do **not** move it to the Trash. Instead, run once in Terminal:
+
+```bash
+xattr -cr /Applications/ShellPilot.app
+```
+
+Then open the app normally. If it still refuses, confirm the exact path is correct (drag the app
+into the Terminal window after typing `xattr -cr ` to avoid a typo) and that you are running the
+command against the copy in `/Applications`, not the one still sitting in `~/Downloads`.
 
 </details>
 
@@ -589,6 +615,111 @@ An encrypted store for the credentials that do not belong to a single server —
 
 > There is **no recovery** if the master password is lost. That is the point.
 
+## AI & MCP
+
+Let AI coding agents — **Claude Code, Claude Desktop, Codex, Gemini CLI** and anything else
+that speaks [MCP](https://modelcontextprotocol.io) — operate your infrastructure through
+ShellPilot: list servers, run commands, browse and edit files, check metrics. The agent never
+sees an SSH password, private key or database credential. ShellPilot resolves the server by
+its friendly name, enforces per-capability policy, and can stop and ask you before anything
+sensitive runs.
+
+![AI & MCP overview](docs/images/ai-mcp-overview.png)
+
+**How it works**
+
+1. Create an access group (or use one of the four built-in ones) describing what AI is allowed to do.
+2. Assign workspaces/servers to an access group — most servers default to **No AI Access**.
+3. Create an AI Agent session scoped to one workspace and access group, and copy its token.
+4. Point Claude Code, Claude Desktop, Codex or another MCP client at ShellPilot's local MCP server with that token.
+5. Approve or deny sensitive actions as they come up — the AI waits for your answer.
+
+The bridge only ever binds to **`127.0.0.1`** — no MCP client on another machine can reach it, whatever else is on the network.
+
+### AI Agents — creating a session
+
+**AI & MCP → AI Agents** issues a session scoped to one workspace and one access-group ceiling, with an expiry from 15 minutes up to never.
+
+![Creating an AI agent session](docs/images/ai-agents.png)
+
+The token is shown **once**, at creation — ShellPilot stores only its SHA-256 hash and a 4-character preview, so if you lose it the only option is to revoke the session and create a new one. Each agent gets its own session and its own token, so Claude Code and Codex (or two different projects) can be connected at the same time with different permissions, each individually revocable.
+
+### Active Sessions
+
+Every session that currently exists, live or expired, with a **Revoke** button and a **Stop all AI access** kill switch that revokes everything and denies every pending approval in one click.
+
+![Active Sessions list](docs/images/ai-active-sessions.png)
+
+### Access Groups
+
+An access group is not a single yes/no toggle — it's a per-capability policy across the 10 things an agent might try to do (view a server, run a command, read/write files, SFTP, SSH tunnels, database access, sudo, metrics), each set to **ALLOW**, **ASK** or **DENY**. Four built-in groups are provided (**Read Only**, **Read & Write**, **Sudo Access**, **Full Access**) and you can create as many custom ones as you need — a "Logs Only" group that can view metrics and read `/var/log/**` but nothing else, for example.
+
+![Access group capabilities](docs/images/ai-access-groups.png)
+
+**File path rules** let you override the blanket read/write capability for specific paths — the most specific matching pattern wins. `/etc/shadow`, `/etc/gshadow` and any `.ssh` directory are hard-denied by default; a change under `/etc/nginx/**` or `/var/www/**` can be set to ASK even inside a group that otherwise allows writes. **Sudo `-i`/`su`/unrestricted-shell style commands are always blocked**, regardless of group — that is not a configurable option.
+
+Below the editor, **Server & workspace assignment** is where a group actually takes effect: pick a default access group per workspace, then override it per server. A server with no override inherits its workspace's default; a workspace with no assignment at all is **No AI Access**.
+
+![File path rules and workspace/server assignment](docs/images/ai-access-groups-assignment.png)
+
+### Approvals
+
+Anything a capability marks **ASK** stops and waits here rather than running immediately. An agent can never approve its own request — only a human, in this screen, can. Each request shows the agent, workspace/server, a risk level and the exact action; **Approve once** or **Deny**, or let it expire — an unanswered request times out and is treated as denied after the timeout configured in Security (1–10 minutes).
+
+### Audit Log
+
+Every AI action ShellPilot processed — allowed outright, approved, denied or failed — with the agent, workspace/server, the exact action and the result. Nothing here ever contains a password, key or other secret: command output and file paths are redacted before they are ever written to disk, not just before they are displayed.
+
+![Audit Log](docs/images/ai-audit-log.png)
+
+### Security
+
+Global configuration for the bridge itself — enable/disable, the local port, the approval timeout, and copy-pasteable connection snippets for every kind of client.
+
+![AI & MCP security settings](docs/images/ai-security.png)
+
+- **Claude Code** — `claude mcp add --transport http shellpilot http://127.0.0.1:<port>/mcp --header "Authorization: Bearer <token>"`
+- **Claude Desktop, Codex, Gemini CLI or any client that takes a JSON config** — a Streamable HTTP entry with a `url` and an `Authorization: Bearer` header, copy-pasted straight into that client's MCP config file
+- **The `shellpilot` CLI launcher** — skip copying tokens entirely: `shellpilot claude` / `shellpilot codex` pop a one-time pairing code inside ShellPilot itself (the code is never sent back to whatever local process asked for it), and the session, token and MCP config are wired up automatically; `shellpilot run -- <command>` does the same for any other MCP-aware CLI
+
+### What could go wrong — and why it doesn't here
+
+Picture the shortcut most "give the AI SSH access" setups take: hand an agent your
+`~/.ssh/config`, or a raw password, and let it run `ssh` itself. That one decision just
+handed a language model your private keys, your production IP addresses, your
+usernames — and however that model's provider retains its own context. From there it only
+gets worse: a prompt-injected or simply confused agent is one `sudo -i` or one `rm -rf`
+away from taking down something real, and whatever it prints back — a password sitting in
+an `env` dump, a connection string with a credential baked in — never gets a second look
+before it lands in a chat transcript somewhere.
+
+None of that is how ShellPilot's MCP bridge works, at every one of those steps:
+
+- **The agent never gets a credential — or your IP, or a username.** It asks for
+  "Production API" by name; ShellPilot resolves the real host, port, username and key
+  itself, inside the main process. None of the six MCP tools — not `list_servers`, not
+  `get_server_details`, not `execute_command` — ever puts a host, IP, username or key in a
+  response the AI can see.
+- **A destructive command doesn't just run.** When the access group governing that server
+  has the capability set to ASK, the command sits in **Approvals** until a human clicks
+  Approve or Deny — and the agent has no code path to approve its own request.
+- **`sudo -i`, `su`, and unrestricted shells are refused outright**, for every access group,
+  with no setting anywhere that turns it back on.
+- **Whatever the command prints back gets scrubbed first.** Known secret values are blanked
+  verbatim, and pattern rules catch `PASSWORD=`/`TOKEN=`/`API_KEY=`-style assignments, PEM
+  private key blocks, bearer tokens, AWS access key IDs and passwords embedded in
+  connection-string URLs — before the AI sees the output, and before it reaches the audit
+  log.
+- **If a token leaks, there is nothing recoverable to steal.** Only its SHA-256 hash is ever
+  stored; it's scoped to one workspace, expires on the schedule you picked (15 minutes to
+  never), and can be revoked individually — or every session at once, from Security.
+- **And every one of those decisions is on the record.** Allowed, asked, approved, denied,
+  failed — each lands in the Audit Log, so a security review never has to rely on the
+  agent's own account of what it did.
+
+That is the shortcut removed, one failure mode at a time — not a policy you have to trust,
+but a bridge that never had the keys in the first place.
+
 ## Backup & restore
 
 Settings → **Backup & Restore** exports everything — workspaces, servers, databases, tunnels, stored credentials, the vault, workspace passwords and trusted host keys — into a **single passphrase-encrypted file**.
@@ -635,8 +766,9 @@ Found a vulnerability? Please read [SECURITY.md](SECURITY.md) — do not open a 
 ### What is ShellPilot?
 
 ShellPilot is a free, open-source, cross-platform desktop application that combines an SSH
-terminal, an SFTP file browser, an SSH tunnel manager, a multi-engine database client and an
-encrypted secrets vault in a single window. It runs on Windows, macOS and Linux, is released
+terminal, an SFTP file browser, an SSH tunnel manager, a multi-engine database client, an
+encrypted secrets vault and a secure MCP bridge for AI coding agents (Claude Code, Claude
+Desktop, Codex and others) in a single window. It runs on Windows, macOS and Linux, is released
 under the MIT licence, and needs no account.
 
 ### Which file should I download?
@@ -711,7 +843,9 @@ code-signing certificate, which costs roughly $200–$400 a year for Windows and
 for an Apple Developer account — money a free, MIT-licensed project with no income does not
 have. The warning means the operating system cannot confirm **who** published the app, not
 that the file is unsafe. On Windows choose *More info → Run anyway*; on macOS right-click →
-**Open**, or run `xattr -cr /Applications/ShellPilot.app`. Full instructions are under
+**Open**, or run `xattr -cr /Applications/ShellPilot.app` — on **Apple Silicon** this same cause
+can show up as *"ShellPilot is damaged and can't be opened"* instead; the fix is the same
+`xattr -cr` command, not the Trash the dialog suggests. Full instructions are under
 [First run: why your computer shows a warning](#first-run-why-your-computer-shows-a-warning),
 and every release publishes SHA-256 checksums so you can verify the download yourself.
 
@@ -719,6 +853,22 @@ and every release publishes SHA-256 checksums so you can verify the download you
 
 Windows 10 or later, macOS 11 or later (Apple Silicon and Intel), or a modern 64-bit Linux
 distribution. Building from source needs Node.js 20 or later.
+
+### Can I connect Claude Code, Claude Desktop or another AI agent to ShellPilot?
+
+Yes — see [AI & MCP](#ai--mcp). ShellPilot runs a local [MCP](https://modelcontextprotocol.io)
+server that Claude Code, Claude Desktop, Codex, Gemini CLI and other MCP-compatible clients can
+connect to, scoped to one workspace and one access group per session. The agent never sees a
+password, private key or database credential — it only ever gets a friendly server name and
+whatever that session's access group allows.
+
+### Is it safe to let an AI agent run commands on my servers?
+
+As safe as the access group you assign it. The bridge only listens on `127.0.0.1`, every
+capability (run commands, read/write files, SFTP, tunnels, database access, sudo, metrics) is
+independently ALLOW/ASK/DENY, sudo/unrestricted shells are hard-blocked regardless of group, and
+anything marked ASK stops and waits for you to approve or deny it in ShellPilot — an agent can
+never approve its own request. Every action is logged in the Audit Log with secrets redacted.
 
 ### How do I move my setup to another machine?
 
@@ -752,6 +902,6 @@ Please do keep the copyright notice, and do not imply the maintainers endorse a 
 
 [⬇ Download ShellPilot](https://github.com/ghauri01/ShellPilot/releases/latest) · [🐞 Report a bug](https://github.com/ghauri01/ShellPilot/issues/new/choose) · [📧 Contact](mailto:aliwaqarofficial@gmail.com)
 
-*Keywords: open source SSH client, free SSH client for Windows, free MobaXterm alternative, PuTTY alternative, Termius alternative, SecureCRT alternative, Xshell alternative, MobaXterm for Mac, SSH client for macOS, SSH client for Linux, SSH terminal manager, SSH connection manager, SFTP client, SCP file transfer, SSH tunnel manager, port forwarding tool, SOCKS5 proxy client, bastion host client, jump host SSH client, ProxyJump GUI, ssh config importer, server monitoring tool, database GUI client, PostgreSQL client, MySQL client, MongoDB client, Redis client, SQL Server client, database over SSH tunnel, password manager for developers, encrypted secrets vault, AES-256-GCM vault, DevOps tools, sysadmin tools, self-hosted, no telemetry, no subscription, Electron SSH client, cross-platform terminal, Windows macOS Linux.*
+*Keywords: open source SSH client, free SSH client for Windows, free MobaXterm alternative, PuTTY alternative, Termius alternative, SecureCRT alternative, Xshell alternative, MobaXterm for Mac, SSH client for macOS, SSH client for Linux, SSH terminal manager, SSH connection manager, SFTP client, SCP file transfer, SSH tunnel manager, port forwarding tool, SOCKS5 proxy client, bastion host client, jump host SSH client, ProxyJump GUI, ssh config importer, server monitoring tool, database GUI client, PostgreSQL client, MySQL client, MongoDB client, Redis client, SQL Server client, database over SSH tunnel, password manager for developers, encrypted secrets vault, AES-256-GCM vault, DevOps tools, sysadmin tools, self-hosted, no telemetry, no subscription, Electron SSH client, cross-platform terminal, Windows macOS Linux, MCP server, Model Context Protocol, AI agent SSH access, Claude Code MCP integration, Claude Desktop MCP server, Codex MCP server, Gemini CLI MCP, AI DevOps tool, secure AI infrastructure access, AI agent access control, credential-free AI automation, human-in-the-loop AI approvals, AI audit log.*
 
 </div>

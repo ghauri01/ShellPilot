@@ -14,6 +14,9 @@ import { DatabaseWorkspace } from './components/databases/DatabaseView'
 import { AddDatabaseModal } from './components/databases/AddDatabaseModal'
 import { Settings } from './components/settings/Settings'
 import { VaultView } from './components/vault/VaultView'
+import { AiPanel } from './components/ai/AiPanel'
+import { ApprovalWatcher } from './components/ai/ApprovalWatcher'
+import { CliPairingBanner } from './components/ai/CliPairingBanner'
 import { CommandPalette } from './components/palette/CommandPalette'
 import { AddServerModal } from './components/connections/AddServerModal'
 import { RouteEditor } from './components/connections/RouteEditor'
@@ -43,6 +46,7 @@ function MainArea(): React.JSX.Element {
         </div>
       )}
       {activity === 'vault' && <VaultView />}
+      {activity === 'ai' && <AiPanel />}
       {activity === 'settings' && <Settings />}
     </>
   )
@@ -96,6 +100,9 @@ export default function App(): React.JSX.Element {
       <WorkspaceUnlock />
       {/* Can appear during any connection attempt, including SFTP and metrics. */}
       <SshPrompt />
+      {/* Surfaces an AI approval request no matter which tab is active. */}
+      <ApprovalWatcher />
+      <CliPairingBanner />
       <Toasts />
     </div>
   )

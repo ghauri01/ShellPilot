@@ -49,7 +49,7 @@ export function Sidebar(): React.JSX.Element | null {
     [width, setWidth]
   )
 
-  if (activity === 'settings' || collapsed) return null
+  if (activity === 'settings' || activity === 'ai' || collapsed) return null
 
   return (
     <aside className="sidebar" style={{ width }}>

@@ -52,21 +52,28 @@
   "license": "MIT",
   "main": "./out/main/index.js",
   "type": "module",
+  "bin": {
+    "shellpilot": "./out/cli/index.js"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
-    "build": "electron-vite build",
+    "build": "electron-vite build && npm run build:cli",
+    "build:cli": "tsc -p tsconfig.cli.json",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "typecheck:cli": "tsc --noEmit -p tsconfig.cli.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:cli",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
     "dist:mac": "npm run build && electron-builder --mac",
     "pack": "npm run build && electron-builder --dir",
-    "dist:portable": "npm run build && electron-builder --win portable"
+    "dist:portable": "npm run build && electron-builder --win portable",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.15.0",
     "@xterm/addon-web-links": "^0.11.0",
@@ -80,6 +87,7 @@
     "mysql2": "^3.23.3",
     "pg": "^8.23.0",
     "ssh2": "^1.17.0",
+    "zod": "^4.4.3",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
@@ -96,7 +104,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.2",
-    "vite": "^7.3.6"
+    "vite": "^7.3.6",
+    "vitest": "^4.1.11"
   },
   "productName": "ShellPilot",
   "engines": {
