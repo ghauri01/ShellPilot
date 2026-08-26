@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
+import { AI_CAPABILITIES } from '../../shared/mcp'
 import type { AccessGroup, PolicyAssignment, PolicyState, ServerAiMeta } from '../../shared/mcp'
 
 // Access groups, server/workspace assignments and AI aliases. Same
@@ -106,11 +107,34 @@ function seed(): PolicyState {
   return { version: 1, groups: defaultGroups(), assignments: [], serverMeta: [] }
 }
 
+// A capability added in a later version is simply absent from a policy file
+// written before it existed, and an absent capability evaluates as DENY. That
+// is the right default for an unknown permission, but it also means an upgraded
+// install silently behaves differently from a fresh one — the feature is off,
+// nothing in the UI says why, and toggling something else does not fix it.
+//
+// So backfill on load. Built-in groups get whatever a fresh seed would have
+// given them, which is the setting the user would see on a new install; custom
+// groups get DENY, because there is no intent on record for a capability their
+// author never saw.
+function backfillCapabilities(state: PolicyState): PolicyState {
+  const seeded = new Map(defaultGroups().map((g) => [g.id, g.capabilities]))
+  for (const group of state.groups) {
+    const fresh = seeded.get(group.id)
+    for (const { id } of AI_CAPABILITIES) {
+      if (group.capabilities[id] === undefined) {
+        group.capabilities[id] = fresh?.[id] ?? 'deny'
+      }
+    }
+  }
+  return state
+}
+
 function read(): PolicyState {
   try {
     if (existsSync(FILE)) {
       const parsed = JSON.parse(readFileSync(FILE, 'utf8')) as PolicyState
-      if (parsed && Array.isArray(parsed.groups)) return parsed
+      if (parsed && Array.isArray(parsed.groups)) return backfillCapabilities(parsed)
     }
   } catch {
     /* fall through to a fresh seed rather than crash on a corrupt file */

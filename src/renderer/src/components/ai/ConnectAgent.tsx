@@ -49,9 +49,15 @@ export function ConnectAgent({ onConnected }: { onConnected?: () => void }): Rea
     void window.shellpilot?.aiPolicy.listGroups().then((g) => {
       const list = g ?? []
       setGroups(list)
-      // Read Only is the least surprising thing to hand a brand-new agent; the
-      // picker is right there for anyone who wants more.
-      setGroupId((prev) => prev || list.find((x) => x.id === 'grp-read-only')?.id || list[0]?.id || '')
+      // Read & Write rather than Read Only, because a session's group is fixed
+      // for its whole life and Read Only cannot add a server however the
+      // workspace is later configured — so the one-click path could never use
+      // add_server, and the only symptom was a denial that pointed at settings
+      // which do not affect an existing connection. Nothing here is granted
+      // silently: every mutating capability in Read & Write is ASK, so writes,
+      // uploads, tunnels and adding a server each still raise an approval
+      // prompt. The picker is right there for anyone who wants narrower.
+      setGroupId((prev) => prev || list.find((x) => x.id === 'grp-read-write')?.id || list[0]?.id || '')
     })
   }, [])
 
@@ -141,6 +147,10 @@ export function ConnectAgent({ onConnected }: { onConnected?: () => void }): Rea
           <div className="s-desc">
             The ceiling for what the agent can do. Applied to any workspace that has no group yet;
             workspaces you have already assigned are left alone.
+            <br />
+            <b>Fixed for the life of the session.</b> Changing access groups later does not affect a
+            connection that already exists — you would revoke it under Active Sessions and connect
+            again.
           </div>
         </div>
         <select className="input" value={groupId} onChange={(e) => setGroupId(e.target.value)}>

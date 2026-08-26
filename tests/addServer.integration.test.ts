@@ -209,6 +209,36 @@ describe('add_server', () => {
     }
   })
 
+  it('names the session ceiling, not just the group, when that is what refused', async () => {
+    // The loop this exists to break: the workspace allows it, the session does
+    // not, and the message said only "Read Only: manageServers = deny" — which
+    // reads as a settings problem, so you change the setting, retry, and get
+    // the identical message back.
+    setAssignment({ level: 'workspace', workspaceId: 'ws-prod' }, 'grp-full')
+    const c = await clientFor('grp-read-only')
+    try {
+      const out = await call(c, { name: 'Ceiling Test', host: '10.0.0.11' })
+      expect(out).toContain("this AI session's own ceiling")
+      expect(out).toContain('Active Sessions')
+      expect(out).toContain('Full Access')
+      expect(received).toHaveLength(0)
+    } finally {
+      await c.close()
+    }
+  })
+
+  it('does not claim a session ceiling when the workspace is what refused', async () => {
+    setAssignment({ level: 'workspace', workspaceId: 'ws-prod' }, 'grp-read-only')
+    const c = await clientFor('grp-full')
+    try {
+      const out = await call(c, { name: 'Workspace Test', host: '10.0.0.12' })
+      expect(out).toContain('Denied')
+      expect(out).not.toContain("this AI session's own ceiling")
+    } finally {
+      await c.close()
+    }
+  })
+
   it('reports a renderer-side failure instead of claiming success', async () => {
     setAssignment({ level: 'workspace', workspaceId: 'ws-prod' }, 'grp-read-write')
     creatorResult = { ok: false, error: 'OS secure storage is unavailable' }
