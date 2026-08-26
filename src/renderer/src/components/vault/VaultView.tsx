@@ -167,6 +167,54 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
   )
 }
 
+// Remembers a decline so the offer is made once, not every unlock. A UI
+// preference, so it lives with the UI rather than in the vault file.
+const BIO_OFFER_DISMISSED = 'shellpilot.vault.bioOfferDismissed'
+
+// Offered right after a successful unlock, which is the one moment the value
+// is obvious — the user has just typed a long password and is about to do it
+// again tomorrow. A toggle in the toolbar is discoverable only by someone
+// already looking for it, which is nobody.
+function BiometricOffer(): React.JSX.Element | null {
+  const bioAvailable = useVault((s) => s.bioAvailable)
+  const bioEnabled = useVault((s) => s.bioEnabled)
+  const bioKind = useVault((s) => s.bioKind)
+  const setBiometrics = useVault((s) => s.setBiometrics)
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(BIO_OFFER_DISMISSED) === '1')
+
+  if (!bioAvailable || bioEnabled || dismissed) return null
+  const label = BIO_LABEL[bioKind] ?? 'biometrics'
+
+  const decline = (): void => {
+    localStorage.setItem(BIO_OFFER_DISMISSED, '1')
+    setDismissed(true)
+  }
+
+  return (
+    <div className="vault-bio-offer">
+      <Fingerprint size={18} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+      <div style={{ flex: 1 }}>
+        <div className="s-title">Unlock with {label} next time?</div>
+        <div className="s-desc">
+          {label} then opens this vault instead of your master password. Doing so stores the
+          vault&apos;s key on this Mac, encrypted by the system keychain — so it trades a little
+          security for not typing a long password every session. Your master password is never
+          stored, and you can turn this off at any time.
+        </div>
+      </div>
+      <button
+        className="btn sm primary"
+        onClick={() => void setBiometrics(true).then((ok) => ok && toast(`${label} unlock enabled`, 'ok'))}
+      >
+        Enable
+      </button>
+      <button className="btn sm" onClick={decline}>
+        Not now
+      </button>
+    </div>
+  )
+}
+
 function VaultBrowser(): React.JSX.Element {
   const bioAvailable = useVault((s) => s.bioAvailable)
   const bioEnabled = useVault((s) => s.bioEnabled)
@@ -217,6 +265,8 @@ function VaultBrowser(): React.JSX.Element {
           <Lock size={13} /> Lock
         </button>
       </div>
+
+      <BiometricOffer />
 
       {error && <div className="vault-error" style={{ margin: 12 }}>{error}</div>}
       {changing && <ChangePassword onDone={() => setChanging(false)} />}

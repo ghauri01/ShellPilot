@@ -2305,3 +2305,21 @@ button {
 .fleet-services .s-desc.danger {
   color: var(--danger, #f87171);
 }
+
+/* One-time offer to enable biometric unlock, shown after a password unlock.
+   Sits above the entry list rather than in a dialog: it is an offer, not a
+   question that has to be answered before the vault can be used. */
+.vault-bio-offer {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 12px 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+.vault-bio-offer .s-desc {
+  margin-top: 2px;
+  max-width: 62ch;
+}
