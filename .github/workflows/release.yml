@@ -220,10 +220,14 @@ jobs:
             echo "binary deltas between versions and are only read by an updater. The source"
             echo "archives are a snapshot of the repository, not a build."
             echo
-            echo "Builds are **not code-signed**. Windows SmartScreen will warn on first run —"
-            echo "choose *More info → Run anyway*. On macOS run"
-            echo "\`xattr -cr /Applications/ShellPilot.app\` if Gatekeeper blocks it. Each asset"
-            echo "lists its SHA-256, which is the strongest integrity check available here."
+            echo "Builds are **not notarized** — the macOS apps are ad-hoc signed, the Windows"
+            echo "ones unsigned. SmartScreen will warn on first run — choose *More info → Run"
+            echo "anyway*. On macOS, first run only: right-click the app → **Open**, or go to"
+            echo "**System Settings → Privacy & Security** and click **Open Anyway**. If you would"
+            echo "rather use the Terminal, \`/usr/bin/xattr -cr /Applications/ShellPilot.app\` clears"
+            echo "the quarantine flag (spelt with the full path, because a Homebrew or pip \`xattr\`"
+            echo "earlier on your PATH may not support \`-r\`). Each asset lists its SHA-256, which"
+            echo "is the strongest integrity check available here."
             echo
           } > release-notes.md
           cat release-notes.md

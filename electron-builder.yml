@@ -61,6 +61,20 @@ portable:
 mac:
   icon: build/icon.icns
   category: public.app-category.developer-tools
+  # There is no Apple Developer ID certificate for this project, and with no
+  # identity electron-builder skips signing altogether — which leaves Electron's
+  # own linker-signed ad-hoc signature on the bundle, covering none of the files
+  # we added. Gatekeeper reads that mismatch as corruption and reports the app as
+  # "damaged", a dialog with no Open Anyway button. Signing ad-hoc ourselves seals
+  # the real bundle, so the app fails the ordinary "cannot be verified" way that
+  # users can click through. It is still not notarized.
+  identity: '-'
+  # Hardened runtime turns on library validation, which refuses to load the
+  # ssh2/cpu-features .node binaries that asarUnpack deliberately keeps outside
+  # the archive. It only buys anything alongside notarization, which we have no
+  # certificate for, so leave it off rather than carry an entitlements plist that
+  # exists purely to switch its side effects back off.
+  hardenedRuntime: false
   target:
     - target: dmg
       arch: [x64, arm64]
