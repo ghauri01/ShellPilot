@@ -44,13 +44,21 @@ export function httpUrl(port: number): string {
 
 // The one-liner for Claude Code, which speaks Streamable HTTP directly and so
 // needs no bridge process at all.
+//
+// Removes first, because `claude mcp add` refuses a name that already exists
+// ("MCP server shellpilot already exists in user config") rather than replacing
+// it. Every time after the first is a re-registration — a new session, or a
+// revoked one being replaced — so the plain add would have failed exactly when
+// it was needed most. `shellpilot claude` has always done remove-then-add for
+// this reason (src/cli/agents.ts); this just matches it.
 export function claudeCodeCommand(token: string, port: number): string {
-  return [
+  const add = [
     'claude mcp add -s user --transport http',
     SERVER_KEY,
     httpUrl(port),
     `--header "Authorization: Bearer ${token}"`
   ].join(' ')
+  return `claude mcp remove ${SERVER_KEY} -s user 2>/dev/null; ${add}`
 }
 
 export function claudeDesktopConfigPath(): string {

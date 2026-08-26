@@ -47,6 +47,18 @@ describe('bridge invocation', () => {
 })
 
 describe('claude code command', () => {
+  it('removes any existing entry first, so re-registering works', () => {
+    // `claude mcp add` refuses a name that already exists rather than
+    // replacing it, and every use after the first is a re-registration — a
+    // rotated token, or a revoked session being replaced. A plain add would
+    // fail exactly when it is needed.
+    const cmd = claudeCodeCommand('tok', 5177)
+    expect(cmd).toContain('claude mcp remove shellpilot -s user')
+    expect(cmd.indexOf('mcp remove')).toBeLessThan(cmd.indexOf('mcp add'))
+    // A missing entry is not an error worth stopping on.
+    expect(cmd).toContain('2>/dev/null')
+  })
+
   it('carries the token as a bearer header against the local bridge', () => {
     const cmd = claudeCodeCommand('secret-token', 5177)
     expect(cmd).toContain('--transport http')
