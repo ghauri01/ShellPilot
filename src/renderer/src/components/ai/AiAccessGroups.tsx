@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Plus, Trash2, Save } from 'lucide-react'
+import { Plus, Trash2, Save, ChevronDown, ChevronRight, TriangleAlert } from 'lucide-react'
 import { toast } from '../../store/toast'
 import { AI_CAPABILITIES } from '../../../../shared/mcp'
 import type { AccessGroup, AiCapability, FilePathRule, PermissionValue, PolicyAssignment } from '../../../../shared/mcp'
@@ -29,12 +29,46 @@ function PermSegment({
   )
 }
 
+// sshTunnel and databaseAccess are in the model but no tool is gated on them,
+// so leaving them silently in the grid invites someone to set a permission that
+// does nothing.
+const NOT_YET_ENFORCED = new Set<AiCapability>(['sshTunnel', 'databaseAccess'])
+
+// Ten rows of ALLOW/ASK/DENY is the wrong first thing to read. Most groups are
+// describable in a sentence, and the person who genuinely needs per-capability
+// control will open the grid.
+function CapabilitySummary({ group }: { group: AccessGroup }): React.JSX.Element {
+  const named = (v: PermissionValue): string[] =>
+    AI_CAPABILITIES.filter(({ id }) => group.capabilities[id] === v && !NOT_YET_ENFORCED.has(id)).map(
+      ({ label }) => label.toLowerCase()
+    )
+  const allowed = named('allow')
+  const asked = named('ask')
+  const denied = named('deny')
+
+  const line = (title: string, items: string[], note: string): React.JSX.Element | null =>
+    items.length === 0 ? null : (
+      <div className="s-desc" style={{ marginTop: 4 }}>
+        <b>{title}</b> {note} — {items.join(', ')}.
+      </div>
+    )
+
+  return (
+    <div>
+      {line('Without asking:', allowed, 'the agent just does these')}
+      {line('With your approval:', asked, 'you get a prompt each time')}
+      {line('Never:', denied, 'refused outright')}
+    </div>
+  )
+}
+
 function GroupEditor({ group, onChange, onSave, onDelete }: {
   group: AccessGroup
   onChange: (g: AccessGroup) => void
   onSave: () => void
   onDelete: () => void
 }): React.JSX.Element {
+  const [showGrid, setShowGrid] = useState(false)
   const setCap = (cap: AiCapability, value: PermissionValue): void => {
     onChange({ ...group, capabilities: { ...group.capabilities, [cap]: value } })
   }
@@ -68,15 +102,27 @@ function GroupEditor({ group, onChange, onSave, onDelete }: {
         />
       </div>
 
-      <h3 style={{ marginTop: 18 }}>Capabilities</h3>
-      {AI_CAPABILITIES.map(({ id, label }) => (
-        <div className="setting-row" key={id}>
-          <div className="s-info">
-            <div className="s-title">{label}</div>
+      <h3 style={{ marginTop: 18 }}>What this group allows</h3>
+      <CapabilitySummary group={group} />
+      <button className="btn sm" style={{ marginTop: 10 }} onClick={() => setShowGrid((v) => !v)}>
+        {showGrid ? <ChevronDown size={13} /> : <ChevronRight size={13} />} Per-capability settings
+      </button>
+
+      {showGrid &&
+        AI_CAPABILITIES.map(({ id, label }) => (
+          <div className="setting-row" key={id}>
+            <div className="s-info">
+              <div className="s-title">{label}</div>
+              {NOT_YET_ENFORCED.has(id) && (
+                <div className="s-desc">
+                  No tool uses this yet — it is here for a feature that has not shipped, and changing
+                  it has no effect today.
+                </div>
+              )}
+            </div>
+            <PermSegment value={group.capabilities[id]} onChange={(v) => setCap(id, v)} />
           </div>
-          <PermSegment value={group.capabilities[id]} onChange={(v) => setCap(id, v)} />
-        </div>
-      ))}
+        ))}
 
       <h3 style={{ marginTop: 18 }}>File path rules</h3>
       <div className="s-desc">
@@ -196,6 +242,24 @@ function ServerAssignment({ groups }: { groups: AccessGroup[] }): React.JSX.Elem
         with no override inherits its workspace's default; a workspace with no assignment is No AI
         Access.
       </div>
+
+      {!workspaceAssignment?.groupId && (
+        // Unassigned is the state a fresh install is in, and it denies every
+        // call. Saying nothing here is what makes an agent look broken rather
+        // than unconfigured: it connects, lists its tools, and is refused on
+        // everything.
+        <div className="setting-row" style={{ alignItems: 'flex-start' }}>
+          <div className="s-info">
+            <div className="s-title">
+              <TriangleAlert size={13} /> This workspace is not assigned to an access group
+            </div>
+            <div className="s-desc">
+              Every AI request against its servers is denied. An agent will still connect and list its
+              tools, then fail on each call — pick a group below to change that.
+            </div>
+          </div>
+        </div>
+      )}
       <div className="setting-row">
         <div className="s-info">
           <div className="s-title">Workspace</div>

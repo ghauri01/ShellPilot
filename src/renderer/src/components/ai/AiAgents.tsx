@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Plus, Copy, Ban, Octagon } from 'lucide-react'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
+import { SessionAccess } from './SessionAccess'
 import type { McpAgentSession, AccessGroup } from '../../../../shared/mcp'
 
 interface WorkspaceOpt {
@@ -235,12 +236,12 @@ export function AiAgents({ sessionsOnly = false }: { sessionsOnly?: boolean }): 
         // should render as empty, not crash the whole panel.
         const ws = Array.isArray(s.workspaces) ? s.workspaces : []
         return (
-          <div className="list-row" key={s.id}>
+          <div className="list-row" key={s.id} style={{ flexWrap: 'wrap' }}>
             <div>
               <div className="r-title">{s.agentName}</div>
               <div className="r-sub">
-                Workspace{ws.length > 1 ? 's' : ''}: {ws.map((w) => w.name).join(', ') || '—'} · Access group:{' '}
-                {s.groupName} · Started {fmtTime(s.createdAt)}
+                Workspace{ws.length > 1 ? 's' : ''}: {ws.map((w) => w.name).join(', ') || '—'} · Started{' '}
+                {fmtTime(s.createdAt)}
                 {s.expiresAt ? ` · Expires ${fmtTime(s.expiresAt)}` : ' · No expiration'}
               </div>
             </div>
@@ -257,6 +258,7 @@ export function AiAgents({ sessionsOnly = false }: { sessionsOnly?: boolean }): 
             >
               <Ban size={13} /> Revoke
             </button>
+            {isLive(s) && <SessionAccess session={s} groups={groups} onChanged={load} />}
           </div>
         )
       })}

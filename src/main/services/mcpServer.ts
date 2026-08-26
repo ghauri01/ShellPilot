@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 
-import { authenticate, getMcpConfig, type AuthFailureReason } from './mcpAuth'
+import { authenticate, getSession, getMcpConfig, type AuthFailureReason } from './mcpAuth'
 import { startCliPairing, confirmCliPairing } from './cliPairing'
 import { listCachedServers, listCachedWorkspaces, getCachedWorkspace, getCachedServer, serverToSshConfig } from './mcpDataCache'
 import { resolveServerByName, formatAmbiguity, type ServerMatch } from './serverResolver'
@@ -103,13 +103,42 @@ function sessionGroupFor(session: McpAgentSession): AccessGroup | null {
   return session.groupId ? getGroup(session.groupId) : null
 }
 
+// Combine the scope's decision with the session's ceiling, and when the ceiling
+// is what refused, say so.
+//
+// Both sides report only a group name, so "Denied: Read Only: manageServers =
+// deny" is indistinguishable whether it came from the workspace assignment or
+// from the session. The two are changed in different places and only one of
+// them can be changed at all once a client is connected: a session copies its
+// group in at creation and never re-reads it, so editing access groups in
+// Settings cannot affect a connection that already exists. Without that spelt
+// out the obvious move is to go and change the setting, retry, and get the same
+// message back.
+function withCeiling(scope: Decision, session: Decision | null, scopeLabel: string): Decision {
+  if (!session) return scope
+  const winner = mostRestrictive(scope, session)
+  // mostRestrictive prefers its first argument on a tie, so this is only the
+  // session when the session is strictly the narrower of the two.
+  if (winner !== session) return winner
+  return {
+    decision: session.decision,
+    reason:
+      `${session.reason} — that is this AI session's own ceiling, fixed when the session was ` +
+      `created, while ${scopeLabel} allows it. Changing access groups in Settings cannot affect a ` +
+      `connection that already exists. Revoke this session under AI & MCP -> Active Sessions, ` +
+      `create a new one with a higher access group, and reconnect the client.`
+  }
+}
+
 function effectiveCapability(session: McpAgentSession, serverId: string, capability: AiCapability): Decision {
   const serverGroup = serverGroupFor(serverId)
   if (!serverGroup) return { decision: 'deny', reason: 'No AI access is assigned to this server.' }
   const sessionGroup = sessionGroupFor(session)
-  const fromServer = evaluateCapability(serverGroup, capability)
-  if (!sessionGroup) return fromServer
-  return mostRestrictive(fromServer, evaluateCapability(sessionGroup, capability))
+  return withCeiling(
+    evaluateCapability(serverGroup, capability),
+    sessionGroup ? evaluateCapability(sessionGroup, capability) : null,
+    `the server's own access group ("${serverGroup.name}")`
+  )
 }
 
 // add_server acts on a workspace, not on a server that exists yet, so the
@@ -125,18 +154,22 @@ function effectiveWorkspaceCapability(
   const workspaceGroup = groupId ? getGroup(groupId) : null
   if (!workspaceGroup) return { decision: 'deny', reason: 'No AI access is assigned to this workspace.' }
   const sessionGroup = sessionGroupFor(session)
-  const fromWorkspace = evaluateCapability(workspaceGroup, capability)
-  if (!sessionGroup) return fromWorkspace
-  return mostRestrictive(fromWorkspace, evaluateCapability(sessionGroup, capability))
+  return withCeiling(
+    evaluateCapability(workspaceGroup, capability),
+    sessionGroup ? evaluateCapability(sessionGroup, capability) : null,
+    `the workspace's access group ("${workspaceGroup.name}")`
+  )
 }
 
 function effectiveCommand(session: McpAgentSession, serverId: string, command: string): Decision {
   const serverGroup = serverGroupFor(serverId)
   if (!serverGroup) return { decision: 'deny', reason: 'No AI access is assigned to this server.' }
   const sessionGroup = sessionGroupFor(session)
-  const fromServer = evaluateCommand(serverGroup, command)
-  if (!sessionGroup) return fromServer
-  return mostRestrictive(fromServer, evaluateCommand(sessionGroup, command))
+  return withCeiling(
+    evaluateCommand(serverGroup, command),
+    sessionGroup ? evaluateCommand(sessionGroup, command) : null,
+    `the server's own access group ("${serverGroup.name}")`
+  )
 }
 
 // read_file, list_files and write_file are the SFTP transport, so the transport
@@ -153,9 +186,11 @@ function effectiveFilePath(session: McpAgentSession, serverId: string, path: str
   const forGroup = (g: AccessGroup): Decision =>
     mostRestrictive(evaluateFilePath(g, path, mode), evaluateCapability(g, transport))
 
-  const fromServer = forGroup(serverGroup)
-  if (!sessionGroup) return fromServer
-  return mostRestrictive(fromServer, forGroup(sessionGroup))
+  return withCeiling(
+    forGroup(serverGroup),
+    sessionGroup ? forGroup(sessionGroup) : null,
+    `the server's own access group ("${serverGroup.name}")`
+  )
 }
 
 interface AuditContext {
@@ -836,6 +871,55 @@ async function handlePairConfirm(req: IncomingMessage, res: ServerResponse): Pro
     res.writeHead(400, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: false, error: 'Invalid request' }))
   }
+}
+
+export interface CapabilityExplanation {
+  capability: AiCapability
+  label: string
+  decision: 'allow' | 'ask' | 'deny'
+  reason: string
+  fromScope: 'allow' | 'ask' | 'deny'
+  fromSession: 'allow' | 'ask' | 'deny' | null
+  decidedBy: 'scope' | 'session' | 'both'
+}
+
+// The same functions the tools call, so the UI cannot drift from what is
+// actually enforced. A permissions screen that computes its own answer is
+// worse than no permissions screen, because it will eventually disagree with
+// reality and be believed.
+export function explainSessionAccess(sessionId: string, serverId: string | null): CapabilityExplanation[] | null {
+  const session = getSession(sessionId)
+  if (!session) return null
+
+  const sessionGroup = sessionGroupFor(session)
+  const scopeGroup = serverId
+    ? serverGroupFor(serverId)
+    : (() => {
+        const first = session.workspaces[0]
+        if (!first) return null
+        const groupId = resolveGroupId(listAssignments(), '', first.id)
+        return groupId ? getGroup(groupId) : null
+      })()
+
+  return AI_CAPABILITIES.map(({ id, label }) => {
+    const scope = scopeGroup
+      ? evaluateCapability(scopeGroup, id)
+      : { decision: 'deny' as const, reason: 'No access group is assigned.' }
+    const sess = sessionGroup ? evaluateCapability(sessionGroup, id) : null
+    const combined = serverId
+      ? effectiveCapability(session, serverId, id)
+      : withCeiling(scope, sess, 'the workspace')
+    return {
+      capability: id,
+      label,
+      decision: combined.decision,
+      reason: combined.reason,
+      fromScope: scope.decision,
+      fromSession: sess ? sess.decision : null,
+      decidedBy:
+        !sess || sess.decision === scope.decision ? 'both' : combined.decision === sess.decision ? 'session' : 'scope'
+    }
+  })
 }
 
 export function mcpServerStatus(): { running: boolean; port: number | null } {
