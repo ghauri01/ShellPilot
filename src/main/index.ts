@@ -76,6 +76,7 @@ import {
   listSessions,
   revokeSession,
   killAllSessions,
+  setSessionGroup,
   type CreateSessionInput
 } from './services/mcpAuth'
 import { listPendingApprovals, respondToApproval, onApprovalEvent, denyAllPending } from './services/approvals'
@@ -84,7 +85,7 @@ import { claudeCodeCommand, writeClaudeDesktopConfig, writeCodexConfig } from '.
 import { setAgentServerCreator, type AgentServerRequest, type AgentServerResult } from './services/agentServerCreate'
 import { listDefaultKeys, sshDir } from './services/sshKeys'
 import { listAudit } from './services/auditLog'
-import { startMcpServer, stopMcpServer, mcpServerStatus } from './services/mcpServer'
+import { startMcpServer, stopMcpServer, mcpServerStatus, explainSessionAccess } from './services/mcpServer'
 
 const isDev = !app.isPackaged
 
@@ -538,6 +539,12 @@ ipcMain.handle('aiMcp:status', () => mcpServerStatus())
 ipcMain.handle('aiMcp:createSession', (_e, input: CreateSessionInput) => createSession(input))
 ipcMain.handle('aiMcp:listSessions', () => listSessions())
 ipcMain.handle('aiMcp:revokeSession', (_e, id: string) => revokeSession(id))
+ipcMain.handle('aiMcp:setSessionGroup', (_e, id: string, groupId: string | null, groupName: string) =>
+  setSessionGroup(id, groupId, groupName)
+)
+ipcMain.handle('aiMcp:explainAccess', (_e, sessionId: string, serverId: string | null) =>
+  explainSessionAccess(sessionId, serverId)
+)
 ipcMain.handle('aiMcp:killAllSessions', () => {
   const count = killAllSessions()
   const denied = denyAllPending()

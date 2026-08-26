@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 
-import { authenticate, getMcpConfig, type AuthFailureReason } from './mcpAuth'
+import { authenticate, getSession, getMcpConfig, type AuthFailureReason } from './mcpAuth'
 import { startCliPairing, confirmCliPairing } from './cliPairing'
 import { listCachedServers, listCachedWorkspaces, getCachedWorkspace, getCachedServer, serverToSshConfig } from './mcpDataCache'
 import { resolveServerByName, formatAmbiguity, type ServerMatch } from './serverResolver'
@@ -871,6 +871,55 @@ async function handlePairConfirm(req: IncomingMessage, res: ServerResponse): Pro
     res.writeHead(400, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: false, error: 'Invalid request' }))
   }
+}
+
+export interface CapabilityExplanation {
+  capability: AiCapability
+  label: string
+  decision: 'allow' | 'ask' | 'deny'
+  reason: string
+  fromScope: 'allow' | 'ask' | 'deny'
+  fromSession: 'allow' | 'ask' | 'deny' | null
+  decidedBy: 'scope' | 'session' | 'both'
+}
+
+// The same functions the tools call, so the UI cannot drift from what is
+// actually enforced. A permissions screen that computes its own answer is
+// worse than no permissions screen, because it will eventually disagree with
+// reality and be believed.
+export function explainSessionAccess(sessionId: string, serverId: string | null): CapabilityExplanation[] | null {
+  const session = getSession(sessionId)
+  if (!session) return null
+
+  const sessionGroup = sessionGroupFor(session)
+  const scopeGroup = serverId
+    ? serverGroupFor(serverId)
+    : (() => {
+        const first = session.workspaces[0]
+        if (!first) return null
+        const groupId = resolveGroupId(listAssignments(), '', first.id)
+        return groupId ? getGroup(groupId) : null
+      })()
+
+  return AI_CAPABILITIES.map(({ id, label }) => {
+    const scope = scopeGroup
+      ? evaluateCapability(scopeGroup, id)
+      : { decision: 'deny' as const, reason: 'No access group is assigned.' }
+    const sess = sessionGroup ? evaluateCapability(sessionGroup, id) : null
+    const combined = serverId
+      ? effectiveCapability(session, serverId, id)
+      : withCeiling(scope, sess, 'the workspace')
+    return {
+      capability: id,
+      label,
+      decision: combined.decision,
+      reason: combined.reason,
+      fromScope: scope.decision,
+      fromSession: sess ? sess.decision : null,
+      decidedBy:
+        !sess || sess.decision === scope.decision ? 'both' : combined.decision === sess.decision ? 'session' : 'scope'
+    }
+  })
 }
 
 export function mcpServerStatus(): { running: boolean; port: number | null } {

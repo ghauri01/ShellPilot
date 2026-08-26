@@ -145,6 +145,21 @@ export function getSession(id: string): McpAgentSession | null {
   return loadSessions().find((s) => s.id === id) ?? null
 }
 
+// The ceiling used to be fixed at creation, which meant changing an access
+// group in Settings could not affect a client that was already connected —
+// the single most confusing thing about the permission model, because the
+// obvious fix silently does nothing. Revoking and re-creating was always
+// allowed, so letting it be edited grants no power that was not already
+// there; it just does not force the user to break the connection to use it.
+export function setSessionGroup(id: string, groupId: string | null, groupName: string): McpAgentSession | null {
+  const session = loadSessions().find((s) => s.id === id)
+  if (!session) return null
+  session.groupId = groupId
+  session.groupName = groupName
+  writeSessions()
+  return session
+}
+
 export function revokeSession(id: string): void {
   const list = loadSessions()
   const session = list.find((s) => s.id === id)

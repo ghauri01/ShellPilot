@@ -4,10 +4,11 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 import { refreshMcpDataCache } from '../src/main/services/mcpDataCache'
 import { setAssignment, resetPolicyCacheForTests } from '../src/main/services/policyStore'
-import { setMcpConfig, createSession, resetMcpAuthForTests } from '../src/main/services/mcpAuth'
-import { startMcpServer, stopMcpServer } from '../src/main/services/mcpServer'
+import { setMcpConfig, createSession, setSessionGroup, listSessions, resetMcpAuthForTests } from '../src/main/services/mcpAuth'
+import { startMcpServer, stopMcpServer, explainSessionAccess } from '../src/main/services/mcpServer'
 import { onApprovalEvent, respondToApproval } from '../src/main/services/approvals'
 import { listAudit } from '../src/main/services/auditLog'
+import { AI_CAPABILITIES } from '../src/shared/mcp'
 import {
   setAgentServerCreator,
   type AgentServerRequest,
@@ -248,6 +249,74 @@ describe('add_server', () => {
       const out = await call(c, { name: 'Doomed', host: '10.0.0.10', auth: 'agent' })
       expect(out).toContain('Could not add the server')
       expect(out).toContain('OS secure storage is unavailable')
+    } finally {
+      stop()
+      await c.close()
+    }
+  })
+})
+
+describe('making the model legible', () => {
+  it('explains each capability and names the layer that decided it', () => {
+    setAssignment({ level: 'workspace', workspaceId: 'ws-prod' }, 'grp-full')
+    const { session } = createSession({
+      agentName: 'Explain',
+      workspaces: [{ id: 'ws-prod', name: 'Production' }],
+      groupId: 'grp-read-only',
+      groupName: 'Read Only',
+      ttlMinutes: null
+    })
+
+    const rows = explainSessionAccess(session.id, null)!
+    const manage = rows.find((r) => r.capability === 'manageServers')!
+    // Full Access at the workspace, Read Only on the session: the session is
+    // the narrower side, so it is what decided.
+    expect(manage.fromScope).toBe('ask')
+    expect(manage.fromSession).toBe('deny')
+    expect(manage.decision).toBe('deny')
+    expect(manage.decidedBy).toBe('session')
+
+    const view = rows.find((r) => r.capability === 'viewServer')!
+    expect(view.decidedBy).toBe('both')
+    expect(rows).toHaveLength(11)
+  })
+
+  it('reports every capability, so the view cannot quietly omit one', () => {
+    const { session } = createSession({
+      agentName: 'Coverage',
+      workspaces: [{ id: 'ws-prod', name: 'Production' }],
+      groupId: 'grp-full',
+      groupName: 'Full Access',
+      ttlMinutes: null
+    })
+    const ids = explainSessionAccess(session.id, null)!.map((r) => r.capability).sort()
+    expect(ids).toEqual(AI_CAPABILITIES.map((c) => c.id).sort())
+  })
+
+  it('lets a live session ceiling be raised without revoking it', async () => {
+    setAssignment({ level: 'workspace', workspaceId: 'ws-prod' }, 'grp-full')
+    const stop = autoRespond('approved')
+    const { session, token } = createSession({
+      agentName: 'Raise Me',
+      workspaces: [{ id: 'ws-prod', name: 'Production' }],
+      groupId: 'grp-read-only',
+      groupName: 'Read Only',
+      ttlMinutes: null
+    })
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } }
+    })
+    const c = new Client({ name: 'raise-test', version: '1.0.0' })
+    await c.connect(transport)
+    try {
+      expect(await call(c, { name: 'Before Raise', host: '10.0.0.20' })).toContain('Denied')
+
+      // The whole point: this used to require revoking the session and
+      // reconnecting the client.
+      setSessionGroup(session.id, 'grp-full', 'Full Access')
+      expect(listSessions().find((s) => s.id === session.id)?.groupName).toBe('Full Access')
+
+      expect(await call(c, { name: 'After Raise', host: '10.0.0.21' })).toContain('Added "After Raise"')
     } finally {
       stop()
       await c.close()

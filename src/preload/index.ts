@@ -257,6 +257,22 @@ const api = {
     }): Promise<{ session: McpAgentSession; token: string }> => ipcRenderer.invoke('aiMcp:createSession', input),
     listSessions: (): Promise<McpAgentSession[]> => ipcRenderer.invoke('aiMcp:listSessions'),
     revokeSession: (id: string): Promise<void> => ipcRenderer.invoke('aiMcp:revokeSession', id),
+    setSessionGroup: (id: string, groupId: string | null, groupName: string): Promise<McpAgentSession | null> =>
+      ipcRenderer.invoke('aiMcp:setSessionGroup', id, groupId, groupName),
+    explainAccess: (
+      sessionId: string,
+      serverId: string | null
+    ): Promise<
+      {
+        capability: string
+        label: string
+        decision: 'allow' | 'ask' | 'deny'
+        reason: string
+        fromScope: 'allow' | 'ask' | 'deny'
+        fromSession: 'allow' | 'ask' | 'deny' | null
+        decidedBy: 'scope' | 'session' | 'both'
+      }[] | null
+    > => ipcRenderer.invoke('aiMcp:explainAccess', sessionId, serverId),
     killAllSessions: (): Promise<{ revoked: number; denied: number }> =>
       ipcRenderer.invoke('aiMcp:killAllSessions'),
     listApprovals: (): Promise<ApprovalRequest[]> => ipcRenderer.invoke('aiMcp:listApprovals'),

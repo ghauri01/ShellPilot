@@ -2259,3 +2259,29 @@ button {
   font-size: 12px;
   white-space: pre;
 }
+
+/* Effective-access table under an AI session. Deliberately plain: it is a
+   readout of two columns against a result, and anything more decorative makes
+   the one bolded cell — the layer that actually decided — harder to spot. */
+.mini-table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.mini-table th,
+.mini-table td {
+  text-align: left;
+  padding: 4px 10px 4px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.mini-table th {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.mini-table td.strong {
+  color: var(--text);
+  font-weight: 600;
+}
