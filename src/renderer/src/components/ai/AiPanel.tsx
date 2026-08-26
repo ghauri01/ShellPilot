@@ -6,6 +6,7 @@ import { AiAccessGroups } from './AiAccessGroups'
 import { AiApprovals } from './AiApprovals'
 import { AiAuditLog } from './AiAuditLog'
 import { AiSecurity } from './AiSecurity'
+import { ConnectAgent } from './ConnectAgent'
 import type { McpAgentSession, ApprovalRequest } from '../../../../shared/mcp'
 
 const SECTIONS = [
@@ -25,12 +26,13 @@ function Overview(): React.JSX.Element {
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([])
   const [status, setStatus] = useState<{ running: boolean; port: number | null }>({ running: false, port: null })
 
+  const load = (): void => {
+    void window.shellpilot?.aiMcp.listSessions().then((s) => setSessions(s ?? []))
+    void window.shellpilot?.aiMcp.listApprovals().then((a) => setApprovals(a ?? []))
+    void window.shellpilot?.aiMcp.status().then((s) => s && setStatus(s))
+  }
+
   useEffect(() => {
-    const load = (): void => {
-      void window.shellpilot?.aiMcp.listSessions().then((s) => setSessions(s ?? []))
-      void window.shellpilot?.aiMcp.listApprovals().then((a) => setApprovals(a ?? []))
-      void window.shellpilot?.aiMcp.status().then((s) => s && setStatus(s))
-    }
     load()
     const t = setInterval(load, 4000)
     return () => clearInterval(t)
@@ -63,6 +65,8 @@ function Overview(): React.JSX.Element {
         </div>
       </div>
 
+      <ConnectAgent onConnected={load} />
+
       <h3 style={{ marginTop: 24 }}>How it works</h3>
       <ol className="s-desc" style={{ lineHeight: 1.8 }}>
         <li>Create an access group (or use a default) describing what AI is allowed to do.</li>
@@ -71,6 +75,11 @@ function Overview(): React.JSX.Element {
         <li>Point Claude Code, Codex or another MCP client at ShellPilot's local MCP server with that token.</li>
         <li>Approve or deny sensitive actions as they come up — the AI waits for your answer.</li>
       </ol>
+      <div className="s-desc">
+        <b>Connect an agent</b> above does steps 1–4 in one click. Codex and Gemini CLI are still
+        wired up by hand — <code className="mono">shellpilot codex</code>, or the snippet under AI
+        Agents.
+      </div>
     </div>
   )
 }

@@ -82,11 +82,13 @@ function CreateSessionForm({
         <h3>Session created</h3>
         <div className="s-desc">
           This token is shown only once. ShellPilot stores only its hash — if you lose it, revoke
-          the session and create a new one. Copy the block below into an MCP client that takes a
-          JSON config (e.g. Gemini CLI). For Claude Code or Codex, you don't need this at all —
-          just run <code className="mono">shellpilot claude</code> or{' '}
-          <code className="mono">shellpilot codex</code>; its one-time pairing code replaces
-          copying a token by hand.
+          the session and create a new one. Copy the block below into an MCP client that speaks
+          Streamable HTTP (e.g. Gemini CLI). <b>Claude Desktop cannot use it</b> — it ignores{' '}
+          <code className="mono">url</code> and <code className="mono">headers</code> and only
+          launches stdio servers; use <b>Overview → Connect Claude Desktop</b>, which writes the
+          bridge entry it does understand. For Claude Code, <b>Overview → Connect Claude Code</b>
+          gives you a one-line command; Codex has{' '}
+          <code className="mono">shellpilot codex</code>.
         </div>
         <div className="setting-row">
           <div className="s-info">
