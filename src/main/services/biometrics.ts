@@ -25,6 +25,17 @@ import type { VaultResult } from '../../shared/vault'
 
 const FILE = join(app.getPath('userData'), 'shellpilot-vault-bio.json')
 
+// The session-scoped store: the wrapped key lives here, in main-process memory,
+// and dies with the process. This is KeePassXC's model, and it is the reason
+// this feature can be defended at all — an attacker who can read your files
+// gets nothing, because there is nothing on disk to read. Touch ID reopens the
+// vault while ShellPilot is running; the master password is typed once per
+// launch.
+//
+// The on-disk variant below survives a restart and is the weaker thing. It is a
+// separate, explicit opt-in rather than the default.
+let sessionKey: StoredKey | null = null
+
 export type BiometricKind = 'touch-id' | 'windows-hello' | 'none'
 
 export interface BiometricSupport {
@@ -88,11 +99,21 @@ function read(): StoredKey | null {
   }
 }
 
+export type BiometricScope = 'session' | 'persistent'
+
 export function biometricEnabled(): boolean {
-  return read() !== null
+  return sessionKey !== null || read() !== null
+}
+
+// Which of the two a vault is currently set up for, so the UI can say so rather
+// than showing one switch for two materially different things.
+export function biometricScope(): BiometricScope | null {
+  if (sessionKey) return 'session'
+  return read() ? 'persistent' : null
 }
 
 export function disableBiometricUnlock(): VaultResult {
+  sessionKey = null
   try {
     if (existsSync(FILE)) unlinkSync(FILE)
     return { ok: true }
@@ -101,10 +122,17 @@ export function disableBiometricUnlock(): VaultResult {
   }
 }
 
+// Locking the vault must also drop a session-scoped key, or "lock" would be a
+// lie: the whole point is that it does not outlive the unlocked state by more
+// than the app's own lifetime.
+export function forgetSessionKey(): void {
+  sessionKey = null
+}
+
 // Requires the vault to be unlocked already, because the key being stored is
 // the one currently in memory. There is no path here that turns a biometric
 // into access the caller did not already have.
-export function enableBiometricUnlock(): VaultResult {
+export function enableBiometricUnlock(scope: BiometricScope = 'session'): VaultResult {
   const support = biometricSupport()
   if (!support.available) return { ok: false, error: support.reason ?? 'Biometric unlock is unavailable.' }
   if (!vaultStatus().unlocked) return { ok: false, error: 'Unlock the vault first.' }
@@ -119,7 +147,14 @@ export function enableBiometricUnlock(): VaultResult {
       key: safeStorage.encryptString(exported.key.toString('base64')).toString('base64'),
       salt: exported.salt.toString('base64')
     }
-    writeFileSync(FILE, JSON.stringify(payload), { mode: 0o600 })
+    if (scope === 'session') {
+      sessionKey = payload
+      // Any previous on-disk key is stale the moment a session key exists, and
+      // leaving it behind would mean "session only" still had a file.
+      if (existsSync(FILE)) unlinkSync(FILE)
+    } else {
+      writeFileSync(FILE, JSON.stringify(payload), { mode: 0o600 })
+    }
     return { ok: true }
   } catch (err) {
     return { ok: false, error: `Could not store the key: ${(err as Error).message}` }
@@ -145,7 +180,7 @@ export async function authenticateFor(kind: BiometricKind, reason: string): Prom
 }
 
 export async function biometricUnlock(reason = 'unlock your ShellPilot vault'): Promise<VaultResult> {
-  const stored = read()
+  const stored = sessionKey ?? read()
   if (!stored) return { ok: false, error: 'Biometric unlock is not set up for this vault.' }
   const support = biometricSupport()
   if (!support.available) return { ok: false, error: support.reason ?? 'Biometric unlock is unavailable.' }

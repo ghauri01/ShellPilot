@@ -59,7 +59,8 @@ interface VaultState {
   bioEnabled: boolean
   refreshBiometrics: () => Promise<void>
   unlockWithBiometrics: () => Promise<boolean>
-  setBiometrics: (on: boolean) => Promise<boolean>
+  bioScope: 'session' | 'persistent' | null
+  setBiometrics: (on: boolean, scope?: 'session' | 'persistent') => Promise<boolean>
 }
 
 // Entries only ever live here while the vault is unlocked; locking drops them.
@@ -75,16 +76,22 @@ export const useVault = create<VaultState>((set, get) => ({
   bioKind: 'none',
   bioReason: null,
   bioEnabled: false,
+  bioScope: null,
 
   refreshBiometrics: async () => {
     const v = window.shellpilot?.vault
     if (typeof v?.bioSupport !== 'function') return
-    const [support, enabled] = await Promise.all([v.bioSupport(), v.bioEnabled()])
+    const [support, enabled, scope] = await Promise.all([
+      v.bioSupport(),
+      v.bioEnabled(),
+      typeof v.bioScope === 'function' ? v.bioScope() : Promise.resolve(null)
+    ])
     set({
       bioAvailable: !!support?.available,
       bioKind: support?.kind ?? 'none',
       bioReason: support?.reason ?? null,
-      bioEnabled: !!enabled
+      bioEnabled: !!enabled,
+      bioScope: scope ?? null
     })
   },
 
@@ -106,10 +113,10 @@ export const useVault = create<VaultState>((set, get) => ({
     return true
   },
 
-  setBiometrics: async (on) => {
+  setBiometrics: async (on, scope = 'session') => {
     const v = window.shellpilot?.vault
     if (typeof v?.bioEnable !== 'function') return false
-    const r = on ? await v.bioEnable() : await v.bioDisable()
+    const r = on ? await v.bioEnable(scope) : await v.bioDisable()
     await get().refreshBiometrics()
     if (!r?.ok) set({ error: r?.error ?? 'Could not change biometric unlock.' })
     return !!r?.ok

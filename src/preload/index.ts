@@ -222,7 +222,9 @@ const api = {
     bioSupport: (): Promise<{ available: boolean; kind: string; reason?: string }> =>
       ipcRenderer.invoke('vault:bio-support'),
     bioEnabled: (): Promise<boolean> => ipcRenderer.invoke('vault:bio-enabled'),
-    bioEnable: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-enable'),
+    bioEnable: (scope: 'session' | 'persistent' = 'session'): Promise<VaultResult> =>
+      ipcRenderer.invoke('vault:bio-enable', scope),
+    bioScope: (): Promise<'session' | 'persistent' | null> => ipcRenderer.invoke('vault:bio-scope'),
     bioDisable: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-disable'),
     bioUnlock: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-unlock')
   },

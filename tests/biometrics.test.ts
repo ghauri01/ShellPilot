@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -83,6 +83,59 @@ describe('support detection', () => {
   })
 })
 
+describe('session scope — the default, and the reason this is defensible', () => {
+  it('writes nothing to disk', async () => {
+    if (!bio.biometricSupport().available) return
+    expect(bio.enableBiometricUnlock('session').ok).toBe(true)
+    const { app } = await import('electron')
+    // KeePassXC's model: an attacker who can read your files gets nothing,
+    // because there is nothing on disk to read.
+    expect(existsSync(join(app.getPath('userData'), 'shellpilot-vault-bio.json'))).toBe(false)
+    expect(bio.biometricScope()).toBe('session')
+  })
+
+  it('still unlocks while the app is running', async () => {
+    if (!bio.biometricSupport().available) return
+    bio.enableBiometricUnlock('session')
+    expect((await bio.biometricUnlock()).ok).toBe(true)
+    expect(promptCalls).toHaveLength(1)
+  })
+
+  it('is forgotten when the vault locks', async () => {
+    // Otherwise "lock" would not mean locked.
+    if (!bio.biometricSupport().available) return
+    bio.enableBiometricUnlock('session')
+    bio.forgetSessionKey()
+    expect(bio.biometricEnabled()).toBe(false)
+    expect((await bio.biometricUnlock()).ok).toBe(false)
+  })
+
+  it('removes any previously persisted key, so "session only" means it', async () => {
+    if (!bio.biometricSupport().available) return
+    bio.enableBiometricUnlock('persistent')
+    const { app } = await import('electron')
+    const file = join(app.getPath('userData'), 'shellpilot-vault-bio.json')
+    expect(existsSync(file)).toBe(true)
+    bio.enableBiometricUnlock('session')
+    expect(existsSync(file)).toBe(false)
+  })
+})
+
+describe('persistent scope — the weaker, explicit opt-in', () => {
+  it('survives on disk and reports itself as the persistent kind', () => {
+    if (!bio.biometricSupport().available) return
+    expect(bio.enableBiometricUnlock('persistent').ok).toBe(true)
+    expect(bio.biometricScope()).toBe('persistent')
+  })
+
+  it('is not what a plain enable gives you', () => {
+    // The default must be the safe one.
+    if (!bio.biometricSupport().available) return
+    bio.enableBiometricUnlock()
+    expect(bio.biometricScope()).toBe('session')
+  })
+})
+
 describe('enabling', () => {
   it('refuses while the vault is locked', () => {
     // There must be no path here that turns a fingerprint into access the
@@ -98,9 +151,9 @@ describe('enabling', () => {
     expect(bio.biometricEnabled()).toBe(true)
   })
 
-  it('never writes the key in the clear', async () => {
+  it('never writes the key in the clear, on the path that does write', async () => {
     if (!bio.biometricSupport().available) return
-    bio.enableBiometricUnlock()
+    bio.enableBiometricUnlock('persistent')
     const { app } = await import('electron')
     const raw = readFileSync(join(app.getPath('userData'), 'shellpilot-vault-bio.json'), 'utf8')
     const keyB64 = Buffer.alloc(32, 7).toString('base64')

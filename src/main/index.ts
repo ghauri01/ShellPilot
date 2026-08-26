@@ -88,8 +88,10 @@ import { listDefaultKeys, sshDir } from './services/sshKeys'
 import {
   biometricSupport,
   biometricEnabled,
+  biometricScope,
   enableBiometricUnlock,
   disableBiometricUnlock,
+  forgetSessionKey,
   biometricUnlock
 } from './services/biometrics'
 import { listAudit } from './services/auditLog'
@@ -470,7 +472,12 @@ ipcMain.handle('tunnel:list', () => tunnelList())
 ipcMain.handle('vault:status', () => vaultStatus())
 ipcMain.handle('vault:create', (_e, password: string) => vaultCreate(password))
 ipcMain.handle('vault:unlock', (_e, password: string) => vaultUnlock(password))
-ipcMain.handle('vault:lock', () => vaultLock())
+ipcMain.handle('vault:lock', () => {
+  // A session-scoped biometric key must not outlive the unlocked state, or
+  // "lock" would not mean locked.
+  forgetSessionKey()
+  return vaultLock()
+})
 ipcMain.handle('vault:list', () => vaultList())
 ipcMain.handle('vault:save', (_e, entries: VaultEntry[]) => vaultSave(entries))
 // The stored biometric key was derived from the old password and cannot open
@@ -492,7 +499,10 @@ ipcMain.handle('vault:destroy', () => {
 // ---- Vault: biometric unlock ----
 ipcMain.handle('vault:bio-support', () => biometricSupport())
 ipcMain.handle('vault:bio-enabled', () => biometricEnabled())
-ipcMain.handle('vault:bio-enable', () => enableBiometricUnlock())
+ipcMain.handle('vault:bio-enable', (_e, scope: 'session' | 'persistent' = 'session') =>
+  enableBiometricUnlock(scope)
+)
+ipcMain.handle('vault:bio-scope', () => biometricScope())
 ipcMain.handle('vault:bio-disable', () => disableBiometricUnlock())
 ipcMain.handle('vault:bio-unlock', () => biometricUnlock())
 

@@ -194,21 +194,18 @@ function BiometricOffer(): React.JSX.Element | null {
       <div style={{ flex: 1 }}>
         <div className="s-title">Unlock with {label} next time?</div>
         <div className="s-desc">
-          {label} will open this vault instead of your master password, including after a restart.
-          To do that, ShellPilot stores the vault&apos;s key on this Mac in the system keychain.
+          {label} reopens the vault while ShellPilot is running. <b>Nothing extra is written to
+          disk</b> — you enter your master password once each time you start the app, and after
+          that {label} unlocks it.
           <br />
-          <b>What changes:</b> {label} confirms it is you, but it does not hold the key — the
-          keychain does, and software running under your macOS account could read it without a
-          fingerprint. Right now your master password is the one thing that is not on this machine.
-          Your SSH credentials are already stored this way, so this brings the vault down to the
-          same level rather than opening a new kind of risk.
-          <br />
-          Your master password is never stored. Turning this off deletes the stored key.
+          Your master password is never stored, and you can turn this off at any time.
         </div>
       </div>
       <button
         className="btn sm primary"
-        onClick={() => void setBiometrics(true).then((ok) => ok && toast(`${label} unlock enabled`, 'ok'))}
+        onClick={() =>
+          void setBiometrics(true, 'session').then((ok) => ok && toast(`${label} unlock enabled`, 'ok'))
+        }
       >
         Enable
       </button>
@@ -223,6 +220,7 @@ function VaultBrowser(): React.JSX.Element {
   const bioAvailable = useVault((s) => s.bioAvailable)
   const bioEnabled = useVault((s) => s.bioEnabled)
   const bioKind = useVault((s) => s.bioKind)
+  const bioScope = useVault((s) => s.bioScope)
   const setBiometrics = useVault((s) => s.setBiometrics)
   const refreshBiometrics = useVault((s) => s.refreshBiometrics)
 
@@ -256,7 +254,8 @@ function VaultBrowser(): React.JSX.Element {
             }
             onClick={() => void setBiometrics(!bioEnabled)}
           >
-            <Fingerprint size={13} /> {BIO_LABEL[bioKind] ?? 'Biometrics'}: {bioEnabled ? 'on' : 'off'}
+            <Fingerprint size={13} /> {BIO_LABEL[bioKind] ?? 'Biometrics'}:{' '}
+            {bioEnabled ? (bioScope === 'persistent' ? 'on, saved' : 'on, this session') : 'off'}
           </button>
         )}
         <button className="btn sm" onClick={() => setChanging((v) => !v)}>

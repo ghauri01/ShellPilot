@@ -33,7 +33,7 @@ Knowing the design may help you assess a finding.
 |---|---|---|
 | SSH passwords, key paths, key passphrases | `shellpilot-secrets.json` | Electron `safeStorage` — DPAPI / Keychain / libsecret. Machine and user bound. |
 | Vault entries | `shellpilot-vault.json` | AES-256-GCM, key from the master password via scrypt (N=32768). Password never stored. Decrypted entries are sent to the renderer while the vault is open, so they live in the renderer's memory too — not only in the main process. |
-| Biometric unlock key (opt-in, off by default) | `shellpilot-vault-bio.json` | The vault's **derived key**, wrapped with Electron `safeStorage`. Present only if you enable Touch ID unlock. The master password is not stored, but see below — this is the weakest protection any vault data gets. |
+| Biometric unlock key (opt-in, off by default) | main-process memory, or `shellpilot-vault-bio.json` | The vault's **derived key**, wrapped with Electron `safeStorage`. By default this is held in memory only and dies with the process, so nothing is written to disk. The file exists only if you explicitly choose to keep biometric unlock across restarts. |
 | Workspace passwords | `shellpilot-wslocks.json` | scrypt verifier with a random salt, compared with `timingSafeEqual`. Not reversible. |
 | Trusted SSH host keys | `shellpilot-known-hosts.json` | SHA-256 fingerprints, plaintext (not secret). |
 | Backups | user-chosen `.spbackup` file | AES-256-GCM under a passphrase you supply. Credentials are unsealed from the keychain and re-encrypted so the file is portable. |
@@ -58,6 +58,16 @@ which requires entitlements authorised by a provisioning profile, which requires
 a paid Apple Developer account. ShellPilot is ad-hoc signed and has none, so
 neither is available to it. (Apple's TN3137 documents this; it is the design, not
 a gap we have failed to close.)
+
+This is why biometric unlock is **session-scoped by default**: the wrapped key
+is held in main-process memory and dies with the app, so an attacker who can
+read your files finds nothing to read. You type the master password once per
+launch and Touch ID reopens the vault after that. It is the same design
+KeePassXC uses, and it is what makes the feature defensible without the
+entitlements above.
+
+Keeping it across restarts is a separate, explicit choice, and it is the one
+that writes the key to disk.
 
 Two consequences worth being concrete about:
 
