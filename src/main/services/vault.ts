@@ -105,6 +105,33 @@ export async function vaultUnlock(password: string): Promise<VaultResult> {
   }
 }
 
+// The derived key, for biometric unlock to hold on the user's behalf. Only
+// ever readable while the vault is already unlocked — this cannot be used to
+// obtain a key the caller did not already have — and never leaves the main
+// process. Returned as a copy so a caller cannot zero the live key.
+export function vaultExportKey(): { key: Buffer; salt: Buffer } | null {
+  if (!key || !salt) return null
+  return { key: Buffer.from(key), salt: Buffer.from(salt) }
+}
+
+// Unlock with a previously derived key instead of a password. The GCM tag is
+// still what decides: a key that does not decrypt the file fails exactly as a
+// wrong password does, so a corrupted or stale stored key cannot half-open a
+// vault.
+export function vaultUnlockWithKey(k: Buffer, s: Buffer): VaultResult {
+  const file = readFile()
+  if (!file) return { ok: false, error: 'No vault exists yet.' }
+  try {
+    const entries = decrypt(file, k)
+    key = Buffer.from(k)
+    salt = Buffer.from(s)
+    cache = entries
+    return { ok: true }
+  } catch {
+    return { ok: false, error: 'The stored key no longer opens this vault.' }
+  }
+}
+
 export function vaultLock(): VaultResult {
   key?.fill(0)
   key = null

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Copy, Eye, EyeOff, KeyRound, Lock, Plus, ShieldCheck, Trash2, Unlock } from 'lucide-react'
+import { Copy, Eye, EyeOff, Fingerprint, KeyRound, Lock, Plus, ShieldCheck, Trash2, Unlock } from 'lucide-react'
 import { useVault, newField } from '../../store/vault'
 import { toast } from '../../store/toast'
+import { clsx } from '../../lib/format'
 import {
   VAULT_KIND_LABEL,
   VAULT_KIND_FIELDS,
@@ -45,6 +46,13 @@ export function VaultView(): React.JSX.Element {
 
 // Create-master-password and unlock share a layout; only the copy and the
 // action differ.
+// What the platform actually calls it. Saying "Touch ID" on a Windows machine
+// would be worse than saying nothing.
+const BIO_LABEL: Record<string, string> = {
+  'touch-id': 'Touch ID',
+  'windows-hello': 'Windows Hello'
+}
+
 function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
   const create = useVault((s) => s.create)
   const unlock = useVault((s) => s.unlock)
@@ -55,6 +63,25 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [show, setShow] = useState(false)
+
+  const bioAvailable = useVault((s) => s.bioAvailable)
+  const bioEnabled = useVault((s) => s.bioEnabled)
+  const bioKind = useVault((s) => s.bioKind)
+  const refreshBiometrics = useVault((s) => s.refreshBiometrics)
+  const unlockWithBiometrics = useVault((s) => s.unlockWithBiometrics)
+  const canUseBio = mode === 'unlock' && bioAvailable && bioEnabled
+
+  useEffect(() => {
+    void refreshBiometrics()
+  }, [refreshBiometrics])
+
+  // Offer the prompt straight away rather than making the user click a button
+  // to reach a prompt. Cancelling leaves the password field focused and ready,
+  // so this costs nothing if they would rather type.
+  useEffect(() => {
+    if (canUseBio) void unlockWithBiometrics()
+    // Only on the transition into being able to, never on every render.
+  }, [canUseBio, unlockWithBiometrics])
 
   const creating = mode === 'create'
   const mismatch = creating && confirm.length > 0 && password !== confirm
@@ -80,6 +107,17 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
             ? 'Pick a master password. It encrypts everything in the vault and is never stored — if you lose it, the contents cannot be recovered.'
             : 'Enter your master password to decrypt the vault for this session.'}
         </p>
+
+        {canUseBio && (
+          <button
+            className="btn primary"
+            style={{ width: '100%', marginBottom: 10 }}
+            disabled={busy}
+            onClick={() => void unlockWithBiometrics()}
+          >
+            <Fingerprint size={15} /> Unlock with {BIO_LABEL[bioKind] ?? 'biometrics'}
+          </button>
+        )}
 
         <div className="row" style={{ gap: 6, marginTop: 4 }}>
           <input
@@ -130,6 +168,16 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
 }
 
 function VaultBrowser(): React.JSX.Element {
+  const bioAvailable = useVault((s) => s.bioAvailable)
+  const bioEnabled = useVault((s) => s.bioEnabled)
+  const bioKind = useVault((s) => s.bioKind)
+  const setBiometrics = useVault((s) => s.setBiometrics)
+  const refreshBiometrics = useVault((s) => s.refreshBiometrics)
+
+  useEffect(() => {
+    void refreshBiometrics()
+  }, [refreshBiometrics])
+
   const entries = useVault((s) => s.entries)
   const selectedId = useVault((s) => s.selectedId)
   const lock = useVault((s) => s.lock)
@@ -146,6 +194,19 @@ function VaultBrowser(): React.JSX.Element {
         <b>Vault</b>
         <span className="server-meta">{entries.length} entries</span>
         <span className="spacer" />
+        {bioAvailable && (
+          <button
+            className={clsx('btn', 'sm', bioEnabled && 'active')}
+            title={
+              bioEnabled
+                ? `Stop unlocking with ${BIO_LABEL[bioKind] ?? 'biometrics'}, and delete the stored key`
+                : `Store this vault's key so ${BIO_LABEL[bioKind] ?? 'biometrics'} can unlock it`
+            }
+            onClick={() => void setBiometrics(!bioEnabled)}
+          >
+            <Fingerprint size={13} /> {BIO_LABEL[bioKind] ?? 'Biometrics'}: {bioEnabled ? 'on' : 'off'}
+          </button>
+        )}
         <button className="btn sm" onClick={() => setChanging((v) => !v)}>
           Change password
         </button>

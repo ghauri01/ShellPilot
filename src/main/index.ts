@@ -85,6 +85,13 @@ import { onCliPairingEvent, cancelCliPairing } from './services/cliPairing'
 import { claudeCodeCommand, writeClaudeDesktopConfig, writeCodexConfig } from './services/clientConfig'
 import { setAgentServerCreator, type AgentServerRequest, type AgentServerResult } from './services/agentServerCreate'
 import { listDefaultKeys, sshDir } from './services/sshKeys'
+import {
+  biometricSupport,
+  biometricEnabled,
+  enableBiometricUnlock,
+  disableBiometricUnlock,
+  biometricUnlock
+} from './services/biometrics'
 import { listAudit } from './services/auditLog'
 import { startMcpServer, stopMcpServer, mcpServerStatus, explainSessionAccess } from './services/mcpServer'
 
@@ -484,10 +491,28 @@ ipcMain.handle('vault:unlock', (_e, password: string) => vaultUnlock(password))
 ipcMain.handle('vault:lock', () => vaultLock())
 ipcMain.handle('vault:list', () => vaultList())
 ipcMain.handle('vault:save', (_e, entries: VaultEntry[]) => vaultSave(entries))
-ipcMain.handle('vault:change-password', (_e, current: string, next: string) =>
-  vaultChangePassword(current, next)
-)
-ipcMain.handle('vault:destroy', () => vaultDestroy())
+// The stored biometric key was derived from the old password and cannot open
+// the re-encrypted vault, so it is cleared here rather than left to fail on
+// the next unlock. The renderer re-reads bio-enabled after this and tells the
+// user to set it up again.
+ipcMain.handle('vault:change-password', async (_e, current: string, next: string) => {
+  const result = await vaultChangePassword(current, next)
+  if (result.ok) disableBiometricUnlock()
+  return result
+})
+ipcMain.handle('vault:destroy', () => {
+  // A stored biometric key opens a vault that no longer exists; leaving it
+  // behind is dead material on disk.
+  disableBiometricUnlock()
+  return vaultDestroy()
+})
+
+// ---- Vault: biometric unlock ----
+ipcMain.handle('vault:bio-support', () => biometricSupport())
+ipcMain.handle('vault:bio-enabled', () => biometricEnabled())
+ipcMain.handle('vault:bio-enable', () => enableBiometricUnlock())
+ipcMain.handle('vault:bio-disable', () => disableBiometricUnlock())
+ipcMain.handle('vault:bio-unlock', () => biometricUnlock())
 
 // ---- Workspace locks ----
 ipcMain.handle('wslock:ids', () => wsLockIds())

@@ -51,6 +51,15 @@ interface VaultState {
   updateEntry: (id: string, patch: Partial<VaultEntry>) => Promise<void>
   deleteEntry: (id: string) => Promise<void>
   clearError: () => void
+  // Biometric unlock. `bioKind` is what to call it on this platform, so the
+  // UI never says "Touch ID" on a machine that does not have one.
+  bioAvailable: boolean
+  bioKind: string
+  bioReason: string | null
+  bioEnabled: boolean
+  refreshBiometrics: () => Promise<void>
+  unlockWithBiometrics: () => Promise<boolean>
+  setBiometrics: (on: boolean) => Promise<boolean>
 }
 
 // Entries only ever live here while the vault is unlocked; locking drops them.
@@ -62,6 +71,49 @@ export const useVault = create<VaultState>((set, get) => ({
   query: '',
   error: null,
   busy: false,
+  bioAvailable: false,
+  bioKind: 'none',
+  bioReason: null,
+  bioEnabled: false,
+
+  refreshBiometrics: async () => {
+    const v = window.shellpilot?.vault
+    if (typeof v?.bioSupport !== 'function') return
+    const [support, enabled] = await Promise.all([v.bioSupport(), v.bioEnabled()])
+    set({
+      bioAvailable: !!support?.available,
+      bioKind: support?.kind ?? 'none',
+      bioReason: support?.reason ?? null,
+      bioEnabled: !!enabled
+    })
+  },
+
+  unlockWithBiometrics: async () => {
+    const v = window.shellpilot?.vault
+    if (typeof v?.bioUnlock !== 'function') return false
+    set({ busy: true, error: null })
+    const r = await v.bioUnlock()
+    set({ busy: false })
+    if (!r?.ok) {
+      // A cancelled prompt should not shout; the password field is right
+      // there and is the expected fallback.
+      set({ error: r?.error ?? 'Biometric unlock failed.' })
+      await get().refreshBiometrics()
+      return false
+    }
+    set({ unlocked: true })
+    await get().refresh()
+    return true
+  },
+
+  setBiometrics: async (on) => {
+    const v = window.shellpilot?.vault
+    if (typeof v?.bioEnable !== 'function') return false
+    const r = on ? await v.bioEnable() : await v.bioDisable()
+    await get().refreshBiometrics()
+    if (!r?.ok) set({ error: r?.error ?? 'Could not change biometric unlock.' })
+    return !!r?.ok
+  },
 
   refresh: async () => {
     const st = await window.shellpilot?.vault.status()

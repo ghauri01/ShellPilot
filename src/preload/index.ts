@@ -218,7 +218,13 @@ const api = {
     save: (entries: VaultEntry[]): Promise<VaultResult> => ipcRenderer.invoke('vault:save', entries),
     changePassword: (current: string, next: string): Promise<VaultResult> =>
       ipcRenderer.invoke('vault:change-password', current, next),
-    destroy: (): Promise<VaultResult> => ipcRenderer.invoke('vault:destroy')
+    destroy: (): Promise<VaultResult> => ipcRenderer.invoke('vault:destroy'),
+    bioSupport: (): Promise<{ available: boolean; kind: string; reason?: string }> =>
+      ipcRenderer.invoke('vault:bio-support'),
+    bioEnabled: (): Promise<boolean> => ipcRenderer.invoke('vault:bio-enabled'),
+    bioEnable: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-enable'),
+    bioDisable: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-disable'),
+    bioUnlock: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-unlock')
   },
   workspaceLock: {
     ids: (): Promise<string[]> => ipcRenderer.invoke('wslock:ids'),
