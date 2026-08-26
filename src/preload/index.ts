@@ -27,6 +27,7 @@ import type { TunnelConfig, TunnelResult, TunnelSshConfig, TunnelStatus } from '
 import type { KnownHost } from '../main/services/knownhosts'
 import type { SshConfigHost } from '../shared/sshconfig'
 import type { BackupResult } from '../shared/backup'
+import type { UpdaterStatus } from '../shared/updater'
 import type {
   AccessGroup,
   PolicyAssignment,
@@ -43,6 +44,7 @@ type ThemeMode = 'dark' | 'light' | 'system'
 
 const api = {
   platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke('app:platform'),
+  getVersion: (): Promise<string> => ipcRenderer.invoke('app:version'),
   window: {
     control: (action: WindowAction): Promise<void> =>
       ipcRenderer.invoke('window:control', action),
@@ -175,6 +177,17 @@ const api = {
       ipcRenderer.invoke('backup:import', password, path),
     deleteAll: (): Promise<BackupResult> => ipcRenderer.invoke('backup:deleteAll'),
     relaunch: (): Promise<void> => ipcRenderer.invoke('backup:relaunch')
+  },
+  updater: {
+    check: (): Promise<void> => ipcRenderer.invoke('updater:check'),
+    status: (): Promise<UpdaterStatus> => ipcRenderer.invoke('updater:status'),
+    install: (): Promise<void> => ipcRenderer.invoke('updater:install'),
+    openReleasePage: (): Promise<void> => ipcRenderer.invoke('updater:openReleasePage'),
+    onStatus: (cb: (s: UpdaterStatus) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, s: UpdaterStatus): void => cb(s)
+      ipcRenderer.on('updater:status-event', h)
+      return () => ipcRenderer.removeListener('updater:status-event', h)
+    }
   },
   sshConfig: {
     read: (): Promise<{ ok: boolean; path: string; hosts?: SshConfigHost[]; error?: string }> =>
