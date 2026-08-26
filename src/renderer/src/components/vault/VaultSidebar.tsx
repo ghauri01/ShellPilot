@@ -1,7 +1,8 @@
 import { KeyRound, Lock, Globe, StickyNote, User, FileKey } from 'lucide-react'
 import { useVault } from '../../store/vault'
 import { clsx } from '../../lib/format'
-import { vaultMatches, type VaultKind } from '../../../../shared/vault'
+import { useApp } from '../../store/app'
+import { vaultMatches, vaultEntriesFor, isSharedVaultEntry, type VaultKind } from '../../../../shared/vault'
 
 const KIND_ICON: Record<VaultKind, React.ReactNode> = {
   login: <User size={13} className="faint" />,
@@ -18,6 +19,7 @@ export function VaultSidebar(): React.JSX.Element {
   const select = useVault((s) => s.select)
   const query = useVault((s) => s.query)
   const setQuery = useVault((s) => s.setQuery)
+  const activeWorkspaceId = useApp((s) => s.activeWorkspaceId)
 
   if (!unlocked) {
     return (
@@ -29,7 +31,12 @@ export function VaultSidebar(): React.JSX.Element {
     )
   }
 
-  const shown = entries.filter((e) => vaultMatches(e, query))
+  // Entries belonging to this workspace, plus the shared ones. Hidden from
+  // view, not cryptographically separated — the vault is still one encrypted
+  // file under one master password, and SECURITY.md says so.
+  const visible = vaultEntriesFor(entries, activeWorkspaceId)
+  const shown = visible.filter((e) => vaultMatches(e, query))
+  const hiddenCount = entries.length - visible.length
 
   return (
     <>
@@ -46,6 +53,13 @@ export function VaultSidebar(): React.JSX.Element {
         <div className="tree-section-label">
           Entries <span className="count">{shown.length}</span>
         </div>
+        {hiddenCount > 0 && (
+          // Saying nothing here would recreate the original confusion in the
+          // opposite direction: entries you saved would simply be missing.
+          <div className="faint" style={{ padding: '2px 12px 6px', fontSize: 11 }}>
+            {hiddenCount} more in other workspaces
+          </div>
+        )}
         {shown.map((e) => (
           <div
             key={e.id}
@@ -54,6 +68,11 @@ export function VaultSidebar(): React.JSX.Element {
             title={e.url || e.username || e.name}
           >
             {KIND_ICON[e.kind]}
+            {isSharedVaultEntry(e) && (
+              <span className="faint" style={{ fontSize: 10 }} title="Visible in every workspace">
+                shared
+              </span>
+            )}
             <span className="label">{e.name}</span>
           </div>
         ))}
