@@ -80,6 +80,9 @@ import {
 } from './services/mcpAuth'
 import { listPendingApprovals, respondToApproval, onApprovalEvent, denyAllPending } from './services/approvals'
 import { onCliPairingEvent, cancelCliPairing } from './services/cliPairing'
+import { claudeCodeCommand, writeClaudeDesktopConfig, writeCodexConfig } from './services/clientConfig'
+import { setAgentServerCreator, type AgentServerRequest, type AgentServerResult } from './services/agentServerCreate'
+import { listDefaultKeys, sshDir } from './services/sshKeys'
 import { listAudit } from './services/auditLog'
 import { startMcpServer, stopMcpServer, mcpServerStatus } from './services/mcpServer'
 
@@ -228,10 +231,16 @@ ipcMain.handle('theme:set', (_e, mode: unknown) => {
   return nativeTheme.shouldUseDarkColors
 })
 
+ipcMain.handle('ssh:defaultKeys', () => listDefaultKeys())
+
 ipcMain.handle('dialog:openKey', async () => {
   if (!mainWindow) return null
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Select private key',
+    // ~/.ssh is where keys actually live and the picker will not show a hidden
+    // folder unless it opens there, so landing anywhere else means the user
+    // has to type the path they came here to avoid typing.
+    defaultPath: sshDir(),
     properties: ['openFile', 'showHiddenFiles'],
     // All files first: OpenSSH keys usually have no extension at all
     // (id_ed25519, or any bare filename), and an extension filter hides them.
@@ -543,6 +552,43 @@ ipcMain.handle('aiMcp:respondApproval', (_e, id: string, decision: 'approved' | 
 onApprovalEvent((e) => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('ai:approval-event', e)
 })
+
+// ---- AI & MCP: agent-initiated server creation (the add_server tool) ----
+// Same request/reply shape as ssh:prompt above: the renderer owns the
+// connection list, so main hands it the work and waits for the answer.
+let createSeq = 0
+const pendingServerCreates = new Map<string, (result: AgentServerResult) => void>()
+
+ipcMain.on('aiMcp:create-server-reply', (_e, id: string, result: AgentServerResult) => {
+  const resolve = pendingServerCreates.get(id)
+  if (!resolve) return
+  pendingServerCreates.delete(id)
+  resolve(result)
+})
+
+setAgentServerCreator((req: AgentServerRequest) => {
+  const target = mainWindow
+  if (!target || target.isDestroyed()) {
+    return Promise.resolve({ ok: false, error: 'The ShellPilot window is closed.' })
+  }
+  const id = `mkserver-${createSeq++}`
+  return new Promise<AgentServerResult>((resolve) => {
+    pendingServerCreates.set(id, resolve)
+    target.webContents.send('aiMcp:create-server', { id, request: req })
+    // The agent is blocked on this call; never leave it hanging on a renderer
+    // that failed to answer.
+    setTimeout(() => {
+      if (pendingServerCreates.delete(id)) resolve({ ok: false, error: 'Timed out adding the server.' })
+    }, 30000)
+  })
+})
+
+// ---- AI & MCP: one-click client wiring (AI & MCP -> Overview -> Connect) ----
+ipcMain.handle('aiMcp:claudeCodeCommand', (_e, token: string, port: number) => claudeCodeCommand(token, port))
+ipcMain.handle('aiMcp:writeClaudeDesktopConfig', (_e, token: string, port: number) =>
+  writeClaudeDesktopConfig(token, port)
+)
+ipcMain.handle('aiMcp:writeCodexConfig', (_e, token: string, port: number) => writeCodexConfig(token, port))
 
 // ---- AI & MCP: CLI pairing (the `shellpilot claude|codex|run` launcher) ----
 ipcMain.handle('aiMcp:cancelPairing', (_e, id: string) => cancelCliPairing(id))

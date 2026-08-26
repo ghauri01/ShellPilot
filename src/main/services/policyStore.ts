@@ -24,6 +24,12 @@ function allowAll(overrides: Partial<AccessGroup['capabilities']> = {}): AccessG
     databaseAccess: 'allow',
     sudo: 'allow',
     serverMetrics: 'allow',
+    // Not 'allow', despite the name. Every other capability here is an action
+    // performed ON a server the user already added; this one edits ShellPilot's
+    // own connection list and stores a credential. Groups that predate it never
+    // had that power, and a helper called allowAll should not be what silently
+    // hands it to them — each group opts in below.
+    manageServers: 'deny',
     ...overrides
   }
 }
@@ -64,7 +70,8 @@ function defaultGroups(): AccessGroup[] {
         writeFiles: 'ask',
         sftpUpload: 'ask',
         sshTunnel: 'ask',
-        sudo: 'deny'
+        sudo: 'deny',
+        manageServers: 'ask'
       }),
       filePolicies: defaultFilePolicies()
     },
@@ -76,7 +83,8 @@ function defaultGroups(): AccessGroup[] {
         writeFiles: 'ask',
         sftpUpload: 'ask',
         sshTunnel: 'ask',
-        sudo: 'ask'
+        sudo: 'ask',
+        manageServers: 'ask'
       }),
       filePolicies: defaultFilePolicies()
     },
@@ -88,7 +96,7 @@ function defaultGroups(): AccessGroup[] {
       // that root access must never be granted silently. The user can raise
       // this to 'allow' themselves, which is then an explicit choice, not a
       // default.
-      capabilities: allowAll({ sudo: 'ask' }),
+      capabilities: allowAll({ sudo: 'ask', manageServers: 'ask' }),
       filePolicies: defaultFilePolicies()
     }
   ]

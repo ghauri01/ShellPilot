@@ -31,10 +31,10 @@ Your DevOps workstation, everywhere. Windows · macOS · Linux.
 > **Windows and macOS will show a security warning the first time you run ShellPilot.
 > This is expected, and it is not a virus.**
 >
-> The app is **not code-signed** — a code-signing certificate costs $200–$400 a year for
-> Windows and $99 a year for Apple, which a free MIT-licensed project has no income to
-> cover. The warning means your operating system cannot confirm **who published** the
-> app. It says nothing about whether the file is safe.
+> The app is **not notarized**, and on Windows not signed at all — a code-signing
+> certificate costs $200–$400 a year for Windows and $99 a year for Apple, which a free
+> MIT-licensed project has no income to cover. The warning means your operating system
+> cannot confirm **who published** the app. It says nothing about whether the file is safe.
 >
 > Every release is **scanned by 70+ antivirus engines** and publishes a **SHA-256** for
 > each file, so you can verify the download yourself.
@@ -159,21 +159,41 @@ override individual file paths on top of the blanket read/write setting:
 
 ### Connecting an agent
 
+The quickest route is **AI & MCP → Overview → Connect an agent**. One click turns on the bridge,
+gives any unassigned workspace an access group, creates a session, and hands it to the client:
+
+| Button | What it does |
+|---|---|
+| **Connect Claude Code** | Copies a ready `claude mcp add` command, token already in it — paste it in a terminal |
+| **Connect Claude Desktop** | Writes the bridge entry into `claude_desktop_config.json`, merging with whatever is already there |
+| **Connect Codex** | Writes a managed `[mcp_servers.shellpilot]` block into `~/.codex/config.toml` |
+
+Existing config files are backed up first, other MCP servers in them are left alone, and running a
+button again replaces its own entry rather than adding a second one. A workspace you have already
+assigned to an access group — including **No AI Access** — is never reassigned.
+
+There is also a CLI, if you would rather not click:
+
 | Command | What it does |
 |---|---|
 | `shellpilot claude` | Registers ShellPilot with Claude Code (`claude mcp add`) and launches it — a one-time pairing code appears in ShellPilot instead of copying a token by hand |
 | `shellpilot codex` | Same, for Codex — writes a managed block into `~/.codex/config.toml` |
 | `shellpilot run -- <command>` | Same pairing flow for any other MCP-aware CLI, via `SHELLPILOT_MCP_COMMAND`/`SHELLPILOT_MCP_ARGS` |
 
-Claude Desktop and other JSON-config clients connect with a Streamable HTTP entry ShellPilot's own
-**Security** tab generates for you — a URL and a bearer token, nothing to type by hand:
+> On macOS the `shellpilot` command is not added to your `PATH` by the installer — only the Windows
+> installer does that. Use the Connect buttons, or call the launcher inside the app bundle directly.
+
+Every other client connects over **Streamable HTTP** with a URL and a bearer token that
+ShellPilot's own **Security** tab generates for you:
 
 ![Security tab: enable toggle, port, approval timeout, and connection snippets](docs/images/ai-security.png)
 
+**Claude Desktop is the exception** — it cannot use that URL. See
+[Connecting Claude Desktop](#connecting-claude-desktop) below.
+
 ### Adding a token manually
 
-Not every client has a one-command launcher yet — Claude Desktop, for one, is still added by
-hand:
+Not every client has a one-command launcher yet:
 
 ![Creating an AI agent session under AI & MCP → AI Agents](docs/images/ai-agents.png)
 
@@ -181,16 +201,14 @@ hand:
    ceiling, then **Create session**.
 2. The token is shown **once**, next to a ready-made JSON block — click **Copy JSON config**, or
    copy the raw token if you'd rather write the entry yourself.
-3. Paste it into the client's own MCP config file, under `mcpServers`. For **Claude Desktop**,
-   that's:
-   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+3. Paste it into the client's own MCP config file, under `mcpServers`.
 4. Restart the client.
 
 ```json
 {
   "mcpServers": {
     "shellpilot": {
+      "type": "http",
       "url": "http://127.0.0.1:<port>/mcp",
       "headers": { "Authorization": "Bearer <token>" }
     }
@@ -198,9 +216,50 @@ hand:
 }
 ```
 
-> If a client doesn't pick up a Streamable HTTP server from `url` + `headers` alone, add
-> `"type": "http"` inside the `shellpilot` entry — ShellPilot's **Security** tab includes it in
-> its own copy-pasteable snippet for exactly that reason.
+**Claude Code** needs no file editing at all — one command registers the same thing:
+
+```bash
+claude mcp add -s user --transport http shellpilot http://127.0.0.1:<port>/mcp --header "Authorization: Bearer <token>"
+```
+
+### Connecting Claude Desktop
+
+Claude Desktop **does not read `url` or `headers`** from `claude_desktop_config.json`. Entries in
+that file are launched as stdio subprocesses; Desktop's remote-server support is a separate
+account-level Connectors feature with nowhere to put a bearer token for a `127.0.0.1` address.
+
+ShellPilot ships a stdio bridge for exactly this case — a pure protocol relay that forwards
+messages to the same authenticated HTTP endpoint, so a stdio-only client gets the identical
+policy, approval and audit path (`src/cli/bridge.ts`). Point Desktop at it:
+
+```json
+{
+  "mcpServers": {
+    "shellpilot": {
+      "command": "/Applications/ShellPilot.app/Contents/MacOS/ShellPilot",
+      "args": [
+        "/Applications/ShellPilot.app/Contents/Resources/app.asar.unpacked/out/cli/index.js",
+        "bridge", "--token", "<token>", "--port", "<port>"
+      ],
+      "env": { "ELECTRON_RUN_AS_NODE": "1" }
+    }
+  }
+}
+```
+
+On **Windows**, the two paths become `%LOCALAPPDATA%\Programs\ShellPilot\ShellPilot.exe` and
+`%LOCALAPPDATA%\Programs\ShellPilot\resources\app.asar.unpacked\out\cli\index.js`.
+
+The config file lives at `~/Library/Application Support/Claude/claude_desktop_config.json` on
+macOS and `%APPDATA%\Claude\claude_desktop_config.json` on Windows. Restart Desktop afterwards.
+
+`ELECTRON_RUN_AS_NODE` makes ShellPilot's own bundled Electron binary run the bridge as plain
+Node, so nothing has to be installed separately and none of this depends on what is on your
+`PATH` — which Claude Desktop does not inherit from your shell.
+
+> **Give the Desktop session no expiry.** Set **Expires** to *Never* when creating it. The
+> default is 60 minutes, after which Desktop silently stops being able to reach ShellPilot until
+> you issue a new token.
 
 The token is shown only once and stored only as a hash — if you lose it, revoke that session
 under **Active Sessions** and create a new one rather than hunting for it:
@@ -255,9 +314,9 @@ metadata or source archives, and you can ignore them.
 
 ### First run: why your computer shows a warning
 
-**ShellPilot is not code-signed yet**, so the first time you run it you will see a
-security warning. Nothing is wrong with the download; the warning is about a missing
-certificate, not about the app.
+**ShellPilot is not notarized**, so the first time you run it you will see a security
+warning. Nothing is wrong with the download; the warning is about a missing certificate,
+not about the app.
 
 Windows and macOS both expect an application to be signed with a **code-signing
 certificate** — an identity certificate bought from a certificate authority, currently
@@ -265,6 +324,11 @@ around **$200–$400 a year** for Windows (or roughly **$99/year** for an Apple 
 account on macOS). ShellPilot is free and MIT licensed with no income behind it, so that
 certificate does not exist yet. Every unsigned app gets the same treatment, whoever wrote
 it.
+
+The macOS builds are **ad-hoc signed** — a signature that seals the bundle's contents but
+carries no identity, so macOS can still tell you the app has not been tampered with since
+it was built. What it cannot do is tell you who built it, which is what notarization is
+for. The Windows builds carry no signature at all.
 
 **The warning does not mean the file is unsafe.** It means the operating system cannot
 confirm *who* published it. You can confirm that yourself — see
@@ -285,43 +349,66 @@ same missing-certificate cause. This happens on the first run only.
 </details>
 
 <details>
-<summary><b>macOS — "cannot be opened because the developer cannot be verified"</b></summary>
+<summary><b>macOS — "Apple could not verify ShellPilot is free of malware"</b></summary>
 
-Gatekeeper refuses to open the app. Either:
+Gatekeeper refuses to open the app, because the build has not been notarized — Apple has
+not been asked to scan it, which requires the paid developer account above. The wording
+varies a little between macOS versions; older ones say *"cannot be opened because the
+developer cannot be verified"*.
 
-- **Right-click** (or Control-click) the app → **Open** → **Open** in the dialog, or
-- Run once in Terminal:
-  ```bash
-  xattr -cr /Applications/ShellPilot.app
-  ```
+- **macOS 15 Sequoia and later** — open **System Settings → Privacy & Security**, scroll
+  down to the message naming ShellPilot, and click **Open Anyway**. Sequoia removed the
+  older right-click shortcut, so this is the only way through in the interface.
+- **macOS 14 and earlier** — **right-click** (or Control-click) the app → **Open** →
+  **Open** in the dialog.
 
-The second command removes the quarantine flag macOS adds to anything downloaded from
-the internet. First run only.
+Either way this is the first launch only; afterwards the app opens normally.
+
+If you would rather do it from the Terminal, this clears the quarantine flag macOS attaches
+to anything downloaded through a browser:
+
+```bash
+/usr/bin/xattr -cr /Applications/ShellPilot.app
+```
+
+The `/usr/bin/` prefix is deliberate. If you have installed `xattr` through Homebrew or
+`pip`, that copy comes earlier on your `PATH` and does not accept `-r` — it prints a usage
+message and clears nothing, which looks exactly like the command having failed to help.
 
 </details>
 
 <details>
-<summary><b>macOS (Apple Silicon) — "ShellPilot is damaged and can't be opened. You should move it to the Trash."</b></summary>
+<summary><b>macOS — "ShellPilot is damaged and can't be opened" (releases 0.2.2 and earlier)</b></summary>
 
 ![macOS Gatekeeper dialog reading "ShellPilot is damaged and can't be opened. You should move it to the Trash."](docs/images/macos-damaged-dialog.png)
 
-**The download is not actually damaged.** On Apple Silicon (M1/M2/M3/M4), Gatekeeper shows this
-alarming message — instead of the "developer cannot be verified" one above — for the exact same
-reason: no valid code signature, combined with the quarantine flag macOS attaches to anything a
-browser downloads. It is Gatekeeper's wording for an arm64 app it cannot verify, not evidence of
-a corrupted file. If you want to confirm that yourself before doing anything else, check the
-release's SHA-256 against your download — see
-[Verifying a download](#verifying-a-download).
+**The download is not damaged, and this is fixed in releases after 0.2.2.** Builds up to and
+including 0.2.2 left the macOS app unsigned, which meant the bundle still carried the
+signature Electron itself ships with — a signature covering none of ShellPilot's own files.
+Gatekeeper reads that mismatch as a corrupted download and words it this way instead of the
+ordinary "could not verify" message above. Unhelpfully, this particular dialog offers no
+**Open Anyway** button, so there is nothing to click through.
 
-Do **not** move it to the Trash. Instead, run once in Terminal:
+If you want to satisfy yourself the file arrived intact before doing anything else, check the
+release's SHA-256 against your download — see [Verifying a download](#verifying-a-download).
+
+Do **not** move it to the Trash. Run this once instead:
 
 ```bash
-xattr -cr /Applications/ShellPilot.app
+/usr/bin/xattr -cr /Applications/ShellPilot.app
 ```
 
-Then open the app normally. If it still refuses, confirm the exact path is correct (drag the app
-into the Terminal window after typing `xattr -cr ` to avoid a typo) and that you are running the
-command against the copy in `/Applications`, not the one still sitting in `~/Downloads`.
+Then open the app normally. If it still refuses:
+
+- Check the path is right — drag the app into the Terminal window after typing
+  `/usr/bin/xattr -cr ` rather than typing it out.
+- Make sure you are pointing at the copy in `/Applications`, not the one still sitting in
+  `~/Downloads`.
+- Keep the `/usr/bin/` prefix. A Homebrew or `pip` `xattr` earlier on your `PATH` does not
+  support `-r` and will quietly do nothing but print its usage text.
+
+Newer releases are ad-hoc signed, which puts them back into the ordinary "could not verify"
+category above — still a warning, but one with a button.
 
 </details>
 
@@ -337,9 +424,10 @@ chmod +x ShellPilot-*.AppImage
 
 </details>
 
-> **Will this be fixed?** Yes — signing is planned once the project can cover the annual
-> certificate cost. Until then the SHA-256 checksums on each release are the way to
-> verify what you downloaded is what was built.
+> **Will this be fixed?** Yes — signing and notarization are planned once the project can
+> cover the annual certificate cost. Until then the macOS builds are ad-hoc signed so the
+> warning is at least the ordinary, clickable kind, and the SHA-256 checksums on each
+> release are the way to verify what you downloaded is what was built.
 
 ### Antivirus scan
 
@@ -863,14 +951,16 @@ file browsing and monitoring — so you enter a code once rather than once per t
 
 ### Why does Windows SmartScreen or macOS Gatekeeper warn about it?
 
-Because ShellPilot is not code-signed. Windows and macOS expect an application to carry a
-code-signing certificate, which costs roughly $200–$400 a year for Windows and $99 a year
-for an Apple Developer account — money a free, MIT-licensed project with no income does not
-have. The warning means the operating system cannot confirm **who** published the app, not
-that the file is unsafe. On Windows choose *More info → Run anyway*; on macOS right-click →
-**Open**, or run `xattr -cr /Applications/ShellPilot.app` — on **Apple Silicon** this same cause
-can show up as *"ShellPilot is damaged and can't be opened"* instead; the fix is the same
-`xattr -cr` command, not the Trash the dialog suggests. Full instructions are under
+Because ShellPilot is not notarized, and on Windows not signed at all. Both systems expect
+an application to carry a code-signing certificate, which costs roughly $200–$400 a year for
+Windows and $99 a year for an Apple Developer account — money a free, MIT-licensed project
+with no income does not have. The warning means the operating system cannot confirm **who**
+published the app, not that the file is unsafe. On Windows choose *More info → Run anyway*;
+on macOS use **System Settings → Privacy & Security → Open Anyway** (or right-click →
+**Open** on macOS 14 and earlier). Releases up to 0.2.2 can show *"ShellPilot is damaged and
+can't be opened"* instead, which has no button to click through — run
+`/usr/bin/xattr -cr /Applications/ShellPilot.app` for those, not the Trash the dialog
+suggests. Full instructions are under
 [First run: why your computer shows a warning](#first-run-why-your-computer-shows-a-warning),
 and every release publishes SHA-256 checksums so you can verify the download yourself.
 

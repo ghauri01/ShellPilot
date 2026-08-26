@@ -3,6 +3,7 @@ import { KeyRound } from 'lucide-react'
 import { Modal } from '../common/Modal'
 import { clsx } from '../../lib/format'
 import type { SshPromptRequest } from '../../../../preload/index'
+import { bridgeOn } from '../../lib/bridge'
 
 // Answers keyboard-interactive challenges: the second factor on servers with
 // AuthenticationMethods publickey,keyboard-interactive, or the password on
@@ -14,7 +15,7 @@ export function SshPrompt(): React.JSX.Element | null {
   const firstField = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    return window.shellpilot?.ssh.onPrompt((req) => {
+    return bridgeOn('ssh.onPrompt', window.shellpilot?.ssh?.onPrompt, (req) => {
       setRequest(req)
       setAnswers(req.prompts.map(() => ''))
       setRemember(false)

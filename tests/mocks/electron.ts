@@ -11,6 +11,9 @@ const userDataDir = mkdtempSync(join(tmpdir(), 'shellpilot-test-'))
 
 export const app = {
   getPath: (_name: string): string => userDataDir,
+  // clientConfig.ts derives the bridge script path from this; outside a
+  // packaged build it is the project root, exactly as in `electron-vite dev`.
+  getAppPath: (): string => process.cwd(),
   isPackaged: false
 }
 

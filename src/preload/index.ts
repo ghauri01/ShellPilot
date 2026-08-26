@@ -94,6 +94,9 @@ const api = {
     poolList: (): Promise<{ key: string; host: string; username: string; sessions: number }[]> =>
       ipcRenderer.invoke('ssh:pool-list'),
     poolClose: (key: string): Promise<void> => ipcRenderer.invoke('ssh:pool-close', key),
+    defaultKeys: (): Promise<
+      { path: string; fileName: string; algorithm: string | null; encrypted: boolean }[]
+    > => ipcRenderer.invoke('ssh:defaultKeys'),
     setPoolIdle: (minutes: number): Promise<void> => ipcRenderer.invoke('ssh:pool-idle', minutes),
     replyPrompt: (id: string, answers: string[], remember?: boolean, serverId?: string): void =>
       ipcRenderer.send('ssh:prompt-reply', id, answers, remember, serverId),
@@ -267,6 +270,27 @@ const api = {
       ipcRenderer.on('ai:approval-event', h)
       return () => ipcRenderer.removeListener('ai:approval-event', h)
     },
+    claudeCodeCommand: (token: string, port: number): Promise<string> =>
+      ipcRenderer.invoke('aiMcp:claudeCodeCommand', token, port),
+    writeClaudeDesktopConfig: (
+      token: string,
+      port: number
+    ): Promise<{ ok: boolean; path: string; backedUpTo?: string; error?: string }> =>
+      ipcRenderer.invoke('aiMcp:writeClaudeDesktopConfig', token, port),
+    writeCodexConfig: (
+      token: string,
+      port: number
+    ): Promise<{ ok: boolean; path: string; backedUpTo?: string; error?: string }> =>
+      ipcRenderer.invoke('aiMcp:writeCodexConfig', token, port),
+    onCreateServerRequest: (
+      cb: (e: { id: string; request: Record<string, unknown> }) => void
+    ): (() => void) => {
+      const h = (_e: IpcRendererEvent, ev: { id: string; request: Record<string, unknown> }): void => cb(ev)
+      ipcRenderer.on('aiMcp:create-server', h)
+      return () => ipcRenderer.removeListener('aiMcp:create-server', h)
+    },
+    replyCreateServer: (id: string, result: { ok: boolean; serverId?: string; error?: string }): void =>
+      ipcRenderer.send('aiMcp:create-server-reply', id, result),
     cancelPairing: (id: string): Promise<void> => ipcRenderer.invoke('aiMcp:cancelPairing', id),
     onPairingEvent: (
       cb: (e: { type: 'created' | 'resolved' | 'expired'; request: CliPairingRequest }) => void

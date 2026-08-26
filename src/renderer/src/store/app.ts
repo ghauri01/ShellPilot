@@ -618,7 +618,10 @@ export const useApp = create<AppState>((set, get) => ({
         ...s.servers,
         {
           id,
-          workspaceId: s.activeWorkspaceId,
+          // Normally the workspace you are looking at, but an agent-initiated
+          // add names the workspace its session is scoped to, which is not
+          // necessarily the one on screen.
+          workspaceId: input.workspaceId ?? s.activeWorkspaceId,
           folderId: input.folderId ?? null,
           name: input.name,
           host: input.host,

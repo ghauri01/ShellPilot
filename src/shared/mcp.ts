@@ -18,6 +18,7 @@ export type AiCapability =
   | 'databaseAccess'
   | 'sudo'
   | 'serverMetrics'
+  | 'manageServers'
 
 export const AI_CAPABILITIES: { id: AiCapability; label: string }[] = [
   { id: 'viewServer', label: 'View server' },
@@ -29,7 +30,8 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string }[] = [
   { id: 'sshTunnel', label: 'SSH tunnels' },
   { id: 'databaseAccess', label: 'Database access' },
   { id: 'sudo', label: 'Sudo / privilege escalation' },
-  { id: 'serverMetrics', label: 'Server metrics' }
+  { id: 'serverMetrics', label: 'Server metrics' },
+  { id: 'manageServers', label: 'Add servers to the workspace' }
 ]
 
 export type AiCapabilityPolicy = Record<AiCapability, PermissionValue>

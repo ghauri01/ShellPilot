@@ -9,6 +9,7 @@ import { parseEndpoint } from '../../../../shared/tunnel'
 import type { TunnelStatus } from '../../../../shared/tunnel'
 import { sshHopFor } from '../../lib/ssh'
 import type { Tunnel, TunnelKind } from '../../types'
+import { bridgeHas } from '../../lib/bridge'
 
 const kindLabel: Record<TunnelKind, string> = {
   local: 'Local forward',
@@ -35,6 +36,7 @@ export function TunnelManager(): React.JSX.Element {
   const tunnelIds = tunnels.map((t) => t.id).join(',')
   useEffect(() => {
     const ids = tunnelIds ? tunnelIds.split(',') : []
+    if (!bridgeHas(window.shellpilot?.tunnel as Record<string, unknown> | undefined, 'onStatus')) return
     const offs = ids.map((id) =>
       window.shellpilot?.tunnel.onStatus(id, (s) => {
         setLive((m) => ({ ...m, [id]: s }))

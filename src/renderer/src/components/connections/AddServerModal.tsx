@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { KeyRound, Lock, UserCheck, FileBadge, FolderOpen, ChevronRight } from 'lucide-react'
 import { Modal } from '../common/Modal'
 import { useApp } from '../../store/app'
@@ -29,6 +29,9 @@ export function AddServerModal(): React.JSX.Element {
   const [username, setUsername] = useState(existing?.username ?? 'root')
   const [auth, setAuth] = useState<AuthMethod>(existing?.auth ?? 'key')
   const [keyPath, setKeyPath] = useState('')
+  const [foundKeys, setFoundKeys] = useState<
+    { path: string; fileName: string; algorithm: string | null; encrypted: boolean }[]
+  >([])
   const [hops, setHops] = useState<Hop[]>(existing?.route ?? [])
   const [passphrase, setPassphrase] = useState('')
   const [password, setPassword] = useState('')
@@ -45,6 +48,14 @@ export function AddServerModal(): React.JSX.Element {
     const p = await window.shellpilot?.dialog.openKey()
     if (p) setKeyPath(p)
   }
+
+  // ~/.ssh is hidden and OpenSSH keys have no extension, so the file picker is
+  // a bad first experience. Offer what is already there; nothing is selected
+  // until the user clicks it.
+  useEffect(() => {
+    if (auth !== 'key' || foundKeys.length > 0) return
+    void window.shellpilot?.ssh.defaultKeys().then((k) => setFoundKeys(k ?? []))
+  }, [auth, foundKeys.length])
 
   const save = async (): Promise<void> => {
     if (!valid) return
@@ -151,6 +162,25 @@ export function AddServerModal(): React.JSX.Element {
               <FolderOpen size={14} /> Browse
             </button>
           </div>
+          {foundKeys.length > 0 && (
+            <div className="field-hint" style={{ marginTop: 6 }}>
+              <span>Found in ~/.ssh:</span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                {foundKeys.map((k) => (
+                  <button
+                    key={k.path}
+                    className={clsx('btn', 'sm', keyPath === k.path && 'active')}
+                    onClick={() => setKeyPath(k.path)}
+                    title={k.path}
+                  >
+                    <KeyRound size={12} /> {k.fileName}
+                    {k.algorithm ? ` (${k.algorithm})` : ''}
+                    {k.encrypted ? ' \u00b7 passphrase' : ''}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <span className="field-hint">Key path and passphrase are stored in OS secure storage, never in plaintext.</span>
           <input
             className="input"
