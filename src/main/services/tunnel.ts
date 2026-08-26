@@ -18,13 +18,16 @@ interface Active {
   error?: string
   connections: number
   listenPort?: number
-  wc: WebContents
+  wc: WebContents | null
 }
 
 const tunnels = new Map<string, Active>()
 
+// A tunnel started by an AI agent has no renderer that asked for it, so there
+// is nowhere to push status to. That is not a reason to refuse to start one —
+// the tunnel manager reads live state from tunnelList() when it next renders.
 function emit(t: Active): void {
-  if (t.wc.isDestroyed()) return
+  if (!t.wc || t.wc.isDestroyed()) return
   const status: TunnelStatus = {
     id: t.cfg.id,
     state: t.state,
@@ -191,7 +194,7 @@ async function handleSocks(t: Active, client: Client, socket: net.Socket): Promi
 // ---------------------------------------------------------------- lifecycle
 
 export async function tunnelStart(
-  wc: WebContents,
+  wc: WebContents | null,
   cfg: TunnelConfig,
   ssh: TunnelSshConfig
 ): Promise<TunnelResult> {

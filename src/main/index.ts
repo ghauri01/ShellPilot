@@ -56,7 +56,7 @@ import { checkForUpdates, getUpdaterStatus, onUpdaterStatus, installUpdate, open
 import { parseSshConfig } from '../shared/sshconfig'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
-import { resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
+import { resolveDbSecrets, resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
 import { refreshMcpDataCache, listCachedWorkspaces, listCachedServers } from './services/mcpDataCache'
 import {
   listGroups,
@@ -395,28 +395,10 @@ ipcMain.handle('metrics:sample', (_e, key: string, cfg: SshConnectConfig & { ser
 ipcMain.handle('metrics:disconnect', (_e, key: string) => metricsDisconnect(key))
 
 // ---- Databases ----
-function withDbSecret(cfg: DbConnectConfig): DbConnectConfig {
-  if (!cfg.password && !cfg.uri) {
-    const raw = getSecret(cfg.id)
-    if (raw) {
-      try {
-        const b = JSON.parse(raw) as { password?: string; uri?: string }
-        cfg.password = b.password
-        cfg.uri = b.uri
-      } catch {
-        cfg.password = raw // legacy plain-password secret
-      }
-    }
-  }
-  // The jump host's own credentials live in the same encrypted store, keyed by
-  // the server id.
-  if (cfg.ssh) cfg.ssh = resolveChainSecrets({ ...cfg.ssh })
-  return cfg
-}
-ipcMain.handle('db:test', (_e, cfg: DbConnectConfig) => dbTest(withDbSecret(cfg)))
-ipcMain.handle('db:query', (_e, cfg: DbConnectConfig, text: string) => dbQuery(withDbSecret(cfg), text))
-ipcMain.handle('db:info', (_e, cfg: DbConnectConfig) => dbInfo(withDbSecret(cfg)))
-ipcMain.handle('db:shell', (_e, cfg: DbConnectConfig, line: string) => dbShell(withDbSecret(cfg), line))
+ipcMain.handle('db:test', (_e, cfg: DbConnectConfig) => dbTest(resolveDbSecrets(cfg)))
+ipcMain.handle('db:query', (_e, cfg: DbConnectConfig, text: string) => dbQuery(resolveDbSecrets(cfg), text))
+ipcMain.handle('db:info', (_e, cfg: DbConnectConfig) => dbInfo(resolveDbSecrets(cfg)))
+ipcMain.handle('db:shell', (_e, cfg: DbConnectConfig, line: string) => dbShell(resolveDbSecrets(cfg), line))
 ipcMain.handle('db:close', (_e, id: string) => dbClose(id))
 
 // ---- SSH config import ----

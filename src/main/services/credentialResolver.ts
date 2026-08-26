@@ -140,3 +140,28 @@ export function knownSecretValuesForServer(serverId: string): string[] {
     return []
   }
 }
+
+
+// A database's stored credential, resolved the same way a server's is: keyed
+// by id in the OS keychain, read only in main, never returned to a caller.
+// The jump host's own credentials live in that same store under the server id.
+export function resolveDbSecrets<T extends { id: string; password?: string; uri?: string; ssh?: unknown }>(
+  cfg: T
+): T {
+  if (!cfg.password && !cfg.uri) {
+    const raw = getSecret(cfg.id)
+    if (raw) {
+      try {
+        const b = JSON.parse(raw) as { password?: string; uri?: string }
+        cfg.password = b.password
+        cfg.uri = b.uri
+      } catch {
+        cfg.password = raw // legacy plain-password secret
+      }
+    }
+  }
+  if (cfg.ssh) {
+    cfg.ssh = resolveChainSecrets({ ...(cfg.ssh as SshHop & { serverId?: string }) }) as T['ssh']
+  }
+  return cfg
+}

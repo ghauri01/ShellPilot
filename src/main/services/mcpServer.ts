@@ -8,13 +8,26 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 
 import { authenticate, getSession, getMcpConfig, type AuthFailureReason } from './mcpAuth'
 import { startCliPairing, confirmCliPairing } from './cliPairing'
-import { listCachedServers, listCachedWorkspaces, getCachedWorkspace, getCachedServer, serverToSshConfig } from './mcpDataCache'
+import {
+  listCachedServers,
+  listCachedWorkspaces,
+  getCachedWorkspace,
+  getCachedServer,
+  listCachedDatabases,
+  listCachedTunnels,
+  serverToSshConfig,
+  type CachedDatabase,
+  type CachedTunnel
+} from './mcpDataCache'
 import { resolveServerByName, formatAmbiguity, type ServerMatch } from './serverResolver'
 import {
   resolveGroupId,
   evaluateCapability,
   evaluateCommand,
   evaluateFilePath,
+  evaluateDatabaseStatement,
+  evaluateTunnelOpen,
+  classifyStatement,
   mostRestrictive,
   type Decision
 } from './policyEngine'
@@ -22,8 +35,11 @@ import { getGroup, listAssignments } from './policyStore'
 import { requestApproval } from './approvals'
 import { recordAudit } from './auditLog'
 import { redactOutput } from './secretRedaction'
-import { knownSecretValuesForServer, resolveChainSecrets } from './credentialResolver'
+import { knownSecretValuesForServer, resolveChainSecrets, resolveDbSecrets } from './credentialResolver'
 import { sshExec } from './ssh'
+import { dbQuery } from './db'
+import { tunnelStart, tunnelStop, tunnelList } from './tunnel'
+import { parseEndpoint } from '../../shared/tunnel'
 import { createServerForAgent } from './agentServerCreate'
 import { sftpConnect, sftpList, sftpRead, sftpWrite, sftpDisconnect } from './sftp'
 import { metricsSample } from './metrics'
@@ -327,6 +343,66 @@ Permissions
 Not available
 - No SSH tunnels, port forwarding, database queries, or file upload/download beyond
   read_file/write_file. Do not attempt these through execute_command; say they are unsupported.`
+
+
+// A cached database record is the UI's shape; the driver wants a connect
+// config. Credentials are added separately by resolveDbSecrets, so this never
+// carries one.
+function databaseConfig(db: CachedDatabase): Parameters<typeof dbQuery>[0] {
+  const server = db.sshServerId ? getCachedServer(db.sshServerId) : null
+  return {
+    id: db.id,
+    kind: db.kind,
+    host: db.host,
+    port: db.port,
+    username: db.username,
+    database: db.database || undefined,
+    ssl: db.ssl,
+    ssh: server
+      ? {
+          serverId: server.id,
+          host: server.host,
+          port: server.port,
+          username: server.username,
+          auth: server.auth
+        }
+      : undefined
+  }
+}
+
+// Rows as a compact table. Capped, because an agent that asks for a million
+// rows should get a readable answer and a note, not a million rows.
+const MAX_ROWS = 200
+
+function formatQueryResult(r: Awaited<ReturnType<typeof dbQuery>>): string {
+  if (r.message) return r.message
+  if (r.json !== undefined) return JSON.stringify(r.json, null, 2).slice(0, 20000)
+  const cols = r.columns ?? []
+  const rows = r.rows ?? []
+  if (cols.length === 0 && rows.length === 0) return `OK${r.rowCount !== undefined ? ` (${r.rowCount} rows)` : ''}`
+  const shown = rows.slice(0, MAX_ROWS)
+  const head = cols.join(' | ')
+  const body = shown.map((row) => row.map((c) => (c === null ? 'NULL' : String(c))).join(' | ')).join('\n')
+  const note = rows.length > shown.length ? `\n… ${rows.length - shown.length} more rows not shown` : ''
+  return `${head}\n${'-'.repeat(Math.min(head.length, 80))}\n${body}${note}`
+}
+
+
+// The stored tunnel keeps "host:port" strings for a human to read; the service
+// wants them split. socks has no target, which parseEndpoint handles by
+// returning port 0 for an empty string.
+function tunnelConfigFor(t: CachedTunnel): Parameters<typeof tunnelStart>[1] {
+  const listen = parseEndpoint(t.listen)
+  const target = parseEndpoint(t.target)
+  return {
+    id: t.id,
+    kind: t.kind,
+    listenHost: listen.host,
+    listenPort: listen.port,
+    targetHost: target.host,
+    targetPort: target.port
+  }
+}
 
 function buildServer(): McpServer {
   const server = new McpServer({ name: 'shellpilot', version: '1.0.0' }, { instructions: INSTRUCTIONS })
@@ -687,6 +763,224 @@ function buildServer(): McpServer {
           `Uptime: ${Math.round(m.uptime / 3600)}h`
         ].join('\n')
       )
+    }
+  )
+
+  server.registerTool(
+    'list_databases',
+    {
+      title: 'List databases',
+      description:
+        'Lists the database connections this session may use, by friendly name. Names returned here ' +
+        'are the only valid databaseName values. Credentials are never included.',
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    },
+    async (extra) => {
+      const auth = authenticateExtra(extra)
+      if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
+      const dbs = listCachedDatabases(auth.session.workspaces.map((w) => w.id))
+      if (dbs.length === 0) return text('No databases are available to this session.')
+      return text(
+        dbs
+          .map((d) => {
+            const ws = getCachedWorkspace(d.workspaceId)?.name ?? ''
+            const via = d.sshServerId ? ' (reached through an SSH server)' : ''
+            return `- ${d.name} — ${d.kind}${d.database ? `, database "${d.database}"` : ''}${via} [${ws}]`
+          })
+          .join('\n')
+      )
+    }
+  )
+
+  server.registerTool(
+    'query_database',
+    {
+      title: 'Run a database query',
+      description:
+        'Runs a statement against a saved database connection and returns the rows. Reads are governed ' +
+        'by the databaseAccess capability; anything that modifies data or schema is additionally bounded ' +
+        'by writeFiles and always requires user approval, whatever the access group says. Address the ' +
+        'database by the friendly name from list_databases — connection details and credentials are ' +
+        'resolved by ShellPilot and never visible here.',
+      inputSchema: {
+        databaseName: z.string().describe('Friendly name exactly as returned by list_databases'),
+        statement: z
+          .string()
+          .describe('A single statement. SQL for relational engines, shell syntax for MongoDB and Redis.')
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+    },
+    async ({ databaseName, statement }, extra) => {
+      const auth = authenticateExtra(extra)
+      if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
+      const { session } = auth
+
+      const wanted = databaseName.trim().toLowerCase()
+      const matches = listCachedDatabases(session.workspaces.map((w) => w.id)).filter(
+        (d) => d.name.toLowerCase() === wanted
+      )
+      if (matches.length === 0) return errorText(`No database named "${databaseName}" is available to this session.`)
+      if (matches.length > 1) {
+        return errorText(`"${databaseName}" matches more than one database in this session's workspaces.`)
+      }
+      const db = matches[0]
+      const workspace = getCachedWorkspace(db.workspaceId)
+
+      const scopeGroupId = resolveGroupId(listAssignments(), '', db.workspaceId)
+      const scopeGroup = scopeGroupId ? getGroup(scopeGroupId) : null
+      const check = withCeiling(
+        evaluateDatabaseStatement(scopeGroup, statement),
+        sessionGroupFor(session) ? evaluateDatabaseStatement(sessionGroupFor(session), statement) : null,
+        `the workspace's access group ("${scopeGroup?.name ?? 'none'}")`
+      )
+
+      const ctx: AuditContext = {
+        session,
+        workspaceId: db.workspaceId,
+        workspaceName: workspace?.name ?? '',
+        serverId: db.id,
+        serverName: db.name,
+        // The statement is the action, and it is persisted to the audit log —
+        // which is exactly why a credential must never be inside one.
+        action: statement,
+        capability: 'databaseAccess'
+      }
+
+      const gated = await gate(ctx, check, classifyStatement(statement) === 'read' ? 'low' : 'high')
+      if (!gated.ok) return gated.result
+
+      const approval = check.decision === 'ask' ? 'approved' : 'not-required'
+      try {
+        const result = await dbQuery(resolveDbSecrets(databaseConfig(db)), statement)
+        if (!result.ok) {
+          recordAudit({ ...auditBase(ctx), approval, result: 'error', error: result.error ?? 'query failed' })
+          return errorText(result.error ?? 'The query failed.')
+        }
+        auditSuccess(ctx, approval)
+        return text(formatQueryResult(result))
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        recordAudit({ ...auditBase(ctx), approval, result: 'error', error: message })
+        return errorText(message)
+      }
+    }
+  )
+
+  server.registerTool(
+    'list_tunnels',
+    {
+      title: 'List tunnels',
+      description:
+        'Lists the SSH tunnels configured in this session\'s workspaces, with whether each is currently ' +
+        'running. Names returned here are the only valid tunnelName values.',
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    },
+    async (extra) => {
+      const auth = authenticateExtra(extra)
+      if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
+      const tunnels = listCachedTunnels(auth.session.workspaces.map((w) => w.id))
+      if (tunnels.length === 0) return text('No tunnels are configured in this session\'s workspaces.')
+      const live = new Map(tunnelList().map((t) => [t.id, t]))
+      return text(
+        tunnels
+          .map((t) => {
+            const status = live.get(t.id)
+            const state = status ? status.state : 'stopped'
+            return `- ${t.name} — ${t.kind}, ${t.listen} -> ${t.target} [${state}]`
+          })
+          .join('\n')
+      )
+    }
+  )
+
+  server.registerTool(
+    'set_tunnel',
+    {
+      title: 'Start or stop a tunnel',
+      description:
+        'Starts or stops a tunnel that is already configured in ShellPilot. Requires the sshTunnel ' +
+        'capability, and starting one always requires user approval whatever the access group says, ' +
+        'because it binds a listening port on the user\'s own machine. This cannot create a tunnel or ' +
+        'change where one points — only run one the user has already defined.',
+      inputSchema: {
+        tunnelName: z.string().describe('Friendly name exactly as returned by list_tunnels'),
+        running: z.boolean().describe('true to start the tunnel, false to stop it')
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async ({ tunnelName, running }, extra) => {
+      const auth = authenticateExtra(extra)
+      if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
+      const { session } = auth
+
+      const wanted = tunnelName.trim().toLowerCase()
+      const matches = listCachedTunnels(session.workspaces.map((w) => w.id)).filter(
+        (t) => t.name.toLowerCase() === wanted
+      )
+      if (matches.length === 0) return errorText(`No tunnel named "${tunnelName}" is available to this session.`)
+      if (matches.length > 1) return errorText(`"${tunnelName}" matches more than one tunnel.`)
+      const tunnel = matches[0]
+      const workspace = getCachedWorkspace(tunnel.workspaceId)
+
+      const scopeGroupId = resolveGroupId(listAssignments(), '', tunnel.workspaceId)
+      const scopeGroup = scopeGroupId ? getGroup(scopeGroupId) : null
+      const sessionGroup = sessionGroupFor(session)
+
+      // Stopping is bounded by the same capability but is not the dangerous
+      // direction, so it does not force an approval the way starting does.
+      const evaluate = (g: AccessGroup | null): Decision =>
+        running
+          ? evaluateTunnelOpen(g)
+          : g
+            ? evaluateCapability(g, 'sshTunnel')
+            : { decision: 'deny', reason: 'No AI access is assigned to this workspace.' }
+
+      const check = withCeiling(
+        evaluate(scopeGroup),
+        sessionGroup ? evaluate(sessionGroup) : null,
+        `the workspace's access group ("${scopeGroup?.name ?? 'none'}")`
+      )
+
+      const ctx: AuditContext = {
+        session,
+        workspaceId: tunnel.workspaceId,
+        workspaceName: workspace?.name ?? '',
+        serverId: tunnel.id,
+        serverName: tunnel.name,
+        action: `${running ? 'Start' : 'Stop'} tunnel "${tunnel.name}" (${tunnel.listen} -> ${tunnel.target})`,
+        capability: 'sshTunnel'
+      }
+
+      const gated = await gate(ctx, check, running ? 'high' : 'low')
+      if (!gated.ok) return gated.result
+      const approval = check.decision === 'ask' ? 'approved' : 'not-required'
+
+      try {
+        if (!running) {
+          await tunnelStop(tunnel.id)
+          auditSuccess(ctx, approval)
+          return text(`Stopped "${tunnel.name}".`)
+        }
+        const server = tunnel.serverId ? getCachedServer(tunnel.serverId) : null
+        if (!server) return errorText(`"${tunnel.name}" has no SSH server configured to carry it.`)
+        // No renderer asked for this one, so there is nowhere to push status
+        // events; the tunnel manager reads live state when it next renders.
+        const result = await tunnelStart(
+          null,
+          tunnelConfigFor(tunnel),
+          resolveChainSecrets(serverToSshConfig(server))
+        )
+        if (!result.ok) {
+          recordAudit({ ...auditBase(ctx), approval, result: 'error', error: result.error ?? 'failed to start' })
+          return errorText(result.error ?? 'The tunnel failed to start.')
+        }
+        auditSuccess(ctx, approval)
+        return text(`Started "${tunnel.name}" on port ${result.listenPort ?? tunnel.listen}.`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        recordAudit({ ...auditBase(ctx), approval, result: 'error', error: message })
+        return errorText(message)
+      }
     }
   )
 
