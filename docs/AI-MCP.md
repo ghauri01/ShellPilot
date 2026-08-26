@@ -18,7 +18,8 @@ another MCP client. For the short pitch and the security summary, see the
 - [Credential isolation](#credential-isolation)
 - [The `shellpilot` CLI and pairing](#the-shellpilot-cli-and-pairing)
 - [Connecting Claude Code](#connecting-claude-code)
-- [Connecting Claude Desktop, Codex, Gemini CLI](#connecting-claude-desktop-codex-gemini-cli)
+- [Connecting Codex, Gemini CLI and other HTTP clients](#connecting-codex-gemini-cli-and-other-http-clients)
+- [Connecting Claude Desktop](#connecting-claude-desktop)
 - [Troubleshooting](#troubleshooting)
 
 ## Architecture
@@ -46,21 +47,70 @@ another MCP client. For the short pitch and the security summary, see the
 
 ## The MCP server
 
-`src/main/services/mcpServer.ts` registers **8 tools**:
+`src/main/services/mcpServer.ts` registers **9 tools**:
 
 | Tool | Capability gating it | What it returns |
 |---|---|---|
 | `list_workspaces` | — | The workspace(s) this session is scoped to |
 | `list_servers` | `viewServer` | Friendly names only, filtered to what the session can see |
 | `get_server_details` | `viewServer` | Name, OS, access group, effective ALLOW/ASK/DENY per capability — **never host/IP/username** |
-| `execute_command` | `terminal` (+ `sudo` if the command is sudo/doas) | stdout/stderr/exit code, redacted |
-| `read_file` | `readFiles` (+ file path rules) | File contents, redacted |
-| `write_file` | `writeFiles` (+ file path rules) | Bytes written |
-| `list_files` | `readFiles` (+ file path rules) | Directory listing |
+| `execute_command` | `terminal` (+ `sudo` if the command is sudo/doas, + file path rules for any absolute path it names) | stdout/stderr/exit code, redacted |
+| `read_file` | `readFiles` + `sftpDownload` (+ file path rules) | File contents, redacted |
+| `write_file` | `writeFiles` + `sftpUpload` (+ file path rules) | Bytes written |
+| `list_files` | `readFiles` + `sftpDownload` (+ file path rules) | Directory listing |
 | `get_server_metrics` | `serverMetrics` | CPU/memory/disk/uptime |
+| `add_server` | `manageServers`, resolved on the **workspace** | The name the new connection was saved under |
+
+Each tool carries a `title`, an MCP annotation set (`readOnlyHint`, `destructiveHint`,
+`openWorldHint`) and a description of every parameter, and the server sends `instructions` on
+initialize. That metadata is what stops an agent reaching for `execute_command` when a
+purpose-built tool exists — see [Tool discoverability](#tool-discoverability).
+
+### File rules apply to shell commands too
+
+`execute_command` is checked against the same per-path rules as the SFTP tools. Absolute paths are
+extracted from the command line — operands of known file-reading and file-writing commands,
+redirection targets, `cp`/`mv` sources and destinations, `dd if=`/`of=` — and each is evaluated
+before the command runs. `cat /etc/shadow` is refused exactly as `read_file /etc/shadow` is, and
+`sudo` does not bypass it.
+
+This is best-effort by design: only absolute paths and only recognised commands, because a
+relative operand cannot be matched against a pattern without knowing the remote working directory.
+`cd /root/.ssh && cat id_rsa` still gets through. It closes the direct form and can only ever
+narrow a decision, never widen one.
+
+### `add_server`
+
+An agent can add an SSH connection, including its credential, when the workspace's access group
+grants `manageServers`. Only **Read & Write**, **Sudo Access** and **Full Access** grant it, and all
+three set it to ASK, so every add surfaces an approval dialog naming the connection, the user and
+the host. The credential itself never appears in that dialog or in the audit log — only the fact
+that one was supplied. It goes straight to the OS keychain and cannot be read back through the
+bridge.
+
+A capability a saved access group predates — `manageServers` for any group written before this
+version — evaluates as DENY, never as an accidental grant.
+
+## Tool discoverability
+
+Descriptions are written to route an agent to the narrowest tool that does the job:
+
+- The server's `instructions` state that servers are addressed by friendly name, that
+  `list_servers` must be called first, that credentials are never visible, and which capabilities
+  do not exist at all (tunnels, port forwarding, databases) so an agent does not shell out to
+  reach them.
+- `execute_command` names its four alternatives; `read_file`, `list_files` and
+  `get_server_metrics` each say why they are preferable.
+- Every `serverName` parameter points back at `list_servers`, because a hostname or IP will not
+  resolve.
+
+`tests/toolMetadata.integration.test.ts` asserts all of this through a real MCP client, so a tool
+cannot be added without it.
 
 There is no `vault` tool. The MCP server has no code path into the Vault at all — an AI session
-cannot read a Vault entry no matter what access group it holds.
+cannot read a Vault entry no matter what access group it holds. There are no tunnel or database
+tools either; the `sshTunnel` and `databaseAccess` capabilities exist in the access-group model but
+nothing is gated on them yet.
 
 The server also exposes two unauthenticated bootstrap endpoints used only by the CLI pairing flow:
 `POST /pair/start` and `POST /pair/confirm` (see [Pairing](#the-shellpilot-cli-and-pairing) below).
@@ -243,9 +293,9 @@ shellpilot claude
 First run shows a one-time 6-digit code in ShellPilot; type it into the terminal. Every later run
 reuses the cached session until it expires.
 
-## Connecting Claude Desktop, Codex, Gemini CLI
+## Connecting Codex, Gemini CLI and other HTTP clients
 
-Any client that takes a JSON MCP config accepts a Streamable HTTP entry:
+Most clients that take a JSON MCP config accept a Streamable HTTP entry:
 
 ```json
 {
@@ -264,13 +314,54 @@ includes `"type": "http"` explicitly (as above); the block **AI & MCP → AI Age
 after you create a session omits it (`url` + `headers` only) — add `"type": "http"` by hand if
 your client doesn't auto-detect a Streamable HTTP server without it.
 
-**Adding it to Claude Desktop by hand** (it has no CLI launcher yet):
+## Connecting Claude Desktop
 
-1. Create a session under **AI & MCP → AI Agents** and copy its token (shown once).
-2. Open Claude Desktop's config file — `%APPDATA%\Claude\claude_desktop_config.json` on Windows,
-   `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS — and add a
-   `shellpilot` entry under `mcpServers`, in the shape above, with your real port and token.
+Claude Desktop is **not** one of those clients, and the HTTP entry above will not work in it.
+
+Entries under `mcpServers` in `claude_desktop_config.json` are launched as stdio subprocesses —
+Desktop reads `command`/`args`/`env` there and ignores `url` and `headers` entirely. Its
+remote-MCP support is a separate, account-level Connectors feature that expects a publicly
+reachable server with OAuth, and offers no field for a bearer token against `127.0.0.1`.
+
+Use the stdio bridge instead. `shellpilot bridge --token <token> --port <port>`
+(`src/cli/bridge.ts`) is a pure protocol relay: stdio in, Streamable HTTP out, `Authorization`
+header attached on the way. No tool, session or policy logic lives in it, so a stdio client is
+subject to exactly the same Access Group checks, approval prompts and audit entries as an HTTP
+one.
+
+1. Create a session under **AI & MCP → AI Agents** and copy its token (shown once). Set
+   **Expires** to *Never* — a Desktop client has no way to re-pair when a token lapses.
+2. Add this to `claude_desktop_config.json`
+   (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS,
+   `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "shellpilot": {
+      "command": "/Applications/ShellPilot.app/Contents/MacOS/ShellPilot",
+      "args": [
+        "/Applications/ShellPilot.app/Contents/Resources/app.asar.unpacked/out/cli/index.js",
+        "bridge", "--token", "<token>", "--port", "<port>"
+      ],
+      "env": { "ELECTRON_RUN_AS_NODE": "1" }
+    }
+  }
+}
+```
+
+   On Windows the two paths are `%LOCALAPPDATA%\Programs\ShellPilot\ShellPilot.exe` and
+   `%LOCALAPPDATA%\Programs\ShellPilot\resources\app.asar.unpacked\out\cli\index.js`.
+
 3. Restart Claude Desktop.
+
+`ELECTRON_RUN_AS_NODE=1` runs ShellPilot's bundled Electron binary as plain Node, so the bridge
+needs no separate Node install and does not depend on `PATH` — which Claude Desktop does not
+inherit from a login shell. `out/cli/**` and `bin/**` are kept outside the asar archive
+(`asarUnpack` in `electron-builder.yml`) precisely so they can be spawned as real files.
+
+**AI & MCP → Overview → Connect Claude Desktop** writes this block for you, filling in the paths
+and a fresh token; the manual steps are here for anyone who would rather see what it does.
 
 If you lose the token before pasting it, there's nothing to recover — revoke that session under
 **Active Sessions** and create a new one.
