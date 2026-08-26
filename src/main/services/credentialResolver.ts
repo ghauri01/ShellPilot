@@ -23,9 +23,17 @@ export type CredentialSource = 'vault' | 'keychain' | 'inline' | 'none'
 // Why a connection has no usable credential, when it names a vault entry it
 // cannot read. Surfaced so the failure says "unlock the vault" rather than
 // ssh2's "All configured authentication methods failed".
+// A marker the renderer can recognise across the IPC boundary. Electron
+// serialises a rejected handler into a plain Error whose message is prefixed
+// with "Error invoking remote method ...", so the class and its name do not
+// survive the trip — a stable token inside the message does.
+export const VAULT_LOCKED = 'SHELLPILOT_VAULT_LOCKED'
+
 export class VaultLockedError extends Error {
   constructor() {
-    super('This server authenticates with a vault credential, and the vault is locked. Unlock it and try again.')
+    super(
+      `${VAULT_LOCKED}: this server authenticates with a vault credential, and the vault is locked.`
+    )
     this.name = 'VaultLockedError'
   }
 }
