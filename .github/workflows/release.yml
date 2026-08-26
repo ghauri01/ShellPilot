@@ -11,6 +11,12 @@ on:
 permissions:
   contents: write
 
+# Re-pushing a tag, or two tags in quick succession, would otherwise run two
+# release jobs editing the same release body at once.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build ${{ matrix.os }}
@@ -92,7 +98,9 @@ jobs:
             release/*.deb
             release/*.blockmap
             release/_defender.txt
-          if-no-files-found: warn
+          # A silent no-op here would publish a release whose notes link to
+          # files that were never built.
+          if-no-files-found: error
 
   release:
     name: Publish release
@@ -275,9 +283,15 @@ jobs:
       # to and including v0.3.0 shipped with an empty body because of it —
       # downloads table, scan results, install guidance and all.
       - uses: softprops/action-gh-release@v2
+        id: gh_release
         with:
           files: artifacts/**
-          draft: false
+          # Stays invisible until the notes are confirmed on the page. Assets
+          # used to go public here and the body was set afterwards, so every
+          # way the notes step could fail left a published, watcher-notified,
+          # empty-bodied release — which the guard below could detect but not
+          # undo. A draft sends no notifications and is not /releases/latest.
+          draft: true
 
       # Set the body explicitly, then check it is actually there. A release
       # whose notes quietly vanish is worse than a failed job, because nothing
@@ -299,10 +313,35 @@ jobs:
 
           gh release edit "$TAG" --notes-file final-notes.md
 
-          LEN=$(gh release view "$TAG" --json body --jq '(.body // "") | length')
-          echo "Release body is $LEN characters."
-          if [ "$LEN" -lt 200 ]; then
-            echo "::error::Release notes did not publish (body is $LEN chars). The assets are"
-            echo "::error::uploaded but the release page is empty — fix before announcing."
+          # Check what is actually on the page, not how long it is. A length
+          # test passes on any body over the threshold, including one with none
+          # of our content in it — so it could not detect the failure it was
+          # written for. Every checksum and every download link must be there.
+          gh release view "$TAG" --json body --jq '.body // ""' > remote.md
+
+          grep -oE '[a-f0-9]{64}' final-notes.md | sort -u > expected.txt
+          grep -oE 'https://github\.com/[^)]*/releases/download/[^)]+' final-notes.md | sort -u >> expected.txt
+
+          if [ ! -s expected.txt ]; then
+            echo "::error::The generated notes contain no checksums or download links at all."
             exit 1
           fi
+
+          MISSING=0
+          while IFS= read -r token; do
+            [ -z "$token" ] && continue
+            if ! grep -qF -- "$token" remote.md; then
+              echo "::error::Missing from the published notes: $token"
+              MISSING=1
+            fi
+          done < expected.txt
+
+          if [ "$MISSING" -ne 0 ]; then
+            echo "::error::The release is still a draft, so nothing is public. Fix and re-run."
+            exit 1
+          fi
+
+          echo "Verified $(wc -l < expected.txt) checksums and links on the published page."
+
+          # Confirmed on the page. Only now does anyone see it.
+          gh release edit "$TAG" --draft=false --latest
