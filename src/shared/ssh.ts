@@ -84,6 +84,37 @@ export interface HostMetrics {
   hostname: string
   kernel: string
   cores: number
+  // null means the tool is not on the host at all — a container without
+  // systemd, or a box with neither ss nor netstat. That is a different thing
+  // from an empty list, which means the tool ran and found nothing, and the
+  // UI has to be able to tell them apart: "no failed services" and "cannot
+  // see services" are not the same answer.
+  services: ServiceUnit[] | null
+  listeners: PortListener[] | null
+  // Which probe produced the listeners, so the UI can say why the process
+  // column is empty on a host where only netstat exists and it ran unprivileged.
+  listenerSource: 'ss' | 'netstat' | null
+}
+
+// A systemd unit, as reported by `systemctl list-units`.
+export interface ServiceUnit {
+  name: string
+  // active | failed | activating | inactive
+  active: string
+  // running | exited | dead | failed
+  sub: string
+  description: string
+}
+
+// A socket in LISTEN state, from `ss` or `netstat`.
+export interface PortListener {
+  proto: string
+  address: string
+  port: number
+  // Only present when the probe ran with enough privilege to see the owner;
+  // an unprivileged user sees the socket but not whose it is.
+  process?: string
+  pid?: number
 }
 
 export interface MetricsResult {

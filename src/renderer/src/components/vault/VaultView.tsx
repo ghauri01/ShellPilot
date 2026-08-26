@@ -1,10 +1,29 @@
 import { useEffect, useState } from 'react'
-import { Copy, Eye, EyeOff, KeyRound, Lock, Plus, ShieldCheck, Trash2, Unlock } from 'lucide-react'
+import { Copy, Eye, EyeOff, Fingerprint, KeyRound, Lock, Plus, ShieldCheck, Trash2, Unlock } from 'lucide-react'
 import { useVault, newField } from '../../store/vault'
 import { toast } from '../../store/toast'
-import { VAULT_KIND_LABEL, type VaultEntry, type VaultKind } from '../../../../shared/vault'
+import { clsx } from '../../lib/format'
+import { bridgeOn } from '../../lib/bridge'
+import {
+  VAULT_KIND_LABEL,
+  VAULT_KIND_FIELDS,
+  VAULT_SECRET_LABEL,
+  hiddenFieldsFor,
+  type VaultEntry,
+  type VaultKind
+} from '../../../../shared/vault'
 
-const KINDS: VaultKind[] = ['login', 'url', 'key', 'note']
+const KINDS: VaultKind[] = ['login', 'url', 'key', 'sshkey', 'note']
+
+// Which of the built-in fields each kind actually shows. The picker used to
+// change nothing but an icon in the sidebar: every kind rendered URL, Username
+// and Password, so a Note asked for a password and an API key had nowhere
+// obvious to put the key. Name, tags, custom fields and notes are on every
+// kind and are not listed here.
+//
+// Switching kind never deletes anything. A value typed under one kind is still
+// stored, still searchable, and comes back if the kind is switched back — so
+// this only decides what is on screen, which is the one thing it should decide.
 
 function copy(label: string, value: string): void {
   if (!value) return
@@ -21,6 +40,18 @@ export function VaultView(): React.JSX.Element {
     void refresh()
   }, [refresh])
 
+  // Main locked the vault on an idle timeout. Drop the decrypted entries the
+  // renderer is holding — leaving them would make the lock cosmetic, since the
+  // plaintext lives here too.
+  useEffect(
+    () =>
+      bridgeOn('vault.onAutoLocked', window.shellpilot?.vault?.onAutoLocked, () => {
+        useVault.setState({ unlocked: false, entries: [], selectedId: null })
+        toast('Vault locked after inactivity')
+      }),
+    []
+  )
+
   if (!exists) return <VaultGate mode="create" />
   if (!unlocked) return <VaultGate mode="unlock" />
   return <VaultBrowser />
@@ -28,6 +59,13 @@ export function VaultView(): React.JSX.Element {
 
 // Create-master-password and unlock share a layout; only the copy and the
 // action differ.
+// What the platform actually calls it. Saying "Touch ID" on a Windows machine
+// would be worse than saying nothing.
+const BIO_LABEL: Record<string, string> = {
+  'touch-id': 'Touch ID',
+  'windows-hello': 'Windows Hello'
+}
+
 function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
   const create = useVault((s) => s.create)
   const unlock = useVault((s) => s.unlock)
@@ -39,9 +77,32 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
   const [confirm, setConfirm] = useState('')
   const [show, setShow] = useState(false)
 
+  const bioAvailable = useVault((s) => s.bioAvailable)
+  const bioEnabled = useVault((s) => s.bioEnabled)
+  const bioKind = useVault((s) => s.bioKind)
+  const refreshBiometrics = useVault((s) => s.refreshBiometrics)
+  const unlockWithBiometrics = useVault((s) => s.unlockWithBiometrics)
+  const canUseBio = mode === 'unlock' && bioAvailable && bioEnabled
+
+  useEffect(() => {
+    void refreshBiometrics()
+  }, [refreshBiometrics])
+
+  // Deliberately NOT fired automatically. The prompt is a gate, not a
+  // cryptographic step, and a prompt that appears unbidden every time the app
+  // opens trains people to touch the sensor without reading it — which is
+  // exactly the habit that makes a prompt worth phishing. The button is one
+  // click and says what it does.
+
   const creating = mode === 'create'
   const mismatch = creating && confirm.length > 0 && password !== confirm
-  const canSubmit = password.length >= (creating ? 8 : 1) && !mismatch && (!creating || confirm.length > 0)
+  // 12, not 8. The vault file is the thing an attacker copies, and against a
+  // stolen file the master password's length is worth more than anything the
+  // unlock UI does. Only applies to new vaults; an existing one is not forced
+  // to change on upgrade.
+  const MIN_PASSWORD = 12
+  const canSubmit =
+    password.length >= (creating ? MIN_PASSWORD : 1) && !mismatch && (!creating || confirm.length > 0)
 
   const submit = async (): Promise<void> => {
     if (!canSubmit || busy) return
@@ -64,13 +125,24 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
             : 'Enter your master password to decrypt the vault for this session.'}
         </p>
 
+        {canUseBio && (
+          <button
+            className="btn primary"
+            style={{ width: '100%', marginBottom: 10 }}
+            disabled={busy}
+            onClick={() => void unlockWithBiometrics()}
+          >
+            <Fingerprint size={15} /> Unlock with {BIO_LABEL[bioKind] ?? 'biometrics'}
+          </button>
+        )}
+
         <div className="row" style={{ gap: 6, marginTop: 4 }}>
           <input
             className="input"
             type={show ? 'text' : 'password'}
             autoFocus
             style={{ flex: 1 }}
-            placeholder={creating ? 'Master password (min 8 characters)' : 'Master password'}
+            placeholder={creating ? `Master password (min ${MIN_PASSWORD} characters)` : 'Master password'}
             value={password}
             onChange={(e) => {
               clearError()
@@ -112,7 +184,69 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
   )
 }
 
+// Remembers a decline so the offer is made once, not every unlock. A UI
+// preference, so it lives with the UI rather than in the vault file.
+const BIO_OFFER_DISMISSED = 'shellpilot.vault.bioOfferDismissed'
+
+// Offered right after a successful unlock, which is the one moment the value
+// is obvious — the user has just typed a long password and is about to do it
+// again tomorrow. A toggle in the toolbar is discoverable only by someone
+// already looking for it, which is nobody.
+function BiometricOffer(): React.JSX.Element | null {
+  const bioAvailable = useVault((s) => s.bioAvailable)
+  const bioEnabled = useVault((s) => s.bioEnabled)
+  const bioKind = useVault((s) => s.bioKind)
+  const setBiometrics = useVault((s) => s.setBiometrics)
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(BIO_OFFER_DISMISSED) === '1')
+
+  if (!bioAvailable || bioEnabled || dismissed) return null
+  const label = BIO_LABEL[bioKind] ?? 'biometrics'
+
+  const decline = (): void => {
+    localStorage.setItem(BIO_OFFER_DISMISSED, '1')
+    setDismissed(true)
+  }
+
+  return (
+    <div className="vault-bio-offer">
+      <Fingerprint size={18} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+      <div style={{ flex: 1 }}>
+        <div className="s-title">Unlock with {label} next time?</div>
+        <div className="s-desc">
+          {label} reopens the vault while ShellPilot is running. <b>Nothing extra is written to
+          disk</b> — you enter your master password once each time you start the app, and after
+          that {label} unlocks it.
+          <br />
+          Your master password is never stored, and you can turn this off at any time.
+        </div>
+      </div>
+      <button
+        className="btn sm primary"
+        onClick={() =>
+          void setBiometrics(true, 'session').then((ok) => ok && toast(`${label} unlock enabled`, 'ok'))
+        }
+      >
+        Enable
+      </button>
+      <button className="btn sm" onClick={decline}>
+        Not now
+      </button>
+    </div>
+  )
+}
+
 function VaultBrowser(): React.JSX.Element {
+  const bioAvailable = useVault((s) => s.bioAvailable)
+  const bioEnabled = useVault((s) => s.bioEnabled)
+  const bioKind = useVault((s) => s.bioKind)
+  const bioScope = useVault((s) => s.bioScope)
+  const setBiometrics = useVault((s) => s.setBiometrics)
+  const refreshBiometrics = useVault((s) => s.refreshBiometrics)
+
+  useEffect(() => {
+    void refreshBiometrics()
+  }, [refreshBiometrics])
+
   const entries = useVault((s) => s.entries)
   const selectedId = useVault((s) => s.selectedId)
   const lock = useVault((s) => s.lock)
@@ -129,6 +263,20 @@ function VaultBrowser(): React.JSX.Element {
         <b>Vault</b>
         <span className="server-meta">{entries.length} entries</span>
         <span className="spacer" />
+        {bioAvailable && (
+          <button
+            className={clsx('btn', 'sm', bioEnabled && 'active')}
+            title={
+              bioEnabled
+                ? `Stop unlocking with ${BIO_LABEL[bioKind] ?? 'biometrics'}, and delete the stored key`
+                : `Store this vault's key so ${BIO_LABEL[bioKind] ?? 'biometrics'} can unlock it`
+            }
+            onClick={() => void setBiometrics(!bioEnabled)}
+          >
+            <Fingerprint size={13} /> {BIO_LABEL[bioKind] ?? 'Biometrics'}:{' '}
+            {bioEnabled ? (bioScope === 'persistent' ? 'on, saved' : 'on, this session') : 'off'}
+          </button>
+        )}
         <button className="btn sm" onClick={() => setChanging((v) => !v)}>
           Change password
         </button>
@@ -139,6 +287,8 @@ function VaultBrowser(): React.JSX.Element {
           <Lock size={13} /> Lock
         </button>
       </div>
+
+      <BiometricOffer />
 
       {error && <div className="vault-error" style={{ margin: 12 }}>{error}</div>}
       {changing && <ChangePassword onDone={() => setChanging(false)} />}
@@ -208,6 +358,13 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
   const setField = (id: string, patch: Partial<(typeof entry.fields)[number]>): void =>
     set({ fields: entry.fields.map((f) => (f.id === id ? { ...f, ...patch } : f)) })
 
+  const shown = VAULT_KIND_FIELDS[entry.kind] ?? VAULT_KIND_FIELDS.login
+
+  // A value that belongs to a field this kind does not show is still stored and
+  // still searchable, but it is now invisible — so say so rather than let it
+  // look lost.
+  const hiddenWithValue = hiddenFieldsFor(entry)
+
   return (
     <div className="vault-editor">
       <div className="row" style={{ gap: 8 }}>
@@ -236,22 +393,54 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
         </button>
       </div>
 
-      <Row label="URL" value={entry.url} onChange={(v) => set({ url: v })} placeholder="https://…" />
-      <Row label="Username" value={entry.username} onChange={(v) => set({ username: v })} />
-      <Row
-        label="Password"
-        value={entry.password}
-        onChange={(v) => set({ password: v })}
-        secret
-        revealed={!!revealed.__pw}
-        onReveal={() => toggle('__pw')}
-      />
+      {shown.url && (
+        <Row label="URL" value={entry.url} onChange={(v) => set({ url: v })} placeholder="https://…" />
+      )}
+      {shown.username && (
+        <Row label="Username" value={entry.username} onChange={(v) => set({ username: v })} />
+      )}
+      {shown.keys && (
+        <>
+          <Multiline
+            label="Private key"
+            value={entry.privateKey ?? ''}
+            onChange={(v) => set({ privateKey: v })}
+            placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…'}
+            secret
+            revealed={!!revealed.__privkey}
+            onReveal={() => toggle('__privkey')}
+          />
+          <Multiline
+            label="Public key"
+            value={entry.publicKey ?? ''}
+            onChange={(v) => set({ publicKey: v })}
+            placeholder="ssh-ed25519 AAAA… user@host"
+          />
+        </>
+      )}
+      {shown.secret && (
+        <Row
+          label={VAULT_SECRET_LABEL[shown.secret]}
+          value={entry.password}
+          onChange={(v) => set({ password: v })}
+          secret
+          revealed={!!revealed.__pw}
+          onReveal={() => toggle('__pw')}
+        />
+      )}
       <Row
         label="Tags"
         value={entry.tags.join(', ')}
         onChange={(v) => set({ tags: v.split(',').map((t) => t.trim()).filter(Boolean) })}
         placeholder="prod, aws"
       />
+
+      {hiddenWithValue.length > 0 && (
+        <div className="s-desc" style={{ marginTop: 8 }}>
+          This entry also has a stored {hiddenWithValue.join(' and ')}, kept but not shown for a{' '}
+          {VAULT_KIND_LABEL[entry.kind].toLowerCase()}. Switch the type back to see it.
+        </div>
+      )}
 
       <div className="vault-section-title">
         Custom fields
@@ -313,6 +502,56 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
 
       <div className="faint" style={{ fontSize: 11 }}>
         Updated {new Date(entry.updatedAt).toLocaleString()}
+      </div>
+    </div>
+  )
+}
+
+// PEM material is many lines long and unusable in a single-line input, which
+// is why storing the key itself was never practical before.
+function Multiline({
+  label,
+  value,
+  onChange,
+  placeholder,
+  secret,
+  revealed,
+  onReveal
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  secret?: boolean
+  revealed?: boolean
+  onReveal?: () => void
+}): React.JSX.Element {
+  const masked = secret && !revealed && value.length > 0
+  return (
+    <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
+      <span className="vault-label" style={{ paddingTop: 8 }}>
+        {label}
+      </span>
+      <textarea
+        className="input mono"
+        style={{ flex: 1, minHeight: 96, resize: 'vertical', lineHeight: 1.4 }}
+        spellCheck={false}
+        placeholder={placeholder}
+        // A revealed key is shown verbatim; a hidden one shows its shape, so
+        // you can tell an entry holds a key without exposing it on screen.
+        value={masked ? `${value.split('\n').length} lines hidden` : value}
+        readOnly={masked}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <div className="col" style={{ gap: 4 }}>
+        {secret && (
+          <button className="icon-btn sm" title="Reveal" onClick={onReveal}>
+            {revealed ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+        )}
+        <button className="icon-btn sm" title={`Copy ${label.toLowerCase()}`} onClick={() => copy(label, value)}>
+          <Copy size={14} />
+        </button>
       </div>
     </div>
   )

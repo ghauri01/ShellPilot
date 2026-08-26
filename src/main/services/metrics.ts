@@ -1,6 +1,6 @@
 import type { Client } from 'ssh2'
 import { acquire, release, type PooledConnection } from './ssh'
-import type { HostMetrics, MetricsResult, SshConnectConfig } from '../../shared/ssh'
+import type { HostMetrics, MetricsResult, PortListener, ServiceUnit, SshConnectConfig } from '../../shared/ssh'
 
 interface Conn {
   conn: PooledConnection
@@ -59,8 +59,26 @@ const script = (withSleep: boolean): string => [
   'echo __KERN__',
   'uname -r',
   'echo __CORES__',
-  'nproc'
+  'nproc',
+  // Both of these are absent on plenty of hosts — a container without systemd,
+  // a box with neither ss nor netstat — so each is guarded and simply produces
+  // an empty section rather than an error that would spoil the whole sample.
+  // The marker line records which probe ran, because it changes how the output
+  // parses and what the UI can honestly claim.
+  'echo __SVC__',
+  "command -v systemctl >/dev/null 2>&1 && systemctl list-units --type=service --state=running,failed --no-pager --no-legend --plain 2>/dev/null | head -" + String(MAX_SERVICES),
+  'echo __PORTS__',
+  // ss is preferred: it is present on anything modern, and netstat is
+  // deprecated and absent by default on many distributions now.
+  "if command -v ss >/dev/null 2>&1; then echo 'src:ss'; ss -lntupH 2>/dev/null | head -" + String(MAX_LISTENERS) +
+    "; elif command -v netstat >/dev/null 2>&1; then echo 'src:netstat'; netstat -lntup 2>/dev/null | head -" + String(MAX_LISTENERS) + '; fi'
 ].join('; ')
+
+// A busy host can run hundreds of units and listen on as many sockets. These
+// are polled continuously, so the sample is capped rather than allowed to grow
+// without limit — the UI says when it truncated.
+const MAX_SERVICES = 80
+const MAX_LISTENERS = 120
 
 const CMD = script(false)
 const CMD_FIRST = script(true)
@@ -71,6 +89,89 @@ function section(text: string, name: string): string[] {
   const rest = parts[1]
   const end = rest.search(/__[A-Z]+__/)
   return (end === -1 ? rest : rest.slice(0, end)).trim().split('\n').filter(Boolean)
+}
+
+// `systemctl list-units --plain --no-legend` gives:
+//   nginx.service loaded active running A high performance web server
+// Bullet-prefixed lines (● for failed) survive --plain on some versions, so
+// the leading marker is stripped rather than assumed absent.
+export function parseServices(lines: string[]): ServiceUnit[] {
+  const out: ServiceUnit[] = []
+  for (const raw of lines) {
+    const line = raw.replace(/^[●*✓✗\s]+/, '').trim()
+    if (!line) continue
+    const parts = line.split(/\s+/)
+    if (parts.length < 4) continue
+    const [name, , active, sub, ...rest] = parts
+    if (!name.endsWith('.service')) continue
+    out.push({ name: name.replace(/\.service$/, ''), active, sub, description: rest.join(' ') })
+  }
+  return out
+}
+
+// Splits "0.0.0.0:22", "[::]:22" and "*:22" into address and port. Taking the
+// last colon rather than the first is what makes IPv6 work.
+export function splitEndpoint(text: string): { address: string; port: number } | null {
+  const i = text.lastIndexOf(':')
+  if (i === -1) return null
+  const port = Number(text.slice(i + 1))
+  if (!Number.isFinite(port) || port <= 0) return null
+  const address = text.slice(0, i).replace(/^\[|\]$/g, '') || '*'
+  // 0.0.0.0, :: and * all mean "every interface". Reported as one thing so a
+  // dual-stack listener reads as the single service it is, rather than as two
+  // rows that differ only in address family.
+  return { address: address === '0.0.0.0' || address === '::' ? '*' : address, port }
+}
+
+// users:(("sshd",pid=1234,fd=3))  →  { process: 'sshd', pid: 1234 }
+export function parseSsUsers(text: string): { process?: string; pid?: number } {
+  const m = /users:\(\("([^"]+)",pid=(\d+)/.exec(text)
+  return m ? { process: m[1], pid: Number(m[2]) } : {}
+}
+
+export function parseListeners(lines: string[]): { listeners: PortListener[]; source: 'ss' | 'netstat' | null } {
+  const first = lines[0]?.trim()
+  const source = first === 'src:ss' ? 'ss' : first === 'src:netstat' ? 'netstat' : null
+  if (!source) return { listeners: [], source: null }
+
+  const out: PortListener[] = []
+  const seen = new Set<string>()
+  for (const line of lines.slice(1)) {
+    const parts = line.trim().split(/\s+/)
+    if (parts.length < 4) continue
+
+    let proto: string
+    let endpoint: string
+    let owner: { process?: string; pid?: number }
+
+    if (source === 'ss') {
+      // tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=1,fd=3))
+      proto = parts[0]
+      // udp rows have no LISTEN state, so the local address is found by
+      // position from the end of the fixed columns rather than a fixed index.
+      endpoint = parts[4] ?? ''
+      owner = parseSsUsers(line)
+    } else {
+      // tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN 1234/sshd
+      proto = parts[0]
+      endpoint = parts[3] ?? ''
+      const prog = parts.find((p) => /^\d+\/\S+$/.test(p))
+      const m = prog ? /^(\d+)\/(.+)$/.exec(prog) : null
+      owner = m ? { pid: Number(m[1]), process: m[2] } : {}
+      if (!/LISTEN/.test(line) && !proto.startsWith('udp')) continue
+    }
+
+    const split = splitEndpoint(endpoint)
+    if (!split) continue
+    // With wildcards normalised, the v4 and v6 rows of a dual-stack listener
+    // collapse to one — which is what a reader wants to see.
+    const dedupe = `${proto}|${split.address}|${split.port}`
+    if (seen.has(dedupe)) continue
+    seen.add(dedupe)
+    out.push({ proto: proto.replace(/6$/, ''), ...split, ...owner })
+  }
+  out.sort((a, b) => a.port - b.port || a.proto.localeCompare(b.proto))
+  return { listeners: out, source }
 }
 
 interface CpuSnap {
@@ -129,6 +230,15 @@ function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: C
   const kernel = section(text, 'KERN')[0] ?? ''
   const cores = parseInt(section(text, 'CORES')[0] ?? '1') || 1
 
+  const svcLines = section(text, 'SVC')
+  // The guard in the script means a host without systemd emits nothing here at
+  // all, which is indistinguishable from systemd running no matching units —
+  // so presence of the section header is not enough. A running host always has
+  // at least one running unit, so an empty section on a systemd host is
+  // vanishingly unlikely; treat lines-present as the signal and say so.
+  const hasSystemd = svcLines.length > 0
+  const { listeners, source: listenerSource } = parseListeners(section(text, 'PORTS'))
+
   const data: HostMetrics = {
     cpu,
     memPct: memTotal ? (memUsed / memTotal) * 100 : 0,
@@ -142,7 +252,12 @@ function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: C
     uptime,
     hostname,
     kernel,
-    cores
+    cores,
+    // An absent section means the tool is not on the host; an empty one means
+    // it ran and found nothing. Only the former becomes null.
+    services: svcLines.length > 0 ? parseServices(svcLines) : hasSystemd ? [] : null,
+    listeners: listenerSource ? listeners : null,
+    listenerSource
   }
   return { data, snap: latest }
 }

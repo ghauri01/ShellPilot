@@ -47,7 +47,7 @@ another MCP client. For the short pitch and the security summary, see the
 
 ## The MCP server
 
-`src/main/services/mcpServer.ts` registers **9 tools**:
+`src/main/services/mcpServer.ts` registers **13 tools**:
 
 | Tool | Capability gating it | What it returns |
 |---|---|---|
@@ -60,6 +60,10 @@ another MCP client. For the short pitch and the security summary, see the
 | `list_files` | `readFiles` + `sftpDownload` (+ file path rules) | Directory listing |
 | `get_server_metrics` | `serverMetrics` | CPU/memory/disk/uptime |
 | `add_server` | `manageServers`, resolved on the **workspace** | The name the new connection was saved under |
+| `list_databases` | `viewServer` | Friendly names and engines, never a host or credential |
+| `query_database` | `databaseAccess` for reads; `+ writeFiles` and always ASK for anything that writes | Rows, capped |
+| `list_tunnels` | `sshTunnel` | Configured tunnels and whether each is running |
+| `set_tunnel` | `sshTunnel`, always ASK to start | Confirmation, with the bound port |
 
 Each tool carries a `title`, an MCP annotation set (`readOnlyHint`, `destructiveHint`,
 `openWorldHint`) and a description of every parameter, and the server sends `instructions` on
@@ -78,6 +82,25 @@ This is best-effort by design: only absolute paths and only recognised commands,
 relative operand cannot be matched against a pattern without knowing the remote working directory.
 `cd /root/.ssh && cat id_rsa` still gets through. It closes the direct form and can only ever
 narrow a decision, never widen one.
+
+### Databases and tunnels
+
+`query_database` classifies the statement before running it. Reads are governed by
+`databaseAccess` alone; anything that modifies data or schema is additionally bounded by
+`writeFiles` — a group whose point is that it cannot change anything should not be able to change
+a row either — and can never resolve better than ASK. That clamp exists because `databaseAccess`
+defaults to ALLOW in every built-in group, so honouring it plainly would have handed a Full Access
+agent a silent `DROP TABLE`.
+
+A read cannot smuggle a write behind a semicolon, comments cannot hide the verb, and an
+unrecognised verb counts as a write: there are too many dialects to enumerate and guessing
+"harmless" is the expensive direction to be wrong in. Mongo shell syntax is classified separately,
+since `db.users.find({})` leads with the collection rather than the verb.
+
+`set_tunnel` can only start or stop a tunnel the user has already defined — it cannot create one or
+change where an existing one points. Starting always requires approval whatever the group says,
+because it binds a listening port on the user's own machine. Stopping does not, being the safe
+direction.
 
 ### `add_server`
 
@@ -108,9 +131,8 @@ Descriptions are written to route an agent to the narrowest tool that does the j
 cannot be added without it.
 
 There is no `vault` tool. The MCP server has no code path into the Vault at all — an AI session
-cannot read a Vault entry no matter what access group it holds. There are no tunnel or database
-tools either; the `sshTunnel` and `databaseAccess` capabilities exist in the access-group model but
-nothing is gated on them yet.
+cannot read a Vault entry no matter what access group it holds, including when a server's
+credential is stored there.
 
 The server also exposes two unauthenticated bootstrap endpoints used only by the CLI pairing flow:
 `POST /pair/start` and `POST /pair/confirm` (see [Pairing](#the-shellpilot-cli-and-pairing) below).

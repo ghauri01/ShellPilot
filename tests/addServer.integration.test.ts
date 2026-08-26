@@ -4,7 +4,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 import { refreshMcpDataCache } from '../src/main/services/mcpDataCache'
 import { setAssignment, resetPolicyCacheForTests } from '../src/main/services/policyStore'
-import { setMcpConfig, createSession, setSessionGroup, listSessions, resetMcpAuthForTests } from '../src/main/services/mcpAuth'
+import { setMcpConfig, createSession, revokeSession, setSessionGroup, listSessions, resetMcpAuthForTests } from '../src/main/services/mcpAuth'
 import { startMcpServer, stopMcpServer, explainSessionAccess } from '../src/main/services/mcpServer'
 import { onApprovalEvent, respondToApproval } from '../src/main/services/approvals'
 import { listAudit } from '../src/main/services/auditLog'
@@ -319,6 +319,35 @@ describe('making the model legible', () => {
       expect(await call(c, { name: 'After Raise', host: '10.0.0.21' })).toContain('Added "After Raise"')
     } finally {
       stop()
+      await c.close()
+    }
+  })
+})
+
+describe('auth failures point at the half of the fix that works', () => {
+  it('tells a revoked client to re-register, not just to make a session', async () => {
+    // The reported loop: revoke, create a new session, restart the client,
+    // identical error — because the client still holds the dead token.
+    const { session, token } = createSession({
+      agentName: 'Revoked One',
+      workspaces: [{ id: 'ws-prod', name: 'Production' }],
+      groupId: 'grp-full',
+      groupName: 'Full Access',
+      ttlMinutes: null
+    })
+    revokeSession(session.id)
+
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${PORT}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } }
+    })
+    const c = new Client({ name: 'revoked-test', version: '1.0.0' })
+    await c.connect(transport)
+    try {
+      const out = await call(c, { name: 'Nope', host: '10.0.0.30' })
+      expect(out).toContain('revoked')
+      expect(out).toContain('not enough on its own')
+      expect(out).toContain('Connect')
+    } finally {
       await c.close()
     }
   })

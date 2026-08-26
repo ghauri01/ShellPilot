@@ -5,6 +5,7 @@ import { useApp } from '../../store/app'
 import { RouteHops } from './RouteHops'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
+import { useVault } from '../../store/vault'
 import type { AuthMethod, Hop } from '../../types'
 
 const AUTH: { id: AuthMethod; label: string; icon: React.ReactNode }[] = [
@@ -29,6 +30,9 @@ export function AddServerModal(): React.JSX.Element {
   const [username, setUsername] = useState(existing?.username ?? 'root')
   const [auth, setAuth] = useState<AuthMethod>(existing?.auth ?? 'key')
   const [keyPath, setKeyPath] = useState('')
+  // '' means "enter a new one"; anything else is a vault entry id.
+  const [vaultEntryId, setVaultEntryId] = useState('')
+  const [saveToVault, setSaveToVault] = useState(true)
   const [foundKeys, setFoundKeys] = useState<
     { path: string; fileName: string; algorithm: string | null; encrypted: boolean }[]
   >([])
@@ -41,6 +45,17 @@ export function AddServerModal(): React.JSX.Element {
   const [hostKeyCheck, setHostKeyCheck] = useState(true)
   const [timeout, setTimeoutV] = useState('15')
   const [env, setEnv] = useState('')
+
+  const vaultUnlocked = useVault((s) => s.unlocked)
+  const vaultEntries = useVault((s) => s.entries)
+  const createVaultEntry = useVault((s) => s.createEntry)
+
+  // A credential is only offered for the method it can actually satisfy: a
+  // password entry cannot authenticate a key connection, and vice versa.
+  const usableEntries = vaultEntries.filter((e) =>
+    auth === 'key' ? !!e.privateKey : auth === 'password' ? !!e.password && !e.privateKey : false
+  )
+  const usingVault = vaultUnlocked && vaultEntryId !== ''
 
   const valid = name.trim() && host.trim()
 
@@ -69,15 +84,33 @@ export function AddServerModal(): React.JSX.Element {
     }
     const id = editId ? (updateServer(editId, fields), editId) : addServer(fields)
 
-    // Credentials live in OS secure storage, keyed by server id. On an edit,
-    // blank fields mean "leave what is already stored alone".
-    const secret =
-      auth === 'password'
-        ? { password }
-        : auth === 'key'
-          ? { keyPath: keyPath.trim() || undefined, passphrase: passphrase || undefined }
-          : null
-    if (secret && (secret.password || secret.keyPath)) {
+    // What gets stored against the server is a reference wherever possible.
+    // A credential in the vault is one record — reusable across every server
+    // that uses it, and changed in one place when it rotates — whereas a copy
+    // per server is what makes rotation a hunt.
+    let secret: Record<string, string | undefined> | null = null
+
+    if (usingVault) {
+      secret = { vaultEntryId }
+    } else if (auth === 'password' && password) {
+      secret = saveToVault && vaultUnlocked ? null : { password }
+      if (!secret) {
+        const entryId = await createVaultEntry('login', {
+          name: `${fields.name} (${fields.username})`,
+          username: fields.username,
+          password,
+          tags: ['server']
+        })
+        // Falling back to the keychain beats losing the credential the user
+        // just typed because the vault write failed.
+        secret = entryId ? { vaultEntryId: entryId } : { password }
+        if (!entryId) toast('Could not save to the vault — kept in OS secure storage', 'error')
+      }
+    } else if (auth === 'key' && keyPath.trim()) {
+      secret = { keyPath: keyPath.trim(), passphrase: passphrase || undefined }
+    }
+
+    if (secret) {
       const ok = await window.shellpilot?.secrets.set(id, JSON.stringify(secret))
       if (ok === false) toast('OS secure storage unavailable — credentials not saved', 'error')
     }
@@ -148,7 +181,36 @@ export function AddServerModal(): React.JSX.Element {
         </div>
       </div>
 
-      {auth === 'key' && (
+      {auth !== 'agent' && vaultUnlocked && usableEntries.length > 0 && (
+        <div className="field">
+          <label className="field-label">Credential</label>
+          <select className="input" value={vaultEntryId} onChange={(e) => setVaultEntryId(e.target.value)}>
+            <option value="">Enter a new one…</option>
+            {usableEntries.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.name}
+                {e.username ? ` — ${e.username}` : ''}
+              </option>
+            ))}
+          </select>
+          <span className="field-hint">
+            {usingVault
+              ? 'This server will reference the vault entry. Change the credential there and every server using it follows.'
+              : 'Reuse a credential you have already saved, or type a new one below.'}
+          </span>
+        </div>
+      )}
+
+      {auth !== 'agent' && vaultUnlocked && usableEntries.length === 0 && (
+        <div className="field">
+          <span className="field-hint">
+            No saved {auth === 'key' ? 'SSH key' : 'login'} in the vault yet — type one below and it
+            will be saved there.
+          </span>
+        </div>
+      )}
+
+      {auth === 'key' && !usingVault && (
         <div className="field">
           <label className="field-label">Private key</label>
           <div className="input-group">
@@ -193,7 +255,7 @@ export function AddServerModal(): React.JSX.Element {
         </div>
       )}
 
-      {auth === 'password' && (
+      {auth === 'password' && !usingVault && (
         <div className="field">
           <label className="field-label">Password</label>
           <input
@@ -203,7 +265,17 @@ export function AddServerModal(): React.JSX.Element {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
-          <span className="field-hint">Encrypted with the OS keychain.</span>
+          {vaultUnlocked ? (
+            <label className="field-hint row" style={{ gap: 6, cursor: 'pointer', marginTop: 6 }}>
+              <input type="checkbox" checked={saveToVault} onChange={(e) => setSaveToVault(e.target.checked)} />
+              Save this to the vault as a reusable credential
+            </label>
+          ) : (
+            <span className="field-hint">
+              Encrypted with the OS keychain. Unlock the vault first to save it as a reusable
+              credential instead.
+            </span>
+          )}
         </div>
       )}
 

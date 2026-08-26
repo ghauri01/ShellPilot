@@ -56,7 +56,7 @@ import { checkForUpdates, getUpdaterStatus, onUpdaterStatus, installUpdate, open
 import { parseSshConfig } from '../shared/sshconfig'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
-import { resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
+import { resolveDbSecrets, resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
 import { refreshMcpDataCache, listCachedWorkspaces, listCachedServers } from './services/mcpDataCache'
 import {
   listGroups,
@@ -85,6 +85,16 @@ import { onCliPairingEvent, cancelCliPairing } from './services/cliPairing'
 import { claudeCodeCommand, writeClaudeDesktopConfig, writeCodexConfig } from './services/clientConfig'
 import { setAgentServerCreator, type AgentServerRequest, type AgentServerResult } from './services/agentServerCreate'
 import { listDefaultKeys, sshDir } from './services/sshKeys'
+import { setVaultAutoLock } from './services/vault'
+import {
+  biometricSupport,
+  biometricEnabled,
+  biometricScope,
+  enableBiometricUnlock,
+  disableBiometricUnlock,
+  forgetSessionKey,
+  biometricUnlock
+} from './services/biometrics'
 import { listAudit } from './services/auditLog'
 import { startMcpServer, stopMcpServer, mcpServerStatus, explainSessionAccess } from './services/mcpServer'
 
@@ -388,28 +398,10 @@ ipcMain.handle('metrics:sample', (_e, key: string, cfg: SshConnectConfig & { ser
 ipcMain.handle('metrics:disconnect', (_e, key: string) => metricsDisconnect(key))
 
 // ---- Databases ----
-function withDbSecret(cfg: DbConnectConfig): DbConnectConfig {
-  if (!cfg.password && !cfg.uri) {
-    const raw = getSecret(cfg.id)
-    if (raw) {
-      try {
-        const b = JSON.parse(raw) as { password?: string; uri?: string }
-        cfg.password = b.password
-        cfg.uri = b.uri
-      } catch {
-        cfg.password = raw // legacy plain-password secret
-      }
-    }
-  }
-  // The jump host's own credentials live in the same encrypted store, keyed by
-  // the server id.
-  if (cfg.ssh) cfg.ssh = resolveChainSecrets({ ...cfg.ssh })
-  return cfg
-}
-ipcMain.handle('db:test', (_e, cfg: DbConnectConfig) => dbTest(withDbSecret(cfg)))
-ipcMain.handle('db:query', (_e, cfg: DbConnectConfig, text: string) => dbQuery(withDbSecret(cfg), text))
-ipcMain.handle('db:info', (_e, cfg: DbConnectConfig) => dbInfo(withDbSecret(cfg)))
-ipcMain.handle('db:shell', (_e, cfg: DbConnectConfig, line: string) => dbShell(withDbSecret(cfg), line))
+ipcMain.handle('db:test', (_e, cfg: DbConnectConfig) => dbTest(resolveDbSecrets(cfg)))
+ipcMain.handle('db:query', (_e, cfg: DbConnectConfig, text: string) => dbQuery(resolveDbSecrets(cfg), text))
+ipcMain.handle('db:info', (_e, cfg: DbConnectConfig) => dbInfo(resolveDbSecrets(cfg)))
+ipcMain.handle('db:shell', (_e, cfg: DbConnectConfig, line: string) => dbShell(resolveDbSecrets(cfg), line))
 ipcMain.handle('db:close', (_e, id: string) => dbClose(id))
 
 // ---- SSH config import ----
@@ -481,13 +473,47 @@ ipcMain.handle('tunnel:list', () => tunnelList())
 ipcMain.handle('vault:status', () => vaultStatus())
 ipcMain.handle('vault:create', (_e, password: string) => vaultCreate(password))
 ipcMain.handle('vault:unlock', (_e, password: string) => vaultUnlock(password))
-ipcMain.handle('vault:lock', () => vaultLock())
+// Auto-lock needs the renderer told, or the UI keeps showing an unlocked vault
+// it can no longer read. The biometric session key goes with it.
+setVaultAutoLock(15, () => {
+  forgetSessionKey()
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('vault:auto-locked')
+})
+
+ipcMain.handle('vault:lock', () => {
+  // A session-scoped biometric key must not outlive the unlocked state, or
+  // "lock" would not mean locked.
+  forgetSessionKey()
+  return vaultLock()
+})
 ipcMain.handle('vault:list', () => vaultList())
 ipcMain.handle('vault:save', (_e, entries: VaultEntry[]) => vaultSave(entries))
-ipcMain.handle('vault:change-password', (_e, current: string, next: string) =>
-  vaultChangePassword(current, next)
+// The stored biometric key was derived from the old password and cannot open
+// the re-encrypted vault, so it is cleared here rather than left to fail on
+// the next unlock. The renderer re-reads bio-enabled after this and tells the
+// user to set it up again.
+ipcMain.handle('vault:change-password', async (_e, current: string, next: string) => {
+  const result = await vaultChangePassword(current, next)
+  if (result.ok) disableBiometricUnlock()
+  return result
+})
+ipcMain.handle('vault:destroy', () => {
+  // A stored biometric key opens a vault that no longer exists; leaving it
+  // behind is dead material on disk.
+  disableBiometricUnlock()
+  return vaultDestroy()
+})
+
+// ---- Vault: biometric unlock ----
+ipcMain.handle('vault:bio-support', () => biometricSupport())
+ipcMain.handle('vault:bio-enabled', () => biometricEnabled())
+ipcMain.handle('vault:bio-enable', (_e, scope: 'session' | 'persistent' = 'session') =>
+  enableBiometricUnlock(scope)
 )
-ipcMain.handle('vault:destroy', () => vaultDestroy())
+ipcMain.handle('vault:bio-scope', () => biometricScope())
+ipcMain.handle('vault:set-auto-lock', (_e, minutes: number) => setVaultAutoLock(minutes))
+ipcMain.handle('vault:bio-disable', () => disableBiometricUnlock())
+ipcMain.handle('vault:bio-unlock', () => biometricUnlock())
 
 // ---- Workspace locks ----
 ipcMain.handle('wslock:ids', () => wsLockIds())

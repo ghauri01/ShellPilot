@@ -218,7 +218,21 @@ const api = {
     save: (entries: VaultEntry[]): Promise<VaultResult> => ipcRenderer.invoke('vault:save', entries),
     changePassword: (current: string, next: string): Promise<VaultResult> =>
       ipcRenderer.invoke('vault:change-password', current, next),
-    destroy: (): Promise<VaultResult> => ipcRenderer.invoke('vault:destroy')
+    destroy: (): Promise<VaultResult> => ipcRenderer.invoke('vault:destroy'),
+    bioSupport: (): Promise<{ available: boolean; kind: string; reason?: string }> =>
+      ipcRenderer.invoke('vault:bio-support'),
+    bioEnabled: (): Promise<boolean> => ipcRenderer.invoke('vault:bio-enabled'),
+    bioEnable: (scope: 'session' | 'persistent' = 'session'): Promise<VaultResult> =>
+      ipcRenderer.invoke('vault:bio-enable', scope),
+    bioScope: (): Promise<'session' | 'persistent' | null> => ipcRenderer.invoke('vault:bio-scope'),
+    setAutoLock: (minutes: number): Promise<void> => ipcRenderer.invoke('vault:set-auto-lock', minutes),
+    onAutoLocked: (cb: () => void): (() => void) => {
+      const h = (): void => cb()
+      ipcRenderer.on('vault:auto-locked', h)
+      return () => ipcRenderer.removeListener('vault:auto-locked', h)
+    },
+    bioDisable: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-disable'),
+    bioUnlock: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-unlock')
   },
   workspaceLock: {
     ids: (): Promise<string[]> => ipcRenderer.invoke('wslock:ids'),

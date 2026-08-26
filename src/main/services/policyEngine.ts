@@ -329,3 +329,107 @@ export function evaluateFilePath(
   }
   return blanket
 }
+
+
+// Database statements, classified the way commands already are.
+//
+// databaseAccess defaults to ALLOW in every built-in group, because until now
+// nothing was gated on it. Shipping a query tool that simply honoured that
+// would hand a Full Access agent a silent DROP TABLE, so this follows the rule
+// the codebase already applies to sudo: the dangerous form is never granted
+// silently, whatever the group says.
+//
+// Reads are governed by databaseAccess alone. Anything that writes is also
+// bounded by writeFiles — a group whose whole point is that it cannot change
+// anything should not be able to change a row either — and can never resolve
+// better than ASK.
+export type StatementKind = 'read' | 'mutating' | 'destructive'
+
+const DESTRUCTIVE = /^(drop|truncate|alter|create|rename|grant|revoke|flushall|flushdb|shutdown)\b/
+const MUTATING =
+  /^(insert|update|delete|replace|merge|upsert|copy|load|call|do|set|del|unlink|expire|rpush|lpush|sadd|hset|incr|decr|append|getset|move|migrate|restore|persist)\b/
+const READ = /^(select|show|explain|describe|desc|with|values|table|analyze|get|mget|keys|scan|type|ttl|exists|llen|lrange|smembers|hget|hgetall|zrange|info|dbsize|find|aggregate|count|distinct|list)\b/
+
+// Strips leading comments and parenthesised prefixes so the verb is the first
+// thing tested, and splits on ; so a read cannot smuggle a write behind one.
+function statements(sql: string): string[] {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--[^\n]*/g, ' ')
+    .split(';')
+    .map((s) => s.trim().replace(/^\(+/, '').trim().toLowerCase())
+    .filter(Boolean)
+}
+
+// Mongo shell statements lead with the collection, not the verb —
+// db.users.find({}) — so the leading-verb tests never see the operation.
+const MONGO = /^db\.(?:getcollection\(['"]?[\w.$-]+['"]?\)|[\w.$-]+)\.(\w+)\s*\(/
+const MONGO_READ = new Set([
+  'find', 'findone', 'aggregate', 'count', 'countdocuments', 'estimateddocumentcount',
+  'distinct', 'getindexes', 'stats', 'explain', 'watch'
+])
+const MONGO_DESTRUCTIVE = new Set(['drop', 'dropindex', 'dropindexes', 'renamecollection'])
+
+function classifyMongo(s: string): StatementKind | null {
+  if (/^db\.dropdatabase\s*\(/.test(s)) return 'destructive'
+  const m = MONGO.exec(s)
+  if (!m) return null
+  const method = m[1].toLowerCase()
+  if (MONGO_DESTRUCTIVE.has(method)) return 'destructive'
+  return MONGO_READ.has(method) ? 'read' : 'mutating'
+}
+
+export function classifyStatement(sql: string): StatementKind {
+  let worst: StatementKind = 'read'
+  for (const s of statements(sql)) {
+    const mongo = classifyMongo(s)
+    if (mongo === 'destructive') return 'destructive'
+    if (mongo === 'mutating') {
+      worst = 'mutating'
+      continue
+    }
+    if (mongo === 'read') continue
+
+    if (DESTRUCTIVE.test(s)) return 'destructive'
+    if (MUTATING.test(s)) worst = 'mutating'
+    // An unrecognised verb is treated as mutating rather than read. There are
+    // far too many dialects to enumerate, and guessing "harmless" is the
+    // expensive direction to be wrong in.
+    else if (!READ.test(s)) worst = worst === 'read' ? 'mutating' : worst
+  }
+  return worst
+}
+
+export function evaluateDatabaseStatement(group: AccessGroup | null, sql: string): Decision {
+  if (!group) return { decision: 'deny', reason: 'No AI access is assigned to this workspace.' }
+
+  const access = evaluateCapability(group, 'databaseAccess')
+  if (access.decision === 'deny') return { decision: 'deny', reason: 'Database access is denied for this access group.' }
+
+  const kind = classifyStatement(sql)
+  if (kind === 'read') return access
+
+  const write = evaluateCapability(group, 'writeFiles')
+  if (write.decision === 'deny') {
+    return {
+      decision: 'deny',
+      reason: `This statement ${kind === 'destructive' ? 'changes schema or permissions' : 'modifies data'}, and this access group cannot write.`
+    }
+  }
+  const combined = mostRestrictive(access, write)
+  // Never silently: a write or a DDL always surfaces an approval prompt.
+  return combined.decision === 'allow'
+    ? { decision: 'ask', reason: `Statements that ${kind === 'destructive' ? 'change schema or permissions' : 'modify data'} always require approval.` }
+    : combined
+}
+
+// Opening a tunnel binds a listener on the user's own machine, so it gets the
+// same treatment: bounded by sshTunnel and never granted silently.
+export function evaluateTunnelOpen(group: AccessGroup | null): Decision {
+  if (!group) return { decision: 'deny', reason: 'No AI access is assigned to this workspace.' }
+  const tunnel = evaluateCapability(group, 'sshTunnel')
+  if (tunnel.decision === 'deny') return { decision: 'deny', reason: 'SSH tunnels are denied for this access group.' }
+  return tunnel.decision === 'allow'
+    ? { decision: 'ask', reason: 'Opening a tunnel binds a port on your machine and always requires approval.' }
+    : tunnel
+}

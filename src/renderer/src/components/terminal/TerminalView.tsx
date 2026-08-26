@@ -11,6 +11,7 @@ import { runShortcut } from '../../hooks/useHotkeys'
 import { sshHopsFor } from '../../lib/ssh'
 import type { Server } from '../../types'
 import type { SshAuth, SshCloseInfo } from '../../../../shared/ssh'
+import { withVaultUnlock } from '../../lib/withVaultUnlock'
 
 function themeFromCss(): Record<string, string> {
   const css = getComputedStyle(document.documentElement)
@@ -319,16 +320,26 @@ function useRealSession(
     })
 
     setServerStatus(server.id, 'connecting')
-    void bridge?.ssh.connect({
-      sessionId,
-      serverId: server.id,
-      host: server.host,
-      port: server.port,
-      username: server.username,
-      auth: asAuth(server.auth),
-      cols: term.cols,
-      rows: term.rows,
-      hops
+    // A credential kept in the vault is unreadable while the vault is locked.
+    // Rather than failing with instructions to go and unlock it and start
+    // again, ask here and carry straight on.
+    void withVaultUnlock(`Connecting to ${server.name}`, () =>
+      Promise.resolve(
+        bridge?.ssh.connect({
+          sessionId,
+          serverId: server.id,
+          host: server.host,
+          port: server.port,
+          username: server.username,
+          auth: asAuth(server.auth),
+          cols: term.cols,
+          rows: term.rows,
+          hops
+        })
+      )
+    ).catch((err) => {
+      setServerStatus(server.id, 'offline')
+      setDead(`Session closed · ${err instanceof Error ? err.message : String(err)}`)
     })
 
     const onInput = term.onData((d) => bridge?.ssh.write(sessionId, d))

@@ -44,6 +44,10 @@ export interface AppSettings {
   // Minutes an authenticated SSH connection is kept alive after its last
   // session closes. 0 = close at once, -1 = keep until the app exits.
   sshMasterIdleMinutes: number
+  // Minutes of vault inactivity before it locks itself. 0 = never. A vault that
+  // never locks makes every other protection on it optional, so the default is
+  // deliberately short rather than off.
+  vaultAutoLockMinutes: number
   // Terminal font size in pixels, adjusted with Ctrl +/- and Ctrl+wheel.
   terminalFontSize: number
   // Host metrics docked under the terminal.
@@ -69,6 +73,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   lastBackupAt: null,
   switchHiddenWorkspaces: false,
   sshMasterIdleMinutes: 15,
+  vaultAutoLockMinutes: 15,
   terminalFontSize: 13,
   showMonitorStrip: false,
   resourceAlertsEnabled: true,

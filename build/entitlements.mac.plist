@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Unused until a Developer ID certificate exists; electron-builder.yml
+    references it only when hardenedRuntime is turned on. Written now so
+    enabling signing is a configuration change rather than a research task.
+
+    Library validation must be disabled: asarUnpack deliberately keeps the ssh2
+    and cpu-features .node binaries outside the archive, and hardened runtime
+    would otherwise refuse to load them. Turning it off gives back that one
+    protection while keeping the two that matter most here — DYLD_INSERT_LIBRARIES
+    injection and debugger attach stay blocked, which is what stops a process
+    running as the same user reading an unlocked vault key out of memory.
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!--
+    Electron needs these regardless; without them the renderer cannot start
+    under hardened runtime.
+  -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+</dict>
+</plist>

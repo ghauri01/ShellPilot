@@ -2285,3 +2285,90 @@ button {
   color: var(--text);
   font-weight: 600;
 }
+
+/* Services and ports panel on the Fleet Monitor. Deliberately quiet: a failed
+   unit is the only thing here that should catch the eye. */
+.fleet-services {
+  margin: 18px 0 8px;
+}
+.fleet-services .badge.danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--danger, #f87171);
+  border: 1px solid var(--danger, #f87171);
+}
+.fleet-services .server-meta.danger,
+.fleet-services .s-desc.danger {
+  color: var(--danger, #f87171);
+}
+
+/* One-time offer to enable biometric unlock, shown after a password unlock.
+   Sits above the entry list rather than in a dialog: it is an offer, not a
+   question that has to be answered before the vault can be used. */
+.vault-bio-offer {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 12px 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+.vault-bio-offer .s-desc {
+  margin-top: 2px;
+  max-width: 62ch;
+}
+
+/* First-run walkthrough. Anchored bottom-right rather than centred over a
+   scrim: each step switches to the view it is describing, and that view has to
+   stay visible for the step to mean anything. */
+.tour-card {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 900;
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  padding: 14px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+}
+.tour-card .s-desc {
+  line-height: 1.5;
+}
+.tour-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--bg-card);
+}
+.tour-dots {
+  display: flex;
+  gap: 5px;
+  margin-top: 12px;
+}
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  background: var(--border-strong);
+}
+.tour-dot.active {
+  background: var(--accent);
+  width: 16px;
+}

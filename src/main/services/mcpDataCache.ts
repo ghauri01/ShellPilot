@@ -7,6 +7,8 @@
 // store.ts's job.
 import { loadData } from './store'
 import type { SshAuth, SshHop } from '../../shared/ssh'
+import type { DbKind } from '../../shared/db'
+import type { TunnelKind } from '../../shared/tunnel'
 
 export type CachedHop = SshHop & { serverId?: string }
 
@@ -27,9 +29,37 @@ export interface CachedServer {
   route: CachedHop[]
 }
 
+export interface CachedDatabase {
+  id: string
+  workspaceId: string
+  name: string
+  kind: DbKind
+  host: string
+  port: number
+  username: string
+  database: string
+  ssl: boolean
+  uri: boolean
+  // Reached through this SSH server when set, exactly as an interactive
+  // connection would be.
+  sshServerId: string | null
+}
+
+export interface CachedTunnel {
+  id: string
+  workspaceId: string
+  name: string
+  kind: TunnelKind
+  serverId: string | null
+  listen: string
+  target: string
+}
+
 interface DataShape {
   workspaces?: unknown
   servers?: unknown
+  databases?: unknown
+  tunnels?: unknown
 }
 
 function isSshAuth(v: unknown): v is SshAuth {
@@ -88,6 +118,50 @@ function parseServers(raw: unknown): CachedServer[] {
     }))
 }
 
+function isDbKind(v: unknown): v is DbKind {
+  return v === 'postgres' || v === 'mysql' || v === 'mssql' || v === 'mongodb' || v === 'redis'
+}
+
+function isTunnelKind(v: unknown): v is TunnelKind {
+  return v === 'local' || v === 'remote' || v === 'socks'
+}
+
+function parseDatabases(raw: unknown): CachedDatabase[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(isRecord)
+    .filter((d) => typeof d.id === 'string' && typeof d.workspaceId === 'string')
+    .map((d) => ({
+      id: d.id as string,
+      workspaceId: d.workspaceId as string,
+      name: asString(d.name, asString(d.host)),
+      kind: isDbKind(d.kind) ? d.kind : 'postgres',
+      host: asString(d.host),
+      port: asNumber(d.port, 0),
+      username: asString(d.username),
+      database: asString(d.database),
+      ssl: d.ssl === true,
+      uri: d.uri === true,
+      sshServerId: typeof d.sshServerId === 'string' ? d.sshServerId : null
+    }))
+}
+
+function parseTunnels(raw: unknown): CachedTunnel[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter(isRecord)
+    .filter((t) => typeof t.id === 'string' && typeof t.workspaceId === 'string')
+    .map((t) => ({
+      id: t.id as string,
+      workspaceId: t.workspaceId as string,
+      name: asString(t.name, t.id as string),
+      kind: isTunnelKind(t.kind) ? t.kind : 'local',
+      serverId: typeof t.serverId === 'string' ? t.serverId : null,
+      listen: asString(t.listen),
+      target: asString(t.target)
+    }))
+}
+
 // Builds the same shape the renderer sends over ssh:connect/sftp:connect for
 // this server, so the MCP bridge authenticates through the identical
 // jump-host chain and credential resolver as an interactive session. The
@@ -112,11 +186,37 @@ export function serverToSshConfig(
 
 let workspaces: CachedWorkspace[] = []
 let servers: CachedServer[] = []
+let databases: CachedDatabase[] = []
+let tunnels: CachedTunnel[] = []
 
 export function refreshMcpDataCache(data?: unknown): void {
   const raw = (data ?? loadData()) as DataShape | null
   workspaces = parseWorkspaces(raw?.workspaces)
   servers = parseServers(raw?.servers)
+  databases = parseDatabases(raw?.databases)
+  tunnels = parseTunnels(raw?.tunnels)
+}
+
+// Same scoping rule as servers: a session only ever sees what is inside the
+// workspace(s) it was granted, and never a credential.
+export function listCachedDatabases(workspaceId?: string | string[]): CachedDatabase[] {
+  if (!workspaceId) return databases
+  const ids = Array.isArray(workspaceId) ? workspaceId : [workspaceId]
+  return databases.filter((d) => ids.includes(d.workspaceId))
+}
+
+export function getCachedDatabase(id: string): CachedDatabase | null {
+  return databases.find((d) => d.id === id) ?? null
+}
+
+export function listCachedTunnels(workspaceId?: string | string[]): CachedTunnel[] {
+  if (!workspaceId) return tunnels
+  const ids = Array.isArray(workspaceId) ? workspaceId : [workspaceId]
+  return tunnels.filter((t) => ids.includes(t.workspaceId))
+}
+
+export function getCachedTunnel(id: string): CachedTunnel | null {
+  return tunnels.find((t) => t.id === id) ?? null
 }
 
 export function listCachedWorkspaces(): CachedWorkspace[] {

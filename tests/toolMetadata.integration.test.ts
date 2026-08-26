@@ -98,9 +98,19 @@ describe('tool metadata', () => {
     expect(byName('write_file').annotations?.destructiveHint).toBe(true)
   })
 
-  it('only execute_command claims an open world', () => {
-    const open = tools.filter((t) => t.annotations?.openWorldHint).map((t) => t.name)
-    expect(open).toEqual(['execute_command'])
+  it('claims an open world only for the tools that reach outside ShellPilot', () => {
+    // A shell command and a database statement both act on a system whose
+    // contents ShellPilot does not model; everything else operates on things
+    // it already knows about. A new tool appearing here should be a decision,
+    // not a default — hence the exact list.
+    const open = tools.filter((t) => t.annotations?.openWorldHint).map((t) => t.name).sort()
+    expect(open).toEqual(['execute_command', 'query_database'])
+  })
+
+  it('does not let a tunnel tool claim an open world', () => {
+    // set_tunnel can only run a tunnel the user already defined, so its effects
+    // are fully described by ShellPilot's own configuration.
+    expect(byName('set_tunnel').annotations?.openWorldHint).toBeFalsy()
   })
 
   it('steers the shell tool towards its alternatives', () => {

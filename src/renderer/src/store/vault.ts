@@ -44,9 +44,23 @@ interface VaultState {
   select: (id: string | null) => void
   setQuery: (q: string) => void
   addEntry: (kind?: VaultKind) => Promise<void>
+  // Creates a fully-populated entry and hands back its id, so a caller that
+  // needs to reference the new entry — saving a server's credential into the
+  // vault — does not have to guess which one it just made.
+  createEntry: (kind: VaultKind, patch: Partial<VaultEntry>) => Promise<string | null>
   updateEntry: (id: string, patch: Partial<VaultEntry>) => Promise<void>
   deleteEntry: (id: string) => Promise<void>
   clearError: () => void
+  // Biometric unlock. `bioKind` is what to call it on this platform, so the
+  // UI never says "Touch ID" on a machine that does not have one.
+  bioAvailable: boolean
+  bioKind: string
+  bioReason: string | null
+  bioEnabled: boolean
+  refreshBiometrics: () => Promise<void>
+  unlockWithBiometrics: () => Promise<boolean>
+  bioScope: 'session' | 'persistent' | null
+  setBiometrics: (on: boolean, scope?: 'session' | 'persistent') => Promise<boolean>
 }
 
 // Entries only ever live here while the vault is unlocked; locking drops them.
@@ -58,6 +72,55 @@ export const useVault = create<VaultState>((set, get) => ({
   query: '',
   error: null,
   busy: false,
+  bioAvailable: false,
+  bioKind: 'none',
+  bioReason: null,
+  bioEnabled: false,
+  bioScope: null,
+
+  refreshBiometrics: async () => {
+    const v = window.shellpilot?.vault
+    if (typeof v?.bioSupport !== 'function') return
+    const [support, enabled, scope] = await Promise.all([
+      v.bioSupport(),
+      v.bioEnabled(),
+      typeof v.bioScope === 'function' ? v.bioScope() : Promise.resolve(null)
+    ])
+    set({
+      bioAvailable: !!support?.available,
+      bioKind: support?.kind ?? 'none',
+      bioReason: support?.reason ?? null,
+      bioEnabled: !!enabled,
+      bioScope: scope ?? null
+    })
+  },
+
+  unlockWithBiometrics: async () => {
+    const v = window.shellpilot?.vault
+    if (typeof v?.bioUnlock !== 'function') return false
+    set({ busy: true, error: null })
+    const r = await v.bioUnlock()
+    set({ busy: false })
+    if (!r?.ok) {
+      // A cancelled prompt should not shout; the password field is right
+      // there and is the expected fallback.
+      set({ error: r?.error ?? 'Biometric unlock failed.' })
+      await get().refreshBiometrics()
+      return false
+    }
+    set({ unlocked: true })
+    await get().refresh()
+    return true
+  },
+
+  setBiometrics: async (on, scope = 'session') => {
+    const v = window.shellpilot?.vault
+    if (typeof v?.bioEnable !== 'function') return false
+    const r = on ? await v.bioEnable(scope) : await v.bioDisable()
+    await get().refreshBiometrics()
+    if (!r?.ok) set({ error: r?.error ?? 'Could not change biometric unlock.' })
+    return !!r?.ok
+  },
 
   refresh: async () => {
     const st = await window.shellpilot?.vault.status()
@@ -128,6 +191,16 @@ export const useVault = create<VaultState>((set, get) => ({
     const entries = [...get().entries, e]
     set({ entries, selectedId: e.id })
     await persist(entries, set)
+  },
+
+  createEntry: async (kind, patch) => {
+    const e = { ...newEntry(kind), ...patch }
+    const entries = [...get().entries, e]
+    set({ entries })
+    await persist(entries, set)
+    // persist() surfaces a failure through `error`; a caller must not be told
+    // an id that was never written to disk.
+    return get().error ? null : e.id
   },
 
   updateEntry: async (id, patch) => {

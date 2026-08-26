@@ -17,6 +17,8 @@ import { VaultView } from './components/vault/VaultView'
 import { AiPanel } from './components/ai/AiPanel'
 import { ApprovalWatcher } from './components/ai/ApprovalWatcher'
 import { AgentServerWatcher } from './components/ai/AgentServerWatcher'
+import { VaultUnlockModal } from './components/vault/VaultUnlockModal'
+import { OnboardingTour } from './components/onboarding/OnboardingTour'
 import { CliPairingBanner } from './components/ai/CliPairingBanner'
 import { CommandPalette } from './components/palette/CommandPalette'
 import { AddServerModal } from './components/connections/AddServerModal'
@@ -104,6 +106,8 @@ export default function App(): React.JSX.Element {
       {/* Surfaces an AI approval request no matter which tab is active. */}
       <ApprovalWatcher />
       <AgentServerWatcher />
+      <VaultUnlockModal />
+      <OnboardingTour />
       <CliPairingBanner />
       <Toasts />
     </div>
