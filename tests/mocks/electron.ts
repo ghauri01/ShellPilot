@@ -28,3 +28,11 @@ export const safeStorage = {
 export const dialog = {
   showMessageBox: async () => ({ response: 1 })
 }
+
+// backup.ts references this at module scope (only called from
+// export/inspect, neither of which the backup tests exercise), so it just
+// needs to exist, not do anything.
+export const BrowserWindow = {
+  getFocusedWindow: () => null,
+  getAllWindows: () => []
+}

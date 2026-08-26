@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AlertTriangle, CheckCircle2, Download, Loader2, ShieldCheck, Upload } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Download, Loader2, ShieldCheck, Trash2, Upload } from 'lucide-react'
 import { useApp } from '../../store/app'
 import { toast } from '../../store/toast'
 import type { BackupResult, BackupSummary } from '../../../../shared/backup'
@@ -16,9 +16,11 @@ export function BackupPanel(): React.JSX.Element {
   const [exportPw, setExportPw] = useState('')
   const [exportPw2, setExportPw2] = useState('')
   const [importPw, setImportPw] = useState('')
-  const [busy, setBusy] = useState<'export' | 'inspect' | 'import' | null>(null)
+  const [busy, setBusy] = useState<'export' | 'inspect' | 'import' | 'delete' | null>(null)
   const [staged, setStaged] = useState<{ path: string; summary: BackupSummary } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleteTyped, setDeleteTyped] = useState('')
 
   const exportReady = exportPw.length >= 8 && exportPw === exportPw2
 
@@ -61,6 +63,16 @@ export function BackupPanel(): React.JSX.Element {
     setBusy(null)
     if (!report(r)) return
     toast('Backup restored — restarting', 'ok')
+    setTimeout(() => void window.shellpilot?.backup.relaunch(), 700)
+  }
+
+  const runDeleteAll = async (): Promise<void> => {
+    if (settings.backupDirty || deleteTyped !== 'DELETE' || busy) return
+    setBusy('delete')
+    const r = await window.shellpilot?.backup.deleteAll()
+    setBusy(null)
+    if (!report(r)) return
+    toast('All data deleted — restarting', 'ok')
     setTimeout(() => void window.shellpilot?.backup.relaunch(), 700)
   }
 
@@ -157,6 +169,68 @@ export function BackupPanel(): React.JSX.Element {
           <button className="btn sm danger" disabled={busy !== null} onClick={() => void runImport()}>
             {busy === 'import' ? <Loader2 size={13} className="spin" /> : null}
             Restore and restart
+          </button>
+        </div>
+      )}
+
+      <h3 className="backup-h" style={{ color: 'var(--danger)' }}>
+        Danger zone
+      </h3>
+      <p className="s-desc" style={{ marginBottom: 10 }}>
+        Permanently deletes every workspace, server, database, tunnel, stored credential, the
+        vault, trusted host keys and AI/MCP configuration — everything a backup covers, gone from
+        this machine. This cannot be undone from within the app; only a backup taken beforehand
+        can bring it back.
+      </p>
+
+      {settings.backupDirty ? (
+        <div className="backup-banner warn">
+          <AlertTriangle size={16} />
+          <div>
+            <div className="s-title">Back up first</div>
+            <div className="s-desc">
+              Your data has changed since the last backup — download one above before deleting
+              anything, or whatever changed since then is gone for good.
+            </div>
+          </div>
+        </div>
+      ) : !confirmDelete ? (
+        <button className="btn danger" onClick={() => setConfirmDelete(true)}>
+          <Trash2 size={14} /> Delete all data
+        </button>
+      ) : (
+        <div className="backup-banner warn">
+          <AlertTriangle size={16} />
+          <div style={{ flex: 1 }}>
+            <div className="s-title">This deletes everything on this machine</div>
+            <div className="s-desc" style={{ marginBottom: 8 }}>
+              Type <strong>DELETE</strong> to confirm. The app restarts once it's done.
+            </div>
+            <input
+              className="input"
+              style={{ maxWidth: 200 }}
+              value={deleteTyped}
+              onChange={(e) => setDeleteTyped(e.target.value)}
+              placeholder="DELETE"
+              autoFocus
+            />
+          </div>
+          <button
+            className="btn sm"
+            onClick={() => {
+              setConfirmDelete(false)
+              setDeleteTyped('')
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            className="btn sm danger"
+            disabled={deleteTyped !== 'DELETE' || busy !== null}
+            onClick={() => void runDeleteAll()}
+          >
+            {busy === 'delete' ? <Loader2 size={13} className="spin" /> : <Trash2 size={13} />}
+            Delete everything
           </button>
         </div>
       )}

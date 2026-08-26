@@ -1,6 +1,6 @@
 import { app, dialog, BrowserWindow } from 'electron'
 import { join } from 'node:path'
-import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 import { randomBytes, scrypt, createCipheriv, createDecipheriv } from 'node:crypto'
 import { exportSecrets, importSecrets } from './secrets'
 import type { BackupPayload, BackupResult, BackupSummary } from '../../shared/backup'
@@ -193,4 +193,36 @@ export async function backupImport(password: string, path: string): Promise<Back
 export function relaunchApp(): void {
   app.relaunch()
   app.exit(0)
+}
+
+// Every file ShellPilot writes to userData — connections, credentials, vault,
+// workspace locks, trusted host keys, and the AI/MCP bridge's own config,
+// sessions, access-group policy and audit log. Deliberately exhaustive:
+// leaving one behind after a "delete everything" is worse than deleting one
+// that never existed, which unlinkSync's own try/catch already tolerates.
+const ALL_DATA_FILES = [
+  'shellpilot-data.json',
+  'shellpilot-secrets.json',
+  'shellpilot-vault.json',
+  'shellpilot-wslocks.json',
+  'shellpilot-known-hosts.json',
+  'shellpilot-mcp-config.json',
+  'shellpilot-mcp-sessions.json',
+  'shellpilot-ai-policy.json',
+  'shellpilot-ai-audit.jsonl'
+]
+
+// The renderer only calls this once a fresh backup exists (`!backupDirty`),
+// so this function itself does not re-check that — it only guards against
+// leaving a partially-deleted mess if one file fails to unlink.
+export function deleteAllData(): BackupResult {
+  try {
+    for (const name of ALL_DATA_FILES) {
+      const p = userFile(name)
+      if (existsSync(p)) unlinkSync(p)
+    }
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 }

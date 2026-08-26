@@ -173,6 +173,7 @@ const api = {
       ipcRenderer.invoke('backup:inspect', password, path),
     import: (password: string, path: string): Promise<BackupResult> =>
       ipcRenderer.invoke('backup:import', password, path),
+    deleteAll: (): Promise<BackupResult> => ipcRenderer.invoke('backup:deleteAll'),
     relaunch: (): Promise<void> => ipcRenderer.invoke('backup:relaunch')
   },
   sshConfig: {
