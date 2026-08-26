@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, Copy, Ban, Octagon } from 'lucide-react'
+import { Plus, Copy, Ban, Octagon, Trash2 } from 'lucide-react'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
 import { SessionAccess } from './SessionAccess'
@@ -257,6 +257,18 @@ export function AiAgents({ sessionsOnly = false }: { sessionsOnly?: boolean }): 
               }}
             >
               <Ban size={13} /> Revoke
+            </button>
+            <button
+              className="btn sm"
+              title="Remove this session from the list entirely — revokes it too, if it's still live"
+              onClick={async () => {
+                if (!confirm(`Delete the "${s.agentName}" session? This can't be undone.`)) return
+                await window.shellpilot?.aiMcp.deleteSession(s.id)
+                toast(`Deleted ${s.agentName}`)
+                load()
+              }}
+            >
+              <Trash2 size={13} /> Delete
             </button>
             {isLive(s) && <SessionAccess session={s} groups={groups} onChanged={load} />}
           </div>

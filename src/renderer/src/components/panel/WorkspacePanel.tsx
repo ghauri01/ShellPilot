@@ -7,6 +7,7 @@ import {
   ArrowRightToLine,
   Terminal as TerminalIcon,
   FolderOpen,
+  Activity,
   SplitSquareHorizontal,
   SplitSquareVertical,
   Search,
@@ -25,6 +26,7 @@ import type { PanelView, Server, Tab } from '../../types'
 
 const VIEWS: { id: PanelView; label: string; icon: React.ReactNode }[] = [
   { id: 'terminal', label: 'Terminal', icon: <TerminalIcon size={14} /> },
+  { id: 'monitor', label: 'Monitor', icon: <Activity size={14} /> },
   { id: 'files', label: 'Files', icon: <FolderOpen size={14} /> }
 ]
 

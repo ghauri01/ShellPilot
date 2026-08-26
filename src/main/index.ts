@@ -76,6 +76,7 @@ import {
   createSession,
   listSessions,
   revokeSession,
+  deleteSession,
   killAllSessions,
   setSessionGroup,
   type CreateSessionInput
@@ -577,6 +578,7 @@ ipcMain.handle('aiMcp:status', () => mcpServerStatus())
 ipcMain.handle('aiMcp:createSession', (_e, input: CreateSessionInput) => createSession(input))
 ipcMain.handle('aiMcp:listSessions', () => listSessions())
 ipcMain.handle('aiMcp:revokeSession', (_e, id: string) => revokeSession(id))
+ipcMain.handle('aiMcp:deleteSession', (_e, id: string) => deleteSession(id))
 ipcMain.handle('aiMcp:setSessionGroup', (_e, id: string, groupId: string | null, groupName: string) =>
   setSessionGroup(id, groupId, groupName)
 )

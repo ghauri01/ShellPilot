@@ -167,6 +167,21 @@ export function revokeSession(id: string): void {
   writeSessions()
 }
 
+// Unlike revoke, this removes the record entirely rather than marking it
+// dead — for clearing out old/expired sessions the Active Sessions list would
+// otherwise keep forever. Safe even on a still-live session: authenticate()
+// only ever finds a session by looking it up in this same list, so removing
+// it here has the identical practical effect as revoking — the token simply
+// stops matching anything.
+export function deleteSession(id: string): boolean {
+  const list = loadSessions()
+  const index = list.findIndex((s) => s.id === id)
+  if (index === -1) return false
+  list.splice(index, 1)
+  writeSessions()
+  return true
+}
+
 export function killAllSessions(): number {
   const list = loadSessions()
   let count = 0

@@ -285,6 +285,7 @@ const api = {
     }): Promise<{ session: McpAgentSession; token: string }> => ipcRenderer.invoke('aiMcp:createSession', input),
     listSessions: (): Promise<McpAgentSession[]> => ipcRenderer.invoke('aiMcp:listSessions'),
     revokeSession: (id: string): Promise<void> => ipcRenderer.invoke('aiMcp:revokeSession', id),
+    deleteSession: (id: string): Promise<boolean> => ipcRenderer.invoke('aiMcp:deleteSession', id),
     setSessionGroup: (id: string, groupId: string | null, groupName: string): Promise<McpAgentSession | null> =>
       ipcRenderer.invoke('aiMcp:setSessionGroup', id, groupId, groupName),
     explainAccess: (

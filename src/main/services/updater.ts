@@ -46,6 +46,14 @@ export function onUpdaterStatus(cb: (s: UpdaterStatus) => void): () => void {
 autoUpdater.autoDownload = false
 autoUpdater.autoInstallOnAppQuit = false
 
+// Without this, electron-updater silently no-ops checkForUpdates() whenever
+// !app.isPackaged — logging a warning and resolving as if nothing were wrong,
+// which from the UI looked identical to "you're already up to date" no
+// matter what was actually published. dev-app-update.yml (repo root) mirrors
+// electron-builder.yml's publish config so `npm run dev` exercises the exact
+// same GitHub-releases check a packaged build does, not a stub.
+if (!app.isPackaged) autoUpdater.forceDevUpdateConfig = true
+
 autoUpdater.on('checking-for-update', () => setStatus({ state: 'checking' }))
 autoUpdater.on('update-not-available', () => setStatus({ state: 'not-available' }))
 autoUpdater.on('error', (err) => setStatus({ state: 'error', message: err.message }))
@@ -60,13 +68,7 @@ autoUpdater.on('update-available', (info) => {
   }
 })
 
-// No-op in dev: there is no packaged app-update.yml to read outside a real
-// build, and checking would only ever fail with a confusing error.
 export async function checkForUpdates(): Promise<void> {
-  if (!app.isPackaged) {
-    setStatus({ state: 'not-available' })
-    return
-  }
   try {
     await autoUpdater.checkForUpdates()
   } catch (err) {

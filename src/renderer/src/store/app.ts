@@ -75,7 +75,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sshMasterIdleMinutes: 15,
   vaultAutoLockMinutes: 15,
   terminalFontSize: 13,
-  showMonitorStrip: false,
+  showMonitorStrip: true,
   resourceAlertsEnabled: true,
   resourceAlertThreshold: 80,
   compactDensity: false,

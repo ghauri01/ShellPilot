@@ -1,0 +1,7 @@
+# electron-updater's documented mechanism for testing update checks from
+# `npm run dev`, without a packaged app-update.yml (which only exists inside
+# a real build's resources). Mirrors electron-builder.yml's publish config
+# exactly — updater.ts only reads this when app.isPackaged is false.
+provider: github
+owner: ghauri01
+repo: ShellPilot

@@ -6,6 +6,7 @@ import {
   authenticate,
   createSession,
   revokeSession,
+  deleteSession,
   killAllSessions,
   listSessions,
   getMcpConfig,
@@ -123,5 +124,31 @@ describe('MCP authentication', () => {
     const [migrated] = listSessions()
     expect(Array.isArray(migrated.workspaces)).toBe(true)
     expect(migrated.workspaces).toEqual([{ id: 'ws-old', name: 'Old Workspace' }])
+  })
+
+  it('deleting a session removes it from the list entirely, unlike revoke', () => {
+    setMcpConfig({ enabled: true })
+    const { session } = makeSession()
+    expect(listSessions().some((s) => s.id === session.id)).toBe(true)
+
+    const result = deleteSession(session.id)
+
+    expect(result).toBe(true)
+    expect(listSessions().some((s) => s.id === session.id)).toBe(false)
+  })
+
+  it('deleting a still-live session revokes it in effect, not just from the list', () => {
+    setMcpConfig({ enabled: true })
+    const { token, session } = makeSession()
+    expect('session' in authenticate(token)).toBe(true) // live before deletion
+
+    deleteSession(session.id)
+
+    const result = authenticate(token)
+    expect('error' in result && result.error).toBe('invalid-token')
+  })
+
+  it('deleting an unknown session id is reported, not silently ignored', () => {
+    expect(deleteSession('sess-does-not-exist')).toBe(false)
   })
 })
