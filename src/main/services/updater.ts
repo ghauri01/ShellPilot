@@ -1,6 +1,14 @@
 import { app, shell } from 'electron'
-import { autoUpdater } from 'electron-updater'
+// electron-updater is CommonJS, and it is externalized rather than bundled
+// (external deps resolve through real Node ESM/CJS interop, not esbuild's
+// bundle-time shim) — Node's cjs-module-lexer cannot statically see
+// `autoUpdater` as a named export of this particular module, even though the
+// package itself does expose it. The default-import form sidesteps that
+// entirely; see electron-updater's own docs for this exact caveat.
+import electronUpdater from 'electron-updater'
 import type { UpdaterStatus } from '../../shared/updater'
+
+const { autoUpdater } = electronUpdater
 
 // electron-builder's `publish: provider: github` config (electron-builder.yml)
 // bakes an app-update.yml into the packaged resources at build time, which is
