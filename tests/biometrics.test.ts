@@ -181,3 +181,25 @@ describe('platforms without a biometric prompt', () => {
     if (!support.available) expect(support.kind).toBe('none')
   })
 })
+
+describe('failing closed', () => {
+  it('authenticates for a kind it knows', async () => {
+    if (!bio.biometricSupport().available) return
+    await expect(bio.authenticateFor('touch-id', 'test')).resolves.toBeUndefined()
+    expect(promptCalls).toHaveLength(1)
+  })
+
+  it('throws for a kind it has no prompt for, rather than falling through', async () => {
+    // Regression: written inline this was `if (kind === 'touch-id') await
+    // prompt()` — authenticate conditionally, then decrypt unconditionally.
+    // Adding a windows-hello branch to biometricSupport() without touching the
+    // unlock path would have shipped a vault that opens with no prompt at all.
+    await expect(bio.authenticateFor('windows-hello', 'test')).rejects.toThrow(/windows-hello/)
+    expect(promptCalls).toHaveLength(0)
+  })
+
+  it('throws for "none", which is what an unsupported platform reports', async () => {
+    await expect(bio.authenticateFor('none', 'test')).rejects.toThrow()
+    expect(promptCalls).toHaveLength(0)
+  })
+})

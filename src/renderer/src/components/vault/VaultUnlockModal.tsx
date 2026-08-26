@@ -37,12 +37,9 @@ export function VaultUnlockModal(): React.JSX.Element | null {
     if (open) void refreshBiometrics()
   }, [open, refreshBiometrics])
 
-  // Same as the main gate: go straight to the prompt rather than to a button
-  // that opens a prompt.
-  useEffect(() => {
-    if (!open || !canUseBio) return
-    void unlockWithBiometrics().then((ok) => ok && finish(true))
-  }, [open, canUseBio, unlockWithBiometrics, finish])
+  // Same as the main gate: the prompt is not fired automatically. See the note
+  // there — an unbidden biometric prompt teaches the reflex that makes prompts
+  // phishable, and this one is a gate rather than a cryptographic step.
 
   if (!open) return null
 

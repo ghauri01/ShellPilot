@@ -126,6 +126,24 @@ export function enableBiometricUnlock(): VaultResult {
   }
 }
 
+// Fails closed on any kind it has no prompt for.
+//
+// This was written inline as `if (kind === 'touch-id') await prompt(...)`, which
+// authenticated conditionally and then decrypted unconditionally — so adding a
+// windows-hello branch to biometricSupport() without also touching the unlock
+// path would have shipped a vault that opens with no prompt at all. Separated
+// out so the gate is a single expression that either authenticates or throws,
+// and so a test can prove it refuses an unknown kind.
+export async function authenticateFor(kind: BiometricKind, reason: string): Promise<void> {
+  switch (kind) {
+    case 'touch-id':
+      await systemPreferences.promptTouchID(reason)
+      return
+    default:
+      throw new Error(`No way to authenticate for "${kind}" on this platform.`)
+  }
+}
+
 export async function biometricUnlock(reason = 'unlock your ShellPilot vault'): Promise<VaultResult> {
   const stored = read()
   if (!stored) return { ok: false, error: 'Biometric unlock is not set up for this vault.' }
@@ -133,7 +151,7 @@ export async function biometricUnlock(reason = 'unlock your ShellPilot vault'): 
   if (!support.available) return { ok: false, error: support.reason ?? 'Biometric unlock is unavailable.' }
 
   try {
-    if (support.kind === 'touch-id') await systemPreferences.promptTouchID(reason)
+    await authenticateFor(support.kind, reason)
   } catch (err) {
     // A cancelled prompt is not a failure worth alarming about; the caller
     // falls back to the password field either way.

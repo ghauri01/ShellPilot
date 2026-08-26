@@ -6,8 +6,14 @@ import type { VaultEntry, VaultListResult, VaultResult, VaultStatus } from '../.
 
 // The vault is encrypted with AES-256-GCM under a key derived from the user's
 // master password via scrypt. The password is never stored — a wrong password
-// simply fails the GCM authentication tag on decrypt. The plaintext exists only
-// in main-process memory while the vault is unlocked.
+// simply fails the GCM authentication tag on decrypt.
+//
+// The KEY exists only in main-process memory while the vault is unlocked. The
+// decrypted ENTRIES do not: vault:list ships them to the renderer, where they
+// live in the Zustand store for as long as the vault is open. That is a
+// deliberate consequence of showing them in a UI, but it means renderer-side
+// script injection reaches vault plaintext, and the threat model has to say so
+// rather than claim main-process confinement it does not have.
 
 const FILE = join(app.getPath('userData'), 'shellpilot-vault.json')
 const TMP = `${FILE}.tmp`

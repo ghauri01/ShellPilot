@@ -75,13 +75,11 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
     void refreshBiometrics()
   }, [refreshBiometrics])
 
-  // Offer the prompt straight away rather than making the user click a button
-  // to reach a prompt. Cancelling leaves the password field focused and ready,
-  // so this costs nothing if they would rather type.
-  useEffect(() => {
-    if (canUseBio) void unlockWithBiometrics()
-    // Only on the transition into being able to, never on every render.
-  }, [canUseBio, unlockWithBiometrics])
+  // Deliberately NOT fired automatically. The prompt is a gate, not a
+  // cryptographic step, and a prompt that appears unbidden every time the app
+  // opens trains people to touch the sensor without reading it — which is
+  // exactly the habit that makes a prompt worth phishing. The button is one
+  // click and says what it does.
 
   const creating = mode === 'create'
   const mismatch = creating && confirm.length > 0 && password !== confirm
@@ -196,10 +194,16 @@ function BiometricOffer(): React.JSX.Element | null {
       <div style={{ flex: 1 }}>
         <div className="s-title">Unlock with {label} next time?</div>
         <div className="s-desc">
-          {label} then opens this vault instead of your master password. Doing so stores the
-          vault&apos;s key on this Mac, encrypted by the system keychain — so it trades a little
-          security for not typing a long password every session. Your master password is never
-          stored, and you can turn this off at any time.
+          {label} will open this vault instead of your master password, including after a restart.
+          To do that, ShellPilot stores the vault&apos;s key on this Mac in the system keychain.
+          <br />
+          <b>What changes:</b> {label} confirms it is you, but it does not hold the key — the
+          keychain does, and software running under your macOS account could read it without a
+          fingerprint. Right now your master password is the one thing that is not on this machine.
+          Your SSH credentials are already stored this way, so this brings the vault down to the
+          same level rather than opening a new kind of risk.
+          <br />
+          Your master password is never stored. Turning this off deletes the stored key.
         </div>
       </div>
       <button
