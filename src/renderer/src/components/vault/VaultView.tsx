@@ -6,6 +6,24 @@ import { VAULT_KIND_LABEL, type VaultEntry, type VaultKind } from '../../../../s
 
 const KINDS: VaultKind[] = ['login', 'url', 'key', 'note']
 
+// Which of the built-in fields each kind actually shows. The picker used to
+// change nothing but an icon in the sidebar: every kind rendered URL, Username
+// and Password, so a Note asked for a password and an API key had nowhere
+// obvious to put the key. Name, tags, custom fields and notes are on every
+// kind and are not listed here.
+//
+// Switching kind never deletes anything. A value typed under one kind is still
+// stored, still searchable, and comes back if the kind is switched back — so
+// this only decides what is on screen, which is the one thing it should decide.
+const KIND_FIELDS: Record<VaultKind, { url: boolean; username: boolean; secret: 'password' | 'key' | null }> = {
+  login: { url: true, username: true, secret: 'password' },
+  url: { url: true, username: false, secret: null },
+  key: { url: true, username: false, secret: 'key' },
+  note: { url: false, username: false, secret: null }
+}
+
+const SECRET_LABEL: Record<'password' | 'key', string> = { password: 'Password', key: 'API key' }
+
 function copy(label: string, value: string): void {
   if (!value) return
   window.shellpilot?.clipboard.write(value)
@@ -208,6 +226,17 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
   const setField = (id: string, patch: Partial<(typeof entry.fields)[number]>): void =>
     set({ fields: entry.fields.map((f) => (f.id === id ? { ...f, ...patch } : f)) })
 
+  const shown = KIND_FIELDS[entry.kind] ?? KIND_FIELDS.login
+
+  // A value that belongs to a field this kind does not show is still stored and
+  // still searchable, but it is now invisible — so say so rather than let it
+  // look lost.
+  const hiddenWithValue = [
+    !shown.url && entry.url ? 'URL' : null,
+    !shown.username && entry.username ? 'username' : null,
+    !shown.secret && entry.password ? 'password' : null
+  ].filter(Boolean) as string[]
+
   return (
     <div className="vault-editor">
       <div className="row" style={{ gap: 8 }}>
@@ -236,22 +265,35 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
         </button>
       </div>
 
-      <Row label="URL" value={entry.url} onChange={(v) => set({ url: v })} placeholder="https://…" />
-      <Row label="Username" value={entry.username} onChange={(v) => set({ username: v })} />
-      <Row
-        label="Password"
-        value={entry.password}
-        onChange={(v) => set({ password: v })}
-        secret
-        revealed={!!revealed.__pw}
-        onReveal={() => toggle('__pw')}
-      />
+      {shown.url && (
+        <Row label="URL" value={entry.url} onChange={(v) => set({ url: v })} placeholder="https://…" />
+      )}
+      {shown.username && (
+        <Row label="Username" value={entry.username} onChange={(v) => set({ username: v })} />
+      )}
+      {shown.secret && (
+        <Row
+          label={SECRET_LABEL[shown.secret]}
+          value={entry.password}
+          onChange={(v) => set({ password: v })}
+          secret
+          revealed={!!revealed.__pw}
+          onReveal={() => toggle('__pw')}
+        />
+      )}
       <Row
         label="Tags"
         value={entry.tags.join(', ')}
         onChange={(v) => set({ tags: v.split(',').map((t) => t.trim()).filter(Boolean) })}
         placeholder="prod, aws"
       />
+
+      {hiddenWithValue.length > 0 && (
+        <div className="s-desc" style={{ marginTop: 8 }}>
+          This entry also has a stored {hiddenWithValue.join(' and ')}, kept but not shown for a{' '}
+          {VAULT_KIND_LABEL[entry.kind].toLowerCase()}. Switch the type back to see it.
+        </div>
+      )}
 
       <div className="vault-section-title">
         Custom fields
