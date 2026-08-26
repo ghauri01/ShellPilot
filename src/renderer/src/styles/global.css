@@ -2285,3 +2285,23 @@ button {
   color: var(--text);
   font-weight: 600;
 }
+
+/* Services and ports panel on the Fleet Monitor. Deliberately quiet: a failed
+   unit is the only thing here that should catch the eye. */
+.fleet-services {
+  margin: 18px 0 8px;
+}
+.fleet-services .badge.danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--danger, #f87171);
+  border: 1px solid var(--danger, #f87171);
+}
+.fleet-services .server-meta.danger,
+.fleet-services .s-desc.danger {
+  color: var(--danger, #f87171);
+}

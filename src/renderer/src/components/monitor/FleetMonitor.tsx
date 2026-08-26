@@ -15,6 +15,7 @@ import { ServerMonitorCard } from './ServerMonitorCard'
 import { fleetTotals, useFleet } from '../../store/fleet'
 import { bytes, clsx } from '../../lib/format'
 import type { MonitorGroup, Server } from '../../types'
+import { FleetServices } from './FleetServices'
 
 function pct(used: number, total: number): number {
   return total > 0 ? (used / total) * 100 : 0
@@ -305,6 +306,8 @@ export function FleetMonitor(): React.JSX.Element {
           </div>
         </div>
       )}
+
+      <FleetServices servers={servers} />
 
       <div
         className="monitor-groups"
