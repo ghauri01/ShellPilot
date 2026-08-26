@@ -68,6 +68,20 @@ mac:
   # "damaged", a dialog with no Open Anyway button. Signing ad-hoc ourselves seals
   # the real bundle, so the app fails the ordinary "cannot be verified" way that
   # users can click through. It is still not notarized.
+  # When a Developer ID certificate is available, this whole block becomes:
+  #
+  #   identity: 'Developer ID Application: <NAME> (<TEAM_ID>)'
+  #   hardenedRuntime: true
+  #   entitlements: build/entitlements.mac.plist
+  #   entitlementsInherit: build/entitlements.mac.plist
+  #   notarize: true          # plus APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID in CI
+  #
+  # That one change removes the Gatekeeper warning entirely, and it is also what
+  # unlocks hardened runtime (see below), a stable signing identity so keychain
+  # ACLs survive updates, and the data-protection keychain that biometry ACLs
+  # and Secure Enclave keys require. build/entitlements.mac.plist is already
+  # written and carries the library-validation exception the unpacked ssh2 and
+  # cpu-features binaries need.
   identity: '-'
   # Hardened runtime turns on library validation, which refuses to load the
   # ssh2/cpu-features .node binaries that asarUnpack deliberately keeps outside

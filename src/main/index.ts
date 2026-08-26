@@ -85,6 +85,7 @@ import { onCliPairingEvent, cancelCliPairing } from './services/cliPairing'
 import { claudeCodeCommand, writeClaudeDesktopConfig, writeCodexConfig } from './services/clientConfig'
 import { setAgentServerCreator, type AgentServerRequest, type AgentServerResult } from './services/agentServerCreate'
 import { listDefaultKeys, sshDir } from './services/sshKeys'
+import { setVaultAutoLock } from './services/vault'
 import {
   biometricSupport,
   biometricEnabled,
@@ -472,6 +473,13 @@ ipcMain.handle('tunnel:list', () => tunnelList())
 ipcMain.handle('vault:status', () => vaultStatus())
 ipcMain.handle('vault:create', (_e, password: string) => vaultCreate(password))
 ipcMain.handle('vault:unlock', (_e, password: string) => vaultUnlock(password))
+// Auto-lock needs the renderer told, or the UI keeps showing an unlocked vault
+// it can no longer read. The biometric session key goes with it.
+setVaultAutoLock(15, () => {
+  forgetSessionKey()
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('vault:auto-locked')
+})
+
 ipcMain.handle('vault:lock', () => {
   // A session-scoped biometric key must not outlive the unlocked state, or
   // "lock" would not mean locked.

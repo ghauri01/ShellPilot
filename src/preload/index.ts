@@ -225,6 +225,11 @@ const api = {
     bioEnable: (scope: 'session' | 'persistent' = 'session'): Promise<VaultResult> =>
       ipcRenderer.invoke('vault:bio-enable', scope),
     bioScope: (): Promise<'session' | 'persistent' | null> => ipcRenderer.invoke('vault:bio-scope'),
+    onAutoLocked: (cb: () => void): (() => void) => {
+      const h = (): void => cb()
+      ipcRenderer.on('vault:auto-locked', h)
+      return () => ipcRenderer.removeListener('vault:auto-locked', h)
+    },
     bioDisable: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-disable'),
     bioUnlock: (): Promise<VaultResult> => ipcRenderer.invoke('vault:bio-unlock')
   },

@@ -3,6 +3,7 @@ import { Copy, Eye, EyeOff, Fingerprint, KeyRound, Lock, Plus, ShieldCheck, Tras
 import { useVault, newField } from '../../store/vault'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
+import { bridgeOn } from '../../lib/bridge'
 import {
   VAULT_KIND_LABEL,
   VAULT_KIND_FIELDS,
@@ -38,6 +39,18 @@ export function VaultView(): React.JSX.Element {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  // Main locked the vault on an idle timeout. Drop the decrypted entries the
+  // renderer is holding — leaving them would make the lock cosmetic, since the
+  // plaintext lives here too.
+  useEffect(
+    () =>
+      bridgeOn('vault.onAutoLocked', window.shellpilot?.vault?.onAutoLocked, () => {
+        useVault.setState({ unlocked: false, entries: [], selectedId: null })
+        toast('Vault locked after inactivity')
+      }),
+    []
+  )
 
   if (!exists) return <VaultGate mode="create" />
   if (!unlocked) return <VaultGate mode="unlock" />
@@ -83,7 +96,13 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
 
   const creating = mode === 'create'
   const mismatch = creating && confirm.length > 0 && password !== confirm
-  const canSubmit = password.length >= (creating ? 8 : 1) && !mismatch && (!creating || confirm.length > 0)
+  // 12, not 8. The vault file is the thing an attacker copies, and against a
+  // stolen file the master password's length is worth more than anything the
+  // unlock UI does. Only applies to new vaults; an existing one is not forced
+  // to change on upgrade.
+  const MIN_PASSWORD = 12
+  const canSubmit =
+    password.length >= (creating ? MIN_PASSWORD : 1) && !mismatch && (!creating || confirm.length > 0)
 
   const submit = async (): Promise<void> => {
     if (!canSubmit || busy) return
@@ -123,7 +142,7 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
             type={show ? 'text' : 'password'}
             autoFocus
             style={{ flex: 1 }}
-            placeholder={creating ? 'Master password (min 8 characters)' : 'Master password'}
+            placeholder={creating ? `Master password (min ${MIN_PASSWORD} characters)` : 'Master password'}
             value={password}
             onChange={(e) => {
               clearError()
