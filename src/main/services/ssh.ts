@@ -5,6 +5,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { WebContents } from 'electron'
 import type { SshCloseInfo, SshConnectConfig, SshHop, SshStatus, SshStatusPhase } from '../../shared/ssh'
 import { verifyHostKey } from './knownhosts'
+import { isEncryptedPrivateKey } from './sshKeys'
 
 interface Session {
   conn: PooledConnection | null
@@ -80,10 +81,7 @@ function loadPrivateKey(hop: SshHop): string {
   if (!/-----BEGIN [^-]*PRIVATE KEY-----/.test(key)) {
     throw new Error(`${path} does not look like a private key file.`)
   }
-  // OpenSSH marks encrypted new-format keys by naming a cipher other than none.
-  const encrypted =
-    /ENCRYPTED/.test(key) || (key.includes('OPENSSH PRIVATE KEY') && !/\bnone\b/.test(key.slice(0, 200)))
-  if (encrypted && !hop.passphrase) {
+  if (isEncryptedPrivateKey(key.slice(0, 512)) && !hop.passphrase) {
     throw new Error(
       `${path} is passphrase-protected. Edit the server and enter the key passphrase.`
     )
