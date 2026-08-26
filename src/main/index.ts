@@ -69,7 +69,7 @@ import {
   listServerMeta,
   setServerAliases
 } from './services/policyStore'
-import type { AccessGroup, McpGlobalConfig, PolicyAssignment } from '../shared/mcp'
+import type { AccessGroup, ApprovalRequest, McpGlobalConfig, PolicyAssignment } from '../shared/mcp'
 import {
   getMcpConfig,
   setMcpConfig,
@@ -427,6 +427,34 @@ ipcMain.handle('sshconfig:read', () => {
   }
 })
 
+// An approval blocks an AI agent until the user answers it, and the dialog it
+// renders lives inside the window. If ShellPilot is not in front, nothing tells
+// the user anything is waiting — the agent simply appears to hang for the
+// whole timeout, which is exactly how it was reported.
+function notifyApprovalPending(request: ApprovalRequest): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    // Bounces the dock icon on macOS, flashes the taskbar on Windows. Left as
+    // 'informational' rather than 'critical': the request expires on its own,
+    // so it does not warrant a bouncing icon that will not stop.
+    app.dock?.bounce('informational')
+    mainWindow.flashFrame(true)
+  }
+  if (!Notification.isSupported()) return
+  const n = new Notification({
+    title: `${request.agentName} needs approval`,
+    body: `${request.action}\non ${request.serverName}`,
+    icon: appIcon()
+  })
+  n.on('click', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+  n.show()
+}
+
 // ---- Notifications ----
 // Native OS notifications: they render outside the window, so they can never
 // cover the terminal, and the OS handles stacking and dismissal.
@@ -598,6 +626,9 @@ ipcMain.handle('aiMcp:respondApproval', (_e, id: string, decision: 'approved' | 
 )
 onApprovalEvent((e) => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('ai:approval-event', e)
+  if (e.type === 'created') notifyApprovalPending(e.request)
+  // Stop the taskbar flashing once the thing it was flashing about is answered.
+  if (e.type === 'resolved' && mainWindow && !mainWindow.isDestroyed()) mainWindow.flashFrame(false)
 })
 
 // ---- AI & MCP: agent-initiated server creation (the add_server tool) ----

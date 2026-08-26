@@ -42,6 +42,34 @@ Knowing the design may help you assess a finding.
 | AI/MCP audit log | `shellpilot-ai-audit.jsonl` | Plaintext, append-only. Free-text fields are passed through the same secret-redaction as command output before being written, so it should never contain a credential. |
 | AI/MCP access-group policy | `shellpilot-ai-policy.json` | Plaintext. Contains no credentials — capability rules and file-path patterns only. |
 
+### SSH host keys
+
+ShellPilot does trust-on-first-use host key checking against its own
+`shellpilot-known-hosts.json`. Without it, ssh2 accepts any key presented, so
+anything on the path to a server could capture the session and the credentials
+sent over it.
+
+It also **reads** `~/.ssh/known_hosts` (and `known_hosts2`), but never inherits
+trust from it. Adopting that file wholesale would silently take on every trust
+decision it has accumulated, including whatever `StrictHostKeyChecking=accept-new`
+waved through unattended. So an entry there only changes what the prompt says:
+a host whose exact key OpenSSH already has is presented as recognised, and the
+dialog defaults to Trust instead of Cancel. A human still confirms it once.
+
+Two cases there are not merely informational:
+
+- **`@revoked`** matching the presented key refuses the connection outright. It
+  is a negative signal, so acting on it without asking only ever restricts.
+- **A host present under a different key** is called out explicitly in the
+  prompt, since that is either a rebuilt server or an interception.
+
+`@cert-authority` lines are ignored. They authorise certificates rather than
+naming a host key, and ShellPilot cannot validate a certificate chain — so they
+are treated as no evidence rather than as trust.
+
+Once a host is trusted, a *changed* key is always refused outright and never
+re-prompted: the user has to forget the saved key in Settings → Security first.
+
 ### Process hardening
 
 macOS builds run with the **hardened runtime**, which blocks
