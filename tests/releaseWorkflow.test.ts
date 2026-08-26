@@ -127,3 +127,25 @@ describe('inline shell in the release job does not keep growing', () => {
     expect(named.sort()).toEqual(Object.keys(CEILING).sort())
   })
 })
+
+describe('macOS build hardening', () => {
+  const builder = load(readFileSync('electron-builder.yml', 'utf8')) as {
+    mac?: { hardenedRuntime?: boolean; entitlements?: string; identity?: string }
+  }
+
+  it('enables the hardened runtime', () => {
+    // Without it a same-user process can inject into ShellPilot and read an
+    // unlocked vault key from memory, which defeats every protection the vault
+    // has. It needs no Developer ID — ad-hoc signing carries it fine.
+    expect(builder.mac?.hardenedRuntime).toBe(true)
+  })
+
+  it('ships the entitlements the hardened runtime needs', () => {
+    // asarUnpack keeps ssh2/cpu-features .node binaries outside the archive on
+    // purpose; without disable-library-validation they will not load.
+    expect(builder.mac?.entitlements).toBe('build/entitlements.mac.plist')
+    const plist = readFileSync('build/entitlements.mac.plist', 'utf8')
+    expect(plist).toContain('com.apple.security.cs.disable-library-validation')
+    expect(plist).toContain('com.apple.security.cs.allow-jit')
+  })
+})

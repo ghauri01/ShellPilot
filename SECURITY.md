@@ -42,6 +42,22 @@ Knowing the design may help you assess a finding.
 | AI/MCP audit log | `shellpilot-ai-audit.jsonl` | Plaintext, append-only. Free-text fields are passed through the same secret-redaction as command output before being written, so it should never contain a credential. |
 | AI/MCP access-group policy | `shellpilot-ai-policy.json` | Plaintext. Contains no credentials — capability rules and file-path patterns only. |
 
+### Process hardening
+
+macOS builds run with the **hardened runtime**, which blocks
+`DYLD_INSERT_LIBRARIES` injection and debugger attach. This matters more than
+any of the vault's own protections: without it, a process running as the same
+user can inject into ShellPilot and read an unlocked vault key out of memory,
+and no amount of encryption at rest or biometric gating prevents that.
+
+The hardened runtime does not require an Apple Developer certificate — it works
+with the ad-hoc signature these builds already carry.
+
+Library validation is disabled by entitlement, because `asarUnpack` keeps the
+ssh2 and cpu-features native binaries outside the archive deliberately. That
+gives back one of the three protections the hardened runtime provides and keeps
+the two that defend an unlocked vault.
+
 ### Workspaces and the vault
 
 Workspaces isolate **servers, databases and tunnels** — each record carries a
