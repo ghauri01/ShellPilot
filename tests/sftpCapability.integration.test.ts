@@ -85,8 +85,15 @@ describe('sftp transport capabilities are enforced', () => {
     setCapability('sftpUpload', 'deny')
     const c = await connect()
     try {
-      // Reaches the transport and fails there rather than being refused by policy.
-      expect(await call(c, 'read_file', { serverName: 'Box', path: '/tmp/x' })).not.toContain('Denied')
+      // Asserted through get_server_details rather than by calling read_file:
+      // a read that policy allows goes on to open a real SFTP connection to a
+      // host that does not exist, which fails fast on a developer machine and
+      // hangs until the test timeout on a CI runner. The permission table is
+      // the thing under test and it needs no transport.
+      const details = await call(c, 'get_server_details', { serverName: 'Box' })
+      expect(details).toContain('SFTP upload: DENY')
+      expect(details).toContain('SFTP download: ALLOW')
+      expect(details).toContain('Read files: ALLOW')
     } finally {
       setCapability('sftpUpload', 'allow')
       await c.close()
