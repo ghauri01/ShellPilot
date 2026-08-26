@@ -24,6 +24,7 @@ import { recordAudit } from './auditLog'
 import { redactOutput } from './secretRedaction'
 import { knownSecretValuesForServer, resolveChainSecrets } from './credentialResolver'
 import { sshExec } from './ssh'
+import { createServerForAgent } from './agentServerCreate'
 import { sftpConnect, sftpList, sftpRead, sftpWrite, sftpDisconnect } from './sftp'
 import { metricsSample } from './metrics'
 import { AI_CAPABILITIES } from '../../shared/mcp'
@@ -111,6 +112,24 @@ function effectiveCapability(session: McpAgentSession, serverId: string, capabil
   return mostRestrictive(fromServer, evaluateCapability(sessionGroup, capability))
 }
 
+// add_server acts on a workspace, not on a server that exists yet, so the
+// per-server override layer has nothing to look at. Resolve the workspace's own
+// assignment instead and keep the session group as the same ceiling it is
+// everywhere else.
+function effectiveWorkspaceCapability(
+  session: McpAgentSession,
+  workspaceId: string,
+  capability: AiCapability
+): Decision {
+  const groupId = resolveGroupId(listAssignments(), '', workspaceId)
+  const workspaceGroup = groupId ? getGroup(groupId) : null
+  if (!workspaceGroup) return { decision: 'deny', reason: 'No AI access is assigned to this workspace.' }
+  const sessionGroup = sessionGroupFor(session)
+  const fromWorkspace = evaluateCapability(workspaceGroup, capability)
+  if (!sessionGroup) return fromWorkspace
+  return mostRestrictive(fromWorkspace, evaluateCapability(sessionGroup, capability))
+}
+
 function effectiveCommand(session: McpAgentSession, serverId: string, command: string): Decision {
   const serverGroup = serverGroupFor(serverId)
   if (!serverGroup) return { decision: 'deny', reason: 'No AI access is assigned to this server.' }
@@ -120,13 +139,23 @@ function effectiveCommand(session: McpAgentSession, serverId: string, command: s
   return mostRestrictive(fromServer, evaluateCommand(sessionGroup, command))
 }
 
+// read_file, list_files and write_file are the SFTP transport, so the transport
+// capability applies on top of the path rules. It never was consulted, which
+// left "SFTP download"/"SFTP upload" in the access-group editor as switches that
+// changed nothing — a permission that is displayed but not enforced is worse
+// than one that does not exist, because the user believes they have set it.
 function effectiveFilePath(session: McpAgentSession, serverId: string, path: string, mode: 'read' | 'write'): Decision {
   const serverGroup = serverGroupFor(serverId)
   if (!serverGroup) return { decision: 'deny', reason: 'No AI access is assigned to this server.' }
+  const transport: AiCapability = mode === 'read' ? 'sftpDownload' : 'sftpUpload'
   const sessionGroup = sessionGroupFor(session)
-  const fromServer = evaluateFilePath(serverGroup, path, mode)
+
+  const forGroup = (g: AccessGroup): Decision =>
+    mostRestrictive(evaluateFilePath(g, path, mode), evaluateCapability(g, transport))
+
+  const fromServer = forGroup(serverGroup)
   if (!sessionGroup) return fromServer
-  return mostRestrictive(fromServer, evaluateFilePath(sessionGroup, path, mode))
+  return mostRestrictive(fromServer, forGroup(sessionGroup))
 }
 
 interface AuditContext {
@@ -222,14 +251,48 @@ function auditSuccess(ctx: AuditContext, approval: 'not-required' | 'approved', 
   })
 }
 
+// Sent to the client on initialize and, in most clients, placed in the model's
+// system prompt. Without it an agent has to infer the addressing scheme from
+// eight one-line descriptions, and the thing it infers is "this is a shell" —
+// which is how you get `cat` where read_file belongs.
+const INSTRUCTIONS = `ShellPilot is a gateway to SSH servers the user has already configured.
+
+Addressing
+- Servers are identified by FRIENDLY NAME or alias, never by hostname, IP or connection string.
+- Call list_servers first. The names it returns are the only valid serverName values.
+- You never see hostnames, IP addresses, usernames, passwords or keys, and cannot ask for them.
+  ShellPilot resolves the name and authenticates on your behalf.
+
+Choosing a tool
+- Prefer the specific tool over execute_command: read_file over \`cat\`, list_files over \`ls\`,
+  get_server_metrics over \`top\`/\`free\`/\`df\`. They state their intent exactly, so the user's
+  path rules apply precisely rather than being inferred from a command string, and they are
+  less likely to need an approval prompt.
+- Use execute_command for work that genuinely needs a shell.
+
+Permissions
+- Every call is checked against an access group. A call may return "Denied", or block while the
+  user approves it. Both are normal; do not retry a denied call in a different form, and do not
+  try to work around a path rule by expressing the same access as a shell command.
+- Some capabilities may be denied entirely for this session. get_server_details lists the
+  effective permissions for a given server.
+
+Not available
+- No SSH tunnels, port forwarding, database queries, or file upload/download beyond
+  read_file/write_file. Do not attempt these through execute_command; say they are unsupported.`
+
 function buildServer(): McpServer {
-  const server = new McpServer({ name: 'shellpilot', version: '1.0.0' })
+  const server = new McpServer({ name: 'shellpilot', version: '1.0.0' }, { instructions: INSTRUCTIONS })
 
   server.registerTool(
     'list_workspaces',
     {
+      title: 'List workspaces',
       description:
-        "Lists the workspace(s) this AI session is scoped to. This never reveals a workspace outside the session's grant."
+        "Lists the workspace(s) this AI session is scoped to. A workspace is a group of servers. " +
+        "This never reveals a workspace outside the session's grant. Useful when a tool asks which " +
+        'workspace to act on; otherwise start with list_servers.',
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     },
     async (extra) => {
       const auth = authenticateExtra(extra)
@@ -241,7 +304,15 @@ function buildServer(): McpServer {
 
   server.registerTool(
     'list_servers',
-    { description: 'Lists the servers this AI session is allowed to see, by friendly name, grouped by workspace.' },
+    {
+      title: 'List servers',
+      description:
+        'Lists the servers this session may use, by friendly name, grouped by workspace. CALL THIS FIRST: ' +
+        'every other tool addresses a server by one of these names, and no other identifier — not a hostname, ' +
+        'an IP or a connection string — will resolve. A server the user has not granted AI access to does not ' +
+        'appear here.',
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    },
     async (extra) => {
       const auth = authenticateExtra(extra)
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
@@ -274,8 +345,17 @@ function buildServer(): McpServer {
   server.registerTool(
     'get_server_details',
     {
-      description: 'Gets details about one server by its friendly name (or alias). Never returns credentials.',
-      inputSchema: { serverName: z.string().describe('The server name or alias, e.g. "Nginx Server Prod" or "nginx"') }
+      title: 'Get server details',
+      description:
+        'Gets the OS, access group and the effective permissions this session has on one server. ' +
+        'Call this when you are unsure whether an action will be allowed, blocked for approval, or denied — ' +
+        'it is cheaper than attempting the action and being refused. Never returns credentials, hostnames or usernames.',
+      inputSchema: {
+        serverName: z
+          .string()
+          .describe('Friendly name or alias exactly as returned by list_servers, e.g. "Nginx Server Prod" or "nginx"')
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     },
     async ({ serverName }, extra) => {
       const auth = authenticateExtra(extra)
@@ -304,12 +384,21 @@ function buildServer(): McpServer {
   server.registerTool(
     'execute_command',
     {
+      title: 'Run a shell command',
       description:
-        'Runs a single non-interactive command on a server over SSH and returns stdout/stderr/exit code. May require user approval depending on the access group.',
+        'Runs a single non-interactive command over SSH and returns stdout, stderr and the exit code. ' +
+        'Use this only for work the purpose-built tools do not cover. Prefer read_file over `cat`, ' +
+        'list_files over `ls`, write_file over a redirect, and get_server_metrics over `top`/`free`/`df`: ' +
+        'those state their intent exactly, so the path rules apply precisely instead of being inferred from ' +
+        'a command string, and they are less likely to require approval. Interactive commands, shells and ' +
+        'privilege-escalation shells (sudo -i, su, sudo bash) are always refused. May block while the user approves it.',
       inputSchema: {
-        serverName: z.string().describe('The server name or alias'),
-        command: z.string().describe('The shell command to run')
-      }
+        serverName: z.string().describe('Friendly name or alias exactly as returned by list_servers'),
+        command: z
+          .string()
+          .describe('A single non-interactive shell command. Not a script, not an interactive program.')
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
     },
     async ({ serverName, command }, extra) => {
       const auth = authenticateExtra(extra)
@@ -361,8 +450,16 @@ function buildServer(): McpServer {
   server.registerTool(
     'read_file',
     {
-      description: 'Reads a text file from a server over SFTP.',
-      inputSchema: { serverName: z.string(), path: z.string().describe('Absolute remote path') }
+      title: 'Read a file',
+      description:
+        'Reads a text file from a server over SFTP. Prefer this over running `cat` through execute_command: ' +
+        "the path is checked against the user's per-path rules directly rather than being parsed out of a " +
+        'command line. Text only — this is not a way to fetch binaries.',
+      inputSchema: {
+        serverName: z.string().describe('Friendly name or alias exactly as returned by list_servers'),
+        path: z.string().describe('Absolute remote path, e.g. /var/log/nginx/error.log')
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     },
     async ({ serverName, path }, extra) => {
       const auth = authenticateExtra(extra)
@@ -402,8 +499,17 @@ function buildServer(): McpServer {
   server.registerTool(
     'write_file',
     {
-      description: 'Writes a text file to a server over SFTP, overwriting it if it exists.',
-      inputSchema: { serverName: z.string(), path: z.string().describe('Absolute remote path'), content: z.string() }
+      title: 'Write a file',
+      description:
+        'Writes a text file over SFTP, replacing it entirely if it exists. There is no append mode — read the ' +
+        'file first and write back the full contents. Prefer this over a shell redirect: the path is checked ' +
+        'against the per-path rules directly. Often requires approval.',
+      inputSchema: {
+        serverName: z.string().describe('Friendly name or alias exactly as returned by list_servers'),
+        path: z.string().describe('Absolute remote path, e.g. /etc/nginx/conf.d/site.conf'),
+        content: z.string().describe('The complete new contents of the file. Replaces whatever is there.')
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
     },
     async ({ serverName, path, content }, extra) => {
       const auth = authenticateExtra(extra)
@@ -442,8 +548,15 @@ function buildServer(): McpServer {
   server.registerTool(
     'list_files',
     {
-      description: 'Lists the contents of a directory on a server over SFTP.',
-      inputSchema: { serverName: z.string(), path: z.string().describe('Absolute remote directory path') }
+      title: 'List a directory',
+      description:
+        'Lists the contents of a directory over SFTP, with sizes and types. Prefer this over running `ls` ' +
+        'through execute_command — it returns structured output and is checked against the per-path rules directly.',
+      inputSchema: {
+        serverName: z.string().describe('Friendly name or alias exactly as returned by list_servers'),
+        path: z.string().describe('Absolute remote directory path, e.g. /var/www')
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     },
     async ({ serverName, path }, extra) => {
       const auth = authenticateExtra(extra)
@@ -482,7 +595,15 @@ function buildServer(): McpServer {
 
   server.registerTool(
     'get_server_metrics',
-    { description: 'Gets live CPU/memory/disk/uptime metrics for a server.', inputSchema: { serverName: z.string() } },
+    {
+      title: 'Get server metrics',
+      description:
+        'Samples live CPU, memory, disk and uptime for a server and returns them as structured values. ' +
+        'Prefer this over `top`, `free`, `df` or `uptime` through execute_command — it needs no shell access ' +
+        'and returns numbers rather than text to parse.',
+      inputSchema: { serverName: z.string().describe('Friendly name or alias exactly as returned by list_servers') },
+      annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: false }
+    },
     async ({ serverName }, extra) => {
       const auth = authenticateExtra(extra)
       if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
@@ -518,6 +639,121 @@ function buildServer(): McpServer {
           `Disk: ${m.diskPct.toFixed(1)}% (${m.diskUsed}/${m.diskTotal} bytes)`,
           `Uptime: ${Math.round(m.uptime / 3600)}h`
         ].join('\n')
+      )
+    }
+  )
+
+  server.registerTool(
+    'add_server',
+    {
+      title: 'Add a server',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      description:
+        'Adds a new SSH connection to a workspace in ShellPilot, so later calls can address it by name. ' +
+        'Use only when the user asks for a server to be added; it changes their saved configuration. ' +
+        'Requires the manageServers capability and, ' +
+        'unless the access group allows it outright, explicit approval from the user. Credentials are written ' +
+        "straight to the operating system's secure storage and are never readable back through this bridge.",
+      inputSchema: {
+        name: z.string().describe('Friendly name for the connection, e.g. "Web Server Staging". Must be unique.'),
+        host: z.string().describe('Hostname or IP address'),
+        workspaceName: z
+          .string()
+          .optional()
+          .describe('Which workspace to add it to. Optional when the session covers exactly one.'),
+        port: z.number().int().min(1).max(65535).optional().describe('SSH port, default 22'),
+        username: z.string().optional().describe('SSH username, default "root"'),
+        auth: z
+          .enum(['password', 'key', 'agent'])
+          .optional()
+          .describe('Authentication method, default "agent" (use the running SSH agent, no credential stored)'),
+        password: z.string().optional().describe('Password, when auth is "password"'),
+        keyPath: z.string().optional().describe('Absolute path to a private key file, when auth is "key"'),
+        passphrase: z.string().optional().describe('Passphrase for the private key, if it has one'),
+        os: z.string().optional().describe('Operating system label, default "Linux"')
+      }
+    },
+    async (args, extra) => {
+      const auth = authenticateExtra(extra)
+      if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
+      const { session } = auth
+
+      const scoped = session.workspaces.map((w) => ({ ...w, name: getCachedWorkspace(w.id)?.name ?? w.name }))
+      const workspace = args.workspaceName
+        ? scoped.find((w) => w.name.toLowerCase() === args.workspaceName!.trim().toLowerCase())
+        : scoped.length === 1
+          ? scoped[0]
+          : undefined
+      if (!workspace) {
+        return errorText(
+          args.workspaceName
+            ? `No workspace named "${args.workspaceName}" is available to this session.`
+            : `This session covers several workspaces — pass workspaceName. Available: ${scoped
+                .map((w) => w.name)
+                .join(', ')}`
+        )
+      }
+
+      const name = args.name.trim()
+      if (!name) return errorText('A server name is required.')
+      // Every other tool addresses servers by friendly name, so a duplicate
+      // would make an existing server unreachable through this bridge.
+      if (listCachedServers([workspace.id]).some((s) => s.name.toLowerCase() === name.toLowerCase())) {
+        return errorText(`A server named "${name}" already exists in ${workspace.name}.`)
+      }
+
+      const method = args.auth ?? 'agent'
+      if (method === 'password' && !args.password) return errorText('auth "password" requires a password.')
+      if (method === 'key' && !args.keyPath) return errorText('auth "key" requires keyPath.')
+
+      const port = args.port ?? 22
+      const username = args.username?.trim() || 'root'
+      const ctx: AuditContext = {
+        session,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        // No server exists yet, so there is no id to record. The name is what
+        // the audit entry and the approval dialog are about.
+        serverId: 'pending-new-server',
+        serverName: name,
+        // Deliberately describes the credential without reproducing it: this
+        // string is persisted to the audit log and shown in a dialog.
+        action: `Add server "${name}" (${username}@${args.host}:${port}, auth: ${method}${
+          method === 'agent' ? '' : ', credential supplied by the agent'
+        })`,
+        capability: 'manageServers'
+      }
+
+      const check = effectiveWorkspaceCapability(session, workspace.id, 'manageServers')
+      const gated = await gate(ctx, check, 'high')
+      if (!gated.ok) return gated.result
+
+      const result = await createServerForAgent({
+        workspaceId: workspace.id,
+        name,
+        host: args.host.trim(),
+        port,
+        username,
+        auth: method,
+        password: args.password,
+        keyPath: args.keyPath,
+        passphrase: args.passphrase,
+        os: args.os
+      })
+      if (!result.ok) {
+        recordAudit({
+          ...auditBase(ctx),
+          approval: check.decision === 'ask' ? 'approved' : 'not-required',
+          result: 'error',
+          error: result.error ?? 'unknown error'
+        })
+        return errorText(`Could not add the server: ${result.error ?? 'unknown error'}`)
+      }
+
+      auditSuccess(ctx, check.decision === 'ask' ? 'approved' : 'not-required')
+      return text(
+        `Added "${name}" to ${workspace.name}. Refer to it by that name in other tools. ` +
+          `Its credential is in the OS keychain and cannot be read back through this bridge.`
       )
     }
   )
