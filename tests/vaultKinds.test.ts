@@ -1,16 +1,16 @@
 import { describe, it, expect } from 'vitest'
-import { VAULT_KIND_LABEL, vaultMatches, type VaultEntry, type VaultKind } from '../src/shared/vault'
+import {
+  VAULT_KIND_LABEL,
+  VAULT_KIND_FIELDS as KIND_FIELDS,
+  hiddenFieldsFor,
+  vaultMatches,
+  type VaultEntry
+} from '../src/shared/vault'
 
-// The picker offers four kinds. Before this, entry.kind was read in exactly one
-// place — the select's own value — so choosing a kind changed an icon in the
-// sidebar and nothing else: a Note asked for a password, and an API key had
-// nowhere obvious to put the key.
-const KIND_FIELDS: Record<VaultKind, { url: boolean; username: boolean; secret: 'password' | 'key' | null }> = {
-  login: { url: true, username: true, secret: 'password' },
-  url: { url: true, username: false, secret: null },
-  key: { url: true, username: false, secret: 'key' },
-  note: { url: false, username: false, secret: null }
-}
+// entry.kind used to be read in exactly one place — the type picker's own
+// value — so choosing a kind changed an icon in the sidebar and nothing else:
+// a Note asked for a password, and an API key had nowhere obvious to put the
+// key. These assert against the real map the view renders from, not a copy.
 
 const entry = (patch: Partial<VaultEntry> = {}): VaultEntry => ({
   id: 'e1',
@@ -79,24 +79,22 @@ describe('switching kind is not destructive', () => {
   })
 
   it('detects which stored values a kind hides, so the UI can say so', () => {
-    const e = { ...entry(), kind: 'note' as const }
-    const shown = KIND_FIELDS[e.kind]
-    const hidden = [
-      !shown.url && e.url ? 'URL' : null,
-      !shown.username && e.username ? 'username' : null,
-      !shown.secret && e.password ? 'password' : null
-    ].filter(Boolean)
-    expect(hidden).toEqual(['URL', 'username', 'password'])
+    expect(hiddenFieldsFor({ ...entry(), kind: 'note' })).toEqual(['URL', 'username', 'password'])
   })
 
   it('reports nothing hidden when the kind shows everything that is set', () => {
-    const e = entry()
-    const shown = KIND_FIELDS[e.kind]
-    const hidden = [
-      !shown.url && e.url ? 'URL' : null,
-      !shown.username && e.username ? 'username' : null,
-      !shown.secret && e.password ? 'password' : null
-    ].filter(Boolean)
-    expect(hidden).toEqual([])
+    expect(hiddenFieldsFor(entry())).toEqual([])
+  })
+
+  it('flags a stored private key that the current kind does not show', () => {
+    expect(hiddenFieldsFor({ ...entry(), kind: 'login', privateKey: 'PEM' })).toContain('private key')
+  })
+
+  it('never puts private key material into the search haystack', () => {
+    const k = { ...entry(), kind: 'sshkey' as const, privateKey: 'PRIVATE-MATERIAL', publicKey: 'ssh-ed25519 AAAA deploy@box' }
+    expect(vaultMatches(k, 'PRIVATE-MATERIAL')).toBe(false)
+    // The public half is not a secret and carries the key comment, which is
+    // the useful thing to search an SSH key by.
+    expect(vaultMatches(k, 'deploy@box')).toBe(true)
   })
 })

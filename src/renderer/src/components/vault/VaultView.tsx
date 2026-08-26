@@ -2,9 +2,16 @@ import { useEffect, useState } from 'react'
 import { Copy, Eye, EyeOff, KeyRound, Lock, Plus, ShieldCheck, Trash2, Unlock } from 'lucide-react'
 import { useVault, newField } from '../../store/vault'
 import { toast } from '../../store/toast'
-import { VAULT_KIND_LABEL, type VaultEntry, type VaultKind } from '../../../../shared/vault'
+import {
+  VAULT_KIND_LABEL,
+  VAULT_KIND_FIELDS,
+  VAULT_SECRET_LABEL,
+  hiddenFieldsFor,
+  type VaultEntry,
+  type VaultKind
+} from '../../../../shared/vault'
 
-const KINDS: VaultKind[] = ['login', 'url', 'key', 'note']
+const KINDS: VaultKind[] = ['login', 'url', 'key', 'sshkey', 'note']
 
 // Which of the built-in fields each kind actually shows. The picker used to
 // change nothing but an icon in the sidebar: every kind rendered URL, Username
@@ -15,14 +22,6 @@ const KINDS: VaultKind[] = ['login', 'url', 'key', 'note']
 // Switching kind never deletes anything. A value typed under one kind is still
 // stored, still searchable, and comes back if the kind is switched back — so
 // this only decides what is on screen, which is the one thing it should decide.
-const KIND_FIELDS: Record<VaultKind, { url: boolean; username: boolean; secret: 'password' | 'key' | null }> = {
-  login: { url: true, username: true, secret: 'password' },
-  url: { url: true, username: false, secret: null },
-  key: { url: true, username: false, secret: 'key' },
-  note: { url: false, username: false, secret: null }
-}
-
-const SECRET_LABEL: Record<'password' | 'key', string> = { password: 'Password', key: 'API key' }
 
 function copy(label: string, value: string): void {
   if (!value) return
@@ -226,16 +225,12 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
   const setField = (id: string, patch: Partial<(typeof entry.fields)[number]>): void =>
     set({ fields: entry.fields.map((f) => (f.id === id ? { ...f, ...patch } : f)) })
 
-  const shown = KIND_FIELDS[entry.kind] ?? KIND_FIELDS.login
+  const shown = VAULT_KIND_FIELDS[entry.kind] ?? VAULT_KIND_FIELDS.login
 
   // A value that belongs to a field this kind does not show is still stored and
   // still searchable, but it is now invisible — so say so rather than let it
   // look lost.
-  const hiddenWithValue = [
-    !shown.url && entry.url ? 'URL' : null,
-    !shown.username && entry.username ? 'username' : null,
-    !shown.secret && entry.password ? 'password' : null
-  ].filter(Boolean) as string[]
+  const hiddenWithValue = hiddenFieldsFor(entry)
 
   return (
     <div className="vault-editor">
@@ -271,9 +266,28 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
       {shown.username && (
         <Row label="Username" value={entry.username} onChange={(v) => set({ username: v })} />
       )}
+      {shown.keys && (
+        <>
+          <Multiline
+            label="Private key"
+            value={entry.privateKey ?? ''}
+            onChange={(v) => set({ privateKey: v })}
+            placeholder={'-----BEGIN OPENSSH PRIVATE KEY-----\n…'}
+            secret
+            revealed={!!revealed.__privkey}
+            onReveal={() => toggle('__privkey')}
+          />
+          <Multiline
+            label="Public key"
+            value={entry.publicKey ?? ''}
+            onChange={(v) => set({ publicKey: v })}
+            placeholder="ssh-ed25519 AAAA… user@host"
+          />
+        </>
+      )}
       {shown.secret && (
         <Row
-          label={SECRET_LABEL[shown.secret]}
+          label={VAULT_SECRET_LABEL[shown.secret]}
           value={entry.password}
           onChange={(v) => set({ password: v })}
           secret
@@ -355,6 +369,56 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
 
       <div className="faint" style={{ fontSize: 11 }}>
         Updated {new Date(entry.updatedAt).toLocaleString()}
+      </div>
+    </div>
+  )
+}
+
+// PEM material is many lines long and unusable in a single-line input, which
+// is why storing the key itself was never practical before.
+function Multiline({
+  label,
+  value,
+  onChange,
+  placeholder,
+  secret,
+  revealed,
+  onReveal
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  secret?: boolean
+  revealed?: boolean
+  onReveal?: () => void
+}): React.JSX.Element {
+  const masked = secret && !revealed && value.length > 0
+  return (
+    <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
+      <span className="vault-label" style={{ paddingTop: 8 }}>
+        {label}
+      </span>
+      <textarea
+        className="input mono"
+        style={{ flex: 1, minHeight: 96, resize: 'vertical', lineHeight: 1.4 }}
+        spellCheck={false}
+        placeholder={placeholder}
+        // A revealed key is shown verbatim; a hidden one shows its shape, so
+        // you can tell an entry holds a key without exposing it on screen.
+        value={masked ? `${value.split('\n').length} lines hidden` : value}
+        readOnly={masked}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <div className="col" style={{ gap: 4 }}>
+        {secret && (
+          <button className="icon-btn sm" title="Reveal" onClick={onReveal}>
+            {revealed ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+        )}
+        <button className="icon-btn sm" title={`Copy ${label.toLowerCase()}`} onClick={() => copy(label, value)}>
+          <Copy size={14} />
+        </button>
       </div>
     </div>
   )

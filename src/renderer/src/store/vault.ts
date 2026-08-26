@@ -44,6 +44,10 @@ interface VaultState {
   select: (id: string | null) => void
   setQuery: (q: string) => void
   addEntry: (kind?: VaultKind) => Promise<void>
+  // Creates a fully-populated entry and hands back its id, so a caller that
+  // needs to reference the new entry — saving a server's credential into the
+  // vault — does not have to guess which one it just made.
+  createEntry: (kind: VaultKind, patch: Partial<VaultEntry>) => Promise<string | null>
   updateEntry: (id: string, patch: Partial<VaultEntry>) => Promise<void>
   deleteEntry: (id: string) => Promise<void>
   clearError: () => void
@@ -128,6 +132,16 @@ export const useVault = create<VaultState>((set, get) => ({
     const entries = [...get().entries, e]
     set({ entries, selectedId: e.id })
     await persist(entries, set)
+  },
+
+  createEntry: async (kind, patch) => {
+    const e = { ...newEntry(kind), ...patch }
+    const entries = [...get().entries, e]
+    set({ entries })
+    await persist(entries, set)
+    // persist() surfaces a failure through `error`; a caller must not be told
+    // an id that was never written to disk.
+    return get().error ? null : e.id
   },
 
   updateEntry: async (id, patch) => {
