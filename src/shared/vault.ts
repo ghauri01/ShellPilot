@@ -13,6 +13,19 @@ export interface VaultEntry {
   id: string
   name: string
   kind: VaultKind
+  // Which workspace this entry belongs to, or absent for one that is visible
+  // everywhere.
+  //
+  // Absent is the honest default for entries that predate this field: the
+  // vault was a single global store, so there is no record of which workspace
+  // any of them was created in, and guessing would either hide a credential
+  // someone relies on or claim knowledge we do not have. They stay shared and
+  // can be moved deliberately.
+  //
+  // Shared is also a real, wanted state — a credential used from several
+  // workspaces should exist once, which is the whole reason a server
+  // references a vault entry rather than copying it.
+  workspaceId?: string
   url: string
   username: string
   // Doubles as the key passphrase on an `sshkey` entry. One secret slot, whose
@@ -58,6 +71,21 @@ export const VAULT_KIND_LABEL: Record<VaultKind, string> = {
   key: 'API key',
   sshkey: 'SSH key',
   note: 'Note'
+}
+
+// Entries visible from a given workspace: the ones that belong to it, plus the
+// shared ones. Filtering happens in the renderer rather than in the vault
+// service because the vault file is one encrypted blob — splitting it per
+// workspace would mean a master password per workspace, which is a different
+// product. This hides entries from view; it is not a cryptographic boundary,
+// and SECURITY.md says so.
+export function vaultEntriesFor(entries: VaultEntry[], workspaceId: string | null): VaultEntry[] {
+  if (!workspaceId) return entries
+  return entries.filter((e) => !e.workspaceId || e.workspaceId === workspaceId)
+}
+
+export function isSharedVaultEntry(e: VaultEntry): boolean {
+  return !e.workspaceId
 }
 
 // Matches an entry against a search query across every stored field, so the

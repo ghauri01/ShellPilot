@@ -20,22 +20,19 @@ describe('what a workspace actually isolates', () => {
     expect(hasWorkspaceId(types, iface)).toBe(true)
   })
 
-  it('a vault entry is not, and the docs must keep saying so', () => {
-    // One vault per installation, shared by every workspace. If this ever gains
-    // a workspaceId the copy asserted below has to change with it.
-    expect(hasWorkspaceId(vaultShared, 'VaultEntry')).toBe(false)
+  it('a vault entry can belong to one, optionally', () => {
+    // Optional, because "shared" is a real state: one credential used from
+    // several workspaces should exist once.
+    expect(vaultShared).toMatch(/workspaceId\?: string/)
   })
 })
 
 describe('the walkthrough does not overclaim isolation', () => {
-  it('never says vault entries belong to a workspace', () => {
-    const workspaces = TOUR_STEPS.find((s) => s.id === 'workspaces')!
-    expect(workspaces.body).not.toMatch(/tunnel and vault entry belongs/)
-  })
-
-  it('says explicitly that the vault is shared across workspaces', () => {
+  it('explains that an entry can be shared rather than implying total isolation', () => {
+    // The vault is filtered by workspace, not cryptographically separated, and
+    // the tour must not imply otherwise.
     const text = TOUR_STEPS.map((s) => s.body).join(' ')
-    expect(text).toMatch(/vault is (the exception|shared)|shared across every workspace/i)
+    expect(text).toMatch(/marked shared/i)
   })
 
   it('still tells people workspaces can be password-protected', () => {
@@ -46,8 +43,9 @@ describe('the walkthrough does not overclaim isolation', () => {
 })
 
 describe('SECURITY.md states the boundary', () => {
-  it('says the vault is not workspace-scoped', () => {
+  it('says filtering is not a cryptographic boundary', () => {
     const doc = readFileSync('SECURITY.md', 'utf8')
-    expect(doc).toMatch(/vault is not workspace-scoped/i)
+    expect(doc).toMatch(/filtered by workspace, not separated by it/i)
+    expect(doc).toMatch(/not\*{0,2} a cryptographic boundary/i)
   })
 })

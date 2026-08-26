@@ -3,6 +3,7 @@ import { Copy, Eye, EyeOff, Fingerprint, KeyRound, Lock, Plus, ShieldCheck, Tras
 import { useVault, newField } from '../../store/vault'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
+import { useApp } from '../../store/app'
 import { bridgeOn } from '../../lib/bridge'
 import {
   VAULT_KIND_LABEL,
@@ -358,6 +359,7 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
   const setField = (id: string, patch: Partial<(typeof entry.fields)[number]>): void =>
     set({ fields: entry.fields.map((f) => (f.id === id ? { ...f, ...patch } : f)) })
 
+  const workspaces = useApp((s) => s.workspaces)
   const shown = VAULT_KIND_FIELDS[entry.kind] ?? VAULT_KIND_FIELDS.login
 
   // A value that belongs to a field this kind does not show is still stored and
@@ -428,6 +430,23 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
           onReveal={() => toggle('__pw')}
         />
       )}
+      <div className="row" style={{ gap: 6 }}>
+        <span className="vault-label">Workspace</span>
+        <select
+          className="input"
+          style={{ flex: 1 }}
+          value={entry.workspaceId ?? ''}
+          onChange={(e) => set({ workspaceId: e.target.value || undefined })}
+        >
+          <option value="">Shared — visible in every workspace</option>
+          {workspaces.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <Row
         label="Tags"
         value={entry.tags.join(', ')}

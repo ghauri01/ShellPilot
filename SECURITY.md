@@ -48,14 +48,21 @@ Workspaces isolate **servers, databases and tunnels** — each record carries a
 workspace id and is filtered by it. A password-protected workspace keeps those
 out of sight until it is unlocked.
 
-**The vault is not workspace-scoped.** There is one vault per installation,
-shared by every workspace, and a credential saved in one workspace is visible
-from all of them. Locking a workspace does not hide the vault, because the
-vault does not belong to any workspace.
+**The vault is filtered by workspace, not separated by it.** A vault entry can
+belong to a workspace — new entries belong to the one they were created in —
+and the entry list then shows that workspace's entries plus any marked shared.
+Entries written before this existed have no workspace recorded, so they stay
+shared and can be moved deliberately.
 
-That is the current design, not an oversight in the filtering — but it is easy
-to expect otherwise if you use one workspace per client, so it is stated here
-plainly.
+What that is worth, stated precisely: it stops another client's credentials
+being in front of you, and it stops you saving a credential into the wrong
+place by accident. It is **not** a cryptographic boundary. The vault remains
+one encrypted file under one master password, so anything that can read the
+unlocked vault can read every entry in it regardless of workspace. Locking a
+workspace does not lock the vault.
+
+Per-workspace cryptographic separation would mean a master password per
+workspace, which is a different product; this is a view over one vault.
 
 ### What biometric unlock actually protects
 

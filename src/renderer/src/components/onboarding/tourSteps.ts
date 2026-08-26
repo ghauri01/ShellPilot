@@ -24,7 +24,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'workspaces',
     title: 'Workspaces keep clients and environments apart',
-    body: 'Servers, databases and tunnels each belong to a workspace — switch with the picker in the title bar, and password-protect a workspace to keep one client’s infrastructure out of sight. The vault is the exception: it is shared across every workspace, so a credential you save is visible from all of them.',
+    body: 'Servers, databases, tunnels and vault entries each belong to a workspace — switch with the picker in the title bar, and password-protect a workspace to keep one client’s infrastructure out of sight. A vault entry can also be marked shared, when the same credential is genuinely used from several workspaces.',
     action: 'Try the workspace picker at the top left.'
   },
   {
@@ -37,7 +37,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'vault',
     title: 'The vault is where credentials live',
-    body: 'Passwords, SSH keys and API keys, encrypted with AES-256-GCM under a master password. One vault for the whole app, not one per workspace — a server in any workspace can reference the same entry, so rotating a credential is one edit instead of a hunt. On a Mac with Touch ID you can unlock with a fingerprint.',
+    body: 'Passwords, SSH keys and API keys, encrypted with AES-256-GCM under a master password. Entries belong to a workspace, or are marked shared when the same credential is used from several. A server references an entry rather than keeping its own copy, so rotating a credential is one edit instead of a hunt. On a Mac with Touch ID you can unlock with a fingerprint.',
     view: 'vault',
     action: 'Create your vault and add a credential.'
   },

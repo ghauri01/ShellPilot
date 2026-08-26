@@ -1,15 +1,20 @@
 import { create } from 'zustand'
+import { useApp } from './app'
 import type { VaultEntry, VaultField, VaultKind } from '../../../shared/vault'
 
 let seq = 0
 const uid = (p: string): string => `${p}-${Date.now().toString(36)}-${seq++}`
 
-export function newEntry(kind: VaultKind = 'login'): VaultEntry {
+// A new entry belongs to the workspace it was made in. That is the behaviour
+// people expect from a workspace, and the alternative — defaulting to shared —
+// silently reproduces the problem this exists to fix.
+export function newEntry(kind: VaultKind = 'login', workspaceId?: string): VaultEntry {
   const now = new Date().toISOString()
   return {
     id: uid('v'),
     name: 'New entry',
     kind,
+    workspaceId,
     url: '',
     username: '',
     password: '',
@@ -187,14 +192,14 @@ export const useVault = create<VaultState>((set, get) => ({
   setQuery: (q) => set({ query: q }),
 
   addEntry: async (kind = 'login') => {
-    const e = newEntry(kind)
+    const e = newEntry(kind, useApp.getState().activeWorkspaceId)
     const entries = [...get().entries, e]
     set({ entries, selectedId: e.id })
     await persist(entries, set)
   },
 
   createEntry: async (kind, patch) => {
-    const e = { ...newEntry(kind), ...patch }
+    const e = { ...newEntry(kind, useApp.getState().activeWorkspaceId), ...patch }
     const entries = [...get().entries, e]
     set({ entries })
     await persist(entries, set)
