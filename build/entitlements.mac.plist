@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
   <!--
-    Unused until a Developer ID certificate exists; electron-builder.yml
-    references it only when hardenedRuntime is turned on. Written now so
-    enabling signing is a configuration change rather than a research task.
+    In use. The hardened runtime is enabled with ad-hoc signing — it does not
+    require a Developer ID, and it blocks DYLD injection and debugger attach
+    whether or not the build is notarized.
 
     Library validation must be disabled: asarUnpack deliberately keeps the ssh2
     and cpu-features .node binaries outside the archive, and hardened runtime

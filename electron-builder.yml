@@ -83,19 +83,26 @@ mac:
   # written and carries the library-validation exception the unpacked ssh2 and
   # cpu-features binaries need.
   identity: '-'
-  # Hardened runtime turns on library validation, which refuses to load the
-  # ssh2/cpu-features .node binaries that asarUnpack deliberately keeps outside
-  # the archive, so it is off here.
+  # On, despite there being no Developer ID. The hardened runtime blocks
+  # DYLD_INSERT_LIBRARIES injection and debugger attach regardless of
+  # notarization, and without it a process running as the same user can inject
+  # into ShellPilot and read an unlocked vault key straight out of memory —
+  # which defeats every protection the vault has, biometrics included.
   #
-  # Note this is a real cost, not a free choice: DYLD_INSERT_LIBRARIES injection
-  # and debugger attach are blocked by the hardened runtime regardless of
-  # notarization, so leaving it off means a process running as the same user can
-  # inject into ShellPilot and read an unlocked vault key straight out of memory.
-  # Turning it on needs com.apple.security.cs.disable-library-validation for the
-  # .node binaries — which gives back the library-validation half but keeps the
-  # DYLD and debugger hardening. Worth doing; it needs an entitlements plist and
-  # a build to verify the native modules still load.
-  hardenedRuntime: false
+  # The entitlements plist disables library validation, because asarUnpack
+  # deliberately keeps the ssh2 and cpu-features .node binaries outside the
+  # archive. That gives back one of the three protections and keeps the two
+  # that matter here.
+  #
+  # Verified before enabling, on an ad-hoc signed arm64 build: signs cleanly
+  # (adhoc,runtime, 132 sealed files, codesign --verify --strict passes), the
+  # app launches with its renderer and helpers, and an ssh2 connection to a
+  # real host completes. The native crypto binding does not load — but it does
+  # not load without the hardened runtime either, and ssh2 falls back to pure
+  # JS, so SSH is unaffected.
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
   target:
     - target: dmg
       arch: [x64, arm64]
