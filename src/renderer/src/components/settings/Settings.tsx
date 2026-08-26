@@ -354,6 +354,35 @@ export function Settings(): React.JSX.Element {
 
           {section === 'security' && (
             <div className="settings-section">
+              <h2>Vault</h2>
+              <div className="sub">The encrypted store for passwords, SSH keys and API keys.</div>
+              <div className="setting-row">
+                <div className="s-info">
+                  <div className="s-title">Lock after inactivity</div>
+                  <div className="s-desc">
+                    While the vault is unlocked its key is in memory and its entries are on screen.
+                    Locking clears both. The timer counts vault inactivity, not time since you
+                    started the app.
+                  </div>
+                </div>
+                <select
+                  className="input"
+                  style={{ maxWidth: 160 }}
+                  value={settings.vaultAutoLockMinutes}
+                  onChange={(e) => setSettings({ vaultAutoLockMinutes: Number(e.target.value) })}
+                >
+                  <option value={5}>5 minutes</option>
+                  <option value={15}>15 minutes</option>
+                  <option value={30}>30 minutes</option>
+                  <option value={60}>1 hour</option>
+                  <option value={0}>Never</option>
+                </select>
+              </div>
+            </div>
+          )}
+
+          {section === 'security' && (
+            <div className="settings-section">
               <h2>Security</h2>
               <div className="sub">Credential storage and workspace locking.</div>
               <KnownHosts />

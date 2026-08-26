@@ -511,6 +511,7 @@ ipcMain.handle('vault:bio-enable', (_e, scope: 'session' | 'persistent' = 'sessi
   enableBiometricUnlock(scope)
 )
 ipcMain.handle('vault:bio-scope', () => biometricScope())
+ipcMain.handle('vault:set-auto-lock', (_e, minutes: number) => setVaultAutoLock(minutes))
 ipcMain.handle('vault:bio-disable', () => disableBiometricUnlock())
 ipcMain.handle('vault:bio-unlock', () => biometricUnlock())
 
