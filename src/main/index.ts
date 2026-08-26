@@ -52,6 +52,7 @@ import type { TunnelConfig, TunnelSshConfig } from '../shared/tunnel'
 import { knownHostList, knownHostForget } from './services/knownhosts'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
 import { backupExport, backupImport, backupInspect, deleteAllData, relaunchApp } from './services/backup'
+import { checkForUpdates, getUpdaterStatus, onUpdaterStatus, installUpdate, openReleasePage } from './services/updater'
 import { parseSshConfig } from '../shared/sshconfig'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
@@ -224,6 +225,7 @@ ipcMain.handle('window:control', (_e, action: unknown) => {
 ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
 
 ipcMain.handle('app:platform', () => process.platform)
+ipcMain.handle('app:version', () => app.getVersion())
 
 ipcMain.handle('theme:set', (_e, mode: unknown) => {
   if (mode === 'dark' || mode === 'light' || mode === 'system') {
@@ -454,6 +456,15 @@ ipcMain.handle('backup:inspect', (_e, password: string, path?: string) => backup
 ipcMain.handle('backup:import', (_e, password: string, path: string) => backupImport(password, path))
 ipcMain.handle('backup:deleteAll', () => deleteAllData())
 ipcMain.handle('backup:relaunch', () => relaunchApp())
+
+// ---- Updater ----
+ipcMain.handle('updater:check', () => checkForUpdates())
+ipcMain.handle('updater:status', () => getUpdaterStatus())
+ipcMain.handle('updater:install', () => installUpdate())
+ipcMain.handle('updater:openReleasePage', () => openReleasePage())
+onUpdaterStatus((s) => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status-event', s)
+})
 
 // ---- Known hosts ----
 ipcMain.handle('knownhosts:list', () => knownHostList())
@@ -695,6 +706,9 @@ app.whenReady().then(() => {
       if (!r.ok) console.error('[mcp] failed to start on launch:', r.error)
     })
   }
+  // Quiet by design: this only ever pushes a status event the renderer can
+  // choose to surface (or not) — it never interrupts anything on its own.
+  void checkForUpdates()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

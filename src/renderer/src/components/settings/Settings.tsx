@@ -19,6 +19,7 @@ import type { ThemeMode } from '../../store/app'
 import { clsx } from '../../lib/format'
 import { ShortcutManager } from './ShortcutManager'
 import { BackupPanel } from './BackupPanel'
+import { UpdatePanel } from './UpdatePanel'
 import { SshSessions } from './SshSessions'
 import { toast } from '../../store/toast'
 
@@ -151,6 +152,8 @@ export function Settings(): React.JSX.Element {
         </nav>
 
         <div className="settings-content">
+          {section === 'general' && <UpdatePanel />}
+
           {section === 'appearance' && (
             <div className="settings-section">
               <h2>Appearance</h2>
@@ -348,6 +351,7 @@ export function Settings(): React.JSX.Element {
           )}
 
           {![
+            'general',
             'appearance',
             'terminal',
             'shortcuts',
