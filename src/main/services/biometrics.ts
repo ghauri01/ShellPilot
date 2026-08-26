@@ -53,14 +53,30 @@ export function biometricSupport(): BiometricSupport {
       : { available: false, kind: 'none', reason: 'No enrolled Touch ID fingerprint on this Mac.' }
   }
   if (process.platform === 'win32') {
-    // Windows Hello has no Electron API; it needs a native module binding
-    // Windows.Security.Credentials.UI. Deliberately not pulled in for this —
-    // a native dependency changes the build for all three platforms. The shape
-    // here is ready for it: a provider that can prompt, plus safeStorage
-    // (DPAPI) for the key, which is already what the other branches use.
-    return { available: false, kind: 'none', reason: 'Windows Hello is not supported yet.' }
+    // Electron exposes promptTouchID for macOS and nothing equivalent for
+    // Windows Hello — reaching Windows.Security.Credentials.UI needs a native
+    // addon, and there is no maintained npm package that provides one for
+    // Electron. Writing and shipping an unverifiable native module into the
+    // path that guards a credential store is a worse outcome than not offering
+    // the feature, so this reports honestly instead.
+    //
+    // Everything except the prompt is already platform-agnostic: safeStorage
+    // is DPAPI here, and biometricUnlock() only needs a provider that can
+    // authenticate the person. Adding one is a self-contained change to this
+    // function.
+    return {
+      available: false,
+      kind: 'none',
+      reason:
+        'Windows Hello needs a native module that Electron does not provide, so vault unlock is by ' +
+        'master password on Windows for now.'
+    }
   }
-  return { available: false, kind: 'none', reason: 'Biometric unlock is not supported on this platform.' }
+  return {
+    available: false,
+    kind: 'none',
+    reason: 'Biometric unlock is not available on this platform; unlock with your master password.'
+  }
 }
 
 function read(): StoredKey | null {

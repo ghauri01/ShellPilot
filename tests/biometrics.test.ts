@@ -164,3 +164,20 @@ describe('disabling', () => {
     expect(bio.disableBiometricUnlock().ok).toBe(true)
   })
 })
+
+describe('platforms without a biometric prompt', () => {
+  it('says why, in terms a user can act on', () => {
+    // An inert switch with no explanation is worse than an honest absence:
+    // the reason has to distinguish "your Mac has no enrolled fingerprint"
+    // from "this platform cannot do it at all".
+    const support = bio.biometricSupport()
+    if (support.available) return
+    expect(support.reason).toBeTruthy()
+    expect(support.reason).toMatch(/master password|fingerprint|secure storage/i)
+  })
+
+  it('never reports a kind it cannot actually prompt with', () => {
+    const support = bio.biometricSupport()
+    if (!support.available) expect(support.kind).toBe('none')
+  })
+})
