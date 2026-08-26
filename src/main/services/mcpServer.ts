@@ -88,6 +88,38 @@ function bearerFrom(headers: RequestInfoLike['headers']): string | null {
 
 interface ExtraLike {
   requestInfo?: RequestInfoLike
+  // Present when the client asked for out-of-band progress on this call. The
+  // spec says the receiver is not obligated to send any, so everything that
+  // reads these has to cope with them being absent.
+  _meta?: { progressToken?: string | number }
+  sendNotification?: (n: {
+    method: 'notifications/progress'
+    params: { progressToken: string | number; progress: number; total?: number; message?: string }
+  }) => Promise<void>
+}
+
+// An ASK-tier call blocks until a human answers it in ShellPilot, which can be
+// the full approval timeout. Without this the agent sees no output at all for
+// that whole window and reports the tool as hung — which is exactly what got
+// reported. A progress notification is the only in-band way to say "still
+// alive, waiting on a human". Clients that sent no progressToken get nothing,
+// and a client that ignores progress is no worse off than before.
+async function noteAwaitingApproval(extra: ExtraLike, action: string, serverName: string): Promise<void> {
+  const token = extra._meta?.progressToken
+  if (token === undefined || !extra.sendNotification) return
+  try {
+    await extra.sendNotification({
+      method: 'notifications/progress',
+      params: {
+        progressToken: token,
+        progress: 0,
+        message: `Waiting for a human to approve "${action}" on ${serverName} in ShellPilot. This is not stuck — approve or deny it in the ShellPilot window.`
+      }
+    })
+  } catch {
+    // A failed progress notification must never take down the tool call that
+    // it was only annotating.
+  }
 }
 
 function authenticateExtra(extra: ExtraLike): { session: McpAgentSession } | { error: AuthFailureReason } {
@@ -237,7 +269,8 @@ interface AuditContext {
 async function gate(
   ctx: AuditContext,
   check: { decision: 'allow' | 'ask' | 'deny'; reason: string },
-  risk: 'low' | 'medium' | 'high'
+  risk: 'low' | 'medium' | 'high',
+  extra?: ExtraLike
 ): Promise<{ ok: true } | { ok: false; result: CallToolResult }> {
   if (check.decision === 'deny') {
     recordAudit({
@@ -260,6 +293,7 @@ async function gate(
     if (!ctx.serverId || !ctx.serverName || !ctx.capability || !ctx.workspaceId || !ctx.workspaceName) {
       return { ok: false, result: errorText('Denied: this action requires approval but has no server context.') }
     }
+    if (extra) await noteAwaitingApproval(extra, ctx.action, ctx.serverName)
     const decision = await requestApproval({
       sessionId: ctx.session.id,
       agentName: ctx.session.agentName,
@@ -288,7 +322,7 @@ async function gate(
         ok: false,
         result: errorText(
           decision === 'timeout'
-            ? 'Denied: approval request timed out waiting for the user.'
+            ? `Denied: nobody answered the approval request for this action within the timeout. It was waiting in the ShellPilot window. Ask the user to approve it there, or to raise the capability for ${ctx.serverName} from Ask to Allow in AI & MCP > Access, then retry.`
             : 'Denied: the user rejected this action.'
         )
       }
@@ -540,7 +574,7 @@ function buildServer(): McpServer {
         capability: 'terminal'
       }
       const risk = check.decision === 'deny' ? 'high' : /sudo\b/.test(command) ? 'high' : 'medium'
-      const gated = await gate(ctx, check, risk)
+      const gated = await gate(ctx, check, risk, extra)
       if (!gated.ok) return gated.result
 
       const secrets = knownSecretValuesForServer(s.id)
@@ -600,7 +634,7 @@ function buildServer(): McpServer {
         action: `read ${path}`,
         capability: 'readFiles'
       }
-      const gated = await gate(ctx, check, 'low')
+      const gated = await gate(ctx, check, 'low', extra)
       if (!gated.ok) return gated.result
 
       const secrets = knownSecretValuesForServer(s.id)
@@ -650,7 +684,7 @@ function buildServer(): McpServer {
         action: `write ${path} (${content.length} bytes)`,
         capability: 'writeFiles'
       }
-      const gated = await gate(ctx, check, 'medium')
+      const gated = await gate(ctx, check, 'medium', extra)
       if (!gated.ok) return gated.result
 
       const cfg = resolveChainSecrets(serverToSshConfig(s))
@@ -697,7 +731,7 @@ function buildServer(): McpServer {
         action: `list ${path}`,
         capability: 'readFiles'
       }
-      const gated = await gate(ctx, check, 'low')
+      const gated = await gate(ctx, check, 'low', extra)
       if (!gated.ok) return gated.result
 
       const cfg = resolveChainSecrets(serverToSshConfig(s))
@@ -743,7 +777,7 @@ function buildServer(): McpServer {
         action: 'get_server_metrics',
         capability: 'serverMetrics'
       }
-      const gated = await gate(ctx, check, 'low')
+      const gated = await gate(ctx, check, 'low', extra)
       if (!gated.ok) return gated.result
 
       const cfg = resolveChainSecrets(serverToSshConfig(s))
@@ -846,7 +880,7 @@ function buildServer(): McpServer {
         capability: 'databaseAccess'
       }
 
-      const gated = await gate(ctx, check, classifyStatement(statement) === 'read' ? 'low' : 'high')
+      const gated = await gate(ctx, check, classifyStatement(statement) === 'read' ? 'low' : 'high', extra)
       if (!gated.ok) return gated.result
 
       const approval = check.decision === 'ask' ? 'approved' : 'not-required'
@@ -951,7 +985,7 @@ function buildServer(): McpServer {
         capability: 'sshTunnel'
       }
 
-      const gated = await gate(ctx, check, running ? 'high' : 'low')
+      const gated = await gate(ctx, check, running ? 'high' : 'low', extra)
       if (!gated.ok) return gated.result
       const approval = check.decision === 'ask' ? 'approved' : 'not-required'
 
@@ -1066,7 +1100,7 @@ function buildServer(): McpServer {
       }
 
       const check = effectiveWorkspaceCapability(session, workspace.id, 'manageServers')
-      const gated = await gate(ctx, check, 'high')
+      const gated = await gate(ctx, check, 'high', extra)
       if (!gated.ok) return gated.result
 
       const result = await createServerForAgent({

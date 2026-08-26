@@ -2,6 +2,7 @@ import { app, dialog } from 'electron'
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { readOpenSshKnownHosts, lookupInKnownHosts, canonicalHostname } from './opensshKnownHosts'
 
 // Trust-on-first-use host key checking. Without this, ssh2 accepts any host
 // key presented, so a machine-in-the-middle on the path to a server can
@@ -80,14 +81,45 @@ export function verifyHostKey(host: string, port: number, key: Buffer): Promise<
   const inFlight = pending.get(id)
   if (inFlight) return inFlight
 
+  // What OpenSSH already thinks of this host. This never grants trust by
+  // itself — see opensshKnownHosts.ts for why — it only changes what the
+  // prompt says, so a host you use daily in your terminal is not announced as
+  // a total stranger. Revocation is the exception: it is a negative signal.
+  const openssh = lookupInKnownHosts(readOpenSshKnownHosts(), host, port, fingerprint, fp)
+
+  if (openssh.revoked) {
+    return dialog
+      .showMessageBox({
+        type: 'error',
+        title: 'Host key revoked',
+        message: `The host key for ${id} is marked @revoked in your ~/.ssh/known_hosts.`,
+        detail: `Fingerprint: ${fp}\n\nThe connection has been refused. Remove the @revoked line if this was a mistake.`,
+        buttons: ['OK'],
+        defaultId: 0
+      })
+      .then(() => false)
+  }
+
+  const recognised = openssh.trusted
   const prompt = dialog
     .showMessageBox({
-      type: 'warning',
-      title: 'Unknown host',
-      message: `The authenticity of ${id} cannot be established.`,
-      detail: `Fingerprint: ${fp}\n\nTrust this host and remember it for future connections?`,
+      type: recognised ? 'question' : 'warning',
+      title: recognised ? 'Confirm host' : 'Unknown host',
+      message: recognised
+        ? `${id} is already trusted in your ~/.ssh/known_hosts.`
+        : `The authenticity of ${id} cannot be established.`,
+      detail: recognised
+        ? `Fingerprint: ${fp}\n\nThis is the same key OpenSSH has for ${canonicalHostname(host, port)}. ` +
+          'ShellPilot keeps its own list of trusted hosts, so it has to be added here once too.'
+        : openssh.knownUnderAnotherKey
+          ? `Fingerprint: ${fp}\n\nWarning: ~/.ssh/known_hosts has an entry for this host under a different key. ` +
+            'That can mean the server was rebuilt, or that this connection is being intercepted. ' +
+            'Check the fingerprint before trusting it.'
+          : `Fingerprint: ${fp}\n\nTrust this host and remember it for future connections?`,
       buttons: ['Trust and connect', 'Cancel'],
-      defaultId: 1,
+      // Pre-selecting Trust is only defensible when we have independent
+      // evidence for this exact key; anything else keeps Cancel as the default.
+      defaultId: recognised ? 0 : 1,
       cancelId: 1
     })
     .then((r) => {
