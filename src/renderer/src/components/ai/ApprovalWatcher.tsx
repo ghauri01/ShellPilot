@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Modal } from '../common/Modal'
 import type { ApprovalRequest } from '../../../../shared/mcp'
+import { bridgeOn } from '../../lib/bridge'
 
 // Mounted once at the app root so an approval request surfaces no matter
 // which tab the user is on — an AI agent waiting on a sudo command should not
@@ -10,7 +11,7 @@ export function ApprovalWatcher(): React.JSX.Element | null {
 
   useEffect(() => {
     void window.shellpilot?.aiMcp.listApprovals().then((a) => setQueue(a ?? []))
-    const off = window.shellpilot?.aiMcp.onApprovalEvent((e) => {
+    const off = bridgeOn('aiMcp.onApprovalEvent', window.shellpilot?.aiMcp?.onApprovalEvent, (e) => {
       if (e.type === 'created') setQueue((q) => [...q, e.request])
       else setQueue((q) => q.filter((r) => r.id !== e.request.id))
     })

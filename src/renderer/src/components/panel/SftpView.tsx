@@ -24,6 +24,7 @@ import { bytes, clsx } from '../../lib/format'
 import { sshHopsFor } from '../../lib/ssh'
 import type { Server } from '../../types'
 import type {SftpEntry, SftpProgress, SshAuth} from '../../../../shared/ssh'
+import { bridgeOn } from '../../lib/bridge'
 
 const asAuth = (a: string): SshAuth => (a === 'password' || a === 'agent' ? a : 'key')
 
@@ -65,7 +66,7 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
   // Remote writes triggered by an external save happen in the main process, so
   // the result is reported back here.
   useEffect(() => {
-    return window.shellpilot?.sftp.onExternalSaved((r) => {
+    return bridgeOn('sftp.onExternalSaved', window.shellpilot?.sftp?.onExternalSaved, (r) => {
       const name = r.remotePath.split('/').pop()
       if (r.ok) toast(`${name} saved to the server`, 'ok')
       else toast(`${name}: ${r.error ?? 'upload failed'}`, 'error')
@@ -222,7 +223,7 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
 
   // Transfer progress is reported from the main process while an upload runs.
   useEffect(() => {
-    return window.shellpilot?.sftp.onProgress((p) => {
+    return bridgeOn('sftp.onProgress', window.shellpilot?.sftp?.onProgress, (p) => {
       if (p.key === key) setProgress(p)
     })
   }, [key])

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Check, X } from 'lucide-react'
 import type { ApprovalRequest } from '../../../../shared/mcp'
+import { bridgeOn } from '../../lib/bridge'
 
 export function AiApprovals(): React.JSX.Element {
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([])
@@ -11,7 +12,7 @@ export function AiApprovals(): React.JSX.Element {
 
   useEffect(() => {
     load()
-    const off = window.shellpilot?.aiMcp.onApprovalEvent(load)
+    const off = bridgeOn('aiMcp.onApprovalEvent', window.shellpilot?.aiMcp?.onApprovalEvent, load)
     const t = setInterval(load, 3000)
     return () => {
       off?.()

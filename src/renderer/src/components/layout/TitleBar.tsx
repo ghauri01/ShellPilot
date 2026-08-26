@@ -3,6 +3,7 @@ import { Search, Minus, Square, Copy, X, Compass } from 'lucide-react'
 import { useApp } from '../../store/app'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import { useShortcutHint } from '../../hooks/useShortcutHint'
+import { bridgeOn } from '../../lib/bridge'
 
 export function TitleBar(): React.JSX.Element {
   const togglePalette = useApp((s) => s.togglePalette)
@@ -15,7 +16,7 @@ export function TitleBar(): React.JSX.Element {
   useEffect(() => {
     window.shellpilot?.platform().then((p) => setIsMac(p === 'darwin'))
     window.shellpilot?.window.isMaximized().then(setMaximized)
-    const off = window.shellpilot?.window.onMaximizedChange(setMaximized)
+    const off = bridgeOn('window.onMaximizedChange', window.shellpilot?.window?.onMaximizedChange, setMaximized)
     return off
   }, [])
 
