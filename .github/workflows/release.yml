@@ -261,10 +261,41 @@ jobs:
           } > release-notes.md
           cat release-notes.md
 
+      # Uploads the assets only. The notes are set in the next step instead,
+      # because append_body silently did nothing here: when a release already
+      # exists for the tag the action reuses it ("Using release N ... instead of
+      # duplicate draft M") and the appended body never landed. Every release up
+      # to and including v0.3.0 shipped with an empty body because of it —
+      # downloads table, scan results, install guidance and all.
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**
-          body_path: release-notes.md
-          append_body: true
-          generate_release_notes: true
           draft: false
+
+      # Set the body explicitly, then check it is actually there. A release
+      # whose notes quietly vanish is worse than a failed job, because nothing
+      # about the run looks wrong.
+      - name: Publish release notes
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # GitHub's own "What's Changed" section, kept below our notes rather
+          # than lost to overwriting the body.
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" --jq .body > generated.md || : > generated.md
+
+          cp release-notes.md final-notes.md
+          if [ -s generated.md ]; then
+            { echo; echo "---"; echo; cat generated.md; } >> final-notes.md
+          fi
+
+          gh release edit "$TAG" --notes-file final-notes.md
+
+          LEN=$(gh release view "$TAG" --json body --jq '(.body // "") | length')
+          echo "Release body is $LEN characters."
+          if [ "$LEN" -lt 200 ]; then
+            echo "::error::Release notes did not publish (body is $LEN chars). The assets are"
+            echo "::error::uploaded but the release page is empty — fix before announcing."
+            exit 1
+          fi
