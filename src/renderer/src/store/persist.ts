@@ -1,4 +1,5 @@
 import { useApp } from './app'
+import type { Server, MonitorGroup } from '../types'
 
 // Bump when the seed/shape changes in a way that should discard older on-disk
 // data (e.g. removing the original sample/dummy dataset).
@@ -20,6 +21,20 @@ interface Persisted {
 }
 
 let timer: ReturnType<typeof setTimeout> | null = null
+
+// Connecting to a server flips Server.status (online/offline/connecting)
+// dozens of times a session, and collapsing a Fleet Monitor group flips
+// MonitorGroup.collapsed — both change the array's reference, but neither is
+// something a backup needs to capture. Comparing without them is what keeps
+// "Backup out of date" meaning what it says: your servers, workspaces, vault
+// or connections changed, not that you opened a terminal or collapsed a
+// panel.
+function serversWithoutStatus(servers: Server[]): Omit<Server, 'status'>[] {
+  return servers.map(({ status: _status, ...rest }) => rest)
+}
+function monitorGroupsWithoutCollapsed(groups: MonitorGroup[]): Omit<MonitorGroup, 'collapsed'>[] {
+  return groups.map(({ collapsed: _collapsed, ...rest }) => rest)
+}
 
 export async function initPersistence(): Promise<void> {
   const bridge = window.shellpilot
@@ -52,19 +67,42 @@ export async function initPersistence(): Promise<void> {
     if (state.settings.sshMasterIdleMinutes !== prev.settings.sshMasterIdleMinutes) {
       void window.shellpilot?.ssh.setPoolIdle(state.settings.sshMasterIdleMinutes)
     }
+    const serversRefChanged = state.servers !== prev.servers
+    const monitorGroupsRefChanged = state.monitorGroups !== prev.monitorGroups
+
+    // Reference changes drive the save-to-disk timer below — status and
+    // collapsed are still worth persisting across restarts, just not worth
+    // telling the user their backup is stale over.
     const dataChanged =
       state.workspaces !== prev.workspaces ||
       state.folders !== prev.folders ||
-      state.monitorGroups !== prev.monitorGroups ||
-      state.servers !== prev.servers ||
+      monitorGroupsRefChanged ||
+      serversRefChanged ||
+      state.vpns !== prev.vpns ||
+      state.tunnels !== prev.tunnels ||
+      state.databases !== prev.databases
+
+    const serversContentChanged =
+      serversRefChanged &&
+      JSON.stringify(serversWithoutStatus(state.servers)) !== JSON.stringify(serversWithoutStatus(prev.servers))
+    const monitorGroupsContentChanged =
+      monitorGroupsRefChanged &&
+      JSON.stringify(monitorGroupsWithoutCollapsed(state.monitorGroups)) !==
+        JSON.stringify(monitorGroupsWithoutCollapsed(prev.monitorGroups))
+
+    const backupRelevantChanged =
+      state.workspaces !== prev.workspaces ||
+      state.folders !== prev.folders ||
+      monitorGroupsContentChanged ||
+      serversContentChanged ||
       state.vpns !== prev.vpns ||
       state.tunnels !== prev.tunnels ||
       state.databases !== prev.databases
 
     // Any change to stored data invalidates the last backup. Guarded on the
     // current flag so this cannot loop: writing settings re-enters with
-    // dataChanged false.
-    if (dataChanged && !state.settings.backupDirty) {
+    // backupRelevantChanged false.
+    if (backupRelevantChanged && !state.settings.backupDirty) {
       useApp.getState().setSettings({ backupDirty: true })
     }
 

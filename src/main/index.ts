@@ -51,7 +51,7 @@ import { tunnelStart, tunnelStop, tunnelList, tunnelDisposeAll } from './service
 import type { TunnelConfig, TunnelSshConfig } from '../shared/tunnel'
 import { knownHostList, knownHostForget } from './services/knownhosts'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
-import { backupExport, backupImport, backupInspect, relaunchApp } from './services/backup'
+import { backupExport, backupImport, backupInspect, deleteAllData, relaunchApp } from './services/backup'
 import { parseSshConfig } from '../shared/sshconfig'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
@@ -452,6 +452,7 @@ ipcMain.handle('notify:show', (_e, title: string, body: string) => {
 ipcMain.handle('backup:export', (_e, password: string) => backupExport(password))
 ipcMain.handle('backup:inspect', (_e, password: string, path?: string) => backupInspect(password, path))
 ipcMain.handle('backup:import', (_e, password: string, path: string) => backupImport(password, path))
+ipcMain.handle('backup:deleteAll', () => deleteAllData())
 ipcMain.handle('backup:relaunch', () => relaunchApp())
 
 // ---- Known hosts ----
