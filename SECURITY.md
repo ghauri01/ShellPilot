@@ -42,6 +42,21 @@ Knowing the design may help you assess a finding.
 | AI/MCP audit log | `shellpilot-ai-audit.jsonl` | Plaintext, append-only. Free-text fields are passed through the same secret-redaction as command output before being written, so it should never contain a credential. |
 | AI/MCP access-group policy | `shellpilot-ai-policy.json` | Plaintext. Contains no credentials — capability rules and file-path patterns only. |
 
+### Workspaces and the vault
+
+Workspaces isolate **servers, databases and tunnels** — each record carries a
+workspace id and is filtered by it. A password-protected workspace keeps those
+out of sight until it is unlocked.
+
+**The vault is not workspace-scoped.** There is one vault per installation,
+shared by every workspace, and a credential saved in one workspace is visible
+from all of them. Locking a workspace does not hide the vault, because the
+vault does not belong to any workspace.
+
+That is the current design, not an oversight in the filtering — but it is easy
+to expect otherwise if you use one workspace per client, so it is stated here
+plainly.
+
 ### What biometric unlock actually protects
 
 Worth stating plainly, because it is easy to assume more.
