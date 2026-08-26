@@ -12,14 +12,14 @@ import {
   Keyboard,
   Bell,
   Wrench,
-  DatabaseBackup
-} from 'lucide-react'
+  DatabaseBackup, Compass } from 'lucide-react'
 import { useApp } from '../../store/app'
 import type { ThemeMode } from '../../store/app'
 import { clsx } from '../../lib/format'
 import { ShortcutManager } from './ShortcutManager'
 import { BackupPanel } from './BackupPanel'
 import { UpdatePanel } from './UpdatePanel'
+import { useOnboarding } from '../../store/onboarding'
 import { SshSessions } from './SshSessions'
 import { toast } from '../../store/toast'
 
@@ -129,6 +129,7 @@ function Toggle({ label, desc, initial = false }: { label: string; desc: string;
 
 export function Settings(): React.JSX.Element {
   const [section, setSection] = useState<SectionId>('appearance')
+  const startTour = useOnboarding((s) => s.start)
   const theme = useApp((s) => s.theme)
   const setTheme = useApp((s) => s.setTheme)
   const settings = useApp((s) => s.settings)
@@ -153,6 +154,25 @@ export function Settings(): React.JSX.Element {
 
         <div className="settings-content">
           {section === 'general' && <UpdatePanel />}
+
+          {section === 'general' && (
+            <div className="settings-section">
+              <h2>Walkthrough</h2>
+              <div className="sub">A short tour of what is here and where it lives.</div>
+              <div className="setting-row">
+                <div className="s-info">
+                  <div className="s-title">Show the walkthrough</div>
+                  <div className="s-desc">
+                    Runs once on a first launch. Reopen it here whenever you want — it switches to
+                    each feature as it describes it, so nothing is hidden while you read.
+                  </div>
+                </div>
+                <button className="btn sm" onClick={() => startTour()}>
+                  <Compass size={13} /> Start walkthrough
+                </button>
+              </div>
+            </div>
+          )}
 
           {section === 'appearance' && (
             <div className="settings-section">
