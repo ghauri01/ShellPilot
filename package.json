@@ -49,7 +49,7 @@
     "email": "aliwaqarofficial@gmail.com",
     "url": "https://github.com/ghauri01"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "main": "./out/main/index.js",
   "type": "module",
   "bin": {

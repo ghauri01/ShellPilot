@@ -138,4 +138,4 @@ lists what is already planned, and the roadmap is kept there.
 ## Licence
 
 By contributing you agree that your work is licensed under the
-[MIT Licence](LICENSE) that covers this project.
+[Apache License 2.0](LICENSE) that covers this project.
