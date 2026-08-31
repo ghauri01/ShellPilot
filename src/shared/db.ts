@@ -27,6 +27,14 @@ export interface DbConnectConfig {
   // When present it takes precedence over the discrete host/port/... fields.
   uri?: string
   ssh?: DbSshConfig
+  // Reach the database through this VPN profile. Independent of `ssh`: a
+  // database can be behind a bastion, behind a VPN, or behind both, and when
+  // both are set the VPN is the outer transport — the bastion itself is only
+  // reachable once the tunnel is up.
+  vpnProfileId?: string
+  // Shown in the "3 sessions are using this VPN" confirmation, so it names
+  // the connection the user recognises rather than a UUID.
+  name?: string
 }
 
 export interface DbTestResult {

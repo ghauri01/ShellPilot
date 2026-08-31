@@ -24,6 +24,20 @@ import type { DbConnectConfig, DbInfo, DbQueryResult, DbTestResult } from '../sh
 import type { DbShellResult } from '../shared/dbshell'
 import type { VaultEntry, VaultListResult, VaultResult, VaultStatus } from '../shared/vault'
 import type { TunnelConfig, TunnelResult, TunnelSshConfig, TunnelStatus } from '../shared/tunnel'
+import type {
+  VpnDependent,
+  VpnEngineInfo,
+  VpnImportResult,
+  VpnKind,
+  VpnLogLine,
+  VpnProfile,
+  VpnPrompt,
+  VpnResult,
+  VpnSpec,
+  VpnStartResult,
+  VpnStatus,
+  VpnValidation
+} from '../shared/vpn'
 import type { KnownHost } from '../main/services/knownhosts'
 import type { SshConfigHost } from '../shared/sshconfig'
 import type { BackupResult } from '../shared/backup'
@@ -208,6 +222,71 @@ const api = {
       ipcRenderer.on(ch, h)
       return () => ipcRenderer.removeListener(ch, h)
     }
+  },
+  vpn: {
+    list: (): Promise<VpnStatus[]> => ipcRenderer.invoke('vpn:list'),
+    start: (id: string): Promise<VpnStartResult> => ipcRenderer.invoke('vpn:start', id),
+    // Returns the result rather than discarding it: a stop can fail (an engine
+    // that will not exit), and a caller that cannot see that will cheerfully
+    // report "stopped" over the top of an error.
+    stop: (id: string, force = false): Promise<VpnResult> =>
+      ipcRenderer.invoke('vpn:stop', id, force),
+    reload: (id: string): Promise<VpnResult> => ipcRenderer.invoke('vpn:reload', id),
+    validate: (spec: VpnSpec): Promise<VpnValidation> => ipcRenderer.invoke('vpn:validate', spec),
+    probe: (kind: VpnKind): Promise<VpnEngineInfo> => ipcRenderer.invoke('vpn:probe', kind),
+    // Returns vault refs, never key material: the main-process handler stores
+    // the secrets and hands back pointers.
+    import: (kind: VpnKind, text: string, baseDir?: string): Promise<VpnImportResult> =>
+      ipcRenderer.invoke('vpn:import', kind, text, baseDir),
+    // The profile's secrets, staged into the vault. Called once when a profile
+    // is created from an import.
+    commitImport: (
+      profileName: string,
+      workspaceId: string,
+      kind: VpnKind,
+      text: string,
+      baseDir?: string
+    ): Promise<{ ok: boolean; error?: string; spec?: VpnSpec; vaultEntryId?: string }> =>
+      ipcRenderer.invoke('vpn:commitImport', profileName, workspaceId, kind, text, baseDir),
+    logs: (id: string, limit?: number): Promise<VpnLogLine[]> =>
+      ipcRenderer.invoke('vpn:logs', id, limit),
+    dependents: (id: string): Promise<VpnDependent[]> => ipcRenderer.invoke('vpn:dependents', id),
+    // Called when a profile is deleted. The profile itself lives in the
+    // renderer's data blob, but its key material lives in the vault and would
+    // otherwise be orphaned there with no UI pointing at it.
+    deleteSecrets: (vaultEntryId: string): Promise<void> =>
+      ipcRenderer.invoke('vpn:deleteSecrets', vaultEntryId),
+    // Read-only. Profiles are persisted by the renderer as part of the ordinary
+    // `data:save` blob, exactly like servers and tunnels — a second writer for
+    // the same JSON file is how that file gets corrupted. This exists so main,
+    // the MCP tools and the CLI all read the same list the UI shows, without
+    // each re-deriving it.
+    profiles: (): Promise<VpnProfile[]> => ipcRenderer.invoke('vpn:profiles'),
+    onStatus: (id: string, cb: (s: VpnStatus) => void): (() => void) => {
+      const ch = `vpn:status:${id}`
+      const h = (_e: IpcRendererEvent, s: VpnStatus): void => cb(s)
+      ipcRenderer.on(ch, h)
+      return () => ipcRenderer.removeListener(ch, h)
+    },
+    // Log lines only stream while someone is subscribed; otherwise they stop
+    // at the ring buffer in main and the drawer pulls them with logs().
+    onLog: (id: string, cb: (l: VpnLogLine) => void): (() => void) => {
+      const ch = `vpn:log:${id}`
+      const h = (_e: IpcRendererEvent, l: VpnLogLine): void => cb(l)
+      ipcRenderer.on(ch, h)
+      ipcRenderer.send('vpn:log-subscribe', id)
+      return () => {
+        ipcRenderer.removeListener(ch, h)
+        ipcRenderer.send('vpn:log-unsubscribe', id)
+      }
+    },
+    onPrompt: (cb: (p: VpnPrompt) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, p: VpnPrompt): void => cb(p)
+      ipcRenderer.on('vpn:prompt', h)
+      return () => ipcRenderer.removeListener('vpn:prompt', h)
+    },
+    replyPrompt: (id: string, value: string | null): void =>
+      ipcRenderer.send('vpn:prompt-reply', id, value)
   },
   vault: {
     status: (): Promise<VaultStatus> => ipcRenderer.invoke('vault:status'),

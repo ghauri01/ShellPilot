@@ -15,7 +15,28 @@ files:
   - out/**
   - bin/**
   - resources/**
+  # The tunnel engines are shipped through extraResources instead, so a build
+  # carries only the binaries for the platform it targets. Bundling all six
+  # cross-compiled targets in every artifact would add tens of megabytes of
+  # binaries the machine can never execute.
+  - '!resources/bin/**'
   - package.json
+
+# Tunnel engines: shellpilot-netd (our WireGuard sidecar, MIT) and frpc
+# (Apache-2.0). Built by scripts/build-sidecar.sh and scripts/build-frpc.sh
+# before electron-builder runs; CI must do that or the app ships with no
+# engines and every VPN profile reports binary-missing.
+#
+# ${platform}-${arch} expands to Node's own names (darwin-arm64, win32-x64,
+# ...), which is exactly what process.platform/process.arch produce at
+# runtime — so the lookup path is identical in a dev checkout and in a
+# packaged app, and there is no per-environment special case to get wrong.
+extraResources:
+  - from: resources/bin/${platform}-${arch}
+    to: bin/${platform}-${arch}
+    filter: ['**/*']
+  - from: resources/bin/manifest.json
+    to: bin/manifest.json
 
 # ssh2 pulls in an optional native crypto binding; keep it unpacked so it can
 # be dlopen'd from outside the asar archive. bin/ (shellpilot.cmd|.sh) and
@@ -103,6 +124,12 @@ mac:
   hardenedRuntime: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # The tunnel engines under Resources/bin are Mach-O executables and arm64
+  # macOS refuses to run an unsigned one at all. electron-builder discovers and
+  # signs nested binaries, and they are spawned as separate processes rather
+  # than dlopen'd, so library validation does not apply to them the way it does
+  # to the ssh2 bindings. `codesign --verify --strict --deep` on the packaged
+  # .app is the check that this stayed true — it is in the release workflow.
   target:
     - target: dmg
       arch: [x64, arm64]

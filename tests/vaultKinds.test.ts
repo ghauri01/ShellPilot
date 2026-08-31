@@ -49,6 +49,21 @@ describe('what each vault kind shows', () => {
     expect(KIND_FIELDS.url).toEqual({ url: true, username: false, secret: null })
   })
 
+  it('would notice a kind added to one map but not the other', () => {
+    // The coverage assertion above is only worth having if it actually fails on
+    // a half-done addition, which is how the `vpn` kind was added: label, field
+    // map and this test in one go.
+    const halfAdded = { ...VAULT_KIND_LABEL, wireguardish: 'Half added' }
+    expect(Object.keys(KIND_FIELDS).sort()).not.toEqual(Object.keys(halfAdded).sort())
+  })
+
+  it('gives a VPN profile a username, a password and a key slot', () => {
+    // privateKey carries the WireGuard key or the sanitised .ovpn body, password
+    // carries the auth password or the frp token, username the OpenVPN account.
+    expect(KIND_FIELDS.vpn).toEqual({ url: true, username: true, secret: 'password', keys: true })
+    expect(VAULT_KIND_LABEL.vpn).toBe('VPN profile')
+  })
+
   it('shows a different field set for at least two kinds', () => {
     // The bug in one assertion: if every kind rendered the same thing, the
     // picker would be decorative.
@@ -96,5 +111,39 @@ describe('switching kind is not destructive', () => {
     // The public half is not a secret and carries the key comment, which is
     // the useful thing to search an SSH key by.
     expect(vaultMatches(k, 'deploy@box')).toBe(true)
+  })
+})
+
+describe('a VPN profile in the vault', () => {
+  const vpnEntry = (): VaultEntry => ({
+    ...entry(),
+    id: 'v-wg',
+    name: 'Office WireGuard',
+    kind: 'vpn',
+    url: '',
+    username: '',
+    password: '',
+    privateKey: 'gI6EdUSYvn8ugXOt8QQD6Yc+JyiZxIhp3GInSWRfWGE=',
+    tags: ['vpn', 'wireguard'],
+    fields: [
+      { id: 'f1', key: 'presharedKey:PUBKEY', value: 'PRESHARED-MATERIAL', secret: true }
+    ]
+  })
+
+  it('holds key material rather than a path to it, so it travels with a backup', () => {
+    // The whole reason a WireGuard key lives here and not in the OS keychain: a
+    // keychain entry is machine-local and no encrypted backup can carry it.
+    expect(vpnEntry().privateKey).toBeTruthy()
+    expect(hiddenFieldsFor(vpnEntry())).toEqual([])
+  })
+
+  it('never puts VPN key material into the search haystack', () => {
+    const e = vpnEntry()
+    expect(vaultMatches(e, 'gI6EdUSYvn8ugXOt8QQD6Yc')).toBe(false)
+    expect(vaultMatches(e, 'PRESHARED-MATERIAL')).toBe(false)
+    // The custom field's key names which peer it belongs to and is not secret,
+    // which is what makes an entry with six preshared keys navigable.
+    expect(vaultMatches(e, 'presharedKey:PUBKEY')).toBe(true)
+    expect(vaultMatches(e, 'Office WireGuard')).toBe(true)
   })
 })

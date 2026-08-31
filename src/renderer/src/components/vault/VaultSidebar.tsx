@@ -1,4 +1,4 @@
-import { KeyRound, Lock, Globe, StickyNote, User, FileKey } from 'lucide-react'
+import { KeyRound, Lock, Globe, StickyNote, User, FileKey, Shield } from 'lucide-react'
 import { useVault } from '../../store/vault'
 import { clsx } from '../../lib/format'
 import { useApp } from '../../store/app'
@@ -9,7 +9,8 @@ const KIND_ICON: Record<VaultKind, React.ReactNode> = {
   url: <Globe size={13} className="faint" />,
   key: <KeyRound size={13} className="faint" />,
   sshkey: <FileKey size={13} className="faint" />,
-  note: <StickyNote size={13} className="faint" />
+  note: <StickyNote size={13} className="faint" />,
+  vpn: <Shield size={13} className="faint" />
 }
 
 export function VaultSidebar(): React.JSX.Element {

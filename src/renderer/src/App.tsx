@@ -10,6 +10,7 @@ import { StatusBar } from './components/layout/StatusBar'
 import { WorkspacePanel } from './components/panel/WorkspacePanel'
 import { FleetMonitor } from './components/monitor/FleetMonitor'
 import { TunnelManager } from './components/tunnels/TunnelManager'
+import { VpnManager } from './components/vpn/VpnManager'
 import { DatabaseWorkspace } from './components/databases/DatabaseView'
 import { AddDatabaseModal } from './components/databases/AddDatabaseModal'
 import { Settings } from './components/settings/Settings'
@@ -25,6 +26,7 @@ import { AddServerModal } from './components/connections/AddServerModal'
 import { RouteEditor } from './components/connections/RouteEditor'
 import { SshConfigImport } from './components/connections/SshConfigImport'
 import { SshPrompt } from './components/connections/SshPrompt'
+import { VpnPromptModal } from './components/vpn/VpnPromptModal'
 import { WorkspaceManager } from './components/workspace/WorkspaceManager'
 import { WorkspaceUnlock } from './components/workspace/WorkspaceUnlock'
 import { Toasts } from './components/common/Toasts'
@@ -43,9 +45,14 @@ function MainArea(): React.JSX.Element {
       </div>
       {activity === 'monitor' && <FleetMonitor />}
       {activity === 'databases' && <DatabaseWorkspace />}
+      {/* One view, three sections: SSH tunnels, VPN and frp reverse proxies.
+          They are all "make a remote thing reachable from here", and splitting
+          them across two activity icons would only make the user guess which
+          one holds the thing they set up yesterday. */}
       {activity === 'tunnels' && (
         <div className="main">
           <TunnelManager />
+          <VpnManager />
         </div>
       )}
       {activity === 'vault' && <VaultView />}
@@ -103,6 +110,9 @@ export default function App(): React.JSX.Element {
       <WorkspaceUnlock />
       {/* Can appear during any connection attempt, including SFTP and metrics. */}
       <SshPrompt />
+      {/* Global, like SshPrompt: a VPN started from the Tunnels view can ask for
+          an OTP long after the user has moved on to a terminal. */}
+      <VpnPromptModal />
       {/* Surfaces an AI approval request no matter which tab is active. */}
       <ApprovalWatcher />
       <AgentServerWatcher />

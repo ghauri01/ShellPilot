@@ -1,0 +1,494 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
+import { fileURLToPath } from 'node:url'
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
+import { Supervisor, backoffDelay } from '../src/main/services/vpn/supervisor'
+import type { SupervisedSpec, SupervisorHandle } from '../src/main/services/vpn/supervisor'
+
+const FIXTURE = fileURLToPath(new URL('./fixtures/fake-child.mjs', import.meta.url))
+
+// A stand-in for ChildProcess that the test drives directly, so the timing
+// assertions below depend only on the fake clock and never on how fast a real
+// process happens to start.
+class FakeChild extends EventEmitter {
+  static nextPid = 4000
+  readonly pid = FakeChild.nextPid++
+  exitCode: number | null = null
+  stdin = new PassThrough()
+  stdout = new PassThrough()
+  stderr = new PassThrough()
+
+  exit(code: number | null, signal: NodeJS.Signals | null = null): void {
+    this.exitCode = code
+    this.emit('exit', code, signal)
+  }
+}
+
+interface Spawned {
+  command: string
+  args: readonly string[]
+  options: SpawnOptions
+  child: FakeChild
+  at: number
+}
+
+// Yields to the real event loop. Fake timers here deliberately do not cover
+// setImmediate, so this still drains pipe and fs callbacks while the clock is
+// frozen.
+const flush = async (times = 30): Promise<void> => {
+  for (let i = 0; i < times; i++) await new Promise((resolve) => setImmediate(resolve))
+}
+
+// Real fs and pipe callbacks still complete while the clock is frozen, but not
+// on a predictable number of turns, so conditions are waited on rather than
+// counted.
+const waitFor = async (fn: () => boolean, turns = 300): Promise<void> => {
+  for (let i = 0; i < turns; i++) {
+    if (fn()) return
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  throw new Error('condition never became true')
+}
+
+let root: string
+
+function baseSpec(over: Partial<SupervisedSpec> = {}): SupervisedSpec {
+  return {
+    id: 'run-1',
+    command: '/opt/shellpilot/engine',
+    args: ['--config', 'stdin'],
+    cwd: root,
+    readiness: async () => {},
+    readinessTimeoutMs: 30_000,
+    restart: 'always',
+    backoff: { baseMs: 1_000, maxMs: 60_000, jitter: 0.3 },
+    crashLoop: { windowMs: 120_000, maxRestarts: 5 },
+    logRing: { maxLines: 2_000, maxBytes: 1 << 20 },
+    redact: [],
+    ...over
+  }
+}
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'sp-sup-'))
+})
+afterEach(() => {
+  vi.useRealTimers()
+  rmSync(root, { recursive: true, force: true })
+})
+
+describe('backoff', () => {
+  const backoff = { baseMs: 1_000, maxMs: 60_000, jitter: 0.3 }
+
+  it('doubles per attempt and clamps at maxMs', () => {
+    // random() === 0.5 puts the jitter factor at exactly 1, which is the only
+    // way to assert the underlying curve rather than a range.
+    const mid = (): number => 0.5
+    expect([0, 1, 2, 3, 4].map((n) => backoffDelay(n, backoff, mid))).toEqual([
+      1_000, 2_000, 4_000, 8_000, 16_000
+    ])
+    expect(backoffDelay(20, backoff, mid)).toBe(60_000)
+  })
+
+  it('keeps every sample inside 1 ± jitter and does not return a constant', () => {
+    const samples = Array.from({ length: 500 }, () => backoffDelay(3, backoff))
+    for (const s of samples) {
+      expect(s).toBeGreaterThanOrEqual(Math.round(8_000 * 0.7))
+      expect(s).toBeLessThanOrEqual(Math.round(8_000 * 1.3))
+    }
+    // Five profiles pointed at one downed endpoint must not retry in lockstep.
+    expect(new Set(samples).size).toBeGreaterThan(50)
+  })
+})
+
+describe('supervisor lifecycle', () => {
+  let spawns: Spawned[]
+  let signals: [number, number | NodeJS.Signals][]
+  let sup: Supervisor
+
+  const make = (over: Partial<SupervisedSpec> = {}, platform: NodeJS.Platform = 'darwin') => {
+    const spec = baseSpec(over)
+    sup = new Supervisor({
+      runRoot: root,
+      platform,
+      random: () => 0.5,
+      spawn: (command, args, options) => {
+        const child = new FakeChild()
+        spawns.push({ command, args, options, child, at: Date.now() })
+        return child as unknown as ChildProcess
+      },
+      kill: (pid, signal) => {
+        signals.push([pid, signal])
+      }
+    })
+    return spec
+  }
+
+  beforeEach(() => {
+    spawns = []
+    signals = []
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date']
+    })
+  })
+
+  it('backs off exponentially between restarts', async () => {
+    const spec = make()
+    const handle = await sup.spawn(spec)
+    expect(handle.pid).toBe(spawns[0].child.pid)
+
+    const start = Date.now()
+    spawns[0].child.exit(1)
+    await flush()
+    expect(spawns).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(999)
+    await flush()
+    expect(spawns).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await waitFor(() => spawns.length === 2)
+    expect(spawns[1].at - start).toBe(1_000)
+
+    spawns[1].child.exit(1)
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_999)
+    await flush()
+    expect(spawns).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(1)
+    await waitFor(() => spawns.length === 3)
+
+    spawns[2].child.exit(1)
+    await flush()
+    await vi.advanceTimersByTimeAsync(3_999)
+    await flush()
+    expect(spawns).toHaveLength(3)
+    await vi.advanceTimersByTimeAsync(1)
+    await waitFor(() => spawns.length === 4)
+  })
+
+  it('forgets the exponent once readiness has held for 60s', async () => {
+    const spec = make()
+    await sup.spawn(spec)
+
+    // One failure, so the next delay would be 2s if the exponent survived.
+    spawns[0].child.exit(1)
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_000)
+    await waitFor(() => spawns.length === 2)
+    // The relaunch must reach readiness before the clock moves, or the 60s
+    // timer this test is about would not exist yet when it is advanced past.
+    await flush()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await flush()
+
+    const before = Date.now()
+    spawns[1].child.exit(1)
+    await flush()
+    await vi.advanceTimersByTimeAsync(999)
+    await flush()
+    expect(spawns).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(1)
+    await waitFor(() => spawns.length === 3)
+    expect(spawns[2].at - before).toBe(1_000)
+  })
+
+  it('goes terminal after more than maxRestarts exits inside the window', async () => {
+    const spec = make({
+      backoff: { baseMs: 10, maxMs: 10, jitter: 0 },
+      crashLoop: { windowMs: 120_000, maxRestarts: 5 }
+    })
+    const handle = await sup.spawn(spec)
+
+    const exits: Parameters<Parameters<SupervisorHandle['onExit']>[0]>[0][] = []
+    handle.onExit((e) => exits.push(e))
+
+    // Sixty lines of engine output, so the tail attached to the terminal error
+    // has more than enough to be trimmed to forty.
+    for (let i = 0; i < 60; i++) spawns[0].child.stdout.write(`engine line ${i}\n`)
+    await flush()
+
+    for (let i = 0; i < 6; i++) {
+      spawns[i].child.exit(2)
+      await flush()
+      await vi.advanceTimersByTimeAsync(20)
+      await flush()
+    }
+
+    expect(spawns).toHaveLength(6)
+    const terminal = exits.at(-1)
+    expect(terminal?.restarting).toBe(false)
+    expect(terminal?.error?.code).toBe('crash-loop')
+    expect(terminal?.logTail).toHaveLength(40)
+
+    // And it stays stopped: no seventh attempt, ever.
+    await vi.advanceTimersByTimeAsync(600_000)
+    await flush()
+    expect(spawns).toHaveLength(6)
+  })
+
+  it('stops in order: gracefulStop, then SIGTERM, then SIGKILL', async () => {
+    const order: string[] = []
+    const spec = make({
+      gracefulTimeoutMs: 5_000,
+      gracefulStop: async () => {
+        order.push('graceful')
+      }
+    })
+    await sup.spawn(spec)
+    const child = spawns[0].child
+
+    const stopped = sup.stop(spec.id)
+    await flush()
+    // The control channel is tried before anything is signalled — on Windows
+    // it is the only chance the engine gets to tidy up.
+    expect(order).toEqual(['graceful'])
+    expect(signals).toHaveLength(0)
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await flush()
+    expect(signals.map((s) => s[1])).toEqual(['SIGTERM'])
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await flush()
+    expect(signals.map((s) => s[1])).toEqual(['SIGTERM', 'SIGKILL'])
+
+    child.exit(null, 'SIGKILL')
+    await flush()
+    await stopped
+    expect(sup.get(spec.id)).toBeUndefined()
+  })
+
+  it('skips straight to the kill when forced', async () => {
+    const order: string[] = []
+    const spec = make({
+      gracefulStop: async () => {
+        order.push('graceful')
+      }
+    })
+    await sup.spawn(spec)
+    const stopped = sup.stop(spec.id, { force: true })
+    await flush()
+    expect(order).toEqual([])
+    expect(signals.map((s) => s[1])).toEqual(['SIGKILL'])
+    spawns[0].child.exit(null, 'SIGKILL')
+    await flush()
+    await stopped
+  })
+
+  it('uses taskkill /T /F on win32, where a non-console child has no SIGTERM', async () => {
+    const spec = make({}, 'win32')
+    await sup.spawn(spec)
+    const stopped = sup.stop(spec.id, { force: true })
+    await flush()
+    const kill = spawns.find((s) => s.command === 'taskkill')
+    expect(kill?.args).toEqual(['/T', '/F', '/PID', String(spawns[0].child.pid)])
+    spawns[0].child.exit(null, 'SIGKILL')
+    await flush()
+    await stopped
+  })
+
+  it('kills and retries when readiness never arrives', async () => {
+    const spec = make({
+      restart: 'on-failure',
+      readiness: () => new Promise<void>(() => {}),
+      readinessTimeoutMs: 30_000,
+      backoff: { baseMs: 1_000, maxMs: 1_000, jitter: 0 }
+    })
+    // Never resolves until a run is ready, so it is deliberately not awaited.
+    void sup.spawn(spec).catch(() => {})
+    // The pid file lands before the readiness clock starts, so its appearance
+    // is the signal that this attempt is fully wired up.
+    await waitFor(() => existsSync(join(root, 'run-1.pid')))
+    await flush()
+    expect(spawns).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await waitFor(() => signals.length > 0)
+    expect(signals.map((s) => s[1])).toEqual(['SIGKILL'])
+
+    spawns[0].child.exit(null, 'SIGKILL')
+    await flush()
+    await vi.advanceTimersByTimeAsync(1_000)
+    await waitFor(() => spawns.length === 2)
+  })
+
+  it('bounds the ring by bytes, so one huge line cannot defeat the line cap', async () => {
+    const spec = make({ logRing: { maxLines: 2_000, maxBytes: 1_024 } })
+    const handle = await sup.spawn(spec)
+
+    spawns[0].child.stdout.write(`${'H'.repeat(4 * 1024 * 1024)}\n`)
+    await flush(12)
+
+    const lines = handle.logs()
+    const bytes = lines.reduce((n, l) => n + Buffer.byteLength(l.text, 'utf8'), 0)
+    expect(lines.length).toBeGreaterThan(0)
+    expect(bytes).toBeLessThanOrEqual(1_024)
+    expect(lines.at(-1)?.text).toContain('truncated')
+  })
+
+  it('redacts before the line is stored, not before it is displayed', async () => {
+    const secret = 'wg-private-key-material'
+    const spec = make({ redact: [secret] })
+    const handle = await sup.spawn(spec)
+
+    spawns[0].child.stderr.write(`peer configured with ${secret} ok\n`)
+    await flush()
+
+    const text = handle.logs().map((l) => l.text).join('\n')
+    expect(text).not.toContain(secret)
+    expect(text).toContain('[REDACTED]')
+  })
+})
+
+// The properties above are about timing, so they are driven by a fake clock
+// and a fake child. These are about what actually crosses the process
+// boundary, so they use a real one.
+describe('supervisor against a real child process', () => {
+  const readyOnLine =
+    (needle: string) =>
+    (h: SupervisorHandle): Promise<void> =>
+      new Promise((resolve) => {
+        if (h.logs().some((l) => l.text.includes(needle))) return resolve()
+        const off = h.onLog((l) => {
+          if (!l.text.includes(needle)) return
+          off()
+          resolve()
+        })
+      })
+
+  it('delivers the secret on stdin and never puts it in argv', async () => {
+    const secret = 'super-secret-wireguard-key='
+    const sup = new Supervisor({ runRoot: root })
+    const spec: SupervisedSpec = {
+      id: 'real-1',
+      command: process.execPath,
+      args: [FIXTURE, '--print-argv', '--read-stdin', '--ready-after=0', '--stay'],
+      cwd: root,
+      stdinPayload: secret,
+      readiness: readyOnLine('READY'),
+      readinessTimeoutMs: 10_000,
+      restart: 'never',
+      backoff: { baseMs: 100, maxMs: 100, jitter: 0 },
+      crashLoop: { windowMs: 120_000, maxRestarts: 5 },
+      logRing: { maxLines: 500, maxBytes: 1 << 20 },
+      redact: [secret]
+    }
+
+    const handle = await sup.spawn(spec)
+    const text = handle.logs().map((l) => l.text).join('\n')
+
+    // The engine only ever sees the secret through the pipe.
+    expect(JSON.stringify(spec.args)).not.toContain(secret)
+    const argvLine = handle.logs().find((l) => l.text.startsWith('ARGV '))
+    expect(argvLine).toBeDefined()
+    expect(argvLine?.text).not.toContain(secret)
+
+    // Proved by hash rather than by echoing it back, so the assertion does not
+    // itself put the secret in the log it is checking.
+    const sha = createHash('sha256').update(secret).digest('hex')
+    expect(text).toContain(`STDIN-SHA256 ${sha}`)
+    expect(text).toContain(`STDIN-LEN ${Buffer.byteLength(secret)}`)
+    expect(text).not.toContain(secret)
+
+    await sup.stop(spec.id, { force: true })
+  })
+
+  it('captures real stdout and stderr separately, line by line', async () => {
+    const sup = new Supervisor({ runRoot: root })
+    const spec: SupervisedSpec = {
+      id: 'real-2',
+      command: process.execPath,
+      args: [
+        FIXTURE,
+        '--print=hello from stdout',
+        '--stderr=hello from stderr',
+        '--ready-after=0',
+        '--stay'
+      ],
+      cwd: root,
+      readiness: readyOnLine('READY'),
+      readinessTimeoutMs: 10_000,
+      restart: 'never',
+      backoff: { baseMs: 100, maxMs: 100, jitter: 0 },
+      crashLoop: { windowMs: 120_000, maxRestarts: 5 },
+      logRing: { maxLines: 500, maxBytes: 1 << 20 },
+      redact: []
+    }
+
+    const handle = await sup.spawn(spec)
+    const lines = handle.logs()
+    expect(lines.some((l) => l.stream === 'stdout' && l.text === 'hello from stdout')).toBe(true)
+    expect(lines.some((l) => l.stream === 'stderr' && l.text === 'hello from stderr')).toBe(true)
+
+    await sup.stop(spec.id, { force: true })
+  })
+
+  it('holds the byte cap against a real 4 MB single line', async () => {
+    const sup = new Supervisor({ runRoot: root })
+    const spec: SupervisedSpec = {
+      id: 'real-2b',
+      command: process.execPath,
+      args: [FIXTURE, '--huge-line=4000000', '--stay'],
+      cwd: root,
+      // Not keyed off a log line: the 4 MB line this test is about would
+      // evict the readiness marker from the ring before it could be seen.
+      readiness: async () => {},
+      readinessTimeoutMs: 10_000,
+      restart: 'never',
+      backoff: { baseMs: 100, maxMs: 100, jitter: 0 },
+      crashLoop: { windowMs: 120_000, maxRestarts: 5 },
+      // A line cap of 500 would happily hold 4 MB; the byte cap is the bound.
+      logRing: { maxLines: 500, maxBytes: 65_536 },
+      redact: []
+    }
+
+    const handle = await sup.spawn(spec)
+    await waitFor(() => handle.logs().some((l) => l.text.startsWith('HHH')))
+
+    const lines = handle.logs()
+    expect(lines.reduce((n, l) => n + Buffer.byteLength(l.text, 'utf8'), 0)).toBeLessThanOrEqual(
+      65_536
+    )
+    const huge = lines.find((l) => l.text.startsWith('HHH'))
+    expect(huge?.text.endsWith('[truncated]')).toBe(true)
+    expect(Buffer.byteLength(huge?.text ?? '', 'utf8')).toBeLessThanOrEqual(65_536)
+
+    await sup.stop(spec.id, { force: true })
+  })
+
+  it('stops a child that ignores SIGTERM by escalating to SIGKILL', async () => {
+    const sup = new Supervisor({ runRoot: root })
+    const order: string[] = []
+    const spec: SupervisedSpec = {
+      id: 'real-3',
+      command: process.execPath,
+      args: [FIXTURE, '--ignore-sigterm', '--ready-after=0', '--stay'],
+      cwd: root,
+      readiness: readyOnLine('READY'),
+      readinessTimeoutMs: 10_000,
+      gracefulTimeoutMs: 50,
+      gracefulStop: async () => {
+        order.push('graceful')
+      },
+      restart: 'never',
+      backoff: { baseMs: 100, maxMs: 100, jitter: 0 },
+      crashLoop: { windowMs: 120_000, maxRestarts: 5 },
+      logRing: { maxLines: 500, maxBytes: 1 << 20 },
+      redact: []
+    }
+
+    const handle = await sup.spawn(spec)
+    const exits: { signal: NodeJS.Signals | null }[] = []
+    handle.onExit((e) => exits.push({ signal: e.signal }))
+
+    await sup.stop(spec.id)
+    expect(order).toEqual(['graceful'])
+    expect(exits.at(-1)?.signal).toBe('SIGKILL')
+  }, 20_000)
+})

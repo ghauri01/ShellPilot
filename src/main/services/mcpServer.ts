@@ -15,9 +15,11 @@ import {
   getCachedServer,
   listCachedDatabases,
   listCachedTunnels,
+  listCachedVpns,
   serverToSshConfig,
   type CachedDatabase,
-  type CachedTunnel
+  type CachedTunnel,
+  type CachedVpn
 } from './mcpDataCache'
 import { resolveServerByName, formatAmbiguity, type ServerMatch } from './serverResolver'
 import {
@@ -27,6 +29,8 @@ import {
   evaluateFilePath,
   evaluateDatabaseStatement,
   evaluateTunnelOpen,
+  evaluateVpnControl,
+  isVpnKindRefusedForAi,
   classifyStatement,
   mostRestrictive,
   type Decision
@@ -40,6 +44,13 @@ import { sshExec } from './ssh'
 import { dbQuery } from './db'
 import { tunnelStart, tunnelStop, tunnelList } from './tunnel'
 import { parseEndpoint } from '../../shared/tunnel'
+import {
+  isVpnManagerReady,
+  startVpn,
+  stopVpn,
+  vpnDependentsOf,
+  vpnStatusOf
+} from './vpn/managerApi'
 import { createServerForAgent } from './agentServerCreate'
 import { sftpConnect, sftpList, sftpRead, sftpWrite, sftpDisconnect } from './sftp'
 import { metricsSample } from './metrics'
@@ -436,6 +447,18 @@ function tunnelConfigFor(t: CachedTunnel): Parameters<typeof tunnelStart>[1] {
     targetHost: target.host,
     targetPort: target.port
   }
+}
+
+// How a VPN profile is described to a human — in the approval dialog, and then
+// permanently in the audit log. It has to be enough to recognise which profile
+// is about to start without naming an endpoint, a key or a bind address: where
+// a VPN points is precisely the thing this bridge does not disclose, and an
+// audit entry is the easiest place to forget that.
+function vpnSummary(v: CachedVpn): string {
+  if (v.kind === 'frp') return `frp, ${v.proxyCount} ${v.proxyCount === 1 ? 'proxy' : 'proxies'}`
+  const parts: string[] = [v.kind, v.mode]
+  if (v.mode === 'userspace') parts.push(`${v.listenerCount} listener${v.listenerCount === 1 ? '' : 's'}`)
+  return parts.join(', ')
 }
 
 function buildServer(): McpServer {
@@ -1010,6 +1033,164 @@ function buildServer(): McpServer {
         }
         auditSuccess(ctx, approval)
         return text(`Started "${tunnel.name}" on port ${result.listenPort ?? tunnel.listen}.`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        recordAudit({ ...auditBase(ctx), approval, result: 'error', error: message })
+        return errorText(message)
+      }
+    }
+  )
+
+  server.registerTool(
+    'list_vpns',
+    {
+      title: 'List VPNs',
+      description:
+        "Lists the VPN and reverse-proxy profiles configured in this session's workspaces, with the " +
+        'engine that carries each one and whether it is currently up. Names returned here are the only ' +
+        'valid vpnName values. This says which profiles exist, not where they point: endpoints, keys ' +
+        'and listener addresses are never included and cannot be requested.',
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
+    },
+    async (extra) => {
+      const auth = authenticateExtra(extra)
+      if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
+      const vpns = listCachedVpns(auth.session.workspaces.map((w) => w.id))
+      if (vpns.length === 0) return text("No VPNs are configured in this session's workspaces.")
+      // "Nothing is up" and "nobody has told me what is up yet" are different
+      // answers about the user's network, and only the first one is safe to
+      // assert. Before the manager registers, say so rather than guess.
+      const ready = isVpnManagerReady()
+      return text(
+        vpns
+          .map((v) => {
+            const status = ready ? vpnStatusOf(v.id) : null
+            const state = ready ? (status?.state ?? 'stopped') : 'state unknown — ShellPilot is still starting'
+            const head = `- ${v.name} — ${vpnSummary(v)} [${state}]`
+            // frp's per-proxy table is its only real telemetry, and a proxy in
+            // `start error` carries the reason. The addresses beside it in
+            // frp's own API are deliberately not reproduced.
+            const proxies = (status?.stats?.proxies ?? [])
+              .map((p) => `    ${p.name} (${p.type}): ${p.status}${p.err ? ` — ${p.err}` : ''}`)
+              .join('\n')
+            return proxies ? `${head}\n${proxies}` : head
+          })
+          .join('\n')
+      )
+    }
+  )
+
+  server.registerTool(
+    'set_vpn',
+    {
+      title: 'Start or stop a VPN',
+      description:
+        'Starts or stops a VPN that is already configured in ShellPilot. Requires the vpnControl ' +
+        'capability, and starting one always requires user approval whatever the access group says, ' +
+        "because it changes which network the user's later SSH and database sessions travel over. " +
+        'Reverse proxies (frp) are refused outright here and no access group can permit them, because ' +
+        "an frp proxy makes a port on the user's own machine reachable from the internet. This cannot " +
+        'create a VPN profile or change where one points — only run one the user has already defined.',
+      inputSchema: {
+        vpnName: z.string().describe('Friendly name exactly as returned by list_vpns'),
+        running: z.boolean().describe('true to start the VPN, false to stop it')
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    },
+    async ({ vpnName, running }, extra) => {
+      const auth = authenticateExtra(extra)
+      if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
+      const { session } = auth
+
+      const wanted = vpnName.trim().toLowerCase()
+      const matches = listCachedVpns(session.workspaces.map((w) => w.id)).filter(
+        (v) => v.name.toLowerCase() === wanted
+      )
+      if (matches.length === 0) return errorText(`No VPN named "${vpnName}" is available to this session.`)
+      if (matches.length > 1) return errorText(`"${vpnName}" matches more than one VPN.`)
+      const vpn = matches[0]
+      const workspace = getCachedWorkspace(vpn.workspaceId)
+
+      // Decided before the access group is even looked at, and not expressible
+      // as a permission: see AI_REFUSED_VPN_KINDS in policyEngine.ts.
+      const refused = isVpnKindRefusedForAi(vpn.kind)
+      if (!refused && !isVpnManagerReady()) {
+        return errorText('ShellPilot has not finished starting its VPN manager. Try again in a moment.')
+      }
+
+      // Only a stop needs to know: a start cannot cut anything, and asking the
+      // manager for the answer costs a walk of every server, database and live
+      // session referencing the profile.
+      const dependents = !refused && !running ? vpnDependentsOf(vpn.id) : []
+      const liveDependents = dependents.filter((d) => d.live).length
+
+      const evaluate = (g: AccessGroup | null): Decision =>
+        evaluateVpnControl(g, running ? 'start' : 'stop', liveDependents > 0)
+
+      const scopeGroupId = resolveGroupId(listAssignments(), '', vpn.workspaceId)
+      const scopeGroup = scopeGroupId ? getGroup(scopeGroupId) : null
+      const sessionGroup = sessionGroupFor(session)
+
+      const check: Decision = refused
+        ? {
+            decision: 'deny',
+            reason:
+              `"${vpn.name}" is a reverse proxy (frp). Each of its proxies makes a port on the user's ` +
+              'own machine reachable from the frp server, so ShellPilot never lets an AI agent open or ' +
+              'close one. This is not a permission that can be raised — ask the user to do it in ' +
+              'ShellPilot themselves.'
+          }
+        : withCeiling(
+            evaluate(scopeGroup),
+            sessionGroup ? evaluate(sessionGroup) : null,
+            `the workspace's access group ("${scopeGroup?.name ?? 'none'}")`
+          )
+
+      const ctx: AuditContext = {
+        session,
+        workspaceId: vpn.workspaceId,
+        workspaceName: workspace?.name ?? '',
+        serverId: vpn.id,
+        serverName: vpn.name,
+        action: `${running ? 'Start' : 'Stop'} VPN "${vpn.name}" (${vpnSummary(vpn)})`,
+        capability: 'vpnControl'
+      }
+
+      const gated = await gate(ctx, check, running || liveDependents > 0 ? 'high' : 'low', extra)
+      if (!gated.ok) return gated.result
+      const approval = check.decision === 'ask' ? 'approved' : 'not-required'
+
+      try {
+        if (!running) {
+          const result = await stopVpn(vpn.id)
+          if (!result.ok) {
+            recordAudit({ ...auditBase(ctx), approval, result: 'error', error: result.error ?? 'failed to stop' })
+            return errorText(result.error ?? 'The VPN failed to stop.')
+          }
+          auditSuccess(ctx, approval)
+          const closed =
+            liveDependents > 0
+              ? ` ${liveDependents} session${liveDependents === 1 ? ' that was' : 's that were'} using it ${
+                  liveDependents === 1 ? 'was' : 'were'
+                } closed.`
+              : ''
+          return text(`Stopped "${vpn.name}".${closed}`)
+        }
+        const result = await startVpn(vpn.id)
+        if (!result.ok) {
+          recordAudit({ ...auditBase(ctx), approval, result: 'error', error: result.error ?? 'failed to start' })
+          return errorText(result.error ?? 'The VPN failed to start.')
+        }
+        auditSuccess(ctx, approval)
+        const listeners = result.listeners?.length ?? 0
+        // The count, never the addresses: ShellPilot dials its own listeners
+        // for anything routed through this profile, so an agent has no use for
+        // them and every reason not to be handed them.
+        return text(
+          `Started "${vpn.name}"${
+            listeners > 0 ? ` with ${listeners} local listener${listeners === 1 ? '' : 's'}` : ''
+          }. ShellPilot routes dependent connections through it itself.`
+        )
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         recordAudit({ ...auditBase(ctx), approval, result: 'error', error: message })

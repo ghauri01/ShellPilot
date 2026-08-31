@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { getOrPairSession } from './pairing.js'
 import { runBridge } from './bridge.js'
 import { registerClaudeMcp, registerCodexMcp } from './agents.js'
+import { runVpnCommand } from './vpn.js'
 
 const selfScript = fileURLToPath(import.meta.url)
 const execPath = process.execPath
@@ -35,6 +36,7 @@ Usage:
   shellpilot claude            Launch Claude Code with ShellPilot MCP auto-configured
   shellpilot codex             Launch Codex with ShellPilot MCP auto-configured
   shellpilot run -- <command>  Launch any command with SHELLPILOT_MCP_COMMAND/ARGS set
+  shellpilot vpn <subcommand>  List, start or stop VPN profiles (see: shellpilot vpn help)
 
 Requires ShellPilot Desktop/Core already running, with AI & MCP enabled (AI & MCP → Security).
 First run pairs with it: a one-time code appears in ShellPilot for you to type here. Set
@@ -84,6 +86,15 @@ async function main(): Promise<void> {
       SHELLPILOT_MCP_COMMAND: execPath,
       SHELLPILOT_MCP_ARGS: JSON.stringify([selfScript, 'bridge', '--token', token, '--port', String(port)])
     })
+    return
+  }
+
+  if (cmd === 'vpn') {
+    // Routed through the MCP session rather than straight into the app, so it
+    // inherits the vpnControl capability check, the approval prompt and the
+    // audit entry instead of quietly bypassing all three.
+    const session = await getOrPairSession('cli-vpn', 'ShellPilot CLI (vpn)')
+    process.exitCode = await runVpnCommand(rest, session)
     return
   }
 

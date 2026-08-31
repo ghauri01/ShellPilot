@@ -49,6 +49,12 @@ export interface Server {
   favorite: boolean
   os: string
   route: Hop[]
+  // Reach this server through a VPN profile when set. The VPN is the outer
+  // transport: the route hops above are dialled *through* it, not beside it.
+  // Main resolves this from the saved record rather than trusting a caller to
+  // pass it, and a reference to a deleted profile means "connect directly"
+  // rather than "fail" — one deleted profile must not strand a fleet.
+  vpnProfileId: UUID | null
   demo?: boolean
 }
 
@@ -79,22 +85,41 @@ export interface MonitorGroup {
   system?: boolean
 }
 
-export type VpnKind = 'wireguard' | 'openvpn' | 'pritunl' | 'easyconnect'
-export type VpnStatus = 'connected' | 'disconnected' | 'connecting' | 'error'
-
-export interface VpnProfile {
-  id: UUID
-  workspaceId: UUID
-  name: string
-  kind: VpnKind
-  status: VpnStatus
-  endpoint: string
-  localIp: string
-  address: string
-  rx: number
-  tx: number
-  connectedSince: number | null
-}
+// The VPN domain lives in src/shared/vpn.ts, shared with main and preload, and
+// is re-exported here rather than restated. What used to sit at this spot was a
+// renderer-only mock (`rx`/`tx`/`connectedSince`, kinds `pritunl`/`easyconnect`)
+// that nothing read; a second definition of the same record is how a renderer
+// and a main process end up disagreeing about it.
+export type {
+  FrpProxy,
+  FrpProxyStatus,
+  FrpProxyType,
+  FrpSpec,
+  FrpVisitor,
+  OpenVpnAuthMode,
+  OpenVpnSpec,
+  StrippedDirective,
+  VpnBoundListener,
+  VpnDependent,
+  VpnEngineInfo,
+  VpnErrorCode,
+  VpnImportResult,
+  VpnKind,
+  VpnListener,
+  VpnLogLine,
+  VpnMode,
+  VpnProfile,
+  VpnPrompt,
+  VpnSecretRef,
+  VpnSpec,
+  VpnState,
+  VpnStats,
+  VpnStatus,
+  VpnValidation,
+  VpnValidationIssue,
+  WireGuardPeer,
+  WireGuardSpec
+} from '../../shared/vpn'
 
 export type TunnelKind = 'local' | 'remote' | 'socks'
 export interface Tunnel {
@@ -124,6 +149,10 @@ export interface DatabaseConn {
   folderId: UUID | null
   // Reach the database through this SSH server (a bastion) when set.
   sshServerId: UUID | null
+  // Reach the database through a VPN profile when set. Independent of the
+  // bastion above and composable with it: with both, the VPN carries the
+  // *bastion*, and the database is reached from there as it always was.
+  vpnProfileId: UUID | null
 }
 
 export type PanelView = 'terminal' | 'monitor' | 'files'

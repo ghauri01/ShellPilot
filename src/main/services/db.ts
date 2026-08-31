@@ -40,6 +40,11 @@ const DEFAULT_PORT: Record<DbKind, number> = {
 // Open the SSH forward (when configured) and hand the driver a config pointed
 // at the local end of it.
 async function build(cfg: DbConnectConfig): Promise<Conn> {
+  // A VPN wraps everything else: if the database is behind one, even the
+  // bastion is only reachable once the tunnel is up. Bringing it up here, and
+  // waiting, is also what stops the failure surfacing downstream as an
+  // unexplained connect timeout.
+  if (cfg.vpnProfileId) return buildOverVpn(cfg)
   if (!cfg.ssh) return buildDriver(cfg)
 
   if (cfg.uri && /^mongodb\+srv:/i.test(cfg.uri)) {
@@ -75,6 +80,120 @@ async function build(cfg: DbConnectConfig): Promise<Conn> {
     }
   } catch (err) {
     fwd.close()
+    throw err
+  }
+}
+
+// Reach the database through a VPN profile.
+//
+// In userspace mode the tunnel has no OS route, so we ask the driver for an
+// ephemeral 127.0.0.1 listener into it and point the database driver at that.
+// The shape is deliberately identical to openEphemeralForward's, which is why
+// the close-wrapping below is the same code as the SSH branch — no database
+// driver has to learn what a VPN is.
+//
+// In system mode there is a real route already and openForward is absent; the
+// driver connects directly and the only thing this branch contributes is
+// making sure the tunnel is actually up first.
+async function buildOverVpn(cfg: DbConnectConfig): Promise<Conn> {
+  const { vpnOpenForward, vpnStart } = await import('./vpn/manager')
+  const vpnId = cfg.vpnProfileId as string
+
+  if (cfg.uri && /^mongodb\+srv:/i.test(cfg.uri)) {
+    throw new Error(
+      'mongodb+srv:// resolves several hosts via DNS and cannot be tunnelled. Use the host/port fields, or a plain mongodb:// string.'
+    )
+  }
+
+  const started = await vpnStart(vpnId)
+  if (!started.ok) {
+    // Surface the VPN's own words. A downstream ETIMEDOUT tells the user
+    // nothing about the fact that their tunnel never came up.
+    throw new Error(started.error ?? 'The VPN for this database could not be started.')
+  }
+
+  const from = cfg.uri ? uriEndpoint(cfg.uri) : null
+  const dbHost = from?.host || cfg.host
+  const dbPort = from?.port || cfg.port || DEFAULT_PORT[cfg.kind]
+  if (!dbHost) throw new Error('No database host to connect to.')
+
+  // With a bastion as well, the VPN carries the *bastion*, not the database:
+  // the SSH hop is what is on the far network, and the database is reached
+  // from there as it always was. Forwarding straight to the database instead
+  // would quietly bypass the bastion the user configured.
+  const targetHost = cfg.ssh ? cfg.ssh.host : dbHost
+  const targetPort = cfg.ssh ? cfg.ssh.port : dbPort
+
+  let fwd: { port: number; close: () => void } | null = null
+  try {
+    fwd = await vpnOpenForward(vpnId, targetHost, targetPort, {
+      kind: 'database',
+      id: cfg.id,
+      name: cfg.name ?? dbHost
+    })
+  } catch (err) {
+    // System mode reports `unsupported` because there is nothing to forward —
+    // the route already exists, so fall through to a direct connection. Any
+    // other failure is real.
+    const code = (err as { code?: string }).code
+    if (code !== 'unsupported') throw err
+  }
+
+  if (!fwd) {
+    // System mode. Still register as a dependent so stopping the VPN knows it
+    // would disconnect this session.
+    const { registerVpnConsumer } = await import('./vpn/dependencies')
+    const release = registerVpnConsumer(vpnId, {
+      kind: 'database',
+      id: cfg.id,
+      name: cfg.name ?? dbHost
+    })
+    // Back through build(), not straight to buildDriver(): a bastion still has
+    // to be dialled, it just reaches its host over a route that now exists.
+    const conn = await build({ ...cfg, vpnProfileId: undefined })
+    const inner = conn.close
+    return {
+      ...conn,
+      close: async () => {
+        try {
+          await inner()
+        } finally {
+          release()
+        }
+      }
+    }
+  }
+
+  const local = fwd
+  try {
+    // With a bastion, hand the SSH path a hop pointed at the loopback end of
+    // the VPN forward. Everything downstream — the SSH forward, the driver —
+    // is byte-for-byte the code that runs without a VPN, which is the point:
+    // one transport was inserted underneath, and nothing else had to know.
+    const inner = cfg.ssh
+      ? { ...cfg, vpnProfileId: undefined, ssh: { ...cfg.ssh, host: '127.0.0.1', port: local.port } }
+      : {
+          ...cfg,
+          vpnProfileId: undefined,
+          host: '127.0.0.1',
+          port: local.port,
+          uri: cfg.uri ? rewriteUriHost(cfg.uri, '127.0.0.1', local.port) : undefined
+        }
+
+    const conn = await build(inner)
+    const innerClose = conn.close
+    return {
+      ...conn,
+      close: async () => {
+        try {
+          await innerClose()
+        } finally {
+          local.close()
+        }
+      }
+    }
+  } catch (err) {
+    local.close()
     throw err
   }
 }

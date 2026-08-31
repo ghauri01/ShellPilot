@@ -6,7 +6,8 @@ import { RouteHops } from './RouteHops'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
 import { useVault } from '../../store/vault'
-import type { AuthMethod, Hop } from '../../types'
+import { VpnTransportSelect } from '../vpn/VpnTransportSelect'
+import type { AuthMethod, Hop, UUID } from '../../types'
 
 const AUTH: { id: AuthMethod; label: string; icon: React.ReactNode }[] = [
   { id: 'password', label: 'Password', icon: <Lock size={16} /> },
@@ -37,6 +38,7 @@ export function AddServerModal(): React.JSX.Element {
     { path: string; fileName: string; algorithm: string | null; encrypted: boolean }[]
   >([])
   const [hops, setHops] = useState<Hop[]>(existing?.route ?? [])
+  const [vpnProfileId, setVpnProfileId] = useState<UUID | null>(existing?.vpnProfileId ?? null)
   const [passphrase, setPassphrase] = useState('')
   const [password, setPassword] = useState('')
   const [advanced, setAdvanced] = useState(false)
@@ -80,7 +82,8 @@ export function AddServerModal(): React.JSX.Element {
       port: Number(port) || 22,
       username: username.trim() || 'root',
       auth,
-      route: hops
+      route: hops,
+      vpnProfileId
     }
     const id = editId ? (updateServer(editId, fields), editId) : addServer(fields)
 
@@ -278,6 +281,12 @@ export function AddServerModal(): React.JSX.Element {
           )}
         </div>
       )}
+
+      <VpnTransportSelect
+        value={vpnProfileId}
+        onChange={setVpnProfileId}
+        hint="The VPN is the outer transport: any jump hosts below are dialled through it, and so is everything that rides this server — terminals, SFTP, metrics and its SSH tunnels."
+      />
 
       <RouteHops hops={hops} onChange={setHops} excludeServerId={editId} />
 

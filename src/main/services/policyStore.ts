@@ -31,6 +31,13 @@ function allowAll(overrides: Partial<AccessGroup['capabilities']> = {}): AccessG
     // had that power, and a helper called allowAll should not be what silently
     // hands it to them — each group opts in below.
     manageServers: 'deny',
+    // Same reasoning, one step further out: this one decides which network the
+    // user's later SSH and database sessions travel over, and an frp profile
+    // makes a local port reachable from the public internet. A group that never
+    // saw the capability cannot be assumed to have wanted it, so nothing here
+    // is granted by the helper — each group opts in below, and none of them
+    // opts in at 'allow'.
+    vpnControl: 'deny',
     ...overrides
   }
 }
@@ -72,7 +79,8 @@ function defaultGroups(): AccessGroup[] {
         sftpUpload: 'ask',
         sshTunnel: 'ask',
         sudo: 'deny',
-        manageServers: 'ask'
+        manageServers: 'ask',
+        vpnControl: 'ask'
       }),
       filePolicies: defaultFilePolicies()
     },
@@ -85,7 +93,8 @@ function defaultGroups(): AccessGroup[] {
         sftpUpload: 'ask',
         sshTunnel: 'ask',
         sudo: 'ask',
-        manageServers: 'ask'
+        manageServers: 'ask',
+        vpnControl: 'ask'
       }),
       filePolicies: defaultFilePolicies()
     },
@@ -97,7 +106,7 @@ function defaultGroups(): AccessGroup[] {
       // that root access must never be granted silently. The user can raise
       // this to 'allow' themselves, which is then an explicit choice, not a
       // default.
-      capabilities: allowAll({ sudo: 'ask', manageServers: 'ask' }),
+      capabilities: allowAll({ sudo: 'ask', manageServers: 'ask', vpnControl: 'ask' }),
       filePolicies: defaultFilePolicies()
     }
   ]

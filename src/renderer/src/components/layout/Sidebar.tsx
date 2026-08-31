@@ -4,6 +4,7 @@ import { useApp } from '../../store/app'
 import { clsx } from '../../lib/format'
 import { ConnectionTree } from '../connections/ConnectionTree'
 import { TunnelSidebar } from '../tunnels/TunnelSidebar'
+import { VpnSidebar } from '../vpn/VpnSidebar'
 import { MonitorSidebar } from '../monitor/MonitorSidebar'
 import { DatabaseSidebar } from '../databases/DatabaseSidebar'
 import { VaultSidebar } from '../vault/VaultSidebar'
@@ -12,7 +13,7 @@ import { useVault } from '../../store/vault'
 const titles: Record<string, string> = {
   connections: 'Connections',
   databases: 'Databases',
-  tunnels: 'SSH Tunnels',
+  tunnels: 'Tunnels & VPN',
   monitor: 'Fleet Monitor',
   vault: 'Vault'
 }
@@ -103,7 +104,12 @@ export function Sidebar(): React.JSX.Element | null {
       <div className="sidebar-scroll">
         {activity === 'connections' && <ConnectionTree />}
         {activity === 'databases' && <DatabaseSidebar />}
-        {activity === 'tunnels' && <TunnelSidebar />}
+        {activity === 'tunnels' && (
+          <>
+            <TunnelSidebar />
+            <VpnSidebar />
+          </>
+        )}
         {activity === 'monitor' && <MonitorSidebar />}
         {activity === 'vault' && <VaultSidebar />}
       </div>

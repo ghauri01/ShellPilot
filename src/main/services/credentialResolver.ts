@@ -1,7 +1,10 @@
 import { getSecret } from './secrets'
 import { vaultList, vaultStatus } from './vault'
+import { VpnError } from './vpn/errors'
 import type { SshHop } from '../../shared/ssh'
 import type { VaultEntry } from '../../shared/vault'
+import type { VpnProfile, VpnSecretField, VpnSecretRef, VpnSpec } from '../../shared/vpn'
+import type { ResolvedVpnSecrets } from './vpn/driver'
 
 export interface SecretBlob {
   // A reference to a vault entry, which is where a credential belongs: one
@@ -30,12 +33,19 @@ export type CredentialSource = 'vault' | 'keychain' | 'inline' | 'none'
 export const VAULT_LOCKED = 'SHELLPILOT_VAULT_LOCKED'
 
 export class VaultLockedError extends Error {
-  constructor() {
-    super(
-      `${VAULT_LOCKED}: this server authenticates with a vault credential, and the vault is locked.`
-    )
+  // The subject is a parameter only so a VPN profile does not have to describe
+  // itself as a server. The default is what every existing caller produces.
+  constructor(subject = 'this server authenticates with a vault credential') {
+    super(`${VAULT_LOCKED}: ${subject}, and the vault is locked.`)
     this.name = 'VaultLockedError'
   }
+}
+
+/** Recognises the locked-vault failure across a module boundary, so a caller
+ *  can map it onto its own error vocabulary (the VPN layer turns it into
+ *  `vault-locked`) instead of reporting it as an internal fault. */
+export function isVaultLockedError(e: unknown): e is VaultLockedError {
+  return e instanceof VaultLockedError || (e instanceof Error && e.message.includes(VAULT_LOCKED))
 }
 
 function vaultEntry(id: string): VaultEntry | null {
@@ -164,4 +174,151 @@ export function resolveDbSecrets<T extends { id: string; password?: string; uri?
     cfg.ssh = resolveChainSecrets({ ...(cfg.ssh as SshHop & { serverId?: string }) }) as T['ssh']
   }
   return cfg
+}
+
+// ---------------------------------------------------------------------- VPN
+
+// Which built-in slot of a `vpn` vault entry a given secret field lives in.
+// `null` means the field has no built-in slot and is always carried in
+// `fields[]`, keyed by the ref's `fieldKey`. VAULT_KIND_FIELDS in
+// shared/vault.ts documents the layout from the entry's side.
+export const VPN_VAULT_SLOT: Record<VpnSecretField, 'privateKey' | 'password' | 'username' | null> = {
+  privateKey: 'privateKey',
+  // The sanitised .ovpn body has the client key inlined in it, so it is key
+  // material and belongs in the slot that holds key material.
+  configBody: 'privateKey',
+  password: 'password',
+  token: 'password',
+  username: 'username',
+  keyPassphrase: null,
+  presharedKey: null,
+  proxySecretKey: null
+}
+
+function vpnVaultEntries(): Map<string, VaultEntry> {
+  const status = vaultStatus()
+  if (!status.exists || !status.unlocked) {
+    throw new VaultLockedError('this VPN profile authenticates with a vault credential')
+  }
+  const byId = new Map<string, VaultEntry>()
+  for (const e of vaultList().entries ?? []) byId.set(e.id, e)
+  return byId
+}
+
+function readVpnRef(ref: VpnSecretRef, entries: Map<string, VaultEntry>): string {
+  const entry = entries.get(ref.vaultEntryId)
+  if (!entry) {
+    throw new VpnError(
+      'config-invalid',
+      `Its stored ${ref.field} is no longer in the vault. Import the profile again.`
+    )
+  }
+  // A named custom field wins over the built-in slot. Staging falls back to a
+  // custom field whenever the slot it wanted was already taken, and the ref is
+  // the only record of where the value actually went.
+  const slot = ref.fieldKey ? null : VPN_VAULT_SLOT[ref.field]
+  const value = slot
+    ? entry[slot]
+    : entry.fields.find((f) => f.key === (ref.fieldKey ?? ref.field))?.value
+  if (!value) {
+    throw new VpnError(
+      'config-invalid',
+      `The vault entry "${entry.name}" has no ${ref.field} in it any more.`
+    )
+  }
+  return value
+}
+
+// Every literal, longest first, for the log redactor.
+//
+// Longest first because redactKnownSecrets replaces in order: if a short secret
+// happens to be a substring of a longer one, blanking the short one first
+// leaves recognisable fragments of the long one behind.
+//
+// The username is in here even though it is not itself a secret — the contract
+// on ResolvedVpnSecrets says every literal, and an account name disclosed to an
+// AI agent through a log line is still a disclosure. The cost is that a log
+// showing the username shows [REDACTED] instead; the profile model still has it
+// for the UI.
+function flattenVpnSecrets(s: ResolvedVpnSecrets): string[] {
+  const seen = new Set<string>()
+  const add = (v: string | undefined): void => {
+    if (v) seen.add(v)
+  }
+  add(s.privateKey)
+  add(s.username)
+  add(s.password)
+  add(s.keyPassphrase)
+  add(s.token)
+  // The config body is one large literal that no single log line will contain,
+  // but a driver echoing the whole thing back is exactly the accident this is
+  // here to catch. The key material inlined in it is also covered by the PEM
+  // pattern rule in secretRedaction.ts.
+  add(s.configBody)
+  for (const v of Object.values(s.presharedKeys ?? {})) add(v)
+  for (const v of Object.values(s.proxySecretKeys ?? {})) add(v)
+  return [...seen].sort((a, b) => b.length - a.length)
+}
+
+function resolveVpnSpec(spec: VpnSpec, read: (ref: VpnSecretRef) => string): ResolvedVpnSecrets {
+  const out: ResolvedVpnSecrets = { all: [] }
+  if (spec.kind === 'wireguard') {
+    out.privateKey = read(spec.privateKeyRef)
+    for (const peer of spec.peers) {
+      if (!peer.presharedKeyRef) continue
+      out.presharedKeys = { ...out.presharedKeys, [peer.publicKey]: read(peer.presharedKeyRef) }
+    }
+  } else if (spec.kind === 'openvpn') {
+    out.configBody = read(spec.configRef)
+    if (spec.usernameRef) out.username = read(spec.usernameRef)
+    if (spec.passwordRef) out.password = read(spec.passwordRef)
+    if (spec.keyPassphraseRef) out.keyPassphrase = read(spec.keyPassphraseRef)
+  } else {
+    if (spec.auth.tokenRef) out.token = read(spec.auth.tokenRef)
+    // ResolvedVpnSecrets has one free single-value slot left and frp has one
+    // more single-value secret, so the OIDC client secret takes `password`.
+    // `auth.method` is either token or oidc, never both, so nothing collides.
+    if (spec.auth.oidc?.clientSecretRef) out.password = read(spec.auth.oidc.clientSecretRef)
+    for (const p of spec.proxies) {
+      if (p.secretKeyRef) {
+        out.proxySecretKeys = { ...out.proxySecretKeys, [p.name]: read(p.secretKeyRef) }
+      }
+      // A plugin password is per-proxy too, so it rides in the same map under a
+      // prefixed key rather than fighting for the one `password` slot.
+      if (p.plugin?.passwordRef) {
+        out.proxySecretKeys = {
+          ...out.proxySecretKeys,
+          [`plugin:${p.name}`]: read(p.plugin.passwordRef)
+        }
+      }
+    }
+    for (const v of spec.visitors) {
+      if (!v.secretKeyRef) continue
+      out.proxySecretKeys = { ...out.proxySecretKeys, [v.name]: read(v.secretKeyRef) }
+    }
+  }
+  out.all = flattenVpnSecrets(out)
+  return out
+}
+
+/** Resolves every secret a VPN profile references into plaintext, immediately
+ *  before a start.
+ *
+ *  Returned, never cached: the plaintext lives as long as the caller's
+ *  `VpnDriverContext` and no longer, so nothing here keeps a copy of a key
+ *  after the vault re-locks.
+ *
+ *  Throws `VaultLockedError` when the vault is locked, which is what makes the
+ *  renderer's existing `withVaultUnlock` flow prompt. There is deliberately no
+ *  fallback to an unencrypted source: starting a tunnel with a stale copy of a
+ *  key the user has since rotated is worse than a clear failure, the same
+ *  reasoning `resolveSecrets` above applies to SSH. */
+export async function resolveVpnSecrets(profile: VpnProfile): Promise<ResolvedVpnSecrets> {
+  // Opened on first use so a profile that references nothing — an frp profile
+  // with no token and no secret proxies — never raises an unlock prompt.
+  let entries: Map<string, VaultEntry> | null = null
+  return resolveVpnSpec(profile.spec, (ref) => {
+    entries ??= vpnVaultEntries()
+    return readVpnRef(ref, entries)
+  })
 }

@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "binaries": {
+    "darwin-x64/frpc": {
+      "sha256": "6ad2365210cad7c338e11265a44a1c7401f855ef81f862a0ed90d459cd41bba9",
+      "size": 16532704,
+      "version": "0.71.0"
+    },
+    "darwin-arm64/frpc": {
+      "sha256": "1059ed86cd57595d3b06438edf89cd9fc4c5f3d1ac7be948ef7d0189098233bb",
+      "size": 14656706,
+      "version": "0.71.0"
+    },
+    "linux-x64/frpc": {
+      "sha256": "bae41db7fc445cd24536cde1fc40a581bd95203b29cfa169b2470efc6efe0297",
+      "size": 16412798,
+      "version": "0.71.0"
+    },
+    "linux-arm64/frpc": {
+      "sha256": "b59d1efe83af4b1203e12ac767ac8d3931fb9ec9596a4d971b441868b87e1830",
+      "size": 14483582,
+      "version": "0.71.0"
+    },
+    "win32-x64/frpc.exe": {
+      "sha256": "cb25bc4baa8430f268f1253610108fe4d8ddd4fbf6b439a8eacf36bcccc89e71",
+      "size": 16544768,
+      "version": "0.71.0"
+    },
+    "win32-arm64/frpc.exe": {
+      "sha256": "70e621da31d62b80fbb6cb479da95b084d7d94434a13d0e529349c93d46070f2",
+      "size": 14337024,
+      "version": "0.71.0"
+    },
+    "darwin-x64/shellpilot-netd": {
+      "sha256": "7c1927965c1bf3ac50ab52dbdd54a95f4e465bb98bcf1a7aa109976e83996490",
+      "size": 6974560,
+      "version": "0.4.4"
+    },
+    "darwin-arm64/shellpilot-netd": {
+      "sha256": "e1f0e3e8e284e0154784c689e4ceaae972a5e93a2853b1432488210c4b94a2ba",
+      "size": 6600242,
+      "version": "0.4.4"
+    },
+    "linux-x64/shellpilot-netd": {
+      "sha256": "f04b870a9c65a8448e113d6e2ae98c8ebdab0628b1aa4a911d868b833846f768",
+      "size": 6918270,
+      "version": "0.4.4"
+    },
+    "linux-arm64/shellpilot-netd": {
+      "sha256": "9968309967470c42a87a41ec9ebc5966ecbd574ac38cf7dd16ae99a563d1525f",
+      "size": 6553726,
+      "version": "0.4.4"
+    },
+    "win32-x64/shellpilot-netd.exe": {
+      "sha256": "816b7740c7bddb5e257cd4f46da0d14a074937ab9f86bde54dce1d77a3669f57",
+      "size": 7145984,
+      "version": "0.4.4"
+    },
+    "win32-arm64/shellpilot-netd.exe": {
+      "sha256": "5cc97b14dab3a0692e11f7333f454197ccca6ec52fe2fb21daccc15442bc4cfa",
+      "size": 6627328,
+      "version": "0.4.4"
+    }
+  }
+}

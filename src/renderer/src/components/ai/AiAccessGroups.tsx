@@ -29,19 +29,19 @@ function PermSegment({
   )
 }
 
-// sshTunnel and databaseAccess are in the model but no tool is gated on them,
-// so leaving them silently in the grid invites someone to set a permission that
-// does nothing.
-const NOT_YET_ENFORCED = new Set<AiCapability>(['sshTunnel', 'databaseAccess'])
+// Every capability in AI_CAPABILITIES is now gated by at least one tool —
+// sshTunnel by list_tunnels/set_tunnel, databaseAccess by query_database,
+// vpnControl by list_vpns/set_vpn — so the grid no longer carries a
+// "displayed but does nothing" tier. If one is ever added back, it needs a
+// visible marker here rather than a silent row: a permission the user believes
+// they have set is worse than one that does not exist.
 
-// Ten rows of ALLOW/ASK/DENY is the wrong first thing to read. Most groups are
-// describable in a sentence, and the person who genuinely needs per-capability
-// control will open the grid.
+// A dozen rows of ALLOW/ASK/DENY is the wrong first thing to read. Most groups
+// are describable in a sentence, and the person who genuinely needs
+// per-capability control will open the grid.
 function CapabilitySummary({ group }: { group: AccessGroup }): React.JSX.Element {
   const named = (v: PermissionValue): string[] =>
-    AI_CAPABILITIES.filter(({ id }) => group.capabilities[id] === v && !NOT_YET_ENFORCED.has(id)).map(
-      ({ label }) => label.toLowerCase()
-    )
+    AI_CAPABILITIES.filter(({ id }) => group.capabilities[id] === v).map(({ label }) => label.toLowerCase())
   const allowed = named('allow')
   const asked = named('ask')
   const denied = named('deny')
@@ -113,12 +113,6 @@ function GroupEditor({ group, onChange, onSave, onDelete }: {
           <div className="setting-row" key={id}>
             <div className="s-info">
               <div className="s-title">{label}</div>
-              {NOT_YET_ENFORCED.has(id) && (
-                <div className="s-desc">
-                  No tool uses this yet — it is here for a feature that has not shipped, and changing
-                  it has no effect today.
-                </div>
-              )}
             </div>
             <PermSegment value={group.capabilities[id]} onChange={(v) => setCap(id, v)} />
           </div>

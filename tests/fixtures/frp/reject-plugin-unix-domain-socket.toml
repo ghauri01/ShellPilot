@@ -1,0 +1,12 @@
+serverAddr = "frp.example.com"
+serverPort = 7000
+auth.token = "s3cr3t-token"
+
+[[proxies]]
+name = "docker"
+type = "tcp"
+localPort = 0
+remotePort = 6000
+[proxies.plugin]
+type = "unix_domain_socket"
+unixPath = "/var/run/docker.sock"

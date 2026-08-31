@@ -1,0 +1,8 @@
+serverAddr = "frp.example.com"
+serverPort = 7000
+auth.token = "s3cr3t-token"
+
+[[proxies]]
+name = "ssh"
+type = "carrier-pigeon"
+localPort = 22

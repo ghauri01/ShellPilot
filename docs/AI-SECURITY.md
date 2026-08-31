@@ -41,6 +41,10 @@ Regardless of which access group a session holds:
 - **A server's real host, IP, port or username.** Every tool that names a server takes and
   returns a friendly name (e.g. "Production API"); `get_server_details` returns OS, access group
   and effective permissions, never connection details.
+- **A VPN's endpoint, keys or listener addresses.** `list_vpns` reports which profiles exist,
+  which engine carries each one and whether it is up. The cached record it reads from
+  (`CachedVpn`, `mcpDataCache.ts`) does not hold an endpoint, a key ref or a bind address at all,
+  so this is a shape that cannot leak one rather than a field somebody remembered not to print.
 
 ## Threat model
 
@@ -50,11 +54,49 @@ Regardless of which access group a session holds:
 | Network/topology exposure — leaking internal IPs, hosts, usernames just by listing servers | Tool responses carry only names, OS and permissions | `mcpServer.ts` (`list_servers`, `get_server_details`) |
 | Prompt-injection or a confused agent running something destructive | Any capability set to ASK blocks until a human approves; the agent has no path to approve its own request | `approvals.ts`, `mcpServer.ts` |
 | Sudo / privilege escalation, including via disguised unrestricted shells | Hard-denied by pattern match, independent of access-group configuration | `policyEngine.ts` (`classifyCommand`, `evaluateCommand`) |
+| An agent silently changing which network the user's traffic crosses | Starting a VPN is always ASK, on every group, including one set to ALLOW; stopping one is ASK whenever live sessions depend on it | `policyEngine.ts` (`evaluateVpnControl`) |
+| An agent publishing a local port to the internet through a reverse proxy | `set_vpn` refuses `frp` profiles before the access group is consulted, in either direction; no capability value reaches past it, and there is no tool that can create one | `policyEngine.ts` (`isVpnKindRefusedForAi`), `mcpServer.ts` (`set_vpn`) |
 | Secrets leaking through command output (`env`, a misconfigured app, a `cat` of a file with a key in it) | Known credential values blanked verbatim; pattern rules catch `PASSWORD=`/`TOKEN=`-style assignments, PEM key blocks, bearer tokens, AWS access key IDs, connection-string passwords | `secretRedaction.ts` |
 | A leaked or stolen token granting standing access | Only a SHA-256 hash + 4-character preview is ever stored; every session has its own expiry and is individually revocable, or all revocable at once | `mcpAuth.ts` |
 | Lateral movement — a session reaching a workspace it wasn't granted | A server outside the session's granted workspace(s) is never in the candidate list a tool call resolves against — invisible, not merely denied. Workspaces are chosen explicitly per session, never "all, including future ones" | `mcpDataCache.ts`, `serverResolver.ts` |
 | No record of what an agent actually did | Every decision — allowed, asked, approved, denied, failed — is written to an append-only, redacted audit log | `auditLog.ts` |
 | A compromised local process trying to complete CLI pairing on its own | The pairing code is shown only inside the ShellPilot window, never returned over HTTP to whatever process asked for it | `cliPairing.ts` |
+
+## Granting `vpnControl` is a bigger decision than it looks
+
+Read this before setting `vpnControl` to anything other than `deny`.
+
+Every other capability in the model is scoped to one server, one file or one statement.
+`vpnControl` is not. **A VPN decides which network the user's later SSH and database sessions
+travel over** — including sessions the agent never touches and connections the user opens by hand
+afterwards. An agent that can start a VPN is an agent that can change the meaning of "connect to
+Production API" without going anywhere near that server's configuration.
+
+Combined with `manageServers`, the two compose into something neither grants alone: an agent could
+add a server *and* bring up a VPN that server's traffic is routed through, and both actions would
+look ordinary in isolation. That composition is the reason for the three rules below, and none of
+them is a preference:
+
+- **Starting a VPN is always ASK**, on every group, including one a user has explicitly raised to
+  ALLOW (`evaluateVpnControl`, `policyEngine.ts`). There is no configuration in which a VPN comes
+  up silently at an agent's request.
+- **Reverse proxies (frp) are refused outright**, in both directions, before the access group is
+  read (`isVpnKindRefusedForAi`). An frp proxy makes a port on the user's own machine reachable
+  from the frp server — from the internet — and an approval dialog is not a meaningful control
+  there, because "Start VPN office" reads nothing like "publish port 5432 to the internet" to the
+  person clicking it. If an frp profile is to run, the user starts it in ShellPilot themselves.
+- **There is no tool that creates or edits a VPN profile.** No `add_vpn`, no `edit_vpn`, and this
+  is asserted by a test rather than left to reviewer memory. An agent can run a profile the user
+  wrote; it can never author where one points.
+
+None of the built-in groups grants `vpnControl` outright: **Read Only** denies it, and **Read &
+Write**, **Sudo Access** and **Full Access** all set it to ASK. A group saved before this version
+existed backfills to DENY if it is custom, and to the fresh-install value if it is built in
+(`backfillCapabilities`, `policyStore.ts`) — an upgrade never silently widens what a group permits.
+
+What this does *not* do is make a granted `vpnControl` safe. If you approve a start prompt without
+reading it, you have moved your traffic, and the audit entry — `Start VPN "office" (wireguard,
+userspace, 2 listeners)` — will record that you meant to.
 
 ## What this does not claim
 

@@ -6,7 +6,7 @@ import type { ActivityView } from '../../types'
 const items: { id: ActivityView; icon: React.ReactNode; label: string }[] = [
   { id: 'connections', icon: <Server size={20} />, label: 'Connections' },
   { id: 'databases', icon: <Database size={20} />, label: 'Databases' },
-  { id: 'tunnels', icon: <Network size={20} />, label: 'SSH Tunnels' },
+  { id: 'tunnels', icon: <Network size={20} />, label: 'Tunnels & VPN' },
   { id: 'monitor', icon: <Activity size={20} />, label: 'Monitoring' },
   { id: 'vault', icon: <KeyRound size={20} />, label: 'Vault' },
   { id: 'ai', icon: <Bot size={20} />, label: 'AI & MCP' }

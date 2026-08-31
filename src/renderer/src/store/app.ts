@@ -10,9 +10,12 @@ import type {
   Folder,
   FolderKind,
   VpnProfile,
+  VpnSpec,
+  VpnStatus,
   Tunnel,
   DatabaseConn
 } from '../types'
+import { bridgeHas } from '../lib/bridge'
 
 // Clean default: a single empty workspace. No sample servers/VPNs/tunnels.
 const DEFAULT_WORKSPACE: Workspace = {
@@ -91,6 +94,12 @@ interface AppState {
   folders: Folder[]
   servers: Server[]
   vpns: VpnProfile[]
+  // Live status per profile id, straight off `vpn:status:<id>`. Kept beside the
+  // profiles rather than on them, and deliberately outside the persisted slice:
+  // a profile is a saved definition that belongs in a backup, a status is a
+  // reading that ticks once a second. Merging the two would make every
+  // handshake sample look like an edit and mark the backup out of date.
+  vpnStatuses: Record<string, VpnStatus>
   tunnels: Tunnel[]
   databases: DatabaseConn[]
 
@@ -210,6 +219,10 @@ interface AppState {
   addTunnel: (input: Omit<Tunnel, 'id' | 'workspaceId' | 'status'>) => string
   deleteTunnel: (id: string) => void
   setTunnelStatus: (id: string, status: Tunnel['status']) => void
+  setVpnProfiles: (profiles: VpnProfile[]) => void
+  upsertVpnProfile: (profile: VpnProfile) => void
+  removeVpnProfile: (id: string) => void
+  setVpnStatus: (id: string, status: VpnStatus) => void
   replaceAll: (
     data: Partial<
       Pick<
@@ -282,12 +295,68 @@ function resolveWorkspaceId(workspaces: Workspace[], wanted: string): string {
   return workspaces.some((w) => w.id === wanted) ? wanted : workspaces[0]?.id ?? wanted
 }
 
+// Every vault entry a profile points at. A profile is plain JSON in the saved
+// blob and never holds key material itself, so deleting one has to tell main
+// which vault entries it just made unreachable.
+function vpnVaultEntryIds(spec: VpnSpec): string[] {
+  const ids = new Set<string>()
+  const take = (ref: { vaultEntryId: string } | undefined): void => {
+    if (ref) ids.add(ref.vaultEntryId)
+  }
+  if (spec.kind === 'wireguard') {
+    take(spec.privateKeyRef)
+    spec.peers.forEach((p) => take(p.presharedKeyRef))
+  } else if (spec.kind === 'openvpn') {
+    take(spec.configRef)
+    take(spec.usernameRef)
+    take(spec.passwordRef)
+    take(spec.keyPassphraseRef)
+  } else {
+    take(spec.auth.tokenRef)
+    take(spec.auth.oidc?.clientSecretRef)
+    spec.proxies.forEach((p) => {
+      take(p.secretKeyRef)
+      take(p.plugin?.passwordRef)
+    })
+    spec.visitors.forEach((v) => take(v.secretKeyRef))
+  }
+  return [...ids]
+}
+
+// Releases the vault entries a set of doomed profiles owned. Fire-and-forget:
+// the profile is already gone from the slice, and a failed release leaves an
+// unreferenced entry rather than a broken UI.
+function releaseVpnSecrets(profiles: VpnProfile[]): void {
+  if (!bridgeHas(window.shellpilot?.vpn as Record<string, unknown> | undefined, 'deleteSecrets')) return
+  for (const p of profiles) {
+    for (const entryId of vpnVaultEntryIds(p.spec)) {
+      void window.shellpilot?.vpn.deleteSecrets(entryId)
+    }
+  }
+}
+
+// Clears `vpnProfileId` on every row pointing at a profile that is going away.
+// Main already reads a dangling reference as "connect directly" rather than
+// failing, so a leftover pointer breaks nothing — but it is a lie the saved
+// blob keeps telling, and it resurfaces as a "(missing profile)" row in every
+// form that reads it. Returns the array unchanged when nothing pointed at a
+// doomed profile, so persist.ts's reference comparison does not report a
+// backup as stale over a delete that touched none of these.
+function detachVpn<T extends { vpnProfileId: string | null }>(
+  rows: T[],
+  doomed: Set<string>
+): T[] {
+  const hit = (r: T): boolean => !!r.vpnProfileId && doomed.has(r.vpnProfileId)
+  return rows.some(hit) ? rows.map((r) => (hit(r) ? { ...r, vpnProfileId: null } : r)) : rows
+}
+
 export const useApp = create<AppState>((set, get) => ({
   workspaces: [DEFAULT_WORKSPACE],
   folders: [],
   monitorGroups: [],
   servers: [],
   vpns: [],
+  vpnStatuses: {},
   tunnels: [],
   databases: [],
 
@@ -592,12 +661,19 @@ export const useApp = create<AppState>((set, get) => ({
       if (s.workspaces.length <= 1) return {}
       const remaining = s.workspaces.filter((w) => w.id !== id)
       const doomedServers = new Set(s.servers.filter((v) => v.workspaceId === id).map((v) => v.id))
+      // Profiles are workspace-scoped, so in practice only this workspace's own
+      // records name them — but a record that survives the cascade must not
+      // keep pointing at one that did not.
+      const doomedVpns = new Set(s.vpns.filter((v) => v.workspaceId === id).map((v) => v.id))
+      // The profiles go with the workspace, but their vault entries do not go by
+      // themselves — release them for the same reason removeVpnProfile does.
+      releaseVpnSecrets(s.vpns.filter((v) => v.workspaceId === id))
       return {
         workspaces: remaining,
         folders: s.folders.filter((f) => f.workspaceId !== id),
-        servers: s.servers.filter((v) => v.workspaceId !== id),
+        servers: detachVpn(s.servers.filter((v) => v.workspaceId !== id), doomedVpns),
         monitorGroups: s.monitorGroups.filter((g) => g.workspaceId !== id),
-        databases: s.databases.filter((d) => d.workspaceId !== id),
+        databases: detachVpn(s.databases.filter((d) => d.workspaceId !== id), doomedVpns),
         vpns: s.vpns.filter((v) => v.workspaceId !== id),
         tunnels: s.tunnels.filter((t) => t.workspaceId !== id),
         tabs: s.tabs.filter((t) => !t.serverId || !doomedServers.has(t.serverId)),
@@ -638,6 +714,9 @@ export const useApp = create<AppState>((set, get) => ({
           favorite: false,
           os: input.os ?? 'Linux',
           route: input.route ?? [],
+          // Direct by default. A server that silently rode a VPN nobody chose
+          // would be a surprising thing to inherit from a bulk import.
+          vpnProfileId: input.vpnProfileId ?? null,
           demo: false
         }
       ]
@@ -664,7 +743,10 @@ export const useApp = create<AppState>((set, get) => ({
   addDatabase: (input) => {
     const id = uid('db')
     set((s) => ({
-      databases: [...s.databases, { ...input, id, workspaceId: s.activeWorkspaceId }],
+      databases: [
+        ...s.databases,
+        { ...input, vpnProfileId: input.vpnProfileId ?? null, id, workspaceId: s.activeWorkspaceId }
+      ],
       activeDatabaseId: id,
       openDatabaseIds: [...s.openDatabaseIds, id]
     }))
@@ -743,6 +825,53 @@ export const useApp = create<AppState>((set, get) => ({
         ? { tunnels: s.tunnels.map((t) => (t.id === id ? { ...t, status } : t)) }
         : s
     ),
+
+  setVpnProfiles: (profiles) => set({ vpns: profiles }),
+
+  upsertVpnProfile: (profile) =>
+    set((s) => ({
+      vpns: s.vpns.some((v) => v.id === profile.id)
+        ? s.vpns.map((v) => (v.id === profile.id ? profile : v))
+        : [...s.vpns, profile]
+    })),
+
+  removeVpnProfile: (id) =>
+    set((s) => {
+      const doomed = s.vpns.find((v) => v.id === id)
+      // The profile is just JSON in the saved blob, but its key material is in
+      // the vault and nothing else points at it once this row is gone.
+      if (doomed) releaseVpnSecrets([doomed])
+      // The live status goes too; leaving it behind would keep a deleted
+      // profile "connected" for anything reading the map by id.
+      const { [id]: _gone, ...vpnStatuses } = s.vpnStatuses
+      // Detached in the same action as the delete, so the saved blob is never
+      // written with a pointer to a profile that no longer exists.
+      const doomedIds = new Set([id])
+      return {
+        vpns: s.vpns.filter((v) => v.id !== id),
+        servers: detachVpn(s.servers, doomedIds),
+        databases: detachVpn(s.databases, doomedIds),
+        vpnStatuses
+      }
+    }),
+
+  // Called on every coalesced status tick, so it has to be a true no-op when
+  // nothing moved — same reasoning as setTunnelStatus above. Comparing the
+  // sample timestamp is enough: main only re-emits when the payload differs.
+  setVpnStatus: (id, status) =>
+    set((s) => {
+      const prev = s.vpnStatuses[id]
+      if (
+        prev &&
+        prev.state === status.state &&
+        prev.restarts === status.restarts &&
+        prev.error === status.error &&
+        prev.stats?.sampledAt === status.stats?.sampledAt
+      ) {
+        return s
+      }
+      return { vpnStatuses: { ...s.vpnStatuses, [id]: status } }
+    }),
 
   moveDatabaseToFolder: (databaseId, folderId) =>
     set((s) => ({
@@ -882,11 +1011,24 @@ export const useApp = create<AppState>((set, get) => ({
         data.activeWorkspaceId ?? s.activeWorkspaceId
       ),
       folders: (data.folders ?? s.folders).map((f) => ({ ...f, kind: f.kind ?? 'server' })),
+      // Saves written before a server could name a VPN have no such key at all.
+      // Normalising on load rather than defaulting at every read keeps
+      // "null means direct" the one representation the rest of the app sees.
+      servers: (data.servers ?? s.servers).map((sv) => ({
+        ...sv,
+        vpnProfileId: sv.vpnProfileId ?? null
+      })),
       databases: (data.databases ?? s.databases).map((d) => ({
         ...d,
         folderId: d.folderId ?? null,
-        sshServerId: d.sshServerId ?? null
+        sshServerId: d.sshServerId ?? null,
+        vpnProfileId: d.vpnProfileId ?? null
       })),
+      // Saves written before the VPN domain was real hold the old mock shape at
+      // this key — a record with `kind`/`rx`/`tx` and no `spec` at all. Dropping
+      // anything without a spec is cheaper than a migration and cannot leave a
+      // half-typed profile in a list every start/stop path dereferences.
+      vpns: (data.vpns ?? s.vpns).filter((v) => !!v && !!v.spec),
       // Merge over defaults so a preference added in a later version is not
       // left undefined when an older save is loaded.
       // Nothing is forwarding yet at launch, whatever the last save said.

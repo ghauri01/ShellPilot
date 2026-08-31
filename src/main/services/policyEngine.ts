@@ -1,4 +1,5 @@
 import type { AccessGroup, AiCapability, PermissionValue, PolicyAssignment } from '../../shared/mcp'
+import type { VpnKind } from '../../shared/vpn'
 
 export interface Decision {
   decision: PermissionValue
@@ -432,4 +433,42 @@ export function evaluateTunnelOpen(group: AccessGroup | null): Decision {
   return tunnel.decision === 'allow'
     ? { decision: 'ask', reason: 'Opening a tunnel binds a port on your machine and always requires approval.' }
     : tunnel
+}
+
+// VPN kinds an AI agent may never run, whatever access group governs it.
+//
+// The same treatment as UNRESTRICTED_SHELL_PATTERNS above, for the same reason.
+// Every frp proxy makes a port on the user's own machine reachable from the frp
+// server, which is to say from the public internet. An approval prompt would
+// not help: "Start VPN office" is indistinguishable, to the person clicking it,
+// from consent to publish a port. So it is not expressed as a permission an
+// administrator could raise to 'allow' — it is refused here, in code, and the
+// user opens an frp profile themselves in ShellPilot or it does not open.
+const AI_REFUSED_VPN_KINDS: ReadonlySet<VpnKind> = new Set<VpnKind>(['frp'])
+
+export function isVpnKindRefusedForAi(kind: VpnKind): boolean {
+  return AI_REFUSED_VPN_KINDS.has(kind)
+}
+
+// Starting a VPN is a bigger act than opening a tunnel: a tunnel binds one
+// port, a VPN changes which network everything downstream of it travels over.
+// So it is never silent — not even for a group that says 'allow' — and a stop
+// that would cut live sessions surfaces that fact before it happens.
+export function evaluateVpnControl(
+  group: AccessGroup | null,
+  action: 'start' | 'stop',
+  hasLiveDependents: boolean
+): Decision {
+  if (!group) return { decision: 'deny', reason: 'No AI access is assigned to this workspace.' }
+  const cap = evaluateCapability(group, 'vpnControl')
+  if (cap.decision === 'deny') return { decision: 'deny', reason: 'VPN control is denied for this access group.' }
+  if (action === 'start') {
+    return cap.decision === 'allow'
+      ? { decision: 'ask', reason: 'Starting a VPN changes where your traffic goes and always requires approval.' }
+      : cap
+  }
+  if (hasLiveDependents && cap.decision === 'allow') {
+    return { decision: 'ask', reason: 'Stopping this VPN will close sessions that depend on it.' }
+  }
+  return cap
 }

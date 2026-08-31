@@ -1,0 +1,13 @@
+serverAddr = "frp.example.com"
+serverPort = 7000
+auth.method = "oidc"
+auth.oidc.clientID = "shellpilot"
+auth.oidc.clientSecret = "oidc-secret"
+auth.oidc.audience = "frp"
+auth.oidc.tokenEndpointURL = "https://idp.example.com/token"
+
+[[proxies]]
+name = "ssh"
+type = "tcp"
+localPort = 22
+remotePort = 6000

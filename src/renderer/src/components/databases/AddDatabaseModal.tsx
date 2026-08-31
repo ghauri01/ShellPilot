@@ -5,7 +5,8 @@ import { useApp, useWorkspaceServers } from '../../store/app'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
 import { KIND_COLOR } from './DatabaseSidebar'
-import type { DbKind } from '../../types'
+import { VpnTransportSelect } from '../vpn/VpnTransportSelect'
+import type { DbKind, UUID } from '../../types'
 
 const KINDS: { id: DbKind; label: string; port: number }[] = [
   { id: 'postgres', label: 'PostgreSQL', port: 5432 },
@@ -31,6 +32,7 @@ export function AddDatabaseModal(): React.JSX.Element {
   const [ssl, setSsl] = useState(false)
   const [uri, setUri] = useState('')
   const [sshServerId, setSshServerId] = useState('')
+  const [vpnProfileId, setVpnProfileId] = useState<UUID | null>(null)
 
   const pickKind = (k: DbKind): void => {
     setKind(k)
@@ -53,7 +55,8 @@ export function AddDatabaseModal(): React.JSX.Element {
       ssl,
       uri: useUri,
       folderId: null,
-      sshServerId: sshServerId || null
+      sshServerId: sshServerId || null,
+      vpnProfileId
     })
     const secret = useUri ? { uri: uri.trim() } : password ? { password } : null
     if (secret) {
@@ -203,6 +206,16 @@ export function AddDatabaseModal(): React.JSX.Element {
           {kind === 'mongodb' && ' mongodb+srv:// strings cannot be tunnelled — use host/port.'}
         </span>
       </div>
+
+      <VpnTransportSelect
+        value={vpnProfileId}
+        onChange={setVpnProfileId}
+        hint={
+          sshServerId
+            ? 'Both are set, so the VPN goes on the outside: the SSH server above is reached through the VPN, and the database is reached from there exactly as it would be without one.'
+            : 'Independent of the SSH tunnel above, and stackable with it: set both and the VPN carries the SSH server, which then reaches the database.'
+        }
+      />
 
       <span className="field-hint">Credentials are stored in OS secure storage, never in plaintext.</span>
     </Modal>

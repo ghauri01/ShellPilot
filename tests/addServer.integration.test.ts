@@ -278,7 +278,9 @@ describe('making the model legible', () => {
 
     const view = rows.find((r) => r.capability === 'viewServer')!
     expect(view.decidedBy).toBe('both')
-    expect(rows).toHaveLength(11)
+    // Every capability, not a frozen count: the next one added should make the
+    // coverage test below fail, not this one.
+    expect(rows).toHaveLength(AI_CAPABILITIES.length)
   })
 
   it('reports every capability, so the view cannot quietly omit one', () => {

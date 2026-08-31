@@ -3,13 +3,16 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
 import { listGroups, getGroup, resetPolicyCacheForTests } from '../src/main/services/policyStore'
-import { evaluateCapability } from '../src/main/services/policyEngine'
+import { evaluateCapability, evaluateVpnControl } from '../src/main/services/policyEngine'
 import { AI_CAPABILITIES } from '../src/shared/mcp'
 
 const FILE = join(app.getPath('userData'), 'shellpilot-ai-policy.json')
 
-// A policy file written before manageServers existed: every group is missing
-// the key, which is what every upgraded install looks like.
+// A policy file written before manageServers and vpnControl existed: every
+// group is missing both keys, which is what every upgraded install looks like.
+// This has now happened twice, so the fixture stays deliberately behind: it is
+// the only thing standing between an added capability and an install where the
+// feature is silently off with nothing in the UI saying why.
 function writeLegacyPolicy(): void {
   const legacyCaps = {
     viewServer: 'allow',
@@ -61,8 +64,18 @@ describe('upgrading a policy file written before a capability existed', () => {
     expect(getGroup('grp-read-only')?.capabilities.manageServers).toBe('deny')
   })
 
+  it('backfills vpnControl the same way, on a file that predates it', () => {
+    // The on-disk fixture has no vpnControl key at all. Full Access seeds it at
+    // ASK and Read Only at DENY, so an upgraded install matches a fresh one.
+    expect(getGroup('grp-full')?.capabilities.vpnControl).toBe('ask')
+    expect(getGroup('grp-read-only')?.capabilities.vpnControl).toBe('deny')
+  })
+
   it('denies a new capability on a custom group, which has no intent on record', () => {
     expect(getGroup('grp-custom')?.capabilities.manageServers).toBe('deny')
+    // Especially this one: a group written before VPNs existed cannot have
+    // meant to let an agent move the user's traffic.
+    expect(getGroup('grp-custom')?.capabilities.vpnControl).toBe('deny')
   })
 
   it('does not disturb capabilities the file already set', () => {
@@ -76,5 +89,15 @@ describe('upgrading a policy file written before a capability existed', () => {
     // Before the backfill this evaluated to deny via the undefined guard, and
     // no amount of changing other settings could shift it.
     expect(evaluateCapability(getGroup('grp-full'), 'manageServers').decision).toBe('ask')
+    expect(evaluateCapability(getGroup('grp-full'), 'vpnControl').decision).toBe('ask')
+  })
+
+  it('reaches the VPN rule, not just the capability lookup', () => {
+    // evaluateVpnControl reads the capability through the same undefined guard,
+    // so a missed backfill would surface here as a permanent deny on a group
+    // the user believes is set to ask.
+    expect(evaluateVpnControl(getGroup('grp-full'), 'start', false).decision).toBe('ask')
+    expect(evaluateVpnControl(getGroup('grp-full'), 'stop', false).decision).toBe('ask')
+    expect(evaluateVpnControl(getGroup('grp-custom'), 'stop', false).decision).toBe('deny')
   })
 })

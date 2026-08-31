@@ -8,3 +8,10 @@ release
 *.spbackup
 .npmrc
 *.tsbuildinfo
+
+# Tunnel engines are built from source by scripts/build-{sidecar,frpc}.sh.
+# The manifest is committed so a clone knows which hashes it expects; the
+# binaries themselves are build output.
+resources/bin/*
+!resources/bin/manifest.json
+.frp-build/

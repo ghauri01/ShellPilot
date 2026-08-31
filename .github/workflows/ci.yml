@@ -15,8 +15,22 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: sidecar/netd/go.sum
       - run: npm ci
       - run: npm audit
       - run: npm run typecheck
       - run: npm run build
       - run: npm run test
+      # The WireGuard sidecar is a Go program in this repo, so it is covered by
+      # CI like the TypeScript is. Building it here also proves the six-target
+      # cross-compile still works before a release depends on it.
+      - name: Sidecar vet and test
+        working-directory: sidecar/netd
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Sidecar cross-compile
+        run: npm run build:sidecar

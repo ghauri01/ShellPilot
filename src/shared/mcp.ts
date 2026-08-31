@@ -19,6 +19,7 @@ export type AiCapability =
   | 'sudo'
   | 'serverMetrics'
   | 'manageServers'
+  | 'vpnControl'
 
 export const AI_CAPABILITIES: { id: AiCapability; label: string }[] = [
   { id: 'viewServer', label: 'View server' },
@@ -31,7 +32,8 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string }[] = [
   { id: 'databaseAccess', label: 'Database access' },
   { id: 'sudo', label: 'Sudo / privilege escalation' },
   { id: 'serverMetrics', label: 'Server metrics' },
-  { id: 'manageServers', label: 'Add servers to the workspace' }
+  { id: 'manageServers', label: 'Add servers to the workspace' },
+  { id: 'vpnControl', label: 'VPN & reverse proxies' }
 ]
 
 export type AiCapabilityPolicy = Record<AiCapability, PermissionValue>

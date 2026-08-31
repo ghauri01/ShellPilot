@@ -92,6 +92,10 @@ sends you to a second application the moment you need to query a table or look u
 | **SFTP browser** | Browse, edit, upload, rename and delete files over the same connection |
 | **Server monitoring** | Live CPU, memory, disk and network docked under the terminal, with resource alerts |
 | **SSH tunnels** | Local forwards, remote forwards and a SOCKS5 proxy |
+| **WireGuard** | Userspace WireGuard with **no administrator rights** — the tunnel appears as a local SOCKS5 proxy and forwards, and your routing table is never touched |
+| **OpenVPN** | Drives an OpenVPN you already have installed, over its management interface, with one-time codes and split tunnelling |
+| **frp** | Publish a local port through an frp server, with a per-proxy confirmation naming exactly what becomes reachable |
+| **SSH & databases over VPN** | Point a server or a database at a VPN profile and it is brought up, waited for, and torn down with the session |
 | **Databases** | PostgreSQL, MySQL, SQL Server, MongoDB and Redis — with an interactive shell per engine |
 | **Databases over SSH** | Reach a database that is only routable from a bastion |
 | **Vault** | AES-256-GCM encrypted store for URLs, logins, API keys and free-form key/value pairs |
@@ -817,9 +821,30 @@ Every engine gets an **interactive shell** alongside the query editor:
 
 **Databases over SSH:** pick a bastion in the *SSH tunnel* field and ShellPilot opens a forward automatically, so you can reach a database that is only routable from inside the network.
 
+**Databases over a VPN:** pick a WireGuard or OpenVPN profile in the *Network* field and the tunnel is brought up before the connection is attempted. A bastion and a VPN can both be set — the VPN is the outer transport, and the bastion is reached through it.
+
 ## SSH tunnels
 
 Create local forwards, remote forwards or a SOCKS5 proxy over any saved server. Live connection counts are shown per tunnel, and a dropped SSH connection tears the listener down rather than leaving it accepting traffic that goes nowhere.
+
+## VPN and reverse-proxy tunnels
+
+ShellPilot speaks **WireGuard**, **OpenVPN** and **frp**. Full guide: **[docs/VPN.md](docs/VPN.md)**.
+
+The default is the unusual part: **WireGuard runs entirely in userspace and needs no administrator rights.** There is no network interface, your routing table and DNS are untouched, and if ShellPilot is killed there is nothing to clean up. The tunnel appears instead as local listeners — a SOCKS5 proxy on `127.0.0.1`, and any forwards you define — and you point individual connections at it.
+
+That trade is deliberate. Reaching one bastion, one database or one internal service does not need your whole machine on the far network. When it genuinely does, system mode is one toggle away on Linux and Windows and asks for elevation each time you connect — with three stated limits: a full tunnel (`0.0.0.0/0`) is refused, macOS is blocked for want of an Apple Developer ID, and Windows needs the Wintun driver that WireGuard for Windows installs. [docs/VPN.md](docs/VPN.md) explains each. None of them affect the default.
+
+- **Handshake age, not just a green dot.** A WireGuard tunnel whose process is up but whose handshake has gone stale is shown as **degraded** in amber, not connected in green. Up-but-not-passing-traffic and down are different problems, and almost no client distinguishes them.
+- **SSH and databases over a VPN.** Pick a profile on a server or a database and it is started, waited for, and torn down with the session. If it cannot come up you see *the VPN's* error, not a connect timeout twenty seconds later.
+- **Imported configs are treated as hostile.** A `.ovpn` file can run programs — `up`, `plugin`, `script-security` and friends execute before the server is ever contacted. ShellPilot never hands your file to OpenVPN: it parses it, rejects anything that runs a program (quoting the line back to you), and generates a fresh config from what is left. `PostUp`/`PostDown` in a WireGuard `.conf` are refused the same way.
+- **Split tunnelling by default.** `redirect-gateway` is off unless you turn it on, even when the profile asks for it. Downloading a profile should not silently reroute your machine.
+- **frp states what it exposes, in words.** Each proxy carries a confirmation reading *"Make 127.0.0.1:5432 reachable from frp.example.com."* and the profile will not start until every one is ticked.
+- **An AI agent can never start an frp profile**, and starting any VPN always asks for approval — even for an access group that allows it.
+
+**OpenVPN is not bundled.** It is GPL-2.0, which is incompatible with ShellPilot's Apache-2.0, so ShellPilot drives a copy you install yourself rather than redistributing it. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). WireGuard (via the MIT `wireguard-go`) and frp (Apache-2.0) *are* bundled, built from source.
+
+**There is no kill switch.** ShellPilot tears down what it started when a tunnel drops, and says so — it does not install firewall rules, and does not claim to.
 
 ## Vault
 

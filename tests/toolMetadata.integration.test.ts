@@ -85,13 +85,13 @@ describe('tool metadata', () => {
   })
 
   it('marks the read-only tools read-only', () => {
-    for (const n of ['list_workspaces', 'list_servers', 'get_server_details', 'read_file', 'list_files', 'get_server_metrics']) {
+    for (const n of ['list_workspaces', 'list_servers', 'get_server_details', 'read_file', 'list_files', 'get_server_metrics', 'list_vpns']) {
       expect(byName(n).annotations?.readOnlyHint, n).toBe(true)
     }
   })
 
   it('marks the mutating tools as not read-only', () => {
-    for (const n of ['execute_command', 'write_file', 'add_server']) {
+    for (const n of ['execute_command', 'write_file', 'add_server', 'set_vpn']) {
       expect(byName(n).annotations?.readOnlyHint, n).toBe(false)
     }
     expect(byName('execute_command').annotations?.destructiveHint).toBe(true)
@@ -111,6 +111,48 @@ describe('tool metadata', () => {
     // set_tunnel can only run a tunnel the user already defined, so its effects
     // are fully described by ShellPilot's own configuration.
     expect(byName('set_tunnel').annotations?.openWorldHint).toBeFalsy()
+  })
+
+  it('does not let a VPN tool claim an open world either', () => {
+    // Same reasoning: set_vpn can only run a profile that already exists.
+    expect(byName('set_vpn').annotations?.openWorldHint).toBeFalsy()
+    expect(byName('list_vpns').annotations?.openWorldHint).toBeFalsy()
+  })
+
+  it('registers no tool that could create or edit a VPN profile', () => {
+    // Not an oversight to be filled in later. A profile decides where the
+    // user's traffic goes, and there is no version of an agent authoring one
+    // that is safe, so the absence is asserted rather than assumed.
+    const vpnTools = tools.map((t) => t.name).filter((n) => n.includes('vpn'))
+    expect(vpnTools.sort()).toEqual(['list_vpns', 'set_vpn'])
+  })
+
+  it('makes set_vpn state what it cannot do', () => {
+    const d = byName('set_vpn').description ?? ''
+    // The exact promise set_tunnel makes, in the same words.
+    expect(d).toContain('only run one the user has already defined')
+    expect(d).toMatch(/cannot create a VPN profile or change where one points/i)
+    // And the one refusal an agent must not waste a call discovering.
+    expect(d).toMatch(/frp/i)
+    expect(d).toMatch(/no access group can permit them|refused outright/i)
+  })
+
+  it('tells set_vpn that starting always needs approval', () => {
+    expect(byName('set_vpn').description ?? '').toMatch(/always requires user approval/i)
+  })
+
+  it('says list_vpns will not disclose where a VPN points', () => {
+    const d = byName('list_vpns').description ?? ''
+    expect(d).toMatch(/endpoints, keys and listener addresses are never included/i)
+  })
+
+  it('points every vpnName parameter at list_vpns', () => {
+    const withVpnName = tools.filter((t) => 'vpnName' in ((t.inputSchema?.properties ?? {}) as object))
+    expect(withVpnName.length).toBe(1)
+    for (const t of withVpnName) {
+      const props = t.inputSchema.properties as Record<string, { description?: string }>
+      expect(props.vpnName.description, t.name).toContain('list_vpns')
+    }
   })
 
   it('steers the shell tool towards its alternatives', () => {

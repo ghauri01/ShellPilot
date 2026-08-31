@@ -7,7 +7,7 @@ export interface VaultField {
   secret: boolean
 }
 
-export type VaultKind = 'login' | 'url' | 'key' | 'sshkey' | 'note'
+export type VaultKind = 'login' | 'url' | 'key' | 'sshkey' | 'note' | 'vpn'
 
 export interface VaultEntry {
   id: string
@@ -70,7 +70,8 @@ export const VAULT_KIND_LABEL: Record<VaultKind, string> = {
   url: 'URL',
   key: 'API key',
   sshkey: 'SSH key',
-  note: 'Note'
+  note: 'Note',
+  vpn: 'VPN profile'
 }
 
 // Entries visible from a given workspace: the ones that belong to it, plus the
@@ -130,7 +131,20 @@ export const VAULT_KIND_FIELDS: Record<VaultKind, VaultKindFields> = {
   // username is the account the key logs in as, worth keeping beside the key
   // rather than only on each server that uses it.
   sshkey: { url: false, username: true, secret: 'passphrase', keys: true },
-  note: { url: false, username: false, secret: null }
+  note: { url: false, username: false, secret: null },
+  // A VPN profile's credentials, stored here rather than in the OS keychain for
+  // the same reason an SSH key is: a WireGuard private key must travel with
+  // `backupExport`, and the keychain is a machine-local store that no backup can
+  // carry. The comment on `privateKey` above states the rule this follows.
+  //
+  // What each slot holds for a `vpn` entry:
+  //   privateKey — the WireGuard private key, the OpenVPN key material, or the
+  //                sanitised `.ovpn` config body (which embeds that material)
+  //   password   — the auth password, or the frp token
+  //   username   — the OpenVPN auth username
+  //   fields[]   — everything else, keyed: per-peer preshared keys by peer
+  //                public key, per-proxy secret keys by proxy name
+  vpn: { url: true, username: true, secret: 'password', keys: true }
 }
 
 export const VAULT_SECRET_LABEL: Record<VaultSecretSlot, string> = {

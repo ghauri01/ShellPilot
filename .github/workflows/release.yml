@@ -55,6 +55,25 @@ jobs:
             exit 1
           fi
 
+      # The WireGuard sidecar and the frp client are Go programs built from
+      # source into resources/bin. electron-builder pulls them in through
+      # extraResources, and a missing build is silent at package time — it only
+      # surfaces at runtime as "binary-missing" on every tunnel. So this step
+      # runs before the build, and the verification step below fails the
+      # release rather than shipping an app with no engines.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: sidecar/netd/go.sum
+
+      - name: Build tunnel engines
+        shell: bash
+        run: npm run build:engines
+
+      - name: Verify engine manifest covers this platform
+        shell: bash
+        run: node scripts/verify-bin-manifest.mjs
+
       - run: npm ci
 
       - run: npm run typecheck
@@ -63,6 +82,25 @@ jobs:
         run: npm run ${{ matrix.script }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The engines are Mach-O executables under Resources/bin and arm64 macOS
+      # refuses to run an unsigned one at all. electron-builder signs nested
+      # binaries, but that is exactly the kind of thing that quietly stops
+      # being true after a config change, so assert it here.
+      - name: Verify macOS signature covers the engines
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find release -maxdepth 3 -name '*.app' -type d | head -n1)
+          if [ -z "$APP" ]; then echo "::error::no .app found under release/"; exit 1; fi
+          echo "verifying $APP"
+          codesign --verify --strict --deep --verbose=2 "$APP"
+          for bin in "$APP/Contents/Resources/bin"/*/*; do
+            [ -f "$bin" ] || continue
+            echo "checking $bin"
+            codesign --verify --strict "$bin"
+          done
 
       # Defender is already installed on the Windows runner, so scanning the
       # installers we just produced costs nothing and catches a problem before

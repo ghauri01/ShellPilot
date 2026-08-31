@@ -1,0 +1,6 @@
+serverPort = 7000
+
+[[proxies]]
+name = "ssh"
+type = "tcp"
+localPort = 22

@@ -194,6 +194,72 @@ function hopForward(prev: Client, target: SshHop): Promise<NodeJS.ReadableStream
 // Walk the jump chain, each hop tunnelled through the previous, then connect
 // to the target. Shared by the shell (sshConnect) and SFTP services.
 export async function openChain(
+  cfg: SshHop & { hops?: SshHop[]; vpnProfileId?: string; serverName?: string; serverId?: string },
+  onHop?: (index: number, count: number) => void
+): Promise<{ clients: Client[]; client: Client; close?: () => void }> {
+  // A server behind a VPN is dialled through a loopback forward into the
+  // tunnel. Only the first hop needs rewriting — everything after it is
+  // reached through the hop before, so the chain is already inside.
+  if (cfg.vpnProfileId) return openChainOverVpn(cfg, onHop)
+  return openChainDirect(cfg, onHop)
+}
+
+async function openChainOverVpn(
+  cfg: SshHop & { hops?: SshHop[]; vpnProfileId?: string; serverName?: string; serverId?: string },
+  onHop?: (index: number, count: number) => void
+): Promise<{ clients: Client[]; client: Client; close?: () => void }> {
+  const { vpnOpenForward, vpnStart } = await import('./vpn/manager')
+  const vpnId = cfg.vpnProfileId as string
+
+  const started = await vpnStart(vpnId)
+  if (!started.ok) {
+    // The VPN's own message, not a connect timeout twenty seconds later.
+    throw new Error(started.error ?? 'The VPN for this server could not be started.')
+  }
+
+  const first = cfg.hops?.[0] ?? cfg
+  let fwd: { port: number; close: () => void } | null = null
+  try {
+    fwd = await vpnOpenForward(vpnId, first.host, first.port, {
+      kind: 'server',
+      id: cfg.serverId ?? first.host,
+      name: cfg.serverName ?? first.host
+    })
+  } catch (err) {
+    // System mode has a real route and no forward to open, so dial directly.
+    if ((err as { code?: string }).code !== 'unsupported') throw err
+  }
+
+  if (!fwd) {
+    const { registerVpnConsumer } = await import('./vpn/dependencies')
+    const release = registerVpnConsumer(vpnId, {
+      kind: 'server',
+      id: cfg.serverId ?? first.host,
+      name: cfg.serverName ?? first.host
+    })
+    const chain = await openChainDirect(cfg, onHop).catch((e) => {
+      release()
+      throw e
+    })
+    return { ...chain, close: release }
+  }
+
+  const local = fwd
+  const rewritten: SshHop = { ...first, host: '127.0.0.1', port: local.port }
+  const next = cfg.hops?.length
+    ? { ...cfg, hops: [rewritten, ...cfg.hops.slice(1)] }
+    : { ...cfg, ...rewritten }
+
+  try {
+    const chain = await openChainDirect(next, onHop)
+    return { ...chain, close: () => local.close() }
+  } catch (err) {
+    local.close()
+    throw err
+  }
+}
+
+async function openChainDirect(
   cfg: SshHop & { hops?: SshHop[] },
   onHop?: (index: number, count: number) => void
 ): Promise<{ clients: Client[]; client: Client }> {
@@ -228,6 +294,11 @@ export interface PooledConnection {
   // The hop this connection was opened through, held for as long as this
   // connection lives so a shared bastion is not torn down underneath it.
   parent?: PooledConnection
+  // Closes the VPN forward this connection was dialled through, and releases
+  // its live-dependent registration. Held here rather than by the caller
+  // because the pool outlives any one acquire(): the socket must stay up until
+  // the last session using it lets go.
+  vpnRelease?: () => void
 }
 
 const pool = new Map<string, PooledConnection>()
@@ -235,11 +306,28 @@ const connecting = new Map<string, Promise<PooledConnection>>()
 
 // Identity of a single hop. Includes the parent so the same host reached by a
 // different route is not mistaken for the same connection.
-function hopKey(hop: SshHop & { serverId?: string }, parentKey?: string): string {
+function hopKey(
+  hop: SshHop & { serverId?: string; vpnProfileId?: string; poolTag?: string },
+  parentKey?: string
+): string {
   const self = hop.serverId
     ? `srv:${hop.serverId}`
     : `${hop.username}@${hop.host}:${hop.port || 22}`
-  return parentKey ? `${parentKey}>${self}` : self
+  // The transport is part of a connection's identity, not a detail of how it
+  // was dialled.
+  //
+  // `vpnProfileId` stops a server whose profile changed from reusing a pooled
+  // connection still riding the old tunnel — the UI would say one network while
+  // the bytes went over another.
+  //
+  // `poolTag` covers the sharper case: a hop dialled through a VPN forward has
+  // had its host and port rewritten to an ephemeral loopback port, but a hop
+  // with a serverId keys on that id alone — so the next run would reuse a
+  // connection pointing at a forward that has since been closed. The tag
+  // carries the forward's identity into the key.
+  const via = hop.vpnProfileId ? `|vpn:${hop.vpnProfileId}` : ''
+  const tag = hop.poolTag ? `|${hop.poolTag}` : ''
+  return parentKey ? `${parentKey}>${self}${via}${tag}` : `${self}${via}${tag}`
 }
 
 function destroy(conn: PooledConnection): void {
@@ -250,6 +338,15 @@ function destroy(conn: PooledConnection): void {
   }
   // Let the bastion go once nothing is riding on it any more.
   if (conn.parent) release(conn.parent)
+  // Same for the VPN forward underneath it. Doing this here rather than in
+  // release() matters: release() is also the idle path, and a connection
+  // sitting in the idle window still has a live socket through the forward.
+  try {
+    conn.vpnRelease?.()
+  } catch {
+    /* a forward that is already gone must not stop the rest of the teardown */
+  }
+  conn.vpnRelease = undefined
 }
 
 // Acquires one hop, reusing a live connection when there is one. `parent` must
@@ -295,6 +392,20 @@ async function acquireOne(
     pool.set(key, conn)
     client.on('close', () => {
       if (pool.get(key) === conn) pool.delete(key)
+      // Release the VPN forward here too, not only from destroy().
+      //
+      // destroy() runs on the idle path, and with `setPoolIdle(-1)` it never
+      // runs at all — so a connection the network dropped kept its loopback
+      // listener, its goroutines in netd, and its live-dependent registration
+      // for the life of the app. That registration is what the stop
+      // confirmation counts, so it went on naming sessions that no longer
+      // existed. A dead client can never need its forward again.
+      try {
+        conn.vpnRelease?.()
+      } catch {
+        /* a forward already gone must not break the close path */
+      }
+      conn.vpnRelease = undefined
     })
     return conn
   })().finally(() => connecting.delete(key))
@@ -312,16 +423,82 @@ async function acquireOne(
 // bastion share one authenticated bastion connection — the code is requested
 // once, not once per destination.
 export async function acquire(
-  cfg: SshHop & { serverId?: string; hops?: SshHop[] },
+  cfg: SshHop & { serverId?: string; hops?: SshHop[]; vpnProfileId?: string; serverName?: string },
   onHop?: (index: number, count: number) => void
 ): Promise<PooledConnection> {
-  const hops = cfg.hops ?? []
+  // Behind a VPN, the first hop is dialled through a loopback forward into the
+  // tunnel. The forward is attached to the pooled connection rather than
+  // released here, because the pool outlives this call — closing it now would
+  // cut the connection the moment it was handed over.
+  const dial = cfg.vpnProfileId ? await vpnDial(cfg) : null
+  const effective = dial?.cfg ?? cfg
+
+  const hops = effective.hops ?? []
   let parent: PooledConnection | null = null
-  for (let i = 0; i < hops.length; i++) {
-    onHop?.(i, hops.length)
-    parent = await acquireOne(hops[i], parent)
+  try {
+    for (let i = 0; i < hops.length; i++) {
+      onHop?.(i, hops.length)
+      parent = await acquireOne(hops[i], parent)
+    }
+    const conn = await acquireOne(effective, parent)
+    if (dial) {
+      // Attach to whichever connection actually owns the socket. On a pool hit
+      // the forward is redundant — the existing connection already has its own
+      // — so release it immediately rather than leaking a listener per
+      // acquire.
+      if (conn.vpnRelease) dial.release()
+      else conn.vpnRelease = dial.release
+    }
+    return conn
+  } catch (err) {
+    dial?.release()
+    throw err
   }
-  return acquireOne(cfg, parent)
+}
+
+// Bring the profile up and open a forward to the first hop, returning a config
+// that dials the loopback end of it.
+async function vpnDial(
+  cfg: SshHop & { serverId?: string; hops?: SshHop[]; vpnProfileId?: string; serverName?: string }
+): Promise<{ cfg: SshHop & { serverId?: string; hops?: SshHop[] }; release: () => void } | null> {
+  const { vpnOpenForward, vpnStart } = await import('./vpn/manager')
+  const vpnId = cfg.vpnProfileId as string
+
+  const started = await vpnStart(vpnId)
+  if (!started.ok) {
+    throw new Error(started.error ?? 'The VPN for this server could not be started.')
+  }
+
+  const first = cfg.hops?.[0] ?? cfg
+  const consumer = {
+    kind: 'server' as const,
+    id: cfg.serverId ?? first.host,
+    name: cfg.serverName ?? first.host
+  }
+
+  let fwd: { port: number; close: () => void }
+  try {
+    fwd = await vpnOpenForward(vpnId, first.host, first.port || 22, consumer)
+  } catch (err) {
+    // System mode routes for real, so there is nothing to forward. Register as
+    // a dependent anyway: stopping the VPN still disconnects this session.
+    if ((err as { code?: string }).code !== 'unsupported') throw err
+    const { registerVpnConsumer } = await import('./vpn/dependencies')
+    return { cfg, release: registerVpnConsumer(vpnId, consumer) }
+  }
+
+  const rewritten = {
+    ...first,
+    host: '127.0.0.1',
+    port: fwd.port,
+    poolTag: `fwd:${vpnId}:${fwd.port}`
+  } as SshHop
+  return {
+    cfg: cfg.hops?.length
+      ? { ...cfg, hops: [rewritten, ...cfg.hops.slice(1)] }
+      : { ...cfg, ...rewritten },
+    release: () => fwd.close()
+  }
 }
 
 // How long an authenticated connection is kept after its last session closes.

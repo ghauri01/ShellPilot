@@ -1,0 +1,9 @@
+serverAddr = "frp.example.com"
+serverPort = 7000
+auth.token = "s3cr3t-token"
+
+[[proxies]]
+name = "ssh"
+type = "tcp"
+localPort = 22
+remotePort = 6000

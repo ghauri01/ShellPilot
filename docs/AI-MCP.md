@@ -47,7 +47,7 @@ another MCP client. For the short pitch and the security summary, see the
 
 ## The MCP server
 
-`src/main/services/mcpServer.ts` registers **13 tools**:
+`src/main/services/mcpServer.ts` registers **15 tools**:
 
 | Tool | Capability gating it | What it returns |
 |---|---|---|
@@ -64,6 +64,8 @@ another MCP client. For the short pitch and the security summary, see the
 | `query_database` | `databaseAccess` for reads; `+ writeFiles` and always ASK for anything that writes | Rows, capped |
 | `list_tunnels` | `sshTunnel` | Configured tunnels and whether each is running |
 | `set_tunnel` | `sshTunnel`, always ASK to start | Confirmation, with the bound port |
+| `list_vpns` | `vpnControl` | Names, engine, mode and state — **never an endpoint, key or listener address** |
+| `set_vpn` | `vpnControl`, always ASK to start; **frp refused outright** | Confirmation, with a listener count |
 
 Each tool carries a `title`, an MCP annotation set (`readOnlyHint`, `destructiveHint`,
 `openWorldHint`) and a description of every parameter, and the server sends `instructions` on
@@ -83,7 +85,7 @@ relative operand cannot be matched against a pattern without knowing the remote 
 `cd /root/.ssh && cat id_rsa` still gets through. It closes the direct form and can only ever
 narrow a decision, never widen one.
 
-### Databases and tunnels
+### Databases, tunnels and VPNs
 
 `query_database` classifies the statement before running it. Reads are governed by
 `databaseAccess` alone; anything that modifies data or schema is additionally bounded by
@@ -102,6 +104,26 @@ change where an existing one points. Starting always requires approval whatever 
 because it binds a listening port on the user's own machine. Stopping does not, being the safe
 direction.
 
+`set_vpn` is the same shape one step further out, and gated on `vpnControl` rather than
+`sshTunnel`. It can start or stop a VPN profile the user has already defined; it cannot create one
+or change where one points, and **there is no `add_vpn` or `edit_vpn` tool** — not an omission to
+be filled in later, but a decision, because a profile determines which network everything
+downstream of it travels over. Starting is always ASK, even for a group set to ALLOW
+(`evaluateVpnControl`, `policyEngine.ts`). Stopping is ASK too whenever live sessions depend on the
+VPN, so "close 3 sessions" is never something an agent does quietly.
+
+**Reverse proxies (frp) are refused unconditionally.** An frp proxy makes a port on the user's own
+machine reachable from the frp server — which is to say from the internet — and an approval prompt
+would not help, because "Start VPN office" is indistinguishable, to the person clicking it, from
+consent to publish a port. So it is not a permission an administrator could raise: the refusal is
+hard-coded (`AI_REFUSED_VPN_KINDS`, `policyEngine.ts`), the same treatment as unrestricted root
+shells, and it applies to stopping as well as starting.
+
+`list_vpns` reports which profiles exist, which engine carries each one, whether it is up, and
+frp's per-proxy status table. It never reports an endpoint, a key, or a listener's bind address —
+the cached shape it reads from does not contain them at all (`CachedVpn`, `mcpDataCache.ts`), so a
+future template string cannot leak one by accident.
+
 ### `add_server`
 
 An agent can add an SSH connection, including its credential, when the workspace's access group
@@ -111,8 +133,11 @@ the host. The credential itself never appears in that dialog or in the audit log
 that one was supplied. It goes straight to the OS keychain and cannot be read back through the
 bridge.
 
-A capability a saved access group predates — `manageServers` for any group written before this
-version — evaluates as DENY, never as an accidental grant.
+A capability a saved access group predates — `manageServers`, and now `vpnControl`, for any group
+written before the version that introduced it — evaluates as DENY, never as an accidental grant.
+On load, built-in groups are backfilled with the value a fresh install would have given them and
+custom groups with DENY (`backfillCapabilities`, `policyStore.ts`), so an upgraded install neither
+silently gains a permission nor quietly loses a feature with nothing in the UI explaining why.
 
 ## Tool discoverability
 
@@ -183,10 +208,11 @@ has to be created by hand under **AI & MCP → AI Agents**.
 
 ![Access group capabilities, file path rules, and workspace/server assignment](images/ai-access-groups.png)
 
-An access group (`AccessGroup`, `shared/mcp.ts`) is a policy across **10 capabilities**
+An access group (`AccessGroup`, `shared/mcp.ts`) is a policy across **12 capabilities**
 (`AI_CAPABILITIES`): view server, execute terminal commands, read files, write files, SFTP
-download, SFTP upload, SSH tunnels, database access, sudo/privilege escalation, server metrics.
-Each is independently `allow`, `ask` or `deny`.
+download, SFTP upload, SSH tunnels, database access, sudo/privilege escalation, server metrics,
+add servers to the workspace, VPN & reverse proxies. Each is independently `allow`, `ask` or
+`deny`.
 
 Four built-in groups ship with ShellPilot (`policyStore.ts`) — **Read Only**, **Read & Write**,
 **Sudo Access**, **Full Access** — and every field on them, including capabilities, is editable.
@@ -195,6 +221,9 @@ hard-coded three-tier model underneath; create as many custom groups as you want
 
 **Two layers always win over policy, no exceptions:**
 
+- **Reverse proxies are hard-refused for AI.** `set_vpn` refuses any profile whose kind is `frp`
+  before the access group is consulted (`isVpnKindRefusedForAi`, `policyEngine.ts`). There is no
+  capability value, on any group, that reaches past it.
 - **Unrestricted shells are hard-denied**, independent of any capability setting. `evaluateCommand`
   (`policyEngine.ts`) checks the command against a fixed pattern list — `sudo -i`, `sudo -s`,
   `sudo su`, `sudo bash`/`sh`/`zsh`/`dash`, bare `su`/`su -` — and returns `deny` before the access

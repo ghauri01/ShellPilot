@@ -1,0 +1,55 @@
+serverAddr = "frp.example.com"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "s3cr3t-token"
+
+transport.protocol = "quic"
+transport.tls.enable = true
+transport.poolCount = 5
+transport.heartbeatInterval = 30
+transport.proxyURL = "http://corp-proxy:3128"
+
+log.to = "console"
+log.level = "info"
+webServer.port = 7400
+
+[[proxies]]
+name = "postgres"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 5432
+remotePort = 15432
+
+[[proxies]]
+name = "site"
+type = "http"
+localPort = 8080
+customDomains = [
+  "site.example.com",
+  "www.example.com"
+]
+
+[[proxies]]
+name = "secret-ssh"
+type = "stcp"
+localPort = 22
+secretKey = "peer-shared-secret"
+
+[[proxies]]
+name = "socks"
+type = "tcp"
+localPort = 0
+remotePort = 16080
+[proxies.plugin]
+type = "socks5"
+username = "bob"
+password = "hunter2"
+
+[[visitors]]
+name = "secret-ssh-visitor"
+type = "stcp"
+serverName = "secret-ssh"
+secretKey = "peer-shared-secret"
+bindAddr = "127.0.0.1"
+bindPort = 6000

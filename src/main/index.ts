@@ -1,7 +1,7 @@
 // Must come first: redirects userData for portable builds before any
 // service module resolves its file paths.
 import './portable'
-import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, session, Menu, Notification } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, session, Menu, Notification, powerMonitor } from 'electron'
 import { join } from 'node:path'
 import { readFileSync, existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
@@ -50,6 +50,29 @@ import { wsLockIds, wsLockSet, wsLockVerify, wsLockRemove, wsLockDelete } from '
 import { tunnelStart, tunnelStop, tunnelList, tunnelDisposeAll } from './services/tunnel'
 import type { TunnelConfig, TunnelSshConfig } from '../shared/tunnel'
 import { knownHostList, knownHostForget } from './services/knownhosts'
+import {
+  setVpnPrompter,
+  vpnAttachRenderer,
+  vpnDependentsOf,
+  vpnDetachRenderer,
+  vpnDisposeAll,
+  vpnInit,
+  vpnList,
+  vpnLogs,
+  vpnProbe,
+  vpnProfiles,
+  vpnReload,
+  vpnSetCadence,
+  vpnStart,
+  vpnStop,
+  vpnSubscribeLogs,
+  vpnUnsubscribeLogs,
+  vpnValidate,
+  vpnHandleWake
+} from './services/vpn/manager'
+import { vpnCommitImport, vpnDeleteSecrets, vpnImport } from './services/vpn/import'
+import { withVpnTransport, withVpnTransportDb } from './services/vpn/transport'
+import type { VpnKind, VpnSpec } from '../shared/vpn'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
 import { backupExport, backupImport, backupInspect, deleteAllData, relaunchApp } from './services/backup'
 import { checkForUpdates, getUpdaterStatus, onUpdaterStatus, installUpdate, openReleasePage } from './services/updater'
@@ -205,6 +228,27 @@ function createWindow(): void {
   const emitMax = () => mainWindow?.webContents.send('window:maximized', mainWindow.isMaximized())
   mainWindow.on('maximize', emitMax)
   mainWindow.on('unmaximize', emitMax)
+
+  // VPN status is polled, and nobody reads a byte counter on a window they
+  // cannot see. Backing off while hidden is most of the idle cost of this
+  // feature; resuming on focus samples immediately so the numbers are current
+  // by the time the user has looked at them.
+  const active = (): void => vpnSetCadence('active')
+  const idle = (): void => vpnSetCadence('idle')
+  mainWindow.on('focus', active)
+  mainWindow.on('show', active)
+  mainWindow.on('blur', idle)
+  mainWindow.on('hide', idle)
+  vpnAttachRenderer(mainWindow.webContents)
+  mainWindow.on('closed', () => {
+    // The WebContents is already gone here, so the bus would prune it on its
+    // next send anyway; doing it now keeps a closed window from being counted
+    // as a live target in the meantime.
+    vpnSetCadence('idle')
+  })
+  mainWindow.webContents.on('destroyed', () => {
+    if (mainWindow) vpnDetachRenderer(mainWindow.webContents)
+  })
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -362,7 +406,7 @@ setSshPrompter((req: KeyboardRequest) => {
 
 
 ipcMain.handle('ssh:connect', (e, cfg: SshConnectConfig & { serverId?: string }) =>
-  sshConnect(e.sender, resolveChainSecrets(cfg))
+  sshConnect(e.sender, withVpnTransport(resolveChainSecrets(cfg)))
 )
 ipcMain.handle('ssh:pool-list', () => poolList())
 ipcMain.handle('ssh:pool-close', (_e, key: string) => poolClose(key))
@@ -373,7 +417,7 @@ ipcMain.on('ssh:close', (_e, id: string) => sshClose(id))
 
 // ---- SFTP ----
 ipcMain.handle('sftp:connect', (_e, key: string, cfg: SshConnectConfig & { serverId?: string }) =>
-  sftpConnect(key, resolveChainSecrets(cfg))
+  sftpConnect(key, withVpnTransport(resolveChainSecrets(cfg)))
 )
 ipcMain.handle('sftp:list', (_e, key: string, path: string) => sftpList(key, path))
 ipcMain.handle('sftp:read', (_e, key: string, path: string) => sftpRead(key, path))
@@ -399,10 +443,17 @@ ipcMain.handle('metrics:sample', (_e, key: string, cfg: SshConnectConfig & { ser
 ipcMain.handle('metrics:disconnect', (_e, key: string) => metricsDisconnect(key))
 
 // ---- Databases ----
-ipcMain.handle('db:test', (_e, cfg: DbConnectConfig) => dbTest(resolveDbSecrets(cfg)))
-ipcMain.handle('db:query', (_e, cfg: DbConnectConfig, text: string) => dbQuery(resolveDbSecrets(cfg), text))
-ipcMain.handle('db:info', (_e, cfg: DbConnectConfig) => dbInfo(resolveDbSecrets(cfg)))
-ipcMain.handle('db:shell', (_e, cfg: DbConnectConfig, line: string) => dbShell(resolveDbSecrets(cfg), line))
+// withVpnTransportDb resolves the profile from the saved record, so a
+// connection cannot skip its VPN just because one call site predates the
+// feature.
+ipcMain.handle('db:test', (_e, cfg: DbConnectConfig) => dbTest(withVpnTransportDb(resolveDbSecrets(cfg))))
+ipcMain.handle('db:query', (_e, cfg: DbConnectConfig, text: string) =>
+  dbQuery(withVpnTransportDb(resolveDbSecrets(cfg)), text)
+)
+ipcMain.handle('db:info', (_e, cfg: DbConnectConfig) => dbInfo(withVpnTransportDb(resolveDbSecrets(cfg))))
+ipcMain.handle('db:shell', (_e, cfg: DbConnectConfig, line: string) =>
+  dbShell(withVpnTransportDb(resolveDbSecrets(cfg)), line)
+)
 ipcMain.handle('db:close', (_e, id: string) => dbClose(id))
 
 // ---- SSH config import ----
@@ -497,6 +548,63 @@ ipcMain.handle('tunnel:start', (e, cfg: TunnelConfig, ssh: TunnelSshConfig) =>
 )
 ipcMain.handle('tunnel:stop', (_e, id: string) => tunnelStop(id))
 ipcMain.handle('tunnel:list', () => tunnelList())
+
+// ---- VPN ----
+ipcMain.handle('vpn:list', () => vpnList())
+ipcMain.handle('vpn:profiles', () => vpnProfiles())
+ipcMain.handle('vpn:start', (e, id: string) => {
+  vpnAttachRenderer(e.sender)
+  return vpnStart(id)
+})
+ipcMain.handle('vpn:stop', (_e, id: string, force?: boolean) => vpnStop(id, { force }))
+ipcMain.handle('vpn:reload', (_e, id: string) => vpnReload(id))
+ipcMain.handle('vpn:validate', (_e, spec: VpnSpec) => vpnValidate(spec))
+ipcMain.handle('vpn:probe', (_e, kind: VpnKind) => vpnProbe(kind))
+// Returns a spec plus the stripped-directive report, and nothing else: the
+// key material stays in main until the user commits the import.
+ipcMain.handle('vpn:import', (_e, kind: VpnKind, text: string, baseDir?: string) =>
+  vpnImport(kind, text, baseDir)
+)
+ipcMain.handle(
+  'vpn:commitImport',
+  (_e, name: string, workspaceId: string, kind: VpnKind, text: string, baseDir?: string) =>
+    vpnCommitImport(name, workspaceId, kind, text, baseDir)
+)
+ipcMain.handle('vpn:deleteSecrets', (_e, vaultEntryId: string) => vpnDeleteSecrets(vaultEntryId))
+ipcMain.handle('vpn:logs', (_e, id: string, limit?: number) => vpnLogs(id, limit))
+ipcMain.handle('vpn:dependents', (_e, id: string) => vpnDependentsOf(id))
+// Log lines stop at the ring buffer unless a drawer is open. Refcounted, so
+// two windows watching the same profile do not silence each other.
+ipcMain.on('vpn:log-subscribe', (e, id: string) => {
+  vpnAttachRenderer(e.sender)
+  vpnSubscribeLogs(id)
+})
+ipcMain.on('vpn:log-unsubscribe', (_e, id: string) => vpnUnsubscribeLogs(id))
+
+// One-time codes and password re-prompts, mirroring the SSH prompter above.
+const pendingVpnPrompts = new Map<string, (value: string | null) => void>()
+ipcMain.on('vpn:prompt-reply', (_e, id: string, value: string | null) => {
+  const resolve = pendingVpnPrompts.get(id)
+  if (!resolve) return
+  pendingVpnPrompts.delete(id)
+  resolve(value)
+})
+setVpnPrompter((req) => {
+  const target = mainWindow
+  // No window means nobody can answer. Returning null is the same outcome as
+  // the user dismissing the dialog, which the drivers already handle; the
+  // alternative is a connection that hangs forever with no explanation.
+  if (!target || target.isDestroyed()) return Promise.resolve(null)
+  return new Promise<string | null>((resolve) => {
+    pendingVpnPrompts.set(req.id, resolve)
+    target.webContents.send('vpn:prompt', req)
+    // A one-time code the user walked away from must not pin a connection
+    // open indefinitely.
+    setTimeout(() => {
+      if (pendingVpnPrompts.delete(req.id)) resolve(null)
+    }, 120000)
+  })
+})
 
 // ---- Vault ----
 ipcMain.handle('vault:status', () => vaultStatus())
@@ -677,7 +785,29 @@ onCliPairingEvent((e) => {
 // ---- AI & MCP: audit log ----
 ipcMain.handle('aiMcp:listAudit', (_e, limit?: number) => listAudit(limit))
 
-app.on('before-quit', () => {
+// Teardown became asynchronous when VPN engines arrived: they are separate
+// processes and killing them is not instantaneous. The order below is the
+// point — every consumer dies before the transport it was riding, so nothing
+// observes a half-dead network on the way out.
+//
+// The re-entry guard exists because preventDefault + app.exit() means this
+// handler fires twice on some platforms, and running the dispose functions
+// twice is at best noisy.
+let teardownStarted = false
+app.on('before-quit', (e) => {
+  if (teardownStarted) {
+    // Still prevent the default. Without this, the second fire (Cmd+Q twice,
+    // or the platforms where this handler runs twice by itself) quits
+    // immediately while the first invocation's vpnDisposeAll is still inside
+    // its 4s window — so engines die by process death instead of by the
+    // graceful ladder, and a system-mode tunnel never puts the routes and DNS
+    // back. The single app.exit(0) below is what ends the process.
+    e.preventDefault()
+    return
+  }
+  teardownStarted = true
+  e.preventDefault()
+
   sshDisposeAll()
   sftpDisposeAll()
   metricsDisposeAll()
@@ -686,6 +816,12 @@ app.on('before-quit', () => {
   externalEditDisposeAll()
   vaultDispose()
   void stopMcpServer()
+
+  // Dependents are down; now the transports. Hard-capped, because a wedged
+  // child must never be able to hold the app open — an orphan is reaped on the
+  // next launch, an app that will not quit is a support ticket.
+  const cap = new Promise<void>((resolve) => setTimeout(resolve, 4000))
+  void Promise.race([vpnDisposeAll().catch(() => undefined), cap]).finally(() => app.exit(0))
 })
 
 // Safety net: never let a stray async error (e.g. a failed child_process
@@ -760,11 +896,26 @@ app.whenReady().then(() => {
   // Primed once at launch so the MCP bridge can resolve server/workspace
   // names even before the renderer's first data:save call.
   refreshMcpDataCache()
-  if (getMcpConfig().enabled) {
-    void startMcpServer().then((r) => {
-      if (!r.ok) console.error('[mcp] failed to start on launch:', r.error)
+  // Before the MCP server: the bridge asks the manager what is running, and a
+  // bridge that answered "nothing" because the manager had not booted would be
+  // lying about the state of the user's network. This also reaps any engine a
+  // previous run left behind, before anything tries to claim its ports.
+  // A laptop that has been asleep comes back on a different path, and
+  // sometimes a different network entirely. WireGuard roams by itself but its
+  // reported handshake age is stale until we resample; OpenVPN can sit on a
+  // dead socket for minutes waiting for its own ping-restart. Nudging both is
+  // cheaper than either.
+  powerMonitor.on('resume', () => vpnHandleWake())
+  powerMonitor.on('unlock-screen', () => vpnHandleWake())
+
+  void vpnInit()
+    .catch((e) => console.error('[vpn] init failed:', e))
+    .finally(() => {
+      if (!getMcpConfig().enabled) return
+      void startMcpServer().then((r) => {
+        if (!r.ok) console.error('[mcp] failed to start on launch:', r.error)
+      })
     })
-  }
   // Quiet by design: this only ever pushes a status event the renderer can
   // choose to surface (or not) — it never interrupts anything on its own.
   void checkForUpdates()

@@ -1,0 +1,79 @@
+name: VPN engines (E2E)
+
+# The rest of the VPN suite runs against fake binaries: fast, deterministic,
+# and able to simulate failures on demand. What a fake cannot tell you is
+# whether the protocol we implemented is the protocol the real program speaks —
+# so this job builds the real engines from source and drives them.
+#
+# Nightly rather than per-push because it clones and compiles frp, and a real
+# WireGuard handshake takes seconds. A break here means an engine changed under
+# us, which is worth knowing about the next morning rather than on release day.
+on:
+  schedule:
+    # 03:30 UTC daily.
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+  # Also on any change to the engine build or the code that talks to them, so a
+  # protocol change is caught in the PR that makes it rather than overnight.
+  pull_request:
+    paths:
+      - 'sidecar/**'
+      - 'scripts/build-*.sh'
+      - 'src/main/services/vpn/**'
+      - 'tests/vpnEngines.e2e.test.ts'
+      - '.github/workflows/vpn-e2e.yml'
+
+jobs:
+  e2e:
+    name: Real engines on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: sidecar/netd/go.sum
+
+      # `wg genkey` only mints the keypairs; the tunnel itself is entirely
+      # userspace and needs no kernel module and no root. The test skips itself
+      # if this is missing rather than failing, so install it explicitly to be
+      # sure the handshake case actually runs.
+      - name: Install wireguard-tools
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update && sudo apt-get install -y wireguard-tools
+          else brew install wireguard-tools
+          fi
+
+      - run: npm ci
+
+      - name: Build the engines from source
+        run: npm run build:engines
+
+      - name: Verify the engine manifest
+        run: node scripts/verify-bin-manifest.mjs
+
+      - name: Go tests for the sidecar
+        working-directory: sidecar/netd
+        run: go test -race ./...
+
+      - name: Drive the real engines
+        env:
+          VPN_E2E: '1'
+        run: npx vitest run tests/vpnEngines.e2e.test.ts
+
+      # Nothing in this job needs root. If a change ever makes an engine ask
+      # for it, that is a design regression and should fail loudly here rather
+      # than surface as a UAC prompt in front of a user.
+      - name: Confirm nothing needed elevation
+        run: echo "userspace WireGuard and frpc both ran as $(id -un)"

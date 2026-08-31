@@ -5,14 +5,86 @@ also incorporates open-source software from other projects, distributed
 under their own licenses. This file lists that software and satisfies the
 attribution requirements of those licenses.
 
-No third-party source code is vendored or copied into this repository —
-everything below is consumed as a normal npm package dependency, unmodified.
-Licenses for the packages listed here are unmodified and are not affected
-by ShellPilot's own license.
+No third-party source code is vendored or copied into this repository. Most of
+what is listed below is consumed as a normal npm package dependency,
+unmodified. The exception is the two tunnel engines described under **Bundled
+binaries**: they are compiled from pinned upstream source at build time and
+shipped inside the installer, so they are distributed rather than merely
+depended on. Licenses for everything listed here are unmodified and are not
+affected by ShellPilot's own license.
 
 This list was generated from the actual installed dependency tree
 (`npm ls --all`), not by inspection of `package.json` alone, so it also
 covers indirect (transitive) dependencies pulled in by the packages below.
+
+## Bundled binaries
+
+Compiled from pinned upstream source by `scripts/build-sidecar.sh` and
+`scripts/build-frpc.sh`, verified against `resources/bin/manifest.json`, and
+shipped inside the installer at `Resources/bin/<platform>-<arch>/`. Unlike the
+npm packages below, these are *distributed*, so their licence terms apply to
+the installer itself.
+
+| Component | Version | License | Source |
+|---|---|---|---|
+| `shellpilot-netd` | in-tree | Apache-2.0 | `sidecar/netd/` in this repository |
+| `wireguard-go` (linked into `shellpilot-netd`) | pinned in `sidecar/netd/go.mod` | MIT | `golang.zx2c4.com/wireguard` |
+| gVisor `netstack` (linked into `shellpilot-netd`) | pinned in `sidecar/netd/go.mod` | Apache-2.0 | `gvisor.dev/gvisor` |
+| `frpc` | v0.71.0 | Apache-2.0 | `github.com/fatedier/frp` |
+
+Apache-2.0 section 4 requires the licence text and any `NOTICE` file to travel
+with the binary. `scripts/build-frpc.sh` copies frp's `LICENSE` and `NOTICE`
+into `resources/licenses/frp/`, which ships inside the app.
+
+### OpenVPN is deliberately **not** bundled
+
+OpenVPN 2.x is **GPL-2.0**, which is incompatible with Apache-2.0 in that
+direction. ShellPilot supports OpenVPN by detecting a copy the user has already
+installed and driving it over its management interface as a separate process —
+it never links against it and never ships it.
+
+This is a deliberate distribution decision, not an oversight. Bundling the
+binary would put ShellPilot in the position of *distributing* GPL-2.0 software,
+carrying a corresponding-source obligation (GPL-2.0 §3) for every platform
+build, in perpetuity. Running an independently-installed program as a separate
+process over a documented control protocol is ordinary use: it creates no
+combined work and no source obligation.
+
+Practical consequences, which the app states in its own UI rather than leaving
+the user to discover:
+
+- An OpenVPN profile cannot connect until OpenVPN is installed. ShellPilot says
+  so, and says where to get it.
+- ShellPilot resolves the binary from a fixed allowlist of standard install
+  locations, and on POSIX only, also `PATH`. It never searches `PATH` on
+  Windows, where `PATH`/CWD search is a well-known hijack vector.
+- The resolved path, version and SHA-256 are recorded in the audit log on first
+  use and whenever they change.
+
+**If you repackage ShellPilot** — an AppImage, a Flatpak, a Homebrew cask, a
+distro package — and you vendor `openvpn` into that package, the GPL obligation
+lands on **you**, not on this project.
+
+### Wintun is not bundled either
+
+Windows **system mode** needs `wintun.dll`, the adapter driver the WireGuard
+project ships. ShellPilot does not include it; installing
+[WireGuard for Windows](https://www.wireguard.com/install/) provides it, and
+userspace mode — the default — needs nothing.
+
+Unlike OpenVPN this is not a licence obstacle. Wintun's *source* is GPL-2.0, but
+wintun.net states the precompiled signed DLLs are released under "a more
+permissive license than GPL 2.0", and that those signed DLLs are the only
+supported way to redistribute Wintun. Bundling them is therefore likely
+permissible; it has not been done because the exact terms live in the licence
+file inside the official ZIP, and a redistribution decision should be made by a
+human who has read it rather than inferred from a summary.
+
+### Trademarks
+
+WireGuard is a registered trademark of Jason A. Donenfeld. OpenVPN is a
+registered trademark of OpenVPN Inc. ShellPilot is not affiliated with or
+endorsed by either project, nor by fatedier and the frp contributors.
 
 ## Key runtime dependencies
 
