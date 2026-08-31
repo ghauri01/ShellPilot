@@ -10,7 +10,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import {
   resetBinaryCache,
@@ -52,8 +52,21 @@ function writeShim(dir: string, name: string): string {
   return file
 }
 
+// A private scratch root for binary fixtures. `.tmp-tests` is gitignored via
+// the repo's existing ignore of build output; it is removed after each case.
+const SANDBOX = resolve(__dirname, '..', '.tmp-tests')
+
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'sp-bin-'))
+  // Not under os.tmpdir(). On Linux that is /tmp, which is world-writable, and
+  // `resolveSystem` correctly refuses any binary with a world-writable
+  // ancestor — so a fixture placed there exercises the rejection path rather
+  // than the resolution path the test is named for. It passed on macOS only
+  // because mkdtemp there lands in a per-user /var/folders directory.
+  //
+  // A directory the test creates itself, beside the repo, is private enough
+  // for the rule and identical on every platform.
+  mkdirSync(SANDBOX, { recursive: true })
+  root = mkdtempSync(join(SANDBOX, 'sp-bin-'))
   binRoot = join(root, 'bin')
   mkdirSync(join(binRoot, PLATFORM_DIR), { recursive: true })
   previousBinDir = process.env.SHELLPILOT_VPN_BIN_DIR

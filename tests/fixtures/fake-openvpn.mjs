@@ -190,7 +190,19 @@ function exit(code) {
   state('EXITING', code === 0 ? 'SIGTERM' : 'error')
   setTimeout(() => {
     socket.end()
-    process.exit(code)
+    // Not process.exit(). When stdout is a pipe — which it always is here,
+    // because the harness captures it — writes are asynchronous, and
+    // process.exit() discards whatever is still buffered. The last thing
+    // written before an exit is usually the very line the test is waiting for
+    // ("RECV signal SIGTERM"), so on a loaded machine it vanished and the test
+    // failed having proved nothing.
+    //
+    // Setting exitCode and letting the loop drain is the fix; the unref'd
+    // fallback below covers a handle that somehow outlives it, without
+    // becoming a reason for the process to stay alive.
+    process.exitCode = code
+    const hardStop = setTimeout(() => process.exit(code), 2000)
+    hardStop.unref?.()
   }, 5)
 }
 

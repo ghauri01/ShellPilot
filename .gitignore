@@ -15,3 +15,7 @@ release
 resources/bin/*
 !resources/bin/manifest.json
 .frp-build/
+
+# Scratch root for tests that need a directory no other user can write to
+# (os.tmpdir() is /tmp on Linux, which the binary resolver correctly refuses).
+.tmp-tests/

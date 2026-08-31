@@ -323,7 +323,17 @@ describe('OpenVpnManagement against the fake binary', () => {
     await runFake(h, ['--tick-ms', '20'])
     await waitFor(() => (h.mgmt.stats()?.rxBytes ?? 0) >= 368640, 'two bytecount ticks')
     const stats = h.mgmt.stats()
-    expect(stats).toMatchObject({ rxBytes: 368640, txBytes: 184320, assignedIp: '10.8.0.6' })
+
+    // Greater-or-equal, not equal. The fake emits >BYTECOUNT: on a 20 ms timer
+    // that keeps running after the wait is satisfied, so a loaded machine can
+    // land a third tick between the two lines above and pin an exact value to
+    // whatever the scheduler did. What the parser has to get right is that the
+    // counters are read and accumulate, and that rx is exactly twice tx —
+    // which is the shape the fake produces and a misparse would break.
+    expect(stats?.rxBytes ?? 0).toBeGreaterThanOrEqual(368640)
+    expect(stats?.txBytes ?? 0).toBeGreaterThanOrEqual(184320)
+    expect(stats?.rxBytes).toBe((stats?.txBytes ?? 0) * 2)
+    expect(stats).toMatchObject({ assignedIp: '10.8.0.6' })
     expect(stats?.sampledAt).toBeGreaterThan(0)
   })
 
@@ -427,7 +437,11 @@ describe('OpenVpnManagement credentials', () => {
     // itself must have been reported before that.
     expect(h.patches.find((p) => p.errorCode === 'auth-failed')?.state).toBe('error')
     expect(h.mgmt.lastErrorCode()).toBe('auth-failed')
-    expect(h.stdout()).toContain('RECV signal SIGTERM')
+    // Waited for, not asserted outright: the SIGTERM is sent *after* the error
+    // is reported, and the fake echoing it is another round-trip. Asserting
+    // immediately passed on an idle machine and failed under load, which is a
+    // test reporting the speed of the runner rather than the behaviour.
+    await waitFor(() => h.stdout().includes('RECV signal SIGTERM'), 'the SIGTERM')
 
     // The fake re-asks after refusing. Give it room to be answered, then check
     // that it was not: a retry storm is what locks the account.

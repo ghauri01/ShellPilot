@@ -221,6 +221,11 @@ describe('supervisor lifecycle', () => {
     await flush()
 
     for (let i = 0; i < 6; i++) {
+      // Wait for the relaunch to exist rather than assuming a fixed number of
+      // event-loop turns produced it. `flush()` was enough on an idle machine
+      // and not on a loaded one, where `spawns[i]` was still undefined and the
+      // test died on a property access instead of testing the crash loop.
+      await waitFor(() => spawns.length > i)
       spawns[i].child.exit(2)
       await flush()
       await vi.advanceTimersByTimeAsync(20)
