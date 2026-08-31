@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Copy, Eye, EyeOff, Fingerprint, KeyRound, Lock, Plus, ShieldCheck, Trash2, Unlock } from 'lucide-react'
 import { useVault, newField } from '../../store/vault'
 import { toast } from '../../store/toast'
@@ -48,7 +48,10 @@ export function VaultView(): React.JSX.Element {
     () =>
       bridgeOn('vault.onAutoLocked', window.shellpilot?.vault?.onAutoLocked, () => {
         useVault.setState({ unlocked: false, entries: [], selectedId: null })
-        toast('Vault locked after inactivity')
+        // The unlock field is on screen the moment this fires — this view is
+        // the only thing that listens — so the message points at it rather
+        // than opening a second way to do the same thing.
+        toast('Vault locked after inactivity — enter your master password to open it again')
       }),
     []
   )
@@ -66,6 +69,12 @@ const BIO_LABEL: Record<string, string> = {
   'touch-id': 'Touch ID',
   'windows-hello': 'Windows Hello'
 }
+
+// 12, not 8. The vault file is the thing an attacker copies, and against a
+// stolen file the master password's length is worth more than anything the
+// unlock UI does. Only applies to passwords being chosen now — an existing
+// vault is not forced to change on upgrade.
+const MIN_PASSWORD = 12
 
 function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
   const create = useVault((s) => s.create)
@@ -97,22 +106,25 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
 
   const creating = mode === 'create'
   const mismatch = creating && confirm.length > 0 && password !== confirm
-  // 12, not 8. The vault file is the thing an attacker copies, and against a
-  // stolen file the master password's length is worth more than anything the
-  // unlock UI does. Only applies to new vaults; an existing one is not forced
-  // to change on upgrade.
-  const MIN_PASSWORD = 12
   const canSubmit =
     password.length >= (creating ? MIN_PASSWORD : 1) && !mismatch && (!creating || confirm.length > 0)
+
+  const passwordRef = useRef<HTMLInputElement>(null)
 
   const submit = async (): Promise<void> => {
     if (!canSubmit || busy) return
     const ok = creating ? await create(password) : await unlock(password)
-    if (ok) {
-      setPassword('')
-      setConfirm('')
-      toast(creating ? 'Vault created' : 'Vault unlocked')
+    if (!ok) {
+      // The only place this can be fixed is the field the user just typed in,
+      // so put the cursor back in it with the attempt selected — the next
+      // keystroke replaces it, and nobody has to work out where to try again.
+      passwordRef.current?.select()
+      passwordRef.current?.focus()
+      return
     }
+    setPassword('')
+    setConfirm('')
+    toast(creating ? 'Vault created' : 'Vault unlocked')
   }
 
   return (
@@ -122,8 +134,8 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
         <h2>{creating ? 'Create your vault' : 'Vault locked'}</h2>
         <p className="faint">
           {creating
-            ? 'Pick a master password. It encrypts everything in the vault and is never stored — if you lose it, the contents cannot be recovered.'
-            : 'Enter your master password to decrypt the vault for this session.'}
+            ? 'The vault keeps passwords, SSH keys and other secrets encrypted on this machine, so ShellPilot can use them without you retyping them. Pick a master password to protect it — it is never stored anywhere, so if you lose it the contents cannot be recovered.'
+            : 'Enter the master password you chose for this vault. It stays open until you lock it, quit ShellPilot, or leave it idle long enough to lock itself.'}
         </p>
 
         {canUseBio && (
@@ -140,6 +152,7 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
         <div className="row" style={{ gap: 6, marginTop: 4 }}>
           <input
             className="input"
+            ref={passwordRef}
             type={show ? 'text' : 'password'}
             autoFocus
             style={{ flex: 1 }}
@@ -170,6 +183,15 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
 
         {mismatch && <div className="vault-error">Passwords do not match.</div>}
         {error && <div className="vault-error">{error}</div>}
+        {/* There is no reset link to offer, so say that plainly instead of
+            leaving someone hunting for one. Caps lock is the usual culprit. */}
+        {error && !creating && (
+          <div className="s-desc" style={{ marginTop: 6 }}>
+            Master passwords are case sensitive — check caps lock. Nothing can reset one: only this
+            password opens this vault.
+            {canUseBio ? ` You can also unlock with ${BIO_LABEL[bioKind] ?? 'biometrics'} above.` : ''}
+          </div>
+        )}
 
         <button
           className="btn primary"
@@ -291,7 +313,10 @@ function VaultBrowser(): React.JSX.Element {
 
       <BiometricOffer />
 
-      {error && <div className="vault-error" style={{ margin: 12 }}>{error}</div>}
+      {/* While the change-password form is open it shows the failure beside the
+          field that caused it, so the same sentence is not also floated at the
+          top of the view, away from anything that can act on it. */}
+      {error && !changing && <div className="vault-error" style={{ margin: 12 }}>{error}</div>}
       {changing && <ChangePassword onDone={() => setChanging(false)} />}
 
       {entry ? (
@@ -307,42 +332,78 @@ function VaultBrowser(): React.JSX.Element {
 
 function ChangePassword({ onDone }: { onDone: () => void }): React.JSX.Element {
   const changePassword = useVault((s) => s.changePassword)
+  const clearError = useVault((s) => s.clearError)
+  const error = useVault((s) => s.error)
   const busy = useVault((s) => s.busy)
+  const bioEnabled = useVault((s) => s.bioEnabled)
+  const bioKind = useVault((s) => s.bioKind)
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
+  const currentRef = useRef<HTMLInputElement>(null)
+
+  const ready = !busy && current.length > 0 && next.length >= MIN_PASSWORD
+
+  const close = (): void => {
+    clearError()
+    onDone()
+  }
+
+  const save = async (): Promise<void> => {
+    if (!ready) return
+    if (await changePassword(current, next)) {
+      toast('Master password changed', 'ok')
+      close()
+      return
+    }
+    // "Incorrect current password" is the only failure this form produces in
+    // practice, and it is fixed in the field right here — so the cursor goes
+    // back to it with the attempt selected rather than the user being told off
+    // from somewhere else on the page.
+    currentRef.current?.select()
+    currentRef.current?.focus()
+  }
 
   return (
     <div className="vault-panel">
       <div className="row" style={{ gap: 6 }}>
         <input
           className="input"
+          ref={currentRef}
           type="password"
-          placeholder="Current password"
+          autoFocus
+          placeholder="Current master password"
           value={current}
-          onChange={(e) => setCurrent(e.target.value)}
+          onChange={(e) => {
+            clearError()
+            setCurrent(e.target.value)
+          }}
+          onKeyDown={(e) => e.key === 'Enter' && void save()}
         />
         <input
           className="input"
           type="password"
-          placeholder="New password (min 8)"
+          placeholder={`New master password (min ${MIN_PASSWORD} characters)`}
           value={next}
-          onChange={(e) => setNext(e.target.value)}
-        />
-        <button
-          className="btn primary sm"
-          disabled={busy || !current || next.length < 8}
-          onClick={async () => {
-            if (await changePassword(current, next)) {
-              toast('Master password changed')
-              onDone()
-            }
+          onChange={(e) => {
+            clearError()
+            setNext(e.target.value)
           }}
-        >
+          onKeyDown={(e) => e.key === 'Enter' && void save()}
+        />
+        <button className="btn primary sm" disabled={!ready} onClick={() => void save()}>
           Save
         </button>
-        <button className="btn sm" onClick={onDone}>
+        <button className="btn sm" onClick={close}>
           Cancel
         </button>
+      </div>
+      {error && <div className="vault-error">{error}</div>}
+      <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>
+        Every entry is re-encrypted under the new password. Nothing moves and nothing is lost — but
+        there is still no way to recover the vault if the new password is forgotten.
+        {bioEnabled
+          ? ` ${BIO_LABEL[bioKind] ?? 'Biometric'} unlock stops working until you switch it back on in the toolbar above: the key it saved was for the old password.`
+          : ''}
       </div>
     </div>
   )
@@ -386,6 +447,7 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
         </select>
         <button
           className="btn sm danger"
+          title="Delete this entry"
           onClick={() => {
             remove(entry.id)
             toast(`${entry.name} deleted`)

@@ -90,9 +90,25 @@ export function SshSessions(): React.JSX.Element {
           <button
             className="btn sm danger"
             onClick={async () => {
-              await window.shellpilot?.ssh.poolClose(p.key)
-              toast(`Disconnected ${p.username}@${p.host}`)
-              load()
+              const close = async (): Promise<void> => {
+                try {
+                  await window.shellpilot?.ssh.poolClose(p.key)
+                  toast(
+                    `Disconnected ${p.username}@${p.host}. The next connection to it will authenticate again.`,
+                    'ok'
+                  )
+                } catch (err) {
+                  // The row stays on screen either way, so without this the
+                  // button would look like it simply did not work.
+                  toast(
+                    `${p.username}@${p.host} is still connected: ${err instanceof Error ? err.message : String(err)}`,
+                    'error',
+                    { label: 'Try again', run: () => void close() }
+                  )
+                }
+                load()
+              }
+              await close()
             }}
           >
             <Unlink size={13} /> Disconnect

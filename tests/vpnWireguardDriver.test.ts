@@ -352,9 +352,20 @@ beforeEach(async () => {
   client = keypair()
   peer = null
 
-  wireguardTuning.firstHandshakeTimeoutMs = 8_000
+  // These are failure deadlines, not durations: a successful handshake ends
+  // the wait as soon as it lands (~20-200 ms over loopback), so a generous
+  // bound costs nothing on the happy path and only decides how long a genuine
+  // failure takes to report.
+  //
+  // 8 s was too tight. The full suite runs ~66 files in parallel, several of
+  // them spawning real processes, and under that load two real WireGuard
+  // devices occasionally needed longer — so this test failed with
+  // `handshake-timeout` while measuring the machine rather than the driver.
+  // The cases that assert a handshake *not* happening set their own short
+  // budget locally.
+  wireguardTuning.firstHandshakeTimeoutMs = 25_000
   wireguardTuning.handshakePollMs = 200
-  wireguardTuning.requestTimeoutMs = 8_000
+  wireguardTuning.requestTimeoutMs = 20_000
 })
 
 /** Stands in for the bundled sidecar lookup.
@@ -1212,10 +1223,18 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
     sock.destroy()
 
     forward.close()
-    await sleep(300)
-    // The listener is gone, so the port refuses rather than accepting into
-    // nothing.
-    await expect(connect(forward.port)).rejects.toMatchObject({ code: 'ECONNREFUSED' })
+    // Poll rather than sleep a fixed 300 ms. Closing a listener is not
+    // instantaneous and a fixed wait is a bet on how busy the machine is; this
+    // asserts the same thing without the bet.
+    await waitFor('the forward to stop accepting', async () => {
+      try {
+        const probe = await connect(forward.port)
+        probe.destroy()
+        return false
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === 'ECONNREFUSED'
+      }
+    })
   })
 
   it('tears everything down on stop and leaves no listener behind', async () => {
@@ -1336,10 +1355,16 @@ describe.skipIf(!HAVE_NETD)('failures the user can act on', () => {
   })
 })
 
-async function waitFor(what: string, fn: () => boolean, ms = 10_000): Promise<void> {
+// Accepts an async predicate too: some conditions can only be observed by
+// attempting something (dialling a port to see whether it still accepts).
+async function waitFor(
+  what: string,
+  fn: () => boolean | Promise<boolean>,
+  ms = 10_000
+): Promise<void> {
   const deadline = Date.now() + ms
   for (;;) {
-    if (fn()) return
+    if (await fn()) return
     if (Date.now() > deadline) throw new Error(`never became true: ${what}`)
     await sleep(20)
   }

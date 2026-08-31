@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Database } from 'lucide-react'
 import { Modal } from '../common/Modal'
 import { useApp, useWorkspaceServers } from '../../store/app'
@@ -6,6 +6,7 @@ import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
 import { KIND_COLOR } from './DatabaseSidebar'
 import { VpnTransportSelect } from '../vpn/VpnTransportSelect'
+import { saveDatabaseEdit, useDbEditor } from '../../store/dbEditor'
 import type { DbKind, UUID } from '../../types'
 
 const KINDS: { id: DbKind; label: string; port: number }[] = [
@@ -20,19 +21,26 @@ export function AddDatabaseModal(): React.JSX.Element {
   const setModal = useApp((s) => s.setModal)
   const addDatabase = useApp((s) => s.addDatabase)
   const servers = useWorkspaceServers()
+  // Set when the dialog was opened to correct an existing connection.
+  const editId = useDbEditor((s) => s.editId)
+  const existing = useApp((s) => s.databases.find((d) => d.id === editId))
 
-  const [kind, setKind] = useState<DbKind>('postgres')
-  const [mode, setMode] = useState<'fields' | 'uri'>('fields')
-  const [name, setName] = useState('')
-  const [host, setHost] = useState('localhost')
-  const [port, setPort] = useState('5432')
-  const [username, setUsername] = useState('')
+  const [kind, setKind] = useState<DbKind>(existing?.kind ?? 'postgres')
+  const [mode, setMode] = useState<'fields' | 'uri'>(existing?.uri ? 'uri' : 'fields')
+  const [name, setName] = useState(existing?.name ?? '')
+  const [host, setHost] = useState(existing?.host ?? 'localhost')
+  const [port, setPort] = useState(String(existing?.port ?? 5432))
+  const [username, setUsername] = useState(existing?.username ?? '')
   const [password, setPassword] = useState('')
-  const [database, setDatabase] = useState('')
-  const [ssl, setSsl] = useState(false)
+  const [database, setDatabase] = useState(existing?.database ?? '')
+  const [ssl, setSsl] = useState(existing?.ssl ?? false)
   const [uri, setUri] = useState('')
-  const [sshServerId, setSshServerId] = useState('')
-  const [vpnProfileId, setVpnProfileId] = useState<UUID | null>(null)
+  const [sshServerId, setSshServerId] = useState(existing?.sshServerId ?? '')
+  const [vpnProfileId, setVpnProfileId] = useState<UUID | null>(existing?.vpnProfileId ?? null)
+
+  // Whoever opened the dialog owns the target; leaving it set would make the
+  // next plain "Add database" open on the connection edited before it.
+  useEffect(() => () => useDbEditor.setState({ editId: null }), [])
 
   const pickKind = (k: DbKind): void => {
     setKind(k)
@@ -40,30 +48,46 @@ export function AddDatabaseModal(): React.JSX.Element {
   }
 
   const useUri = mode === 'uri'
-  const valid = name.trim() && (useUri ? uri.trim() : host.trim())
+  // An edit starts with the stored credential already in the keychain, so an
+  // empty password field means "leave it alone" rather than "there isn't one".
+  const valid = name.trim() && (useUri ? uri.trim() || !!editId : host.trim())
+
+  // Retryable on purpose: an OS keychain that is unavailable is usually a
+  // login keyring the user has not unlocked yet, and that is fixed outside
+  // this app and then works.
+  const storeSecret = async (
+    id: string,
+    secret: { uri: string } | { password: string },
+    label: string
+  ): Promise<void> => {
+    const ok = await window.shellpilot?.secrets.set(id, JSON.stringify(secret))
+    if (ok !== false) return
+    toast(`${label} was saved, but this device would not store its password.`, 'error', {
+      label: 'Try again',
+      run: () => void storeSecret(id, secret, label)
+    })
+  }
 
   const save = async (): Promise<void> => {
     if (!valid) return
     const displayHost = useUri ? uri.match(/@([^/:?,]+)/)?.[1] ?? uri.replace(/^\w+(\+\w+)?:\/\//, '').split(/[/:?]/)[0] : host.trim()
-    const id = addDatabase({
+    const fields = {
       name: name.trim(),
       kind,
-      host: displayHost,
+      host: displayHost || existing?.host || '',
       port: Number(port) || KINDS.find((x) => x.id === kind)!.port,
       username: useUri ? '' : username.trim(),
       database: database.trim(),
       ssl,
       uri: useUri,
-      folderId: null,
+      folderId: existing?.folderId ?? null,
       sshServerId: sshServerId || null,
       vpnProfileId
-    })
-    const secret = useUri ? { uri: uri.trim() } : password ? { password } : null
-    if (secret) {
-      const ok = await window.shellpilot?.secrets.set(id, JSON.stringify(secret))
-      if (ok === false) toast('OS secure storage unavailable — credentials not saved', 'error')
     }
-    toast(`${name.trim()} added`, 'ok')
+    const id = editId ? (saveDatabaseEdit(editId, fields), editId) : addDatabase(fields)
+    const secret = useUri ? (uri.trim() ? { uri: uri.trim() } : null) : password ? { password } : null
+    if (secret) await storeSecret(id, secret, fields.name)
+    toast(`${fields.name} ${editId ? 'updated' : 'added'}`, 'ok')
     setModal(null)
   }
 
@@ -77,8 +101,8 @@ export function AddDatabaseModal(): React.JSX.Element {
 
   return (
     <Modal
-      title="Add Database"
-      subtitle="Create a database connection profile"
+      title={editId ? 'Edit Database' : 'Add Database'}
+      subtitle={editId ? `Change how ShellPilot reaches ${existing?.name ?? 'this database'}` : 'Create a database connection profile'}
       onClose={() => setModal(null)}
       footer={
         <>
@@ -87,7 +111,7 @@ export function AddDatabaseModal(): React.JSX.Element {
             Cancel
           </button>
           <button className="btn primary" disabled={!valid} onClick={save}>
-            Add Database
+            {editId ? 'Save Changes' : 'Add Database'}
           </button>
         </>
       }
@@ -133,7 +157,7 @@ export function AddDatabaseModal(): React.JSX.Element {
             <textarea
               className="textarea"
               style={{ minHeight: 60 }}
-              placeholder={uriPlaceholder[kind]}
+              placeholder={editId ? 'Leave blank to keep the saved connection string' : uriPlaceholder[kind]}
               value={uri}
               onChange={(e) => setUri(e.target.value)}
             />
@@ -165,7 +189,13 @@ export function AddDatabaseModal(): React.JSX.Element {
             </div>
             <div className="field">
               <label className="field-label">Password</label>
-              <input className="input" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <input
+                className="input"
+                type="password"
+                placeholder={editId ? 'Unchanged' : '••••••••'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
             </div>
           </div>
 

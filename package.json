@@ -1,6 +1,6 @@
 {
   "name": "shellpilot",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Free, open-source SSH client, SFTP browser, SSH tunnel manager, multi-engine database GUI and encrypted secrets vault in one cross-platform desktop app. A MobaXterm, PuTTY and Termius alternative for Windows, macOS and Linux.",
   "keywords": [
     "ssh",

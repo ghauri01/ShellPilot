@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, Plus, ScrollText, Trash2 } from 'lucide-react'
 import { Modal } from '../common/Modal'
 import { useApp } from '../../store/app'
@@ -33,12 +33,20 @@ const KIND_SUBTITLE: Record<VpnProfile['spec']['kind'], string> = {
   frp: 'frp reverse proxy'
 }
 
+/** Which part of the form the caller wants the user standing in front of.
+ *
+ *  An error that says "open the profile" and then drops the user at the top of
+ *  a long form has moved the search, not ended it. The failure already knows
+ *  what is wrong, so it can say where. */
+export type VpnFormFocus = 'binaryPath' | 'proxies'
+
 interface VpnProfileFormProps {
   profile: VpnProfile
   onClose: () => void
+  focus?: VpnFormFocus
 }
 
-export function VpnProfileForm({ profile, onClose }: VpnProfileFormProps): React.JSX.Element {
+export function VpnProfileForm({ profile, onClose, focus }: VpnProfileFormProps): React.JSX.Element {
   const upsertVpnProfile = useApp((s) => s.upsertVpnProfile)
   // "Edit New frp client" is what the title said for a profile being created.
   // The caller mints the profile before opening the form, so the honest test is
@@ -149,10 +157,22 @@ export function VpnProfileForm({ profile, onClose }: VpnProfileFormProps): React
           <WireGuardFields spec={draft.spec} issue={byPath} shown={shown} onChange={setSpec} />
         )}
         {draft.spec.kind === 'openvpn' && (
-          <OpenVpnFields spec={draft.spec} issue={byPath} shown={shown} onChange={setSpec} />
+          <OpenVpnFields
+            spec={draft.spec}
+            issue={byPath}
+            shown={shown}
+            onChange={setSpec}
+            focus={focus}
+          />
         )}
         {draft.spec.kind === 'frp' && (
-          <FrpFields spec={draft.spec} issue={byPath} shown={shown} onChange={setSpec} />
+          <FrpFields
+            spec={draft.spec}
+            issue={byPath}
+            shown={shown}
+            onChange={setSpec}
+            focus={focus}
+          />
         )}
 
         {stripped.length > 0 && (
@@ -634,6 +654,7 @@ interface OvpnProps {
   issue: IssueMap
   shown: Set<string>
   onChange: (spec: OpenVpnSpec) => void
+  focus?: VpnFormFocus
 }
 
 const AUTH_LABEL: Record<OpenVpnAuthMode, string> = {
@@ -642,7 +663,7 @@ const AUTH_LABEL: Record<OpenVpnAuthMode, string> = {
   'userpass-otp': 'Username, password and a one-time code'
 }
 
-function OpenVpnFields({ spec, issue, onChange, shown }: OvpnProps): React.JSX.Element {
+function OpenVpnFields({ spec, issue, onChange, shown, focus }: OvpnProps): React.JSX.Element {
   const set = (patch: Partial<OpenVpnSpec>): void => onChange({ ...spec, ...patch })
 
   return (
@@ -709,6 +730,10 @@ function OpenVpnFields({ spec, issue, onChange, shown }: OvpnProps): React.JSX.E
         <input
           className="input"
           placeholder="Detected automatically"
+          // Opened from a "could not find OpenVPN" failure, this is the field
+          // that answers it — so the caret is already in it, and the browser
+          // scrolls it into view for free.
+          autoFocus={focus === 'binaryPath'}
           value={spec.binaryPath ?? ''}
           onChange={(e) => set({ binaryPath: e.target.value || undefined })}
         />
@@ -729,10 +754,20 @@ interface FrpProps {
   issue: IssueMap
   shown: Set<string>
   onChange: (spec: FrpSpec) => void
+  focus?: VpnFormFocus
 }
 
-function FrpFields({ spec, issue, onChange, shown }: FrpProps): React.JSX.Element {
+function FrpFields({ spec, issue, onChange, shown, focus }: FrpProps): React.JSX.Element {
   const set = (patch: Partial<FrpSpec>): void => onChange({ ...spec, ...patch })
+
+  // The proxy list is below the server and transport fields, so a form opened
+  // from "confirm what this exposes" starts scrolled past the checkbox it was
+  // opened for. Once, on mount: re-running it while the user types would drag
+  // the page back every keystroke.
+  const proxiesRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (focus === 'proxies') proxiesRef.current?.scrollIntoView({ block: 'center' })
+  }, [focus])
 
   // Re-keys `proxies[3].localPort` to `localPort` for the row that owns it, so
   // the editor does not have to know its own index.
@@ -860,7 +895,7 @@ function FrpFields({ spec, issue, onChange, shown }: FrpProps): React.JSX.Elemen
 
       <div className="divider" />
 
-      <div className="field">
+      <div className="field" ref={proxiesRef}>
         <div className="row" style={{ gap: 8 }}>
           <span className="field-label">Proxies</span>
           <span className="grow" />

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, ShieldCheck } from 'lucide-react'
 import { toast } from '../../store/toast'
+import { openAi, openSettings } from '../../store/nav'
 import { clsx } from '../../lib/format'
 import type { AccessGroup, McpAgentSession } from '../../../../shared/mcp'
 
@@ -42,15 +43,28 @@ export function SessionAccess({
 
   const changeGroup = async (groupId: string): Promise<void> => {
     const group = groups.find((g) => g.id === groupId) ?? null
+    const name = group?.name ?? 'No AI Access'
     const api = window.shellpilot?.aiMcp
     if (typeof api?.setSessionGroup !== 'function') {
-      toast('This build cannot change a session ceiling — restart the app', 'error')
+      toast('This build of ShellPilot cannot change what a running session is allowed to do.', 'error', {
+        label: 'Check for updates',
+        run: () => openSettings('general')
+      })
       return
     }
-    await api.setSessionGroup(session.id, group?.id ?? null, group?.name ?? 'No AI Access')
-    toast(`${session.agentName} ceiling is now ${group?.name ?? 'No AI Access'}`, 'ok')
+    const updated = await api.setSessionGroup(session.id, group?.id ?? null, name)
     setRows(null)
     onChanged()
+    if (!updated) {
+      // The select has already moved to the new value, so silence here would
+      // show a limit that is not actually in force.
+      toast(`${session.agentName} was not changed — it can still do what ${session.groupName} allows.`, 'error', {
+        label: 'Try again',
+        run: () => void changeGroup(groupId)
+      })
+      return
+    }
+    toast(`${session.agentName} can now do at most what ${name} allows.`, 'ok')
   }
 
   return (
@@ -104,9 +118,17 @@ export function SessionAccess({
           )}
           <div className="s-desc" style={{ marginTop: 6 }}>
             The stricter of the two wins. The bolded column is the one that decided — if it is
-            <b> This session</b>, changing access groups in Settings will not help; change the
-            ceiling above instead.
+            <b> This session</b>, change the ceiling above; if it is <b>Workspace</b>, the group
+            assigned to the workspace is what has to change.
           </div>
+          <button
+            className="btn sm"
+            style={{ marginTop: 8 }}
+            onClick={() => openAi('groups', session.groupId)}
+            title="Open the access group this session is capped by"
+          >
+            <ShieldCheck size={13} /> Edit access groups
+          </button>
         </div>
       )}
     </div>

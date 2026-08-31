@@ -659,7 +659,7 @@ describe('OpenVPN driver validation and probe', () => {
     ])
   })
 
-  it('tells the user to install OpenVPN, and says why it is not bundled', async () => {
+  it('tells the user how to install OpenVPN, and does not lecture them about licences', async () => {
     // No spec, so no override: on a machine without openvpn this is the real
     // resolver's answer, and on one with it the probe simply succeeds.
     const info = await createOpenVpnDriver({ platform: 'win32' }).probe()
@@ -667,9 +667,15 @@ describe('OpenVPN driver validation and probe', () => {
       expect(info.bundled).toBe(false)
       return
     }
-    expect(info.reason).toContain('does not include OpenVPN')
-    expect(info.reason).toContain('Interactive Service')
     expect(info.reason).toContain('openvpn.net')
+    expect(info.reason).toContain('Interactive Service')
+    // This used to carry "ShellPilot does not include OpenVPN, because its
+    // licence and ShellPilot's cannot be combined" — true, and of no use at all
+    // to somebody whose tunnel will not start. Why we do not ship it is in
+    // THIRD-PARTY-NOTICES.md and docs/VPN.md; an error gets the one thing the
+    // reader can act on.
+    expect(info.reason).not.toContain('licence')
+    expect(info.reason).not.toContain('does not include OpenVPN')
   })
 
   it('says PATH is not searched on Windows', async () => {

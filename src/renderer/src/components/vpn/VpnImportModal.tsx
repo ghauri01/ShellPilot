@@ -6,6 +6,7 @@ import { useApp } from '../../store/app'
 import { toast } from '../../store/toast'
 import type { StrippedDirective, VpnImportResult, VpnKind, VpnProfile } from '../../types'
 import { bridgeHas } from '../../lib/bridge'
+import { isVaultLocked, withVaultUnlock } from '../../lib/withVaultUnlock'
 
 const ACCEPT: Record<VpnKind, string> = {
   wireguard: '.conf',
@@ -46,6 +47,12 @@ export function VpnImportModal({ kind, onClose }: VpnImportModalProps): React.JS
   const [saving, setSaving] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [readWarnings, setReadWarnings] = useState(false)
+  // Shown in the card rather than thrown at a toast: the modal stays open on a
+  // failed commit, and the card is where there is room for the whole reason
+  // next to the button that resolves it.
+  const [commitError, setCommitError] = useState<{ message: string; vaultLocked: boolean } | null>(
+    null
+  )
   // Set when the import committed but the profile is not startable yet, so the
   // modal hands straight over to the form instead of closing.
   const [created, setCreated] = useState<VpnProfile | null>(null)
@@ -72,8 +79,10 @@ export function VpnImportModal({ kind, onClose }: VpnImportModalProps): React.JS
         setParsing(false)
         setReport(r ?? null)
         // Every re-parse clears the acknowledgement: the user has not read a
-        // list they have not been shown yet.
+        // list they have not been shown yet. The last commit failure goes with
+        // it — it was about text that is no longer in the box.
         setReadWarnings(false)
+        setCommitError(null)
         if (r?.name && !touched.current) setName(r.name)
       })
     }, 250)
@@ -117,24 +126,43 @@ export function VpnImportModal({ kind, onClose }: VpnImportModalProps): React.JS
         ? 'Read the removed directive above to continue.'
         : 'Read the removed directives above to continue.'
     if (!name.trim()) return 'Name this profile to import it.'
+    // "Ready to import." sitting under a red box that says it was not imported
+    // is the kind of contradiction that makes people distrust the whole screen.
+    if (commitError) return 'Not imported — see the message above.'
     return 'Ready to import.'
   }
 
   const save = async (): Promise<void> => {
     if (!canSave) return
     setSaving(true)
+    setCommitError(null)
     // Commit re-runs the import in main so the secrets land in the vault there.
     // The parse we already hold carries refs, never key material, so it can
     // never be the thing that gets saved.
-    const committed = await window.shellpilot?.vpn.commitImport(
-      name.trim(),
-      workspaceId,
-      kind,
-      text.trim()
+    //
+    // Wrapped because the vault is where those secrets go, so a shut vault
+    // stops the import — and asking here and carrying straight on is the whole
+    // point: the common case is a password box and then a finished import, not
+    // a red sentence about a thing the user has not met yet and has to go and
+    // find. `commitImport`'s preload signature predates `errorCode`, but its
+    // handler has returned one from the start (services/vpn/import.ts), and
+    // withVaultUnlock reads the value rather than the declared type.
+    const committed = await withVaultUnlock(`Importing ${name.trim()}`, () =>
+      Promise.resolve(
+        window.shellpilot?.vpn.commitImport(name.trim(), workspaceId, kind, text.trim())
+      )
     )
     setSaving(false)
     if (!committed?.ok || !committed.spec) {
-      toast(committed?.error ?? 'Could not import this profile', 'error')
+      // True only when the user declined the dialog above — withVaultUnlock has
+      // already asked once and retried.
+      const vaultLocked = isVaultLocked(committed)
+      setCommitError({
+        message: vaultLocked
+          ? 'Nothing was imported: this profile’s keys and certificates are stored in the vault, and the vault is shut.'
+          : (committed?.error ?? 'This profile could not be imported.'),
+        vaultLocked
+      })
       return
     }
     const spec = committed.spec
@@ -284,6 +312,22 @@ export function VpnImportModal({ kind, onClose }: VpnImportModalProps): React.JS
               generated itself, so it cannot honour them — and importing while pretending it had
               would be a lie about what this profile does.
             </span>
+          </div>
+        )}
+
+        {commitError && (
+          <div className="conn-error" style={{ borderRadius: 'var(--r-sm)', border: 'none' }}>
+            <AlertTriangle size={13} style={{ flexShrink: 0 }} />
+            <span className="grow">{commitError.message}</span>
+            {commitError.vaultLocked && (
+              <button
+                className="btn sm primary"
+                style={{ flexShrink: 0 }}
+                onClick={() => void save()}
+              >
+                Unlock vault and import
+              </button>
+            )}
           </div>
         )}
 

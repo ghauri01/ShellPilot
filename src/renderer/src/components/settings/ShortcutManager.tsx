@@ -22,6 +22,9 @@ export function ShortcutManager(): React.JSX.Element {
   const setShortcut = useApp((s) => s.setShortcut)
   const resetShortcuts = useApp((s) => s.resetShortcuts)
   const [recording, setRecording] = useState<string | null>(null)
+  // The command a conflict badge has just jumped to, highlighted for a moment
+  // so the eye lands on the right row in a list this long.
+  const [jumpedTo, setJumpedTo] = useState<string | null>(null)
 
   const bindings = useMemo(() => resolveBindings(overrides), [overrides])
   const conflicts = useMemo(() => findConflicts(bindings), [bindings])
@@ -53,17 +56,40 @@ export function ShortcutManager(): React.JSX.Element {
       'shellpilot-shortcuts.json',
       JSON.stringify({ shortcuts: overrides }, null, 2)
     )
-    if (ok) toast('Shortcuts exported')
+    if (ok) toast('Shortcuts exported', 'ok')
   }
 
   const importJson = async (): Promise<void> => {
     const raw = await window.shellpilot?.dialog.openJson()
     if (!raw) return
     const parsed = parseShortcutFile(raw)
-    if (!parsed) return toast('That file is not a ShellPilot shortcut export')
+    if (!parsed) {
+      return toast('That file is not a ShellPilot shortcut export.', 'error', {
+        label: 'Choose another file',
+        run: () => void importJson()
+      })
+    }
+    const count = Object.keys(parsed).length
+    if (count === 0) {
+      // Importing it would silently reset every shortcut to its default, which
+      // is not what "import" means to anybody.
+      return toast('That export has no shortcuts in it, so nothing was changed.', 'error', {
+        label: 'Choose another file',
+        run: () => void importJson()
+      })
+    }
     resetShortcuts()
     for (const [id, keys] of Object.entries(parsed)) setShortcut(id, keys)
-    toast(`Imported ${Object.keys(parsed).length} shortcut(s)`)
+    toast(`Imported ${count} shortcut(s). Anything not in the file is back to its default.`, 'ok')
+  }
+
+  // A conflict badge that only says "conflict" leaves the user to scan the
+  // whole list for the other command holding the same keys. Name it, and take
+  // them to it.
+  const jumpTo = (id: string): void => {
+    document.getElementById(`sc-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setJumpedTo(id)
+    setTimeout(() => setJumpedTo((cur) => (cur === id ? null : cur)), 2000)
   }
 
   const groups = useMemo(() => {
@@ -87,7 +113,7 @@ export function ShortcutManager(): React.JSX.Element {
           className="btn sm"
           onClick={() => {
             resetShortcuts()
-            toast('Shortcuts reset to defaults')
+            toast('Every shortcut is back to its default.', 'ok')
           }}
         >
           <RotateCcw size={13} /> Reset
@@ -108,9 +134,16 @@ export function ShortcutManager(): React.JSX.Element {
             if (!cmd) return null
             const keys = cmd.fixed ? cmd.keys : bindings.get(id) ?? ''
             const clash = !cmd.fixed && keys ? conflicts.get(keys)?.includes(id) : false
+            const other = clash ? (conflicts.get(keys) ?? []).find((x) => x !== id) : undefined
+            const otherName = other ? COMMANDS_BY_ID.get(other)?.name : undefined
             const overridden = !cmd.fixed && overrides[id] !== undefined
             return (
-              <div className="sc-row" key={id}>
+              <div
+                className="sc-row"
+                key={id}
+                id={`sc-${id}`}
+                style={jumpedTo === id ? { background: 'var(--accent-soft)' } : undefined}
+              >
                 <span className="sc-name">
                   {cmd.name}
                   <span className="faint" style={{ marginLeft: 8, fontSize: 11 }}>
@@ -118,11 +151,21 @@ export function ShortcutManager(): React.JSX.Element {
                     {cmd.hint ? ` · ${cmd.hint}` : ''}
                   </span>
                 </span>
-                {clash && (
-                  <span className="sc-conflict">
-                    <AlertTriangle size={12} /> conflict
-                  </span>
-                )}
+                {clash &&
+                  (other && otherName ? (
+                    <button
+                      className="sc-conflict"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                      title={`${otherName} uses the same keys — go to it`}
+                      onClick={() => jumpTo(other)}
+                    >
+                      <AlertTriangle size={12} /> same keys as {otherName}
+                    </button>
+                  ) : (
+                    <span className="sc-conflict">
+                      <AlertTriangle size={12} /> conflict
+                    </span>
+                  ))}
                 {overridden && (
                   <button
                     className="icon-btn"

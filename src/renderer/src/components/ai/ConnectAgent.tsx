@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Copy, TriangleAlert, Terminal, MonitorSmartphone, SquareTerminal } from 'lucide-react'
 import { toast } from '../../store/toast'
+import type { ToastAction } from '../../store/toast'
+import { useApp } from '../../store/app'
+import { openAi, openSettings } from '../../store/nav'
 import type { AccessGroup } from '../../../../shared/mcp'
 
 type Target = 'claude-code' | 'claude-desktop' | 'codex'
@@ -10,6 +13,17 @@ interface Ready {
   command?: string
   path?: string
   backedUpTo?: string
+}
+
+// A failure carries the button that fixes it. Each step here fails for its own
+// reason and each reason has its own next step, so the two travel together
+// rather than the catch block guessing from the wording of a message.
+class StepError extends Error {
+  readonly action?: ToastAction
+  constructor(message: string, action?: ToastAction) {
+    super(message)
+    this.action = action
+  }
 }
 
 // Claude Desktop and Codex both launch MCP servers as stdio subprocesses and
@@ -43,7 +57,7 @@ export function ConnectAgent({ onConnected }: { onConnected?: () => void }): Rea
   const [groupId, setGroupId] = useState('')
   const [busy, setBusy] = useState<Target | null>(null)
   const [ready, setReady] = useState<Ready | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<{ text: string; action?: ToastAction } | null>(null)
 
   useEffect(() => {
     void window.shellpilot?.aiPolicy.listGroups().then((g) => {
@@ -71,15 +85,28 @@ export function ConnectAgent({ onConnected }: { onConnected?: () => void }): Rea
       const config = await api.aiMcp.getConfig()
       if (!config.enabled) {
         const result = await api.aiMcp.setConfig({ enabled: true })
-        if (result.error) throw new Error(`Could not start the MCP bridge: ${result.error}`)
+        if (result.error) {
+          throw new StepError(
+            `ShellPilot could not listen on port ${config.port}: ${result.error}. Another program is probably using it.`,
+            { label: 'Change the port', run: () => openAi('security') }
+          )
+        }
       }
 
       const status = await api.aiMcp.status()
-      if (!status?.running || !status.port) throw new Error('The MCP bridge is not running.')
+      if (!status?.running || !status.port) {
+        throw new StepError('AI & MCP access did not start, so there is nothing for the agent to connect to.', {
+          label: 'Open AI settings',
+          run: () => openAi('security')
+        })
+      }
 
       const workspaces = (await api.aiPolicy.listWorkspaces()) ?? []
       if (workspaces.length === 0) {
-        throw new Error('Create a workspace in ShellPilot first — an agent session is scoped to one.')
+        throw new StepError('There are no workspaces yet, and an agent session has to be scoped to at least one.', {
+          label: 'Open Connections',
+          run: () => useApp.getState().setActivity('connections')
+        })
       }
 
       const group = groups.find((g) => g.id === groupId) ?? null
@@ -109,7 +136,12 @@ export function ConnectAgent({ onConnected }: { onConnected?: () => void }): Rea
         // instead, which is visible and deliberate.
         ttlMinutes: null
       })
-      if (!created) throw new Error('Could not create an agent session.')
+      if (!created) {
+        throw new StepError('ShellPilot could not issue a session for this agent.', {
+          label: 'Create one by hand',
+          run: () => openAi('agents')
+        })
+      }
 
       if (target === 'claude-code') {
         const command = await api.aiMcp.claudeCodeCommand(created.token, status.port)
@@ -119,15 +151,26 @@ export function ConnectAgent({ onConnected }: { onConnected?: () => void }): Rea
       } else {
         const label = FILE_CLIENTS[target]
         const write = target === 'codex' ? api.aiMcp.writeCodexConfig : api.aiMcp.writeClaudeDesktopConfig
-        if (typeof write !== 'function') throw new Error(`Connecting ${label} needs a newer ShellPilot build.`)
+        if (typeof write !== 'function') {
+          throw new StepError(`This build of ShellPilot cannot configure ${label} for you.`, {
+            label: 'Check for updates',
+            run: () => openSettings('general')
+          })
+        }
         const result = await write(created.token, status.port)
-        if (!result.ok) throw new Error(result.error ?? `Could not write the ${label} config.`)
+        // Nothing in the app can fix a config file it is not allowed to write,
+        // so this one says what happened and stops there rather than offering a
+        // button that would do nothing.
+        if (!result.ok) throw new StepError(result.error ?? `The ${label} config file could not be written.`)
         setReady({ target, path: result.path, backedUpTo: result.backedUpTo })
-        toast(`${label} configured — restart it`)
+        toast(`${label} is configured. Quit it and open it again to pick ShellPilot up.`, 'ok')
       }
       onConnected?.()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError({
+        text: err instanceof Error ? err.message : String(err),
+        action: err instanceof StepError ? err.action : undefined
+      })
     } finally {
       setBusy(null)
     }
@@ -176,13 +219,18 @@ export function ConnectAgent({ onConnected }: { onConnected?: () => void }): Rea
       </div>
 
       {error && (
-        <div className="setting-row" style={{ marginTop: 12 }}>
+        <div className="setting-row" style={{ marginTop: 12, alignItems: 'flex-start' }}>
           <div className="s-info">
             <div className="s-title">
               <TriangleAlert size={13} /> Could not connect
             </div>
-            <div className="s-desc">{error}</div>
+            <div className="s-desc">{error.text}</div>
           </div>
+          {error.action && (
+            <button className="btn sm primary" onClick={error.action.run}>
+              {error.action.label}
+            </button>
+          )}
         </div>
       )}
 

@@ -7,9 +7,11 @@ import { AiApprovals } from './AiApprovals'
 import { AiAuditLog } from './AiAuditLog'
 import { AiSecurity } from './AiSecurity'
 import { ConnectAgent } from './ConnectAgent'
+import { useNav } from '../../store/nav'
+import type { AiSection } from '../../store/nav'
 import type { McpAgentSession, ApprovalRequest } from '../../../../shared/mcp'
 
-const SECTIONS = [
+const SECTIONS: { id: AiSection; label: string; icon: React.JSX.Element }[] = [
   { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={16} /> },
   { id: 'agents', label: 'AI Agents', icon: <Users size={16} /> },
   { id: 'groups', label: 'Access Groups', icon: <ShieldCheck size={16} /> },
@@ -17,9 +19,7 @@ const SECTIONS = [
   { id: 'approvals', label: 'Approvals', icon: <CircleCheck size={16} /> },
   { id: 'audit', label: 'Audit Log', icon: <ScrollText size={16} /> },
   { id: 'security', label: 'Security', icon: <Lock size={16} /> }
-] as const
-
-type SectionId = (typeof SECTIONS)[number]['id']
+]
 
 function Overview(): React.JSX.Element {
   const [sessions, setSessions] = useState<McpAgentSession[]>([])
@@ -85,7 +85,10 @@ function Overview(): React.JSX.Element {
 }
 
 export function AiPanel(): React.JSX.Element {
-  const [section, setSection] = useState<SectionId>('overview')
+  // Held in the nav store rather than locally so a message elsewhere in the app
+  // can send the user straight to the page that fixes it.
+  const section = useNav((s) => s.aiSection)
+  const setSection = useNav((s) => s.setAiSection)
 
   return (
     <div className="main">

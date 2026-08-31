@@ -18,6 +18,7 @@ const AUTH: { id: AuthMethod; label: string; icon: React.ReactNode }[] = [
 
 export function AddServerModal(): React.JSX.Element {
   const setModal = useApp((s) => s.setModal)
+  const setActivity = useApp((s) => s.setActivity)
   const addServer = useApp((s) => s.addServer)
   const updateServer = useApp((s) => s.updateServer)
   const openServer = useApp((s) => s.openServer)
@@ -74,6 +75,18 @@ export function AddServerModal(): React.JSX.Element {
     void window.shellpilot?.ssh.defaultKeys().then((k) => setFoundKeys(k ?? []))
   }, [auth, foundKeys.length])
 
+  // Retryable on purpose: an OS keychain that refuses a write is usually a
+  // login keyring nobody has unlocked yet, which is fixed outside this app and
+  // then works. Without the button the credential is simply lost.
+  const storeSecret = async (id: string, secret: Record<string, string | undefined>, label: string): Promise<void> => {
+    const ok = await window.shellpilot?.secrets.set(id, JSON.stringify(secret))
+    if (ok !== false) return
+    toast(`${label} was saved, but this device would not store its credential.`, 'error', {
+      label: 'Try again',
+      run: () => void storeSecret(id, secret, label)
+    })
+  }
+
   const save = async (): Promise<void> => {
     if (!valid) return
     const fields = {
@@ -107,16 +120,17 @@ export function AddServerModal(): React.JSX.Element {
         // Falling back to the keychain beats losing the credential the user
         // just typed because the vault write failed.
         secret = entryId ? { vaultEntryId: entryId } : { password }
-        if (!entryId) toast('Could not save to the vault — kept in OS secure storage', 'error')
+        if (!entryId)
+          toast('The vault would not take this credential, so it was kept on this device only.', 'error', {
+            label: 'Open vault',
+            run: () => setActivity('vault')
+          })
       }
     } else if (auth === 'key' && keyPath.trim()) {
       secret = { keyPath: keyPath.trim(), passphrase: passphrase || undefined }
     }
 
-    if (secret) {
-      const ok = await window.shellpilot?.secrets.set(id, JSON.stringify(secret))
-      if (ok === false) toast('OS secure storage unavailable — credentials not saved', 'error')
-    }
+    if (secret) await storeSecret(id, secret, fields.name)
 
     toast(`${fields.name} ${editId ? 'updated' : 'added'}`, 'ok')
     setModal(null)

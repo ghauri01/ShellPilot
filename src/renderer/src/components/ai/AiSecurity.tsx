@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
-import { Copy, Octagon } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Copy, Octagon, Plus } from 'lucide-react'
 import { clsx } from '../../lib/format'
 import { toast } from '../../store/toast'
+import { openAi } from '../../store/nav'
 import type { McpGlobalConfig } from '../../../../shared/mcp'
 
 function copy(text: string): void {
@@ -12,6 +13,9 @@ function copy(text: string): void {
 export function AiSecurity(): React.JSX.Element {
   const [config, setConfig] = useState<McpGlobalConfig | null>(null)
   const [status, setStatus] = useState<{ running: boolean; port: number | null }>({ running: false, port: null })
+  // "Pick a different port" is the fix for almost every start failure, so the
+  // message hands the user the field instead of naming it.
+  const portRef = useRef<HTMLInputElement>(null)
 
   const load = (): void => {
     void window.shellpilot?.aiMcp.getConfig().then((c) => c && setConfig(c))
@@ -23,13 +27,36 @@ export function AiSecurity(): React.JSX.Element {
     const result = await window.shellpilot?.aiMcp.setConfig(patch)
     if (!result) return
     setConfig(result.config)
-    if (result.error) toast(`Could not start MCP server: ${result.error}`)
+    if (result.error) {
+      toast(
+        `ShellPilot could not listen on port ${result.config.port}: ${result.error}. Another program is probably using it.`,
+        'error',
+        {
+          label: 'Pick another port',
+          run: () => {
+            portRef.current?.focus()
+            portRef.current?.select()
+          }
+        }
+      )
+    }
     load()
   }
 
   const killAll = async (): Promise<void> => {
     const result = await window.shellpilot?.aiMcp.killAllSessions()
-    toast(result ? `Stopped ${result.revoked} session(s)` : 'Failed')
+    load()
+    if (!result) {
+      toast('AI access was not stopped — every session is still live.', 'error', {
+        label: 'Try again',
+        run: () => void killAll()
+      })
+      return
+    }
+    toast(
+      `Stopped every agent: ${result.revoked} session(s) revoked, ${result.denied} waiting request(s) denied.`,
+      'ok'
+    )
   }
 
   if (!config) return <div className="settings-section" />
@@ -77,6 +104,7 @@ export function AiSecurity(): React.JSX.Element {
         </div>
         <input
           className="input"
+          ref={portRef}
           style={{ width: 100 }}
           type="number"
           value={config.port}
@@ -114,8 +142,17 @@ export function AiSecurity(): React.JSX.Element {
       </div>
 
       <h3 style={{ marginTop: 24 }}>Connecting Claude Code</h3>
-      <div className="s-desc">
-        Create a session under AI & MCP → AI Agents to get a token, then run:
+      <div className="setting-row" style={{ alignItems: 'flex-start' }}>
+        <div className="s-info">
+          <div className="s-desc">
+            This command needs a token, and a token comes from an agent session. Create one, then
+            paste the command into a terminal with that token in place of{' '}
+            <code className="mono">&lt;token&gt;</code>.
+          </div>
+        </div>
+        <button className="btn sm" onClick={() => openAi('agents')}>
+          <Plus size={13} /> Create a session
+        </button>
       </div>
       <div className="setting-row">
         <code className="mono" style={{ flex: 1, wordBreak: 'break-all' }}>

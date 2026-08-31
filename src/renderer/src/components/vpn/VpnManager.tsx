@@ -14,12 +14,19 @@ import {
 import { EmptyState } from '../common/EmptyState'
 import { Modal } from '../common/Modal'
 import { useApp, useWorkspaceVpns } from '../../store/app'
-import { useVaultPrompt } from '../../store/vaultPrompt'
-import { toast } from '../../store/toast'
+import { toast, type ToastAction } from '../../store/toast'
 import { bytes, clsx } from '../../lib/format'
 import { bridgeHas } from '../../lib/bridge'
+import { withVaultUnlock } from '../../lib/withVaultUnlock'
 import { isVpnRunning } from '../../../../shared/vpn'
-import type { FrpProxy, VpnDependent, VpnEngineInfo, VpnKind, VpnProfile } from '../../types'
+import type {
+  FrpProxy,
+  VpnDependent,
+  VpnEngineInfo,
+  VpnErrorCode,
+  VpnKind,
+  VpnProfile
+} from '../../types'
 import {
   HealthChip,
   HealthDot,
@@ -29,7 +36,7 @@ import {
   vpnHealth
 } from './VpnStatusCard'
 import { VpnImportModal } from './VpnImportModal'
-import { VpnProfileForm } from './VpnProfileForm'
+import { VpnProfileForm, type VpnFormFocus } from './VpnProfileForm'
 import { VpnLogDrawer } from './VpnLogDrawer'
 
 const KIND_LABEL: Record<VpnKind, string> = {
@@ -70,6 +77,95 @@ function vaultLoss(profile: VpnProfile): string {
     return 'its stored configuration — including any inline certificates and keys — and its saved credentials'
   }
   return 'its server token and any proxy secret keys'
+}
+
+const OPENVPN_DOWNLOAD = 'https://openvpn.net/community-downloads/'
+
+/** Open a page in the user's browser.
+ *
+ *  `setWindowOpenHandler` in main/index.ts turns every `window.open` into
+ *  `shell.openExternal` and denies the window, so this is the route that is
+ *  already wired — no new preload method involved. */
+function openExternal(url: string): void {
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+/** The first sentence of a message from main.
+ *
+ *  Every VPN failure is composed as message + detail + hint (see
+ *  services/vpn/errors.ts) and only the first of the three says what happened.
+ *  The hint is advice, and the advice is a button now; the detail is
+ *  diagnostics — the paths an engine was looked for in — which belong under
+ *  Details, read by someone who wants them rather than at someone who does
+ *  not. */
+function headline(text: string): string {
+  const end = text.indexOf('. ')
+  return end === -1 ? text.trim() : text.slice(0, end + 1)
+}
+
+/** What each remedy actually does, supplied by the component that can do it. */
+interface Remedies {
+  /** Open this profile's form, optionally standing on the field at fault. */
+  profile: (focus?: VpnFormFocus) => void
+  log: () => void
+  /** Start it again. Also the vault route: `start` prompts for an unlock and
+   *  retries on its own, so "unlock" and "try again" are the same call. */
+  start: () => void
+  vault: () => void
+}
+
+/** The one control that ends this failure, or undefined when no control would.
+ *
+ *  A button that does not actually help is worse than no button: it costs a
+ *  click to find out it was useless, and it teaches the user to stop pressing
+ *  the next one. So `cert-expired` gets nothing — a new certificate comes from
+ *  whoever issued it — and neither does `clock-skew`, `network-unreachable` or
+ *  a bundled engine that failed its checksum, all of which are fixed outside
+ *  this window. */
+function remedyFor(
+  code: VpnErrorCode | undefined,
+  kind: VpnKind,
+  r: Remedies
+): ToastAction | undefined {
+  switch (code) {
+    // Not "go and unlock the vault, then come back": `start` asks for the
+    // unlock and retries by itself, so this button finishes the job the user
+    // originally pressed.
+    case 'vault-locked':
+      return { label: 'Unlock vault', run: r.start }
+    // Only OpenVPN is the user's to install. WireGuard and frp ship inside
+    // ShellPilot, so a missing one is a damaged install and a download page
+    // would send them to the wrong project entirely.
+    case 'binary-missing':
+      return kind === 'openvpn'
+        ? { label: 'Install OpenVPN', run: () => openExternal(OPENVPN_DOWNLOAD) }
+        : undefined
+    case 'exposure-unacknowledged':
+      return { label: 'Open profile', run: () => r.profile('proxies') }
+    case 'config-invalid':
+    case 'config-rejected':
+    case 'dns-failure':
+    case 'handshake-timeout':
+    case 'interface-conflict':
+    case 'port-in-use':
+    case 'proxy-required':
+    case 'server-rejected':
+      return { label: 'Open profile', run: () => r.profile() }
+    // Credentials are never in the profile — they are in the vault, handed to
+    // the engine over its management socket — so the profile form is the wrong
+    // room to send someone whose password was rejected.
+    case 'auth-failed':
+      return { label: 'Open vault', run: r.vault }
+    case 'elevation-declined':
+    case 'permission-denied':
+      return { label: 'Try again', run: r.start }
+    case 'crash-loop':
+    case 'internal':
+    case 'tls-handshake-failed':
+      return { label: 'Show log', run: r.log }
+    default:
+      return undefined
+  }
 }
 
 /** True when the status stream has already toasted this failure.
@@ -116,11 +212,14 @@ export function VpnManager(): React.JSX.Element {
   const vpnStatuses = useApp((s) => s.vpnStatuses)
   const setVpnStatus = useApp((s) => s.setVpnStatus)
   const removeVpnProfile = useApp((s) => s.removeVpnProfile)
+  const setActivity = useApp((s) => s.setActivity)
 
   const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [expanded, setExpanded] = useState<string | null>(null)
   const [importing, setImporting] = useState<VpnKind | null>(null)
-  const [editing, setEditing] = useState<VpnProfile | null>(null)
+  // Carries where to stand as well as what to edit: a failure that knows the
+  // port is taken can open the form on the port.
+  const [editing, setEditing] = useState<{ profile: VpnProfile; focus?: VpnFormFocus } | null>(null)
   const [logsFor, setLogsFor] = useState<VpnProfile | null>(null)
   const [confirmStop, setConfirmStop] = useState<{
     profile: VpnProfile
@@ -132,6 +231,12 @@ export function VpnManager(): React.JSX.Element {
     attached: { id: string; kind: string; name: string }[]
   } | null>(null)
   const [engines, setEngines] = useState<Partial<Record<VpnKind, VpnEngineInfo>>>({})
+
+  // `start` reports its failures through `report`, and several of `report`'s
+  // buttons start. They genuinely refer to each other, so one of the two is
+  // read through a ref — which is also what lets the status subscription below
+  // stay keyed on the profile ids alone.
+  const reportRef = useRef<(id: string, error: string, code?: VpnErrorCode) => void>(() => {})
 
   // Starts the user pulled the plug on. A cancelled start still resolves with a
   // failure, and reporting that as one is how cancelling would earn a red toast
@@ -152,10 +257,7 @@ export function VpnManager(): React.JSX.Element {
     const offs = ids.map((id) =>
       window.shellpilot?.vpn.onStatus(id, (s) => {
         setVpnStatus(id, s)
-        if (s.state === 'error' && s.error) {
-          const name = useApp.getState().vpns.find((p) => p.id === id)?.name ?? 'VPN'
-          toast(`${name}: ${s.error}`, 'error')
-        }
+        if (s.state === 'error' && s.error) reportRef.current(id, s.error, s.errorCode)
       })
     )
     return () => offs.forEach((off) => off?.())
@@ -190,16 +292,15 @@ export function VpnManager(): React.JSX.Element {
 
   const start = useCallback(async (p: VpnProfile): Promise<void> => {
     setBusy((b) => ({ ...b, [p.id]: true }))
-    let r = await window.shellpilot?.vpn.start(p.id)
     // docs/VPN.md promises that starting against a locked vault asks to unlock
-    // it. The vault reports this as a code on a resolved result rather than as
-    // the thrown marker withVaultUnlock watches for, so the check is on the
-    // code — and the retry happens once, for the reason that helper only
-    // retries once: a second failure is no longer about the vault.
-    if (r?.errorCode === 'vault-locked') {
-      const unlocked = await useVaultPrompt.getState().request(`Starting ${p.name}`)
-      if (unlocked) r = await window.shellpilot?.vpn.start(p.id)
-    }
+    // it. The vault reports that as a code on a *resolved* result rather than as
+    // a rejection, which withVaultUnlock now recognises too — so this is the
+    // same one-shot prompt-and-retry every other surface in the app gets, from
+    // one definition of what "locked" looks like. Declining hands back the
+    // failed result rather than throwing, which is what the tail below expects.
+    const r = await withVaultUnlock(`Starting ${p.name}`, () =>
+      Promise.resolve(window.shellpilot?.vpn.start(p.id))
+    )
     setBusy((b) => ({ ...b, [p.id]: false }))
     const cancelled = cancelledStarts.current.delete(p.id)
     if (r?.ok) {
@@ -213,8 +314,27 @@ export function VpnManager(): React.JSX.Element {
     // Cancel has already said what happened, and so has the status stream when
     // it carried the error. Either way this failure is spoken for.
     if (cancelled || errorSpoken(p.id)) return
-    toast(r?.error ?? `Could not start ${p.name}`, 'error')
+    reportRef.current(p.id, r?.error ?? 'This tunnel could not be started.', r?.errorCode)
   }, [])
+
+  // The single place a VPN failure becomes something on screen — the status
+  // stream, start and stop all come through here, so one failure cannot get two
+  // different phrasings depending on which of them noticed it first. One line
+  // and one button: the rest of what main said stays under the row, behind
+  // Details, and in the log.
+  const report = (id: string, error: string, code?: VpnErrorCode): void => {
+    const p = useApp.getState().vpns.find((v) => v.id === id)
+    const action = p
+      ? remedyFor(code, p.spec.kind, {
+          profile: (focus) => setEditing({ profile: p, focus }),
+          log: () => setLogsFor(p),
+          start: () => void start(p),
+          vault: () => setActivity('vault')
+        })
+      : undefined
+    toast(`${p?.name ?? 'VPN'}: ${headline(error)}`, 'error', action)
+  }
+  reportRef.current = report
 
   const stop = useCallback(async (p: VpnProfile, cancelling = false): Promise<void> => {
     setBusy((b) => ({ ...b, [p.id]: true }))
@@ -228,7 +348,11 @@ export function VpnManager(): React.JSX.Element {
     // and "X stopped", all at once, because the old preload signature threw the
     // result away. It reports one now, so this can say what actually happened.
     if (errorSpoken(p.id)) return
-    toast(r?.error ?? `Could not ${cancelling ? 'cancel' : 'stop'} ${p.name}`, 'error')
+    reportRef.current(
+      p.id,
+      r?.error ?? `This tunnel could not be ${cancelling ? 'cancelled' : 'stopped'}.`,
+      r?.errorCode
+    )
   }, [])
 
   // A start can sit in TLS negotiation, an elevation prompt or an OTP
@@ -313,6 +437,13 @@ export function VpnManager(): React.JSX.Element {
     const open = expanded === p.id
     const gated = !running && ungated.length > 0
     const engineMissing = engine?.available === false
+    // main explains where it looked, what to install and why it will not look
+    // anywhere else. All true, none of it needed before the user has decided
+    // what to do — so the row shows the first sentence and the buttons, and
+    // keeps the rest one click away.
+    const engineProblem = headline(
+      engine?.reason ?? `${KIND_LABEL[p.spec.kind]} is not available on this machine.`
+    )
     const sub = subtitle(p)
     // Mid-start, and slow enough to be worth escaping from.
     const cancellable =
@@ -372,7 +503,7 @@ export function VpnManager(): React.JSX.Element {
                 : gated
                   ? 'Confirm what each proxy exposes before starting'
                   : engineMissing
-                    ? engine?.reason
+                    ? engineProblem
                     : undefined
             }
             onClick={() => void (cancellable ? cancel(p) : toggle(p))}
@@ -380,7 +511,11 @@ export function VpnManager(): React.JSX.Element {
             {busy[p.id] ? <Loader2 size={13} className="spin" /> : <Power size={13} />}
             {cancellable ? 'Cancel' : running ? 'Stop' : 'Start'}
           </button>
-          <button className="icon-btn sm" title="Edit profile" onClick={() => setEditing(p)}>
+          <button
+            className="icon-btn sm"
+            title="Edit profile"
+            onClick={() => setEditing({ profile: p })}
+          >
             <Pencil size={14} />
           </button>
           <button className="icon-btn sm" title="Show log" onClick={() => setLogsFor(p)}>
@@ -396,22 +531,60 @@ export function VpnManager(): React.JSX.Element {
         </div>
 
         {engineMissing && (
-          <div className="row" style={{ gap: 6, padding: '6px 16px', color: 'var(--danger)', fontSize: 11 }}>
-            <AlertTriangle size={12} />
-            <span>{engine?.reason ?? `${KIND_LABEL[p.spec.kind]} is not available on this machine.`}</span>
+          <div className="col" style={{ gap: 6, padding: '6px 16px' }}>
+            <div className="row" style={{ gap: 6, color: 'var(--danger)', fontSize: 11 }}>
+              <AlertTriangle size={12} style={{ flexShrink: 0 }} />
+              <span className="grow">{engineProblem}</span>
+              {/* Only OpenVPN is the user's to install or to point us at.
+                  WireGuard and frp ship with ShellPilot, so neither button
+                  would lead anywhere for them. */}
+              {p.spec.kind === 'openvpn' && (
+                <>
+                  <button className="btn sm primary" onClick={() => openExternal(OPENVPN_DOWNLOAD)}>
+                    Install OpenVPN
+                  </button>
+                  <button
+                    className="btn sm"
+                    onClick={() => setEditing({ profile: p, focus: 'binaryPath' })}
+                  >
+                    Set the path
+                  </button>
+                </>
+              )}
+            </div>
+            {engine?.reason && engine.reason !== engineProblem && (
+              <details className="disclosure">
+                <summary className="disclosure-head">Details</summary>
+                <div className="disclosure-body">
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    {engine.reason}
+                  </span>
+                </div>
+              </details>
+            )}
           </div>
         )}
 
         {gated && (
           // Naming the proxies is the point. "Acknowledge exposure to continue"
-          // just sends the user hunting for the checkbox they missed.
-          <div className="row" style={{ gap: 6, padding: '6px 16px', color: 'var(--warn)', fontSize: 11 }}>
-            <AlertTriangle size={12} />
-            <span>
+          // just sends the user hunting for the checkbox they missed — and so,
+          // very nearly, did the sentence that used to describe the journey to
+          // it instead of offering the button.
+          <div
+            className="row"
+            style={{ gap: 6, padding: '6px 16px', color: 'var(--warn)', fontSize: 11 }}
+          >
+            <AlertTriangle size={12} style={{ flexShrink: 0 }} />
+            <span className="grow">
               Confirm what {ungated.map((x) => x.name).join(', ')}{' '}
-              {ungated.length === 1 ? 'exposes' : 'expose'} before starting — open the profile and
-              tick the box on {ungated.length === 1 ? 'that proxy' : 'each of those proxies'}.
+              {ungated.length === 1 ? 'exposes' : 'expose'} before starting.
             </span>
+            <button
+              className="btn sm primary"
+              onClick={() => setEditing({ profile: p, focus: 'proxies' })}
+            >
+              {ungated.length === 1 ? 'Confirm it' : 'Confirm them'}
+            </button>
           </div>
         )}
 
@@ -474,7 +647,7 @@ export function VpnManager(): React.JSX.Element {
         </button>
         <button
           className="btn sm"
-          onClick={() => setEditing(blankFrpProfile(useApp.getState().activeId()))}
+          onClick={() => setEditing({ profile: blankFrpProfile(useApp.getState().activeId()) })}
         >
           <Share2 size={14} /> New frp client
         </button>
@@ -488,7 +661,7 @@ export function VpnManager(): React.JSX.Element {
           action={
             <button
               className="btn primary"
-              onClick={() => setEditing(blankFrpProfile(useApp.getState().activeId()))}
+              onClick={() => setEditing({ profile: blankFrpProfile(useApp.getState().activeId()) })}
             >
               <Share2 size={15} /> New frp client
             </button>
@@ -501,7 +674,13 @@ export function VpnManager(): React.JSX.Element {
       )}
 
       {importing && <VpnImportModal kind={importing} onClose={() => setImporting(null)} />}
-      {editing && <VpnProfileForm profile={editing} onClose={() => setEditing(null)} />}
+      {editing && (
+        <VpnProfileForm
+          profile={editing.profile}
+          focus={editing.focus}
+          onClose={() => setEditing(null)}
+        />
+      )}
       {logsFor && (
         <VpnLogDrawer
           profileId={logsFor.id}

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Plus, Trash2, Save, ChevronDown, ChevronRight, TriangleAlert } from 'lucide-react'
+import { Plus, Trash2, Save, ChevronDown, ChevronRight, TriangleAlert, X } from 'lucide-react'
 import { toast } from '../../store/toast'
+import { useNav } from '../../store/nav'
 import { AI_CAPABILITIES } from '../../../../shared/mcp'
 import type { AccessGroup, AiCapability, FilePathRule, PermissionValue, PolicyAssignment } from '../../../../shared/mcp'
 
@@ -214,22 +215,45 @@ function ServerAssignment({ groups }: { groups: AccessGroup[] }): React.JSX.Elem
     [servers, activeWorkspaceId]
   )
 
-  const setWorkspaceGroup = async (groupId: string | null): Promise<void> => {
-    await window.shellpilot?.aiPolicy.setAssignment({ level: 'workspace', workspaceId: activeWorkspaceId }, groupId)
-    load()
-  }
-  const setServerOverride = async (serverId: string, groupId: string | null): Promise<void> => {
-    await window.shellpilot?.aiPolicy.setAssignment({ level: 'server', serverId }, groupId)
-    load()
-  }
-  const clearServerOverride = async (serverId: string): Promise<void> => {
-    const existing = assignments.find((a) => a.scope.level === 'server' && a.scope.serverId === serverId)
-    if (existing) await window.shellpilot?.aiPolicy.removeAssignment(existing.id)
+  // An assignment that silently fails to save is the worst kind of permission
+  // bug: the control shows what the user picked and the policy engine still
+  // sees the old value. Say so, and offer the retry rather than describing it.
+  const apply = async (change: () => Promise<unknown> | undefined, retry: () => void): Promise<void> => {
+    try {
+      await change()
+    } catch (err) {
+      toast(`That assignment was not saved: ${err instanceof Error ? err.message : String(err)}`, 'error', {
+        label: 'Try again',
+        run: retry
+      })
+    }
     load()
   }
 
+  const setWorkspaceGroup = async (groupId: string | null): Promise<void> => {
+    const scope = { level: 'workspace', workspaceId: activeWorkspaceId } as const
+    await apply(
+      () => window.shellpilot?.aiPolicy.setAssignment(scope, groupId),
+      () => void setWorkspaceGroup(groupId)
+    )
+  }
+  const setServerOverride = async (serverId: string, groupId: string | null): Promise<void> => {
+    await apply(
+      () => window.shellpilot?.aiPolicy.setAssignment({ level: 'server', serverId }, groupId),
+      () => void setServerOverride(serverId, groupId)
+    )
+  }
+  const clearServerOverride = async (serverId: string): Promise<void> => {
+    const existing = assignments.find((a) => a.scope.level === 'server' && a.scope.serverId === serverId)
+    if (!existing) return load()
+    await apply(
+      () => window.shellpilot?.aiPolicy.removeAssignment(existing.id),
+      () => void clearServerOverride(serverId)
+    )
+  }
+
   return (
-    <div>
+    <div id="ai-assignments">
       <h2>Server & workspace assignment</h2>
       <div className="sub">
         Assign an access group per workspace as the default, then override individual servers. A server
@@ -316,10 +340,20 @@ function ServerAssignment({ groups }: { groups: AccessGroup[] }): React.JSX.Elem
   )
 }
 
+// The assignment table lives at the bottom of this same page, so "go and check
+// what this changed" is a scroll, not a search.
+function showAssignments(): void {
+  document.getElementById('ai-assignments')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 export function AiAccessGroups(): React.JSX.Element {
   const [groups, setGroups] = useState<AccessGroup[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [draft, setDraft] = useState<AccessGroup | null>(null)
+  // null = not naming a new group. '' = the naming row is open and empty.
+  const [newName, setNewName] = useState<string | null>(null)
+  const focusGroupId = useNav((s) => s.aiGroupId)
+  const clearAiGroup = useNav((s) => s.clearAiGroup)
 
   const load = (): void => {
     void window.shellpilot?.aiPolicy.listGroups().then((g) => {
@@ -329,34 +363,74 @@ export function AiAccessGroups(): React.JSX.Element {
   }
   useEffect(load, [])
 
+  // Somebody sent the user here to look at one particular group — open it,
+  // rather than dropping them on whichever group happened to be selected.
+  useEffect(() => {
+    if (!focusGroupId) return
+    setSelectedId(focusGroupId)
+    clearAiGroup()
+  }, [focusGroupId, clearAiGroup])
+
   useEffect(() => {
     setDraft(groups.find((g) => g.id === selectedId) ?? null)
   }, [selectedId, groups])
 
+  // Was window.prompt(), which Electron does not implement: the button threw
+  // and nothing happened at all. Naming it in place also puts the new group's
+  // settings on screen the moment it exists.
   const createGroup = async (): Promise<void> => {
-    const name = window.prompt('New access group name')
+    const name = (newName ?? '').trim()
     if (!name) return
-    const g = await window.shellpilot?.aiPolicy.createGroup(name)
-    if (g) setSelectedId(g.id)
-    load()
+    try {
+      const g = await window.shellpilot?.aiPolicy.createGroup(name)
+      if (!g) throw new Error('No group came back')
+      setNewName(null)
+      setSelectedId(g.id)
+      load()
+      // Deliberately not "created, you're done": a new group is not empty, it
+      // arrives with defaults, and the summary showing them is right below.
+      toast(`Created ${g.name}. Check what it allows below before you assign it to anything.`, 'ok')
+    } catch (err) {
+      toast(`${name} was not created: ${err instanceof Error ? err.message : String(err)}`, 'error', {
+        label: 'Try again',
+        run: () => void createGroup()
+      })
+    }
   }
 
   const saveGroup = async (): Promise<void> => {
     if (!draft) return
-    await window.shellpilot?.aiPolicy.saveGroup(draft)
-    toast(`Saved ${draft.name}`)
-    load()
+    try {
+      await window.shellpilot?.aiPolicy.saveGroup(draft)
+      toast(`Saved ${draft.name}`, 'ok')
+      load()
+    } catch (err) {
+      // Reload so the editor shows what is actually stored — leaving unsaved
+      // edits on screen next to a failure reads as if they took effect.
+      load()
+      toast(`${draft.name} was not saved: ${err instanceof Error ? err.message : String(err)}`, 'error', {
+        label: 'Try again',
+        run: () => void saveGroup()
+      })
+    }
   }
 
   const deleteGroup = async (): Promise<void> => {
     if (!draft) return
+    const name = draft.name
     const result = await window.shellpilot?.aiPolicy.deleteGroup(draft.id)
     if (result && !result.ok) {
-      toast(result.error ?? 'Could not delete group')
+      toast(result.error ?? `${name} could not be deleted.`, 'error')
       return
     }
     setSelectedId(null)
     load()
+    // Deleting a group is not neutral: everything assigned to it drops to No AI
+    // Access, which the user finds out about later as agents being refused.
+    toast(`Deleted ${name}. Anything assigned to it is now No AI Access.`, 'ok', {
+      label: 'Review assignments',
+      run: showAssignments
+    })
   }
 
   return (
@@ -375,10 +449,39 @@ export function AiAccessGroups(): React.JSX.Element {
             </option>
           ))}
         </select>
-        <button className="btn sm" onClick={createGroup}>
+        <button className="btn sm" onClick={() => setNewName('')}>
           <Plus size={13} /> New group
         </button>
       </div>
+
+      {newName !== null && (
+        <div className="setting-row">
+          <div className="s-info">
+            <div className="s-title">Name the new group</div>
+            <div className="s-desc">
+              A new group starts by allowing reads, asking before terminal and database access, and
+              refusing writes and sudo. You can change all of it next.
+            </div>
+          </div>
+          <input
+            className="input"
+            autoFocus
+            placeholder="e.g. Logs Only"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void createGroup()
+              if (e.key === 'Escape') setNewName(null)
+            }}
+          />
+          <button className="btn sm primary" disabled={!newName.trim()} onClick={() => void createGroup()}>
+            Create
+          </button>
+          <button className="icon-btn" aria-label="Cancel" onClick={() => setNewName(null)}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {draft && <GroupEditor group={draft} onChange={setDraft} onSave={saveGroup} onDelete={deleteGroup} />}
 

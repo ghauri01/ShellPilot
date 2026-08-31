@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Plus, Copy, Ban, Octagon, Trash2 } from 'lucide-react'
+import { Plus, Copy, Ban, Octagon, Trash2, TriangleAlert } from 'lucide-react'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
+import { useApp } from '../../store/app'
+import { openAi } from '../../store/nav'
 import { SessionAccess } from './SessionAccess'
 import type { McpAgentSession, AccessGroup } from '../../../../shared/mcp'
 
@@ -55,24 +57,41 @@ function CreateSessionForm({
     const selected = workspaces.filter((w) => workspaceIds.includes(w.id))
     const group = groups.find((g) => g.id === groupId)
     if (selected.length === 0) {
-      toast('Select at least one workspace')
+      // Two different problems wore the same sentence: "you missed a checkbox"
+      // and "there is nothing here to check".
+      if (workspaces.length === 0) {
+        toast('There are no workspaces yet, and a session has to be scoped to at least one.', 'error', {
+          label: 'Open Connections',
+          run: () => useApp.getState().setActivity('connections')
+        })
+        return
+      }
+      toast('Pick at least one workspace for this agent to see.', 'error')
       return
     }
-    const result = await window.shellpilot?.aiMcp.createSession({
-      agentName: agentName.trim() || 'Unnamed agent',
-      workspaces: selected.map((w) => ({ id: w.id, name: w.name })),
-      groupId: group?.id ?? null,
-      groupName: group?.name ?? 'No AI Access',
-      ttlMinutes: ttl === 0 ? null : ttl
-    })
-    if (!result) return
-    const status = await window.shellpilot?.aiMcp.status()
-    setIssued({ token: result.token, port: status?.port ?? null })
-    onCreated()
+    try {
+      const result = await window.shellpilot?.aiMcp.createSession({
+        agentName: agentName.trim() || 'Unnamed agent',
+        workspaces: selected.map((w) => ({ id: w.id, name: w.name })),
+        groupId: group?.id ?? null,
+        groupName: group?.name ?? 'No AI Access',
+        ttlMinutes: ttl === 0 ? null : ttl
+      })
+      if (!result) throw new Error('ShellPilot returned no session')
+      const status = await window.shellpilot?.aiMcp.status()
+      setIssued({ token: result.token, port: status?.running ? status.port : null })
+      onCreated()
+    } catch (err) {
+      // Before this the button simply did nothing when the call failed.
+      toast(`The session was not created: ${err instanceof Error ? err.message : String(err)}`, 'error', {
+        label: 'Try again',
+        run: () => void create()
+      })
+    }
   }
 
   if (issued) {
-    const url = `http://127.0.0.1:${issued.port ?? '(disabled)'}/mcp`
+    const url = `http://127.0.0.1:${issued.port}/mcp`
     const jsonConfig = JSON.stringify(
       { mcpServers: { shellpilot: { url, headers: { Authorization: `Bearer ${issued.token}` } } } },
       null,
@@ -81,6 +100,24 @@ function CreateSessionForm({
     return (
       <div className="settings-section" style={{ marginBottom: 24 }}>
         <h3>Session created</h3>
+        {issued.port === null && (
+          // The snippet used to be emitted with "(disabled)" where the port
+          // goes, which is a config file that cannot work and does not say why.
+          <div className="setting-row" style={{ alignItems: 'flex-start' }}>
+            <div className="s-info">
+              <div className="s-title">
+                <TriangleAlert size={13} /> Nothing can connect yet
+              </div>
+              <div className="s-desc">
+                The token below is valid, but AI &amp; MCP access is switched off, so ShellPilot is not
+                listening for any agent.
+              </div>
+            </div>
+            <button className="btn sm primary" onClick={() => openAi('security')}>
+              Turn on AI access
+            </button>
+          </div>
+        )}
         <div className="s-desc">
           This token is shown only once. ShellPilot stores only its hash — if you lose it, revoke
           the session and create a new one. Copy the block below into an MCP client that speaks
@@ -91,21 +128,23 @@ function CreateSessionForm({
           gives you a one-line command; Codex has{' '}
           <code className="mono">shellpilot codex</code>.
         </div>
-        <div className="setting-row">
-          <div className="s-info">
-            <div className="s-title">mcp.json snippet</div>
-            <div className="s-desc">For clients configured via a JSON file.</div>
+        {issued.port !== null && (
+          <div className="setting-row">
+            <div className="s-info">
+              <div className="s-title">mcp.json snippet</div>
+              <div className="s-desc">For clients configured via a JSON file.</div>
+            </div>
+            <button
+              className="btn sm"
+              onClick={() => {
+                navigator.clipboard.writeText(jsonConfig)
+                toast('Config copied')
+              }}
+            >
+              <Copy size={13} /> Copy JSON config
+            </button>
           </div>
-          <button
-            className="btn sm"
-            onClick={() => {
-              navigator.clipboard.writeText(jsonConfig)
-              toast('Config copied')
-            }}
-          >
-            <Copy size={13} /> Copy JSON config
-          </button>
-        </div>
+        )}
         <div className="setting-row">
           <div className="s-info">
             <div className="s-title mono">{issued.token}</div>
@@ -129,7 +168,7 @@ function CreateSessionForm({
   }
 
   return (
-    <div className="settings-section" style={{ marginBottom: 24 }}>
+    <div className="settings-section" id="ai-new-session" style={{ marginBottom: 24 }}>
       <h3>New AI agent session</h3>
       <div className="setting-row">
         <div className="s-info">
@@ -210,10 +249,32 @@ export function AiAgents({ sessionsOnly = false }: { sessionsOnly?: boolean }): 
     return () => clearInterval(t)
   }, [])
 
+  // Takes the user to the form that issues a session and puts it on screen —
+  // the AI Agents page can be long, and landing above the fold of it is not the
+  // same as being shown the thing you asked for.
+  const newSession = (): void => {
+    openAi('agents')
+    requestAnimationFrame(() =>
+      document.getElementById('ai-new-session')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    )
+  }
+
   const killAll = async (): Promise<void> => {
     const result = await window.shellpilot?.aiMcp.killAllSessions()
-    toast(result ? `Revoked ${result.revoked} session(s), denied ${result.denied} pending request(s)` : 'Failed')
     load()
+    if (!result) {
+      // "Failed" on a safety control is the least useful word available: the
+      // user needs to know access is still live, and be able to try again.
+      toast('AI access was not stopped — every session is still live.', 'error', {
+        label: 'Try again',
+        run: () => void killAll()
+      })
+      return
+    }
+    toast(
+      `Stopped every agent: ${result.revoked} session(s) revoked, ${result.denied} waiting request(s) denied.`,
+      'ok'
+    )
   }
 
   return (
@@ -247,24 +308,32 @@ export function AiAgents({ sessionsOnly = false }: { sessionsOnly?: boolean }): 
             </div>
             <div className="spacer" />
             <div className="r-stat">{isLive(s) ? 'Active' : s.revoked ? 'Revoked' : 'Expired'}</div>
-            <button
-              className="btn sm danger"
-              disabled={!isLive(s)}
-              onClick={async () => {
-                await window.shellpilot?.aiMcp.revokeSession(s.id)
-                toast(`Revoked ${s.agentName}`)
-                load()
-              }}
-            >
-              <Ban size={13} /> Revoke
-            </button>
+            {isLive(s) ? (
+              <button
+                className="btn sm danger"
+                onClick={async () => {
+                  await window.shellpilot?.aiMcp.revokeSession(s.id)
+                  toast(`${s.agentName} can no longer reach ShellPilot.`, 'ok')
+                  load()
+                }}
+              >
+                <Ban size={13} /> Revoke
+              </button>
+            ) : (
+              // A revoked or expired row is otherwise a dead end: the client
+              // still has a token that no longer works, and the form that
+              // issues a replacement lives on another page.
+              <button className="btn sm" onClick={newSession} title="Issue a replacement session">
+                <Plus size={13} /> New session
+              </button>
+            )}
             <button
               className="btn sm"
               title="Remove this session from the list entirely — revokes it too, if it's still live"
               onClick={async () => {
                 if (!confirm(`Delete the "${s.agentName}" session? This can't be undone.`)) return
                 await window.shellpilot?.aiMcp.deleteSession(s.id)
-                toast(`Deleted ${s.agentName}`)
+                toast(`Deleted ${s.agentName}`, 'ok')
                 load()
               }}
             >

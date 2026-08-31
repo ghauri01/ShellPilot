@@ -32,6 +32,103 @@ describe('recognising the failure across the IPC boundary', () => {
   })
 })
 
+describe('recognising the failure as a resolved result, not a rejection', () => {
+  // The VPN paths do not throw when the vault is shut. They resolve with
+  // `{ ok: false, errorCode: 'vault-locked' }`, because an IPC handler that
+  // rejects loses its structure on the way to the renderer. A helper that only
+  // inspected rejections therefore did nothing for them, which is exactly how
+  // "unlock the vault and try again" survived as a dead end in the VPN
+  // surfaces after it had been fixed everywhere else.
+  it('matches an errorCode on a resolved result', () => {
+    expect(isVaultLocked({ ok: false, errorCode: 'vault-locked' })).toBe(true)
+  })
+
+  it('matches the same code under `code`', () => {
+    expect(isVaultLocked({ ok: false, code: 'vault-locked' })).toBe(true)
+  })
+
+  it('matches the marker carried on an `error` string', () => {
+    expect(isVaultLocked({ ok: false, error: `something: ${VAULT_LOCKED}` })).toBe(true)
+  })
+
+  it('does not match a result that merely failed', () => {
+    expect(isVaultLocked({ ok: false, errorCode: 'handshake-timeout' })).toBe(false)
+    expect(isVaultLocked({ ok: true })).toBe(false)
+  })
+
+  it('does not match nothing at all', () => {
+    expect(isVaultLocked(null)).toBe(false)
+    expect(isVaultLocked(undefined)).toBe(false)
+  })
+
+  it('retries a resolved failure once the vault is open', async () => {
+    let calls = 0
+    const run = async (): Promise<{ ok: boolean; errorCode?: string }> => {
+      calls++
+      return calls === 1 ? { ok: false, errorCode: 'vault-locked' } : { ok: true }
+    }
+    const done = withVaultUnlock('Starting office', run)
+    await Promise.resolve()
+    useVaultPrompt.getState().finish(true)
+
+    await expect(done).resolves.toEqual({ ok: true })
+    expect(calls).toBe(2)
+  })
+
+  it('hands back the original result when the user cancels', async () => {
+    let calls = 0
+    const locked = { ok: false, errorCode: 'vault-locked' }
+    const done = withVaultUnlock('Starting office', async () => {
+      calls++
+      return locked
+    })
+    await Promise.resolve()
+    useVaultPrompt.getState().finish(false)
+
+    // The original result, unchanged — not a throw, and not a second attempt
+    // the user did not ask for.
+    await expect(done).resolves.toBe(locked)
+    expect(calls).toBe(1)
+  })
+
+  it('does not prompt for a resolved failure that is not about the vault', async () => {
+    const done = withVaultUnlock('Starting office', async () => ({
+      ok: false,
+      errorCode: 'handshake-timeout'
+    }))
+    await expect(done).resolves.toEqual({ ok: false, errorCode: 'handshake-timeout' })
+    expect(useVaultPrompt.getState().open).toBe(false)
+  })
+
+  it('is not tripped up by an empty object', () => {
+    // A result that carries no code and no text at all must not be read as a
+    // locked vault, or every shapeless failure would open the dialog.
+    expect(isVaultLocked({})).toBe(false)
+  })
+
+  it('matches the marker carried on a `message` field', () => {
+    // A plain object stringifies to "[object Object]", so both fields the two
+    // shapes put text in have to be read directly.
+    expect(isVaultLocked({ message: `something: ${VAULT_LOCKED}` })).toBe(true)
+  })
+
+  it('retries a resolved failure once, not forever', async () => {
+    // Still locked after a successful unlock means the cause is something
+    // else; a second dialog would be one the user cannot get rid of.
+    let calls = 0
+    const locked = { ok: false, errorCode: 'vault-locked' }
+    const done = withVaultUnlock('Starting office', async () => {
+      calls++
+      return locked
+    })
+    await Promise.resolve()
+    useVaultPrompt.getState().finish(true)
+
+    await expect(done).resolves.toBe(locked)
+    expect(calls).toBe(2)
+  })
+})
+
 describe('asking and retrying', () => {
   it('does not prompt when the operation succeeds', async () => {
     const run = vi.fn().mockResolvedValue('connected')

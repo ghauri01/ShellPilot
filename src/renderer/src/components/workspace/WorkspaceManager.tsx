@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { EyeOff, Eye, Copy, Download, Trash2, Plus, Lock, LockOpen, Check } from 'lucide-react'
+import { useRef, useState } from 'react'
+import { EyeOff, Eye, Trash2, Plus, Lock, LockOpen, Check } from 'lucide-react'
 import { Modal } from '../common/Modal'
 import { useApp } from '../../store/app'
 import { toast } from '../../store/toast'
@@ -9,6 +9,10 @@ import type { WorkspaceColor } from '../../types'
 
 const COLORS: WorkspaceColor[] = ['green', 'purple', 'blue', 'orange', 'red', 'cyan', 'pink']
 
+// Matches what the main process enforces in wslock.ts. Kept in step so the
+// form can refuse a short password itself instead of round-tripping to be told.
+const MIN_WS_PASSWORD = 6
+
 export function WorkspaceManager(): React.JSX.Element {
   const setModal = useApp((s) => s.setModal)
   const workspaces = useApp((s) => s.workspaces)
@@ -16,6 +20,7 @@ export function WorkspaceManager(): React.JSX.Element {
   const addWorkspace = useApp((s) => s.addWorkspace)
   const setWorkspaceProtected = useApp((s) => s.setWorkspaceProtected)
   const lockWorkspace = useApp((s) => s.lockWorkspace)
+  const setWorkspace = useApp((s) => s.setWorkspace)
   const unlockedWorkspaces = useApp((s) => s.unlockedWorkspaces)
   const deleteWorkspace = useApp((s) => s.deleteWorkspace)
   // Confirming a delete: holds the workspace id awaiting confirmation.
@@ -31,22 +36,40 @@ export function WorkspaceManager(): React.JSX.Element {
   const active = workspaces.filter((w) => !w.hidden)
   const hidden = workspaces.filter((w) => w.hidden)
 
+  // Checked by the form rather than announced afterwards: a rule the form can
+  // enforce before the click is not an error, and an error toast for one is a
+  // telling-off with nothing to act on.
+  const passwordTooShort = withPassword && newPassword.length > 0 && newPassword.length < MIN_WS_PASSWORD
+  const canCreate = name.trim().length > 0 && (!withPassword || newPassword.length >= MIN_WS_PASSWORD)
+
   const create = async (): Promise<void> => {
-    if (!name.trim()) return
-    if (withPassword && newPassword.length < 6) {
-      toast('Password must be at least 6 characters', 'error')
-      return
+    const wname = name.trim()
+    if (!canCreate) return
+    const id = addWorkspace(wname, color)
+    const clearForm = (): void => {
+      setName('')
+      setNewPassword('')
+      setWithPassword(false)
     }
-    const id = addWorkspace(name.trim(), color)
     if (withPassword) {
       const r = await window.shellpilot?.workspaceLock.set(id, newPassword)
-      if (r?.ok) setWorkspaceProtected(id, true)
-      else toast(r?.error ?? 'Could not set the password', 'error')
+      if (!r?.ok) {
+        // The workspace itself was created, so "could not set the password"
+        // alone would leave someone believing a workspace is protected when it
+        // is wide open. Say what exists now, and open the form that finishes
+        // the job.
+        clearForm()
+        toast(
+          `"${wname}" was created, but without a password: ${r?.error ?? 'it could not be saved.'} Anyone using this app can open it.`,
+          'error',
+          { label: 'Set password', run: () => setEditing(id) }
+        )
+        return
+      }
+      setWorkspaceProtected(id, true)
     }
-    toast(`Workspace "${name.trim()}" created`, 'ok')
-    setName('')
-    setNewPassword('')
-    setWithPassword(false)
+    clearForm()
+    toast(`Workspace "${wname}" created`, 'ok')
   }
 
   const Row = ({
@@ -69,24 +92,44 @@ export function WorkspaceManager(): React.JSX.Element {
         {hasPassword && (
           <span
             className="row"
-            title={unlockedWorkspaces.includes(id) ? 'Protected — unlocked this session' : 'Protected — locked'}
+            title={
+              unlockedWorkspaces.includes(id)
+                ? 'Password protected — open until you lock it or quit'
+                : 'Password protected — asks for the password to open'
+            }
           >
             <Lock size={13} className="faint" />
           </span>
         )}
         <span className="spacer" />
-        {hasPassword && unlockedWorkspaces.includes(id) && (
-          <button
-            className="icon-btn sm"
-            title="Lock now"
-            onClick={() => {
-              lockWorkspace(id)
-              toast(`${wname} locked`)
-            }}
-          >
-            <LockOpen size={14} />
-          </button>
-        )}
+        {hasPassword &&
+          (unlockedWorkspaces.includes(id) ? (
+            <button
+              className="icon-btn sm"
+              title={`Lock ${wname} again now`}
+              onClick={() => {
+                lockWorkspace(id)
+                toast(`${wname} locked`)
+              }}
+            >
+              <LockOpen size={14} />
+            </button>
+          ) : (
+            // Reporting "locked" and leaving it there is the whole complaint.
+            // setWorkspace routes through the same gate as the switcher, so
+            // this opens the unlock dialog — with the manager out of the way so
+            // there is only one thing on screen asking for something.
+            <button
+              className="btn sm"
+              title={`Enter the password for ${wname} and open it`}
+              onClick={() => {
+                setModal(null)
+                setWorkspace(id)
+              }}
+            >
+              <Lock size={13} /> Unlock
+            </button>
+          ))}
         <button
           className="icon-btn sm"
           title={hasPassword ? 'Change or remove password' : 'Set password'}
@@ -94,12 +137,10 @@ export function WorkspaceManager(): React.JSX.Element {
         >
           <Lock size={14} />
         </button>
-        <button className="icon-btn sm" title="Duplicate" onClick={() => toast('Duplicated (mock)')}>
-          <Copy size={14} />
-        </button>
-        <button className="icon-btn sm" title="Export" onClick={() => toast('Exported workspace.json')}>
-          <Download size={14} />
-        </button>
+        {/* No Duplicate or Export here: both only ever announced work that
+            never happened ("Exported workspace.json"), and a message describing
+            an imaginary file is worse than no button. Settings → Backup is the
+            export that exists. */}
         <button
           className="icon-btn sm"
           title={isHidden ? 'Restore' : 'Hide'}
@@ -178,7 +219,18 @@ export function WorkspaceManager(): React.JSX.Element {
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
-          <button className="btn primary" onClick={() => void create()} disabled={!name.trim()}>
+          <button
+            className="btn primary"
+            onClick={() => void create()}
+            disabled={!canCreate}
+            title={
+              canCreate
+                ? 'Create this workspace'
+                : withPassword && name.trim()
+                  ? `Enter a password of at least ${MIN_WS_PASSWORD} characters first`
+                  : 'Give the workspace a name first'
+            }
+          >
             <Plus size={14} /> Create
           </button>
         </div>
@@ -207,13 +259,25 @@ export function WorkspaceManager(): React.JSX.Element {
           </label>
         </div>
         {withPassword && (
-          <input
-            className="input"
-            type="password"
-            placeholder="Workspace password (min 6 characters)"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-          />
+          <>
+            <input
+              className="input"
+              type="password"
+              placeholder={`Workspace password (min ${MIN_WS_PASSWORD} characters)`}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void create()}
+            />
+            {passwordTooShort && (
+              <div className="s-desc" style={{ color: 'var(--danger)' }}>
+                Use at least {MIN_WS_PASSWORD} characters.
+              </div>
+            )}
+            <div className="faint" style={{ fontSize: 11 }}>
+              Hides this workspace behind a password inside ShellPilot. It is not your vault master
+              password, and it does not encrypt anything on disk.
+            </div>
+          </>
         )}
       </div>
 
@@ -255,31 +319,48 @@ function PasswordForm({
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [busy, setBusy] = useState(false)
+  // Shown in the form rather than thrown at the corner of the screen: every
+  // failure here is "one of these two fields is wrong", and the fields are here.
+  const [error, setError] = useState<string | null>(null)
+  const currentRef = useRef<HTMLInputElement>(null)
+
+  const canSave = !busy && next.length >= MIN_WS_PASSWORD && (!hasPassword || current.length > 0)
+
+  // Only the current password can be wrong in a way the user can correct on the
+  // spot, so that is where the cursor goes back to.
+  const blame = (message: string): void => {
+    setError(message)
+    if (hasPassword) {
+      currentRef.current?.select()
+      currentRef.current?.focus()
+    }
+  }
 
   const save = async (): Promise<void> => {
-    if (next.length < 6 || busy) return
+    if (!canSave) return
     setBusy(true)
     const r = await window.shellpilot?.workspaceLock.set(id, next, current)
     setBusy(false)
     if (!r?.ok) {
-      toast(r?.error ?? 'Could not set the password', 'error')
+      blame(r?.error ?? 'That password could not be saved. Try again.')
       return
     }
     setWorkspaceProtected(id, true)
-    toast(hasPassword ? `Password changed for ${wname}` : `${wname} is now password protected`)
+    toast(hasPassword ? `Password changed for ${wname}` : `${wname} is now password protected`, 'ok')
     onDone()
   }
 
   const clear = async (): Promise<void> => {
+    if (busy || !current) return
     setBusy(true)
     const r = await window.shellpilot?.workspaceLock.remove(id, current)
     setBusy(false)
     if (!r?.ok) {
-      toast(r?.error ?? 'Could not remove the password', 'error')
+      blame(r?.error ?? 'The password could not be removed. Try again.')
       return
     }
     setWorkspaceProtected(id, false)
-    toast(`Password removed from ${wname}`)
+    toast(`${wname} no longer asks for a password`, 'ok')
     onDone()
   }
 
@@ -289,25 +370,54 @@ function PasswordForm({
         {hasPassword && (
           <input
             className="input grow"
+            ref={currentRef}
             type="password"
+            autoFocus
             placeholder="Current password"
             value={current}
-            onChange={(e) => setCurrent(e.target.value)}
+            onChange={(e) => {
+              setError(null)
+              setCurrent(e.target.value)
+            }}
+            onKeyDown={(e) => e.key === 'Enter' && void save()}
           />
         )}
         <input
           className="input grow"
           type="password"
-          placeholder={hasPassword ? 'New password (min 6)' : 'Password (min 6)'}
+          placeholder={
+            hasPassword
+              ? `New password (min ${MIN_WS_PASSWORD})`
+              : `Password (min ${MIN_WS_PASSWORD})`
+          }
           value={next}
-          onChange={(e) => setNext(e.target.value)}
+          onChange={(e) => {
+            setError(null)
+            setNext(e.target.value)
+          }}
           onKeyDown={(e) => e.key === 'Enter' && void save()}
         />
-        <button className="btn primary sm" disabled={busy || next.length < 6} onClick={() => void save()}>
+        <button
+          className="btn primary sm"
+          disabled={!canSave}
+          title={
+            canSave
+              ? undefined
+              : hasPassword && !current
+                ? 'Enter the current password first'
+                : `New password must be at least ${MIN_WS_PASSWORD} characters`
+          }
+          onClick={() => void save()}
+        >
           {hasPassword ? 'Change' : 'Set'}
         </button>
         {hasPassword && (
-          <button className="btn sm danger" disabled={busy || !current} onClick={() => void clear()}>
+          <button
+            className="btn sm danger"
+            disabled={busy || !current}
+            title={current ? `Stop asking for a password on ${wname}` : 'Enter the current password first'}
+            onClick={() => void clear()}
+          >
             Remove
           </button>
         )}
@@ -315,9 +425,11 @@ function PasswordForm({
           Cancel
         </button>
       </div>
+      {error && <div className="vault-error">{error}</div>}
       <div className="faint" style={{ fontSize: 11 }}>
-        Gates access to this workspace in the app. It does not encrypt its servers on disk — use the
-        Vault for secrets that must be encrypted at rest.
+        This password hides the workspace inside ShellPilot. It does not encrypt anything on disk,
+        and it is not your vault master password — for secrets that must be encrypted at rest, put
+        them in the Vault in the left sidebar.
       </div>
     </div>
   )

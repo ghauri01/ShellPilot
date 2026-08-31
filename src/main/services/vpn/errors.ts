@@ -56,10 +56,17 @@ export const VPN_ERROR_MESSAGE: Record<VpnErrorCode, string> = {
   internal: 'Something went wrong inside ShellPilot.'
 }
 
-// What the user should do next. Empty string means "the message says it all".
+// What the user should do next, in one short instruction. Empty string means
+// "the message says it all".
+//
+// One instruction, not a paragraph. The UI turns most of these codes into a
+// button — see `remedyFor` in components/vpn/VpnManager.tsx — so anything here
+// that reads as an explanation rather than an instruction is text the user
+// reads instead of clicking. The CLI and the log still print the sentence, so
+// it has to stand alone; it does not have to teach.
 export const VPN_ERROR_HINT: Record<VpnErrorCode, string> = {
-  'binary-missing': 'Install it, or point ShellPilot at it in the profile settings.',
-  'binary-untrusted': 'Reinstall ShellPilot. Antivirus software sometimes alters bundled files.',
+  'binary-missing': 'Install it, or set its path in the profile.',
+  'binary-untrusted': 'Reinstall ShellPilot — antivirus software sometimes alters bundled files.',
   // Not "check the highlighted fields": this arrives as a toast when the
   // profile form is closed, so there is nothing highlighted to look at.
   'config-invalid': 'Open the profile to fix it.',
@@ -69,17 +76,16 @@ export const VPN_ERROR_HINT: Record<VpnErrorCode, string> = {
   'tls-handshake-failed': 'Check the certificate and that the server address is right.',
   'cert-expired': 'Ask for a new certificate.',
   'handshake-timeout':
-    'Check the endpoint address, and that the port is not blocked. You may also need to sign in to this network first.',
+    'Check the endpoint address and port, and whether you need to sign in to this network first.',
   'dns-failure': 'Check the server address and your DNS settings.',
   'port-in-use': 'Choose another port, or leave it as 0 to pick one automatically.',
   'permission-denied': 'Try again and approve the administrator prompt.',
   'elevation-declined': 'Start it again and approve the prompt.',
   'network-unreachable': 'Check that you are online.',
   'server-rejected': 'Check the server address and port.',
-  'crash-loop': 'Open the log to see why, fix it, then start the tunnel again.',
-  'vault-locked': 'Unlock the vault and try again.',
-  'proxy-required':
-    'Set a proxy in the profile. WireGuard runs over UDP and cannot go through an HTTP proxy.',
+  'crash-loop': 'Open the log to see why it stopped.',
+  'vault-locked': 'Unlock the vault to continue.',
+  'proxy-required': 'Set a proxy in the profile.',
   'version-mismatch': 'Update ShellPilot, or ask the server operator which version to use.',
   'interface-conflict': 'Stop the other tunnel using that interface first.',
   'already-running': '',

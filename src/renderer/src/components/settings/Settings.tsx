@@ -12,10 +12,15 @@ import {
   Keyboard,
   Bell,
   Wrench,
-  DatabaseBackup, Compass } from 'lucide-react'
+  DatabaseBackup, Compass, Lock, LockOpen } from 'lucide-react'
 import { useApp } from '../../store/app'
 import type { ThemeMode } from '../../store/app'
+import { useNav } from '../../store/nav'
+import type { SettingsSection } from '../../store/nav'
+import { useVault } from '../../store/vault'
+import { useVaultPrompt } from '../../store/vaultPrompt'
 import { clsx } from '../../lib/format'
+import { bridgeOn } from '../../lib/bridge'
 import { ShortcutManager } from './ShortcutManager'
 import { BackupPanel } from './BackupPanel'
 import { UpdatePanel } from './UpdatePanel'
@@ -23,23 +28,41 @@ import { useOnboarding } from '../../store/onboarding'
 import { SshSessions } from './SshSessions'
 import { toast } from '../../store/toast'
 
-const SECTIONS = [
-  { id: 'general', label: 'General', icon: <Sliders size={16} /> },
-  { id: 'appearance', label: 'Appearance', icon: <Palette size={16} /> },
-  { id: 'terminal', label: 'Terminal', icon: <TerminalSquare size={16} /> },
-  { id: 'connections', label: 'Connections', icon: <Server size={16} /> },
-  { id: 'ssh', label: 'SSH', icon: <KeyRound size={16} /> },
-  { id: 'security', label: 'Security', icon: <Shield size={16} /> },
-  { id: 'sftp', label: 'SFTP', icon: <FolderCog size={16} /> },
-  { id: 'monitoring', label: 'Monitoring', icon: <Activity size={16} /> },
-  { id: 'editor', label: 'Editor', icon: <Code2 size={16} /> },
-  { id: 'shortcuts', label: 'Keyboard Shortcuts', icon: <Keyboard size={16} /> },
-  { id: 'backup', label: 'Backup & Restore', icon: <DatabaseBackup size={16} /> },
-  { id: 'notifications', label: 'Notifications', icon: <Bell size={16} /> },
-  { id: 'advanced', label: 'Advanced', icon: <Wrench size={16} /> }
-] as const
+// Keyed by the nav store's union rather than by a list that describes itself,
+// so a page added here without being added there — and therefore unreachable
+// from any `openSettings(...)` button — fails the build, and a page added to
+// the union without a label here fails it too.
+const SECTION_META: Record<SettingsSection, { label: string; icon: React.JSX.Element }> = {
+  general: { label: 'General', icon: <Sliders size={16} /> },
+  appearance: { label: 'Appearance', icon: <Palette size={16} /> },
+  terminal: { label: 'Terminal', icon: <TerminalSquare size={16} /> },
+  connections: { label: 'Connections', icon: <Server size={16} /> },
+  ssh: { label: 'SSH', icon: <KeyRound size={16} /> },
+  security: { label: 'Security', icon: <Shield size={16} /> },
+  sftp: { label: 'SFTP', icon: <FolderCog size={16} /> },
+  monitoring: { label: 'Monitoring', icon: <Activity size={16} /> },
+  editor: { label: 'Editor', icon: <Code2 size={16} /> },
+  shortcuts: { label: 'Keyboard Shortcuts', icon: <Keyboard size={16} /> },
+  backup: { label: 'Backup & Restore', icon: <DatabaseBackup size={16} /> },
+  notifications: { label: 'Notifications', icon: <Bell size={16} /> },
+  advanced: { label: 'Advanced', icon: <Wrench size={16} /> }
+}
 
-type SectionId = (typeof SECTIONS)[number]['id']
+const SECTIONS: SettingsSection[] = [
+  'general',
+  'appearance',
+  'terminal',
+  'connections',
+  'ssh',
+  'security',
+  'sftp',
+  'monitoring',
+  'editor',
+  'shortcuts',
+  'backup',
+  'notifications',
+  'advanced'
+]
 
 // A toggle backed by real, persisted state — unlike `Toggle` below, which is
 // still placeholder UI holding its value in local state.
@@ -102,7 +125,7 @@ function KnownHosts(): React.JSX.Element {
             className="btn sm danger"
             onClick={async () => {
               await window.shellpilot?.knownHosts.forget(h.id)
-              toast(`Forgot host key for ${h.id}`)
+              toast(`Forgot the saved key for ${h.id}. The next connection to it will ask again.`, 'ok')
               load()
             }}
           >
@@ -110,6 +133,64 @@ function KnownHosts(): React.JSX.Element {
           </button>
         </div>
       ))}
+    </div>
+  )
+}
+
+// The auto-lock control below is about a vault that may not exist yet, or may
+// be locked right now — and "the vault is locked" is only useful next to the
+// thing that unlocks it. Everywhere else in the app an operation that needs a
+// credential raises the unlock prompt itself; this is the one place the state
+// is the subject rather than a side effect, so it says so and offers the same
+// prompt rather than sending the user off to find the Vault view.
+function VaultState(): React.JSX.Element {
+  const exists = useVault((s) => s.exists)
+  const unlocked = useVault((s) => s.unlocked)
+  const refresh = useVault((s) => s.refresh)
+  const setActivity = useApp((s) => s.setActivity)
+
+  useEffect(() => {
+    void refresh()
+    // The vault can lock itself on the inactivity timer configured just below
+    // this row, and a row that goes on saying "unlocked" after that is worse
+    // than no row at all.
+    const off = bridgeOn('vault.onAutoLocked', window.shellpilot?.vault?.onAutoLocked, () => void refresh())
+    return () => off()
+  }, [refresh])
+
+  const unlock = async (): Promise<void> => {
+    await useVaultPrompt.getState().request('Unlocking makes your saved credentials usable again.')
+    void refresh()
+  }
+
+  return (
+    <div className="setting-row">
+      <div className="s-info">
+        <div className="s-title">
+          {unlocked ? <LockOpen size={13} /> : <Lock size={13} />}{' '}
+          {!exists ? 'No vault on this computer yet' : unlocked ? 'Vault unlocked' : 'Vault locked'}
+        </div>
+        <div className="s-desc">
+          {!exists
+            ? 'A vault holds one copy of each credential and travels inside an encrypted backup. Without one, every server keeps its own.'
+            : unlocked
+              ? 'Anything that needs a saved credential can use it until the timer below runs out.'
+              : 'Anything that needs a saved credential will ask you to unlock first.'}
+        </div>
+      </div>
+      {!exists ? (
+        <button className="btn sm" onClick={() => setActivity('vault')}>
+          Set up a vault
+        </button>
+      ) : unlocked ? (
+        <button className="btn sm" onClick={() => void useVault.getState().lock()}>
+          <Lock size={13} /> Lock now
+        </button>
+      ) : (
+        <button className="btn sm primary" onClick={() => void unlock()}>
+          <LockOpen size={13} /> Unlock vault
+        </button>
+      )}
     </div>
   )
 }
@@ -128,7 +209,11 @@ function Toggle({ label, desc, initial = false }: { label: string; desc: string;
 }
 
 export function Settings(): React.JSX.Element {
-  const [section, setSection] = useState<SectionId>('appearance')
+  // Held in the nav store so an error raised anywhere in the app can send the
+  // user to the page that resolves it — a host-key mismatch to Security, a
+  // too-old build to General — rather than to Settings in general.
+  const section = useNav((s) => s.settingsSection)
+  const setSection = useNav((s) => s.setSettingsSection)
   const startTour = useOnboarding((s) => s.start)
   const theme = useApp((s) => s.theme)
   const setTheme = useApp((s) => s.setTheme)
@@ -140,14 +225,14 @@ export function Settings(): React.JSX.Element {
     <div className="main">
       <div className="settings">
         <nav className="settings-nav">
-          {SECTIONS.map((s) => (
+          {SECTIONS.map((id) => (
             <button
-              key={s.id}
-              className={clsx('nav-item', section === s.id && 'active')}
-              onClick={() => setSection(s.id)}
+              key={id}
+              className={clsx('nav-item', section === id && 'active')}
+              onClick={() => setSection(id)}
             >
-              {s.icon}
-              {s.label}
+              {SECTION_META[id].icon}
+              {SECTION_META[id].label}
             </button>
           ))}
         </nav>
@@ -356,6 +441,7 @@ export function Settings(): React.JSX.Element {
             <div className="settings-section">
               <h2>Vault</h2>
               <div className="sub">The encrypted store for passwords, SSH keys and API keys.</div>
+              <VaultState />
               <div className="setting-row">
                 <div className="s-info">
                   <div className="s-title">Lock after inactivity</div>
@@ -411,7 +497,7 @@ export function Settings(): React.JSX.Element {
             'monitoring'
           ].includes(section) && (
             <div className="settings-section">
-              <h2>{SECTIONS.find((s) => s.id === section)?.label}</h2>
+              <h2>{SECTION_META[section].label}</h2>
               <div className="sub">Configure {section} preferences for this workspace.</div>
               <Toggle label={`Enable ${section} features`} desc="Turn this subsystem on." initial />
               <Toggle label="Sync across workspaces" desc="Share these settings between workspaces." />
@@ -420,7 +506,10 @@ export function Settings(): React.JSX.Element {
                   <div className="s-title">Reset {section}</div>
                   <div className="s-desc">Restore defaults for this section.</div>
                 </div>
-                <button className="btn sm" onClick={() => toast('Section reset')}>
+                <button
+                  className="btn sm"
+                  onClick={() => toast(`Nothing to reset — ${SECTION_META[section].label} has no saved settings yet.`)}
+                >
                   Reset
                 </button>
               </div>

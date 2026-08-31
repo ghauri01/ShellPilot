@@ -659,16 +659,23 @@ function describe(e: unknown): string {
  *  "install it", never "our download failed". */
 function absentReason(e: unknown, platform: NodeJS.Platform): string {
   const detail = e instanceof VpnError ? e.message : describe(e)
-  return `${detail} ShellPilot does not include OpenVPN, because its licence and ShellPilot's cannot be combined. ${installHint(platform)}`
+  // No licence explanation here. It used to say "ShellPilot does not include
+  // OpenVPN, because its licence and ShellPilot's cannot be combined", which is
+  // true, is the reason, and is of no use whatsoever to somebody who just wants
+  // their tunnel to start. Why we do not ship it belongs in
+  // THIRD-PARTY-NOTICES.md and docs/VPN.md, both of which say it at length; an
+  // error message gets the one thing the reader can act on.
+  return `${detail} ${installHint(platform)}`
 }
 
 function installHint(platform: NodeJS.Platform): string {
   if (platform === 'win32') {
-    // Worth naming twice over: the official package is the only supported
-    // route on Windows — there is no PATH search there (E44) — and it installs
-    // the Interactive Service, which is what removes the permission prompt on
-    // every connect (E05).
-    return 'Install OpenVPN from openvpn.net/community-downloads. The official installer also adds the OpenVPN Interactive Service, which lets tunnels connect without a Windows permission prompt each time.'
+    // The official package is the only supported route on Windows — there is
+    // no PATH search there (E44) — and it also installs the Interactive
+    // Service, which removes the permission prompt on every connect (E05).
+    // That second fact is worth knowing but is not what the reader needs in
+    // the first line, so the renderer keeps it behind Details.
+    return 'Install OpenVPN from openvpn.net/community-downloads. Its installer also adds the OpenVPN Interactive Service, so tunnels connect without a Windows permission prompt each time.'
   }
   if (platform === 'darwin') return 'Install it with Homebrew: brew install openvpn.'
   return 'Install your distribution’s openvpn package, for example apt install openvpn or dnf install openvpn.'

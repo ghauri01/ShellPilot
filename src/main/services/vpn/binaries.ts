@@ -249,11 +249,16 @@ export async function resolveSystem(
     }
   }
 
+  // Where it looked, and nothing else. What to do about it — install the
+  // engine, or point the profile at a copy — used to be tacked on here, which
+  // put four sentences of advice in a toast with no control in it. The UI
+  // renders the code's hint and a button that performs it, and shows this
+  // detail behind a Details disclosure for whoever actually wants the paths.
   const where = candidates.length ? candidates.join(', ') : 'the standard install locations'
   throw new VpnError(
     'binary-missing',
     win32
-      ? `Looked in ${where}. ShellPilot does not search PATH on Windows; install the official package, or set the program path in the profile.`
+      ? `Looked in ${where}. ShellPilot does not search PATH on Windows.`
       : `Looked in ${where} and on PATH.`
   )
 }

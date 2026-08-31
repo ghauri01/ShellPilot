@@ -13,6 +13,7 @@ import { useApp, useWorkspaceDatabases, useWorkspaceFolders } from '../../store/
 import { clsx } from '../../lib/format'
 import { toast } from '../../store/toast'
 import { ContextMenu, MenuEntry } from '../connections/ContextMenu'
+import { openDatabaseEditor } from '../../store/dbEditor'
 import type { DatabaseConn, DbKind, Folder } from '../../types'
 
 export const KIND_COLOR: Record<DbKind, string> = {
@@ -214,6 +215,7 @@ export function DatabaseSidebar(): React.JSX.Element {
           onClose={() => setCtx(null)}
           entries={[
             { label: 'Open', icon: <Plug size={14} />, onClick: () => openDatabase(ctx.id) },
+            { label: 'Edit connection', icon: <Pencil size={14} />, onClick: () => openDatabaseEditor(ctx.id) },
             { separator: true, label: '' },
             {
               label: 'Delete',

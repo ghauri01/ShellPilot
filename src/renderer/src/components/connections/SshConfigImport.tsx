@@ -62,7 +62,14 @@ export function SshConfigImport(): React.JSX.Element {
       if (!r) return
       setPath(r.path)
       if (!r.ok) {
-        setError(r.error ?? 'Could not read the SSH config')
+        // "No such file" is not a failure so much as an answer: there is
+        // nothing to import, and the way forward is to add a server by hand.
+        const missing = /no such file|ENOENT/i.test(r.error ?? '')
+        setError(
+          missing
+            ? `There is no ${r.path} on this machine, so there is nothing to import.`
+            : (r.error ?? `Could not read ${r.path}.`)
+        )
         return
       }
       const list = r.hosts ?? []
@@ -82,6 +89,7 @@ export function SshConfigImport(): React.JSX.Element {
   const runImport = async (): Promise<void> => {
     if (chosen.length === 0) return
     const folderId = intoFolder ? addFolder('Imported from ~/.ssh/config', null, 'server') : null
+    const unsaved: string[] = []
 
     for (const h of chosen) {
       const id = addServer({
@@ -97,10 +105,19 @@ export function SshConfigImport(): React.JSX.Element {
       // The key path travels through the encrypted secret store, same as a
       // manually added server.
       if (h.identityFile) {
-        await window.shellpilot?.secrets.set(id, JSON.stringify({ keyPath: h.identityFile }))
+        const ok = await window.shellpilot?.secrets.set(id, JSON.stringify({ keyPath: h.identityFile }))
+        if (ok === false) unsaved.push(h.alias)
       }
     }
     toast(`Imported ${chosen.length} server${chosen.length === 1 ? '' : 's'}`, 'ok')
+    // Actionless deliberately: the fix is a keychain this app cannot unlock,
+    // and each of these servers needs its key re-attached individually — which
+    // is what naming them here lets the user go and do.
+    if (unsaved.length)
+      toast(
+        `This device would not store a key path for ${unsaved.join(', ')} — open each one and set it again.`,
+        'error'
+      )
     setModal(null)
   }
 
@@ -128,7 +145,16 @@ export function SshConfigImport(): React.JSX.Element {
         </div>
       )}
 
-      {error && <div className="vault-error">{error}</div>}
+      {error && (
+        <>
+          <div className="vault-error">{error}</div>
+          <div className="row" style={{ gap: 8, marginTop: 10 }}>
+            <button className="btn primary" onClick={() => setModal('add-server')}>
+              Add a server manually
+            </button>
+          </div>
+        </>
+      )}
 
       {!loading && !error && hosts.length === 0 && (
         <div className="faint" style={{ padding: 12 }}>

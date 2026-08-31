@@ -110,8 +110,17 @@ export function ConnectionTree(): React.JSX.Element {
       label: 'Duplicate',
       icon: <Copy size={14} />,
       onClick: () => {
-        addServer({ ...s, name: `${s.name} copy` })
-        toast(`${s.name} duplicated`)
+        const id = addServer({ ...s, name: `${s.name} copy` })
+        // A credential is held in the OS keychain under the server's own id,
+        // so the copy starts without one. Saying so here beats an
+        // authentication failure later that reads as the original having
+        // broken. SSH-agent servers carry no stored credential either way.
+        if (s.auth === 'agent') toast(`${s.name} copy added`, 'ok')
+        else
+          toast(`${s.name} copy was added without a credential.`, 'info', {
+            label: 'Add one',
+            run: () => openServerEditor(id)
+          })
       }
     },
     { separator: true, label: '' },

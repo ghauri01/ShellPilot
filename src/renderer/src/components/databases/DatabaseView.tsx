@@ -10,6 +10,7 @@ import {
   FileCode2,
   TerminalSquare,
   Loader2,
+  Pencil,
   Trash2,
   X
 } from 'lucide-react'
@@ -20,8 +21,12 @@ import { DbShell } from './DbShell'
 import { toast } from '../../store/toast'
 import { KIND_COLOR, KIND_SHORT } from './DatabaseSidebar'
 import { sshHopFor } from '../../lib/ssh'
+import { withVaultUnlock } from '../../lib/withVaultUnlock'
+import { classifyConnectionError, errorText } from '../../lib/connectionError'
+import { openDatabaseCreator, openDatabaseEditor } from '../../store/dbEditor'
+import { openSettings } from '../../store/nav'
 import type { DatabaseConn, DbKind, Server } from '../../types'
-import type { DbConnectConfig, DbInfo, DbQueryResult } from '../../../../shared/db'
+import type { DbConnectConfig, DbInfo, DbQueryResult, DbTestResult } from '../../../../shared/db'
 
 const DEFAULT_QUERY: Record<DbKind, string> = {
   postgres: 'SELECT * FROM information_schema.tables LIMIT 20;',
@@ -52,13 +57,46 @@ function cfgOf(db: DatabaseConn, servers: Server[]): DbConnectConfig {
   }
 }
 
+// One sentence for a connection failure, picked from what the driver said.
+// The driver's own words stay on screen underneath; this is the part that says
+// which setting to go and look at.
+function connSummary(db: DatabaseConn, jump: Server | undefined, error: string | undefined): string {
+  switch (classifyConnectionError(error)) {
+    case 'refused':
+      return `Nothing is listening on ${db.host}:${db.port}.`
+    case 'unreachable':
+      return `${db.host} did not answer in time.`
+    case 'auth':
+      return `${db.host} rejected the username or password.`
+    case 'host-key':
+      return `${jump ? jump.name : 'The SSH server'} presented a different host key, so the tunnel was refused.`
+    case 'key-missing':
+      return `${jump ? `${jump.name}'s` : 'The'} private key file is not where the connection says it is.`
+    case 'passphrase':
+      return `${jump ? `${jump.name}'s` : 'The'} private key needs a passphrase.`
+    case 'permission':
+      return `${db.username || 'This user'} is not allowed to open ${db.database || 'this database'}.`
+    default:
+      return `Could not connect to ${db.name}.`
+  }
+}
+
 export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
   const deleteDatabase = useApp((s) => s.deleteDatabase)
   const servers = useWorkspaceServers()
+  // The bastion this database is reached through, when it has one. Named in
+  // failures so "the key is missing" says whose key.
+  const jumpServer = db.sshServerId ? servers.find((s) => s.id === db.sshServerId) : undefined
   const [query, setQuery] = useState(DEFAULT_QUERY[db.kind])
   const [result, setResult] = useState<DbQueryResult | null>(null)
   const [running, setRunning] = useState(false)
-  const [conn, setConn] = useState<{ phase: 'idle' | 'connecting' | 'ok' | 'error'; message?: string }>({ phase: 'idle' })
+  // `message` is the sentence a person reads; `detail` is the driver's own text,
+  // kept beside it so nothing is lost when the sentence is the short version.
+  const [conn, setConn] = useState<{
+    phase: 'idle' | 'connecting' | 'ok' | 'error'
+    message?: string
+    detail?: string
+  }>({ phase: 'idle' })
   const [info, setInfo] = useState<DbInfo | null>(null)
   const [dbName, setDbName] = useState(db.database)
   // Database picker. `typed` is true only while the user is actively typing, so
@@ -75,21 +113,43 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
     [db, servers]
   )
 
+  // Every call that reaches the database can need a credential the vault holds
+  // — its own password, or the bastion's key. Routing them through this means a
+  // locked vault produces an unlock dialog and the call finishing, rather than
+  // a rejected promise nobody catches.
+  const unlocked = useCallback(
+    <T,>(run: () => Promise<T>): Promise<T> => withVaultUnlock(`Connecting to ${db.name}`, run),
+    [db.name]
+  )
+
   const loadInfo = useCallback(
     async (dbn: string): Promise<DbInfo | undefined> => {
-      const i = await window.shellpilot?.db.info(cfgWith(dbn))
-      if (i) setInfo(i)
-      return i
+      try {
+        const i = await unlocked(async () => window.shellpilot?.db.info(cfgWith(dbn)))
+        if (i) setInfo(i)
+        return i
+      } catch {
+        // The connection banner already carries the failure; a second copy of
+        // it here would just be the same problem counted twice.
+        return undefined
+      }
     },
-    [cfgWith]
+    [cfgWith, unlocked]
   )
 
   const init = useCallback(
     async (dbn: string): Promise<void> => {
       setConn({ phase: 'connecting' })
-      const r = await window.shellpilot?.db.test(cfgWith(dbn))
+      let r: DbTestResult | undefined
+      try {
+        r = await unlocked(async () => window.shellpilot?.db.test(cfgWith(dbn)))
+      } catch (err) {
+        const detail = errorText(err)
+        setConn({ phase: 'error', message: connSummary(db, jumpServer, detail), detail })
+        return
+      }
       if (!r?.ok) {
-        setConn({ phase: 'error', message: r?.error ?? 'Connection failed' })
+        setConn({ phase: 'error', message: connSummary(db, jumpServer, r?.error), detail: r?.error })
         return
       }
       setConn({ phase: 'ok', message: r.version })
@@ -105,7 +165,7 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
         }
       }
     },
-    [cfgWith, loadInfo, db.kind]
+    [cfgWith, loadInfo, unlocked, db, jumpServer]
   )
 
   useEffect(() => {
@@ -134,11 +194,16 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
   const run = useCallback(async () => {
     if (!query.trim()) return
     setRunning(true)
-    const r = await window.shellpilot?.db.query(cfgWith(dbName), query)
-    setResult(r ?? { ok: false, error: 'No response' })
+    let r: DbQueryResult | undefined
+    try {
+      r = await unlocked(async () => window.shellpilot?.db.query(cfgWith(dbName), query))
+    } catch (err) {
+      r = { ok: false, error: errorText(err) }
+    }
+    setResult(r ?? { ok: false, error: 'The database did not answer.' })
     if (r?.ok && conn.phase !== 'ok') setConn({ phase: 'ok' })
     setRunning(false)
-  }, [query, conn.phase, cfgWith, dbName])
+  }, [query, conn.phase, cfgWith, dbName, unlocked])
 
   const onKey = (e: React.KeyboardEvent): void => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -267,8 +332,27 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
       {conn.phase === 'error' && (
         <div className="conn-error">
           <AlertTriangle size={14} />
-          <span className="selectable">{conn.message}</span>
+          <div style={{ minWidth: 0 }}>
+            <div className="selectable">{conn.message}</div>
+            {conn.detail && conn.detail !== conn.message && (
+              <div className="mono faint selectable" style={{ fontSize: 11 }}>
+                {conn.detail}
+              </div>
+            )}
+          </div>
           <span className="spacer" />
+          {/* A host key that no longer matches is not fixed by editing the
+              connection — the saved key has to be reviewed and forgotten
+              first, so that is the button that gets offered instead. */}
+          {classifyConnectionError(conn.detail) === 'host-key' ? (
+            <button className="btn sm" onClick={() => openSettings('security')}>
+              Review saved keys
+            </button>
+          ) : (
+            <button className="btn sm" onClick={() => openDatabaseEditor(db.id)}>
+              <Pencil size={13} /> Edit connection
+            </button>
+          )}
           <button className="btn sm" onClick={test}>
             Retry
           </button>
@@ -281,7 +365,9 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
             {db.kind === 'redis' ? 'Keyspace' : db.kind === 'mongodb' ? 'Collections' : 'Tables'}
           </div>
           <div style={{ overflowY: 'auto', flex: 1 }}>
-            {conn.phase === 'error' && <div className="faint" style={{ padding: 12, fontSize: 12 }}>{conn.message}</div>}
+            {conn.phase === 'error' && (
+              <div className="faint" style={{ padding: 12, fontSize: 12 }}>Not connected, so nothing can be listed.</div>
+            )}
             {(info?.tables ?? []).map((t) => (
               <div key={t} className="tree-row" onClick={() => insertTable(t)}>
                 <Table2 size={13} className="faint" />
@@ -442,7 +528,6 @@ export function DatabaseWorkspace(): React.JSX.Element {
   const openIds = useApp((s) => s.openDatabaseIds)
   const setActive = useApp((s) => s.setActiveDatabase)
   const closeDatabase = useApp((s) => s.closeDatabase)
-  const setModal = useApp((s) => s.setModal)
 
   const open = openIds.map((id) => databases.find((d) => d.id === id)).filter((d): d is DatabaseConn => !!d)
   const active = open.find((d) => d.id === activeId) ?? open[0]
@@ -456,7 +541,7 @@ export function DatabaseWorkspace(): React.JSX.Element {
           </div>
           <h3>No database selected</h3>
           <p>Add a database connection, then select it to run queries.</p>
-          <button className="btn primary" onClick={() => setModal('add-database')}>
+          <button className="btn primary" onClick={openDatabaseCreator}>
             <Plug size={15} /> Add Database
           </button>
         </div>

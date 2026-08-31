@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Network, Plus, Power, ArrowRight, Trash2, Loader2 } from 'lucide-react'
+import { Network, Plus, Power, ArrowRight, Trash2, Loader2, Pencil } from 'lucide-react'
 import { useApp, useWorkspaceServers, useWorkspaceTunnels } from '../../store/app'
 import { EmptyState } from '../common/EmptyState'
 import { Modal } from '../common/Modal'
 import { clsx } from '../../lib/format'
 import { toast } from '../../store/toast'
+import type { ToastAction } from '../../store/toast'
 import { parseEndpoint } from '../../../../shared/tunnel'
 import type { TunnelStatus } from '../../../../shared/tunnel'
 import { sshHopFor } from '../../lib/ssh'
-import type { Tunnel, TunnelKind } from '../../types'
+import { withVaultUnlock } from '../../lib/withVaultUnlock'
+import { classifyConnectionError, errorText } from '../../lib/connectionError'
+import { openSettings } from '../../store/nav'
+import type { Server, Tunnel, TunnelKind } from '../../types'
 import { bridgeHas } from '../../lib/bridge'
 
 const kindLabel: Record<TunnelKind, string> = {
@@ -17,12 +21,98 @@ const kindLabel: Record<TunnelKind, string> = {
   socks: 'SOCKS5 proxy'
 }
 
+/** Saves a change to an existing tunnel. `replaceAll` is the store's own bulk
+ *  setter and swaps the `tunnels` reference, which is what persist.ts watches,
+ *  so an edit is written to disk exactly like an add or a delete. */
+function saveTunnelEdit(id: string, patch: Partial<Tunnel>): void {
+  const state = useApp.getState()
+  state.replaceAll({ tunnels: state.tunnels.map((t) => (t.id === id ? { ...t, ...patch } : t)) })
+}
+
+/**
+ * One sentence for a tunnel failure, and the single control that fixes it.
+ *
+ * `web-db: listen EADDRINUSE: address already in use 127.0.0.1:5432` says what
+ * the socket layer saw. It does not say that the number the user typed into
+ * "Listen locally" is the one to change, which is the only thing they can act
+ * on — so that is what this says, and the button opens that field.
+ */
+function tunnelFailure(
+  t: Tunnel,
+  server: Server | undefined,
+  error: string | undefined,
+  edit: () => void
+): { message: string; action?: ToastAction } {
+  const listen = parseEndpoint(t.listen)
+  const editServer = server
+    ? { label: `Edit ${server.name}`, run: () => useApp.getState().openServerEditor(server.id) }
+    : undefined
+
+  // Binding below 1024 needs rights this app does not have. Nothing about the
+  // server or the credential is wrong, so neither of those buttons would help
+  // — the only fix is a higher port.
+  if (error && /below 1024|EACCES/i.test(error)) {
+    return {
+      message: `Port ${listen.port} needs administrator rights to open — pick one above 1024.`,
+      action: { label: 'Change the port', run: edit }
+    }
+  }
+
+  switch (classifyConnectionError(error)) {
+    case 'port-in-use':
+      return {
+        message: `Port ${listen.port} is already in use on ${t.kind === 'remote' ? (server?.name ?? 'the server') : 'this machine'}.`,
+        action: { label: 'Change the port', run: edit }
+      }
+    case 'host-key':
+      return {
+        message: `${server?.name ?? 'The server'} presented a different host key, so ${t.name} was refused.`,
+        action: { label: 'Review saved keys', run: () => openSettings('security') }
+      }
+    case 'key-missing':
+      return {
+        message: `${server?.name ?? 'The server'}'s private key file is missing, so ${t.name} could not open.`,
+        action: editServer
+      }
+    case 'passphrase':
+      return {
+        message: `${server?.name ?? 'The server'}'s private key needs a passphrase, so ${t.name} could not open.`,
+        action: editServer
+      }
+    case 'auth':
+      return {
+        message: `${server?.name ?? 'The server'} rejected the saved credential, so ${t.name} could not open.`,
+        action: editServer
+      }
+    case 'refused':
+      return {
+        message:
+          t.kind === 'socks'
+            ? `${t.name} could not reach ${server?.name ?? 'the server'}.`
+            : `${server?.name ?? 'The server'} reached ${t.target}, but nothing is listening there.`,
+        action: { label: 'Edit tunnel', run: edit }
+      }
+    case 'unreachable':
+      return {
+        message: `${server?.name ?? 'The server'} did not answer, so ${t.name} could not open.`,
+        action: editServer
+      }
+    default:
+      // Nothing recognised: the raw text is the only information there is, and
+      // dropping it to keep the sentence short would leave nothing to act on.
+      return { message: `${t.name}: ${error ?? 'the tunnel closed unexpectedly.'}`, action: { label: 'Edit tunnel', run: edit } }
+  }
+}
+
 export function TunnelManager(): React.JSX.Element {
   const tunnels = useWorkspaceTunnels()
   const servers = useWorkspaceServers()
   const deleteTunnel = useApp((s) => s.deleteTunnel)
   const setTunnelStatus = useApp((s) => s.setTunnelStatus)
   const [creating, setCreating] = useState(false)
+  // The tunnel the form is correcting, when it was opened from a failure or
+  // from the row's own pencil rather than from "Create tunnel".
+  const [editing, setEditing] = useState<Tunnel | null>(null)
   const [live, setLive] = useState<Record<string, TunnelStatus>>({})
   const [busy, setBusy] = useState<Record<string, boolean>>({})
 
@@ -42,8 +132,16 @@ export function TunnelManager(): React.JSX.Element {
         setLive((m) => ({ ...m, [id]: s }))
         setTunnelStatus(id, s.state === 'active' ? 'active' : 'inactive')
         if (s.state === 'error' && s.error) {
-          const name = useApp.getState().tunnels.find((t) => t.id === id)?.name ?? 'Tunnel'
-          toast(`${name}: ${s.error}`, 'error')
+          const app = useApp.getState()
+          const t = app.tunnels.find((x) => x.id === id)
+          if (!t) return
+          const { message, action } = tunnelFailure(
+            t,
+            app.servers.find((sv) => sv.id === t.serverId),
+            s.error,
+            () => setEditing(t)
+          )
+          toast(message, 'error', action)
         }
       })
     )
@@ -69,25 +167,44 @@ export function TunnelManager(): React.JSX.Element {
       } else {
         const server = servers.find((s) => s.id === t.serverId)
         if (!server) {
-          toast('This tunnel has no SSH server selected', 'error')
+          toast(`${t.name} has no SSH server to run over.`, 'error', {
+            label: 'Choose a server',
+            run: () => setEditing(t)
+          })
           setBusy((b) => ({ ...b, [t.id]: false }))
           return
         }
         const listen = parseEndpoint(t.listen)
         const target = t.kind === 'socks' ? { host: '', port: 0 } : parseEndpoint(t.target)
-        const r = await window.shellpilot?.tunnel.start(
-          {
-            id: t.id,
-            kind: t.kind,
-            listenHost: listen.host,
-            listenPort: listen.port,
-            targetHost: target.host,
-            targetPort: target.port
-          },
-          sshHopFor(server)
-        )
-        if (r?.ok) toast(`${t.name} listening on ${listen.host}:${r.listenPort}`, 'ok')
-        else toast(r?.error ?? 'Could not start the tunnel', 'error')
+        // A server that authenticates from the vault cannot be dialled while
+        // the vault is locked, and the handler rejects rather than returning a
+        // result — so the unlock happens here and the start simply carries on.
+        let error: string | undefined
+        let listenPort: number | undefined
+        try {
+          const r = await withVaultUnlock(`Starting ${t.name}`, async () =>
+            window.shellpilot?.tunnel.start(
+              {
+                id: t.id,
+                kind: t.kind,
+                listenHost: listen.host,
+                listenPort: listen.port,
+                targetHost: target.host,
+                targetPort: target.port
+              },
+              sshHopFor(server)
+            )
+          )
+          if (r?.ok) listenPort = r.listenPort
+          else error = r?.error ?? 'The tunnel did not open.'
+        } catch (err) {
+          error = errorText(err)
+        }
+        if (error === undefined) toast(`${t.name} listening on ${listen.host}:${listenPort}`, 'ok')
+        else {
+          const { message, action } = tunnelFailure(t, server, error, () => setEditing(t))
+          toast(message, 'error', action)
+        }
       }
       setBusy((b) => ({ ...b, [t.id]: false }))
     },
@@ -120,7 +237,15 @@ export function TunnelManager(): React.JSX.Element {
             </button>
           }
         />
-        {creating && <TunnelForm onClose={() => setCreating(false)} />}
+        {(creating || editing) && (
+          <TunnelForm
+            tunnel={editing}
+            onClose={() => {
+              setCreating(false)
+              setEditing(null)
+            }}
+          />
+        )}
       </div>
     )
   }
@@ -162,6 +287,9 @@ export function TunnelManager(): React.JSX.Element {
               {busy[t.id] ? <Loader2 size={13} className="spin" /> : <Power size={13} />}
               {on ? 'Stop' : 'Start'}
             </button>
+            <button className="icon-btn sm" title="Edit tunnel" onClick={() => setEditing(t)}>
+              <Pencil size={14} />
+            </button>
             <button
               className="icon-btn sm"
               title="Delete tunnel"
@@ -177,33 +305,54 @@ export function TunnelManager(): React.JSX.Element {
         )
       })}
 
-      {creating && <TunnelForm onClose={() => setCreating(false)} />}
+      {(creating || editing) && (
+        <TunnelForm
+          tunnel={editing}
+          onClose={() => {
+            setCreating(false)
+            setEditing(null)
+          }}
+        />
+      )}
     </div>
   )
 }
 
-function TunnelForm({ onClose }: { onClose: () => void }): React.JSX.Element {
+function TunnelForm({ tunnel, onClose }: { tunnel?: Tunnel | null; onClose: () => void }): React.JSX.Element {
   const servers = useWorkspaceServers()
   const addTunnel = useApp((s) => s.addTunnel)
 
-  const [name, setName] = useState('')
-  const [kind, setKind] = useState<TunnelKind>('local')
-  const [serverId, setServerId] = useState(servers[0]?.id ?? '')
-  const [listen, setListen] = useState('127.0.0.1:8080')
-  const [target, setTarget] = useState('localhost:80')
+  const [name, setName] = useState(tunnel?.name ?? '')
+  const [kind, setKind] = useState<TunnelKind>(tunnel?.kind ?? 'local')
+  const [serverId, setServerId] = useState(tunnel?.serverId ?? servers[0]?.id ?? '')
+  const [listen, setListen] = useState(tunnel?.listen ?? '127.0.0.1:8080')
+  const [target, setTarget] = useState(tunnel?.target || 'localhost:80')
 
   const socks = kind === 'socks'
   const valid = name.trim() && serverId && parseEndpoint(listen).port > 0 && (socks || parseEndpoint(target).port > 0)
 
   const save = (): void => {
     if (!valid) return
-    addTunnel({ name: name.trim(), kind, serverId, listen: listen.trim(), target: socks ? '' : target.trim() })
-    toast(`${name.trim()} created — press Start to open it`, 'ok')
+    const fields = { name: name.trim(), kind, serverId, listen: listen.trim(), target: socks ? '' : target.trim() }
+    if (tunnel) {
+      // Stop first: the running tunnel still holds the old port, and leaving it
+      // there is how "I changed the port and it is still in use" happens.
+      void window.shellpilot?.tunnel.stop(tunnel.id)
+      saveTunnelEdit(tunnel.id, fields)
+      toast(`${fields.name} saved — press Start to open it`, 'ok')
+    } else {
+      addTunnel(fields)
+      toast(`${fields.name} created — press Start to open it`, 'ok')
+    }
     onClose()
   }
 
   return (
-    <Modal title="Create tunnel" subtitle="Forward a port over an SSH connection" onClose={onClose}>
+    <Modal
+      title={tunnel ? 'Edit tunnel' : 'Create tunnel'}
+      subtitle="Forward a port over an SSH connection"
+      onClose={onClose}
+    >
       <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <input
           className="input"
@@ -231,7 +380,7 @@ function TunnelForm({ onClose }: { onClose: () => void }): React.JSX.Element {
         <label className="field">
           <span className="field-label">SSH server</span>
           <select className="input" value={serverId} onChange={(e) => setServerId(e.target.value)}>
-            {servers.length === 0 && <option value="">No servers in this workspace</option>}
+            {servers.length === 0 && <option value="">Add a server first — this workspace has none</option>}
             {servers.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name} ({s.username}@{s.host})
@@ -266,7 +415,7 @@ function TunnelForm({ onClose }: { onClose: () => void }): React.JSX.Element {
             Cancel
           </button>
           <button className="btn primary sm" disabled={!valid} onClick={save}>
-            <Plus size={14} /> Create
+            {tunnel ? <Pencil size={14} /> : <Plus size={14} />} {tunnel ? 'Save' : 'Create'}
           </button>
         </div>
       </div>

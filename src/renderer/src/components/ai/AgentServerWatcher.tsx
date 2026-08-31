@@ -53,6 +53,14 @@ export function AgentServerWatcher(): null {
               // supplied, and half-adding it would leave the user to guess what
               // went wrong, so undo rather than report success.
               useApp.getState().deleteServer(serverId)
+              // The agent is told; so is the person, who would otherwise see an
+              // agent claim it added a server that is not there. Nothing in the
+              // app can grant it access to the OS keychain, so this one has no
+              // button — the sentence is the whole of what can be done.
+              toast(
+                `${req.name} was not added — this computer's secure storage refused the credential, and ShellPilot will not keep one anywhere else.`,
+                'error'
+              )
               api?.replyCreateServer?.(id, {
                 ok: false,
                 error: 'OS secure storage is unavailable, so the credential could not be saved.'
@@ -61,13 +69,15 @@ export function AgentServerWatcher(): null {
             }
           }
 
-          toast(`${req.name} added by an AI agent`, 'ok')
+          toast(`An AI agent added the server ${req.name}.`, 'ok', {
+            label: 'Show it',
+            run: () => useApp.getState().setActivity('connections')
+          })
           api?.replyCreateServer?.(id, { ok: true, serverId })
         } catch (err) {
-          api?.replyCreateServer?.(id, {
-            ok: false,
-            error: err instanceof Error ? err.message : String(err)
-          })
+          const reason = err instanceof Error ? err.message : String(err)
+          toast(`An AI agent tried to add ${req.name} and it did not work: ${reason}`, 'error')
+          api?.replyCreateServer?.(id, { ok: false, error: reason })
         }
       })()
     })

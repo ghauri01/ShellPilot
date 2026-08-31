@@ -22,8 +22,11 @@ import { toast } from '../../store/toast'
 import { useApp } from '../../store/app'
 import { bytes, clsx } from '../../lib/format'
 import { sshHopsFor } from '../../lib/ssh'
+import { withVaultUnlock } from '../../lib/withVaultUnlock'
+import { classifyConnectionError, errorText } from '../../lib/connectionError'
+import { openSettings } from '../../store/nav'
 import type { Server } from '../../types'
-import type {SftpEntry, SftpProgress, SshAuth} from '../../../../shared/ssh'
+import type { SftpEntry, SftpProgress, SftpResult, SshAuth } from '../../../../shared/ssh'
 import { bridgeOn } from '../../lib/bridge'
 
 const asAuth = (a: string): SshAuth => (a === 'password' || a === 'agent' ? a : 'key')
@@ -45,13 +48,73 @@ function mtimeLabel(ms: number): string {
     .slice(0, 5)}`
 }
 
+/** Something the user can click about a failure. */
+interface Fix {
+  label: string
+  run: () => void
+}
+
+interface SftpFailure {
+  message: string
+  detail?: string
+  fix?: Fix
+  retry: Fix
+}
+
+const MISSING = /no such file|ENOENT/i
+
+// A file operation that failed, said as a sentence.
+//
+// "Rename failed" tells the user only that they already know. Which file, in
+// which directory, and whether the server said "you may not" or "that is not
+// there" is the part that decides what they do next — so that is what this
+// says. An error nothing recognises keeps the server's own words: an unhelpful
+// string still beats discarding the only evidence there is.
+function fileFailure(verb: string, what: string, dir: string, error: string | undefined): string {
+  if (classifyConnectionError(error) === 'permission') return `${dir} does not allow you to ${verb} ${what}.`
+  if (error && MISSING.test(error)) return `${what} is no longer in ${dir}.`
+  return error ? `Could not ${verb} ${what} — ${error}` : `Could not ${verb} ${what}.`
+}
+
+// Why the SSH chain behind the Files tab would not come up, and the one screen
+// that holds the setting to change.
+function connectFailure(
+  server: Server,
+  error: string | undefined,
+  editServer: (id: string) => void,
+  retry: Fix
+): SftpFailure {
+  const fixServer: Fix = { label: `Edit ${server.name}`, run: () => editServer(server.id) }
+  const of = (message: string, fix?: Fix): SftpFailure => ({ message, detail: error, fix, retry })
+
+  switch (classifyConnectionError(error)) {
+    case 'host-key':
+      return of(`${server.name} presented a different host key, so the connection was refused.`, {
+        label: 'Review saved keys',
+        run: () => openSettings('security')
+      })
+    case 'key-missing':
+      return of(`${server.name}'s private key file is not where the connection says it is.`, fixServer)
+    case 'passphrase':
+      return of(`${server.name}'s private key needs a passphrase.`, fixServer)
+    case 'auth':
+      return of(`${server.name} rejected the saved credential.`, fixServer)
+    case 'refused':
+      return of(`Nothing is listening on ${server.host}:${server.port}.`, fixServer)
+    case 'unreachable':
+      return of(`${server.host} did not answer in time.`, fixServer)
+    default:
+      return of(`Could not open files on ${server.name}.`)
+  }
+}
+
 // ---- Real SFTP -------------------------------------------------------------
 function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.JSX.Element {
   const key = server.id
   const [path, setPath] = useState('/')
   const [entries, setEntries] = useState<SftpEntry[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<SftpFailure | null>(null)
   const [query, setQuery] = useState('')
   const [ctx, setCtx] = useState<{ x: number; y: number; entry: SftpEntry } | null>(null)
   const [creating, setCreating] = useState(false)
@@ -62,6 +125,7 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
   const [dropping, setDropping] = useState(false)
   const editorCommand = useApp((s) => s.settings.externalEditorCommand)
   const preferExternal = useApp((s) => s.settings.openFilesExternally)
+  const openServerEditor = useApp((s) => s.openServerEditor)
 
   // Remote writes triggered by an external save happen in the main process, so
   // the result is reported back here.
@@ -69,7 +133,10 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
     return bridgeOn('sftp.onExternalSaved', window.shellpilot?.sftp?.onExternalSaved, (r) => {
       const name = r.remotePath.split('/').pop()
       if (r.ok) toast(`${name} saved to the server`, 'ok')
-      else toast(`${name}: ${r.error ?? 'upload failed'}`, 'error')
+      // No button: the file is open in the user's own editor, and saving it
+      // there again is the retry — one that exists outside this window.
+      else if (r.error) toast(`${name} was saved locally but not uploaded — ${r.error}`, 'error')
+      else toast(`${name} was saved locally, but uploading it to the server failed.`, 'error')
     })
   }, [])
   const [linked, setLinked] = useState(true)
@@ -96,22 +163,52 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
     [server]
   )
 
+  // Any call over this channel can need a credential the vault holds, and the
+  // handler rejects rather than returning a result when it is locked. Routing
+  // through withVaultUnlock turns that into an unlock dialog and a call that
+  // finishes, instead of a promise nobody catches and a spinner that never stops.
+  const unlocked = useCallback(
+    <T,>(run: () => Promise<T>): Promise<T> => withVaultUnlock(`Opening files on ${server.name}`, run),
+    [server.name]
+  )
+
   const list = useCallback(
     async (p: string): Promise<boolean> => {
       setLoading(true)
       setError(null)
-      const res = await window.shellpilot?.sftp.list(key, p)
+      let res: SftpResult<SftpEntry[]> | undefined
+      try {
+        res = await unlocked(async () => window.shellpilot?.sftp.list(key, p))
+      } catch (err) {
+        res = { ok: false, error: errorText(err) }
+      }
       if (res?.ok && res.data) {
         setEntries(res.data)
         setPath(p)
         setLoading(false)
         return true
       }
-      setError(res?.error ?? 'Failed to list directory')
+      const detail = res?.error
+      const message =
+        classifyConnectionError(detail) === 'permission'
+          ? `You do not have permission to open ${p}.`
+          : detail && MISSING.test(detail)
+            ? `${p} is not there any more.`
+            : `Could not open ${p}.`
+      // A failed step into a directory leaves the last good one loaded, so the
+      // way out is back to it rather than a retry that fails the same way.
+      setError({
+        message,
+        detail,
+        retry:
+          p === path
+            ? { label: 'Try again', run: () => void list(p) }
+            : { label: `Back to ${path}`, run: () => void list(path) }
+      })
       setLoading(false)
       return false
     },
-    [key]
+    [key, path, unlocked]
   )
 
   // Navigate here AND mirror the change to the terminal (cd) when linked.
@@ -128,21 +225,44 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
     [list, tabId, setTabCwd, linked, session]
   )
 
-  useEffect(() => {
-    let alive = true
-    ;(async () => {
+  // Opening the channel, and the way back in after it failed. Retrying a failed
+  // connect has to redial — listing a key that never connected only produces a
+  // second, less recognisable failure.
+  const connect = useCallback(
+    async (alive: () => boolean): Promise<void> => {
       setLoading(true)
-      const res = await window.shellpilot?.sftp.connect(key, cfg())
-      if (!alive) return
+      setError(null)
+      let res: SftpResult<{ home: string }> | undefined
+      try {
+        res = await unlocked(async () => window.shellpilot?.sftp.connect(key, cfg()))
+      } catch (err) {
+        res = { ok: false, error: errorText(err) }
+      }
+      if (!alive()) return
       if (res?.ok) {
         connectedRef.current = true
         // Start where the terminal is, if known; otherwise the SFTP home.
         await list(termCwd || res.data?.home || '/')
-      } else {
-        setError(res?.error ?? 'Connection failed')
-        setLoading(false)
+        return
       }
-    })()
+      setError(
+        connectFailure(server, res?.error, openServerEditor, {
+          label: 'Try again',
+          run: () => void connect(() => true)
+        })
+      )
+      setLoading(false)
+    },
+    // list and termCwd deliberately excluded: this reconnects a channel, and
+    // rebuilding it whenever the current directory changes would redial the
+    // whole jump chain on every navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key, cfg, unlocked, server, openServerEditor]
+  )
+
+  useEffect(() => {
+    let alive = true
+    void connect(() => alive)
     return () => {
       // Keep the SFTP connection cached in the main process so re-opening the
       // Files tab is instant instead of re-establishing the SSH/jump chain.
@@ -171,26 +291,42 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
     const remote = join(path, e.name)
     const r = await window.shellpilot?.sftp.editExternal(key, remote, editorCommand)
     if (r?.ok) toast(`Opened ${e.name} — saves upload automatically`, 'ok')
-    else toast(r?.error ?? 'Could not open the file', 'error')
+    else
+      toast(fileFailure('open', e.name, path, r?.error), 'error', {
+        label: 'Open here instead',
+        run: () => void openFile(e)
+      })
   }
 
   const openFile = async (e: SftpEntry): Promise<void> => {
     if (e.size > 2_000_000) {
-      toast('File too large to edit inline', 'error')
+      toast(`${e.name} is ${bytes(e.size)} — too large for the editor in this window.`, 'error', {
+        label: editorCommand ? `Open in ${editorCommand}` : 'Open in your editor',
+        run: () => void openExternally(e)
+      })
       return
     }
     const res = await window.shellpilot?.sftp.read(key, join(path, e.name))
     if (res?.ok) setEditor({ path: join(path, e.name), content: res.data ?? '' })
-    else toast(res?.error ?? 'Read failed', 'error')
+    // No button: the same read through the external editor goes down the same
+    // channel and is refused for the same reason.
+    else toast(fileFailure('read', e.name, path, res?.error), 'error')
   }
 
   const saveFile = async (content: string): Promise<void> => {
     if (!editor) return
+    const name = editor.path.split('/').pop() ?? editor.path
     const res = await window.shellpilot?.sftp.write(key, editor.path, content)
     if (res?.ok) {
-      toast('Saved', 'ok')
+      toast(`${name} saved`, 'ok')
       setEditor(null)
-    } else toast(res?.error ?? 'Write failed', 'error')
+    } else
+      // The editor stays open, so the retry writes exactly what is still on
+      // screen rather than whatever the file happens to hold now.
+      toast(fileFailure('save', name, path, res?.error), 'error', {
+        label: 'Try again',
+        run: () => void saveFile(content)
+      })
   }
 
   const createFolder = async (): Promise<void> => {
@@ -201,7 +337,9 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
       setNewName('')
       setCreating(false)
       void list(path)
-    } else toast(res?.error ?? 'mkdir failed', 'error')
+      // The name field stays open behind this, so there is nothing a button
+      // would do that the still-focused input does not already offer.
+    } else toast(fileFailure('create', newName.trim(), path, res?.error), 'error')
   }
 
   const doRename = async (from: SftpEntry, to: string): Promise<void> => {
@@ -209,7 +347,11 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
     if (!to.trim() || to === from.name) return
     const res = await window.shellpilot?.sftp.rename(key, join(path, from.name), join(path, to.trim()))
     if (res?.ok) void list(path)
-    else toast(res?.error ?? 'Rename failed', 'error')
+    else
+      toast(fileFailure('rename', from.name, path, res?.error), 'error', {
+        label: 'Rename again',
+        run: () => setRenaming(from.name)
+      })
   }
 
   const remove = async (e: SftpEntry): Promise<void> => {
@@ -218,7 +360,9 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
     if (res?.ok) {
       toast(`Deleted ${e.name}`)
       void list(path)
-    } else toast(res?.error ?? 'Delete failed', 'error')
+      // Actionless on purpose: the same delete against the same permissions
+      // fails the same way, and a button that repeats it is theatre.
+    } else toast(fileFailure('delete', e.name, path, res?.error), 'error')
   }
 
   // Transfer progress is reported from the main process while an upload runs.
@@ -241,8 +385,21 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
     const done = res?.data?.uploaded.length ?? 0
     const failed = res?.data?.failed ?? []
     if (done) toast(`Uploaded ${done} file${done > 1 ? 's' : ''} to ${path}`, 'ok')
-    for (const f of failed) toast(`${f.name}: ${f.error}`, 'error')
-    if (!done && !failed.length) toast(res?.error ?? 'Upload failed', 'error')
+    for (const f of failed) {
+      // The summary reports basenames; the local file that produced one is
+      // still in `paths`, which is what makes a per-file retry possible.
+      const local = paths.find((x) => baseName(x) === f.name)
+      toast(
+        fileFailure('upload', f.name, path, f.error),
+        'error',
+        local ? { label: 'Try again', run: () => void upload([local]) } : undefined
+      )
+    }
+    if (!done && !failed.length)
+      toast(res?.error ? `Nothing was uploaded to ${path} — ${res.error}` : `Nothing was uploaded to ${path}.`, 'error', {
+        label: 'Choose files',
+        run: () => void pickAndUpload()
+      })
     void list(path)
   }
 
@@ -272,7 +429,18 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
         ]
       : []),
     { label: 'Rename', icon: <Edit3 size={14} />, onClick: () => setRenaming(e.name) },
-    { label: 'Download', icon: <Download size={14} />, onClick: () => toast('Download coming soon') },
+    {
+      label: 'Download',
+      icon: <Download size={14} />,
+      // Saving to a chosen folder is not built yet. Opening the file in an
+      // editor does fetch a local copy, which is what most people want when
+      // they reach for Download — so that is offered rather than a dead end.
+      onClick: () =>
+        toast('Saving to a folder is not built yet.', 'info', {
+          label: editorCommand ? `Open in ${editorCommand}` : 'Open in your editor',
+          run: () => void openExternally(e)
+        })
+    },
     { separator: true, label: '' },
     { label: 'Delete', icon: <Trash2 size={14} />, danger: true, onClick: () => void remove(e) }
   ]
@@ -372,15 +540,26 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
       )}
 
       {error && !loading && (
-        <div className="empty" style={{ height: 200 }}>
+        <div className="empty" style={{ height: 220 }}>
           <div className="empty-icon" style={{ color: 'var(--danger)' }}>
             <AlertTriangle size={22} />
           </div>
-          <h3>Could not open SFTP</h3>
-          <p className="mono">{error}</p>
-          <button className="btn" onClick={() => void list(path)}>
-            <RefreshCw size={14} /> Retry
-          </button>
+          <h3>{error.message}</h3>
+          {error.detail && error.detail !== error.message && (
+            <p className="mono selectable" style={{ fontSize: 11 }}>
+              {error.detail}
+            </p>
+          )}
+          <div className="row" style={{ gap: 8 }}>
+            {error.fix && (
+              <button className="btn primary" onClick={error.fix.run}>
+                {error.fix.label}
+              </button>
+            )}
+            <button className="btn" onClick={error.retry.run}>
+              <RefreshCw size={14} /> {error.retry.label}
+            </button>
+          </div>
         </div>
       )}
 
@@ -551,18 +730,28 @@ const DEMO_TREE: Record<string, { name: string; dir: boolean; size: number; mtim
 const EDITORS = ['VS Code', 'Cursor', 'Sublime Text', 'Notepad++', 'System Default']
 
 function DemoSftp(): React.JSX.Element {
+  const setModal = useApp((s) => s.setModal)
   const [path, setPath] = useState('/opt/app')
   const [query, setQuery] = useState('')
   const [ctx, setCtx] = useState<{ x: number; y: number; name: string; dir: boolean } | null>(null)
   const entries = (DEMO_TREE[path] ?? []).filter((e) => e.name.toLowerCase().includes(query.toLowerCase()))
   const parts = path === '/' ? [] : path.split('/').filter(Boolean)
 
+  // Everything in this pane is a fixture. Saying "(demo)" after the fact
+  // explains nothing to someone who never chose a demo — the way out of it is
+  // a real server, so that is the button.
+  const notReal = (what: string): void =>
+    toast(`${what} does nothing here — this is a sample file list, not a real server.`, 'info', {
+      label: 'Add a real server',
+      run: () => setModal('add-server')
+    })
+
   const open = (e: { name: string; dir: boolean }): void => {
     if (e.dir) {
       const next = path === '/' ? `/${e.name}` : `${path}/${e.name}`
       if (DEMO_TREE[next]) setPath(next)
-      else toast(`${e.name}/ is empty (demo)`)
-    } else toast(`Opening ${e.name}… (demo)`)
+      else notReal(`${e.name}/`)
+    } else notReal(e.name)
   }
 
   return (
@@ -638,12 +827,16 @@ function DemoSftp(): React.JSX.Element {
           y={ctx.y}
           onClose={() => setCtx(null)}
           entries={[
-            { label: 'Download', icon: <Download size={14} />, onClick: () => toast('demo') },
+            { label: 'Download', icon: <Download size={14} />, onClick: () => notReal('Download') },
             ...(!ctx.dir
-              ? EDITORS.map((ed) => ({ label: `Open with ${ed}`, icon: <Edit3 size={14} />, onClick: () => toast(`Open in ${ed} (demo)`) }))
+              ? EDITORS.map((ed) => ({
+                  label: `Open with ${ed}`,
+                  icon: <Edit3 size={14} />,
+                  onClick: () => notReal(`Open with ${ed}`)
+                }))
               : []),
             { separator: true, label: '' },
-            { label: 'Delete', icon: <Trash2 size={14} />, danger: true, onClick: () => toast('demo', 'error') }
+            { label: 'Delete', icon: <Trash2 size={14} />, danger: true, onClick: () => notReal('Delete') }
           ]}
         />
       )}
