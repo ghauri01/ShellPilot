@@ -100,9 +100,24 @@ describe('the module stays loadable from the renderer', () => {
     // catch. Keep this module dependency-free; put anything that needs a
     // runtime somewhere else.
     const source = readFileSync('src/shared/vpnEngines.ts', 'utf8')
-    const imports = source
-      .split('\n')
-      .filter((line) => /^\s*import\b/.test(line) && !/^\s*import type\b/.test(line))
-    expect(imports, `vpnEngines.ts must import nothing:\n${imports.join('\n')}`).toEqual([])
+    // Comments are stripped first, so the module's own prose about importing
+    // nothing cannot trip its own guard.
+    const code = source.split('\n').filter((line) => {
+      const t = line.trim()
+      return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+    })
+    // Three forms, because all three reach a module at runtime and all three
+    // break the renderer bundle: a static `import`, a dynamic `import(...)`,
+    // and a `require(...)`. Checking only the first would leave the guard blind
+    // to the exact thing it exists to catch.
+    //
+    // `import type` is exempt, and that is not a hole — type imports are
+    // erased before a bundler ever sees them, so they cannot break anything.
+    const offenders = code.filter(
+      (line) =>
+        (/^\s*import\b/.test(line) && !/^\s*import type\b/.test(line)) ||
+        /\brequire\s*\(|\bimport\s*\(/.test(line)
+    )
+    expect(offenders, `vpnEngines.ts must import nothing:\n${offenders.join('\n')}`).toEqual([])
   })
 })
