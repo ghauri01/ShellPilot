@@ -75,7 +75,8 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "pack": "npm run build && electron-builder --dir",
     "dist:portable": "npm run build && electron-builder --win portable",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:advisories": "node scripts/check-engine-advisories.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
