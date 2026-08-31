@@ -72,11 +72,10 @@ import {
 } from './services/vpn/manager'
 import { vpnCommitImport, vpnDeleteSecrets, vpnImport } from './services/vpn/import'
 import { wireguardDriver } from './services/vpn/drivers/wireguard'
-import { deleteVpnSecrets, stageImportedSecrets } from './services/vpn/vaultBridge'
+import { mintKeypair, storeKeypair } from './services/vpn/keys'
 import { toVpnResult } from './services/vpn/errors'
 import { withVpnTransport, withVpnTransportDb } from './services/vpn/transport'
-import { isVaultLockedError } from './services/credentialResolver'
-import type { VpnKeygenResult, VpnKind, VpnPublicKeyResult, VpnSpec } from '../shared/vpn'
+import type { VpnKeygenResult, VpnKind, VpnMintResult, VpnPublicKeyResult, VpnSpec } from '../shared/vpn'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
 import { backupExport, backupImport, backupInspect, deleteAllData, relaunchApp } from './services/backup'
 import { checkForUpdates, getUpdaterStatus, onUpdaterStatus, installUpdate, openReleasePage } from './services/updater'
@@ -575,53 +574,21 @@ ipcMain.handle(
     vpnCommitImport(name, workspaceId, kind, text, baseDir)
 )
 ipcMain.handle('vpn:deleteSecrets', (_e, vaultEntryId: string) => vpnDeleteSecrets(vaultEntryId))
-// A generated WireGuard key takes exactly the road an imported one takes:
-// `stageImportedSecrets` writes it into a `vpn` vault entry and the profile
-// keeps a ref. There is no second storage path — the renderer persists the
-// pointer, never the key.
+// Two channels, because they do two different things to the vault.
 //
-// `privateKey` set means "adopt this one instead of minting one", which is how
-// a key pasted from somewhere else gets stored and how its public half is
-// confirmed at the same time. Neither branch logs: this handler is the only
-// thing between the sidecar and the reply, and it writes nothing anywhere else.
+// `wireguardKeygen` writes; `wireguardMint` does not. The profile form
+// generates through the mint channel and holds the pair, then stores through
+// the other one only if the user presses Save — so cancelling a dialog after
+// pressing "Generate keypair" no longer leaves an entry behind that no profile
+// references. Both bodies live in services/vpn/keys.ts, where the reasoning and
+// the tests for that split are.
+ipcMain.handle('vpn:wireguardMint', (): Promise<VpnMintResult> => mintKeypair())
 ipcMain.handle(
   'vpn:wireguardKeygen',
-  async (
+  (
     _e,
-    req: { profileName: string; workspaceId: string; privateKey?: string; replaces?: string }
-  ): Promise<VpnKeygenResult> => {
-    try {
-      const pasted = req.privateKey?.trim()
-      const pair = await wireguardDriver.keygen(pasted ? { publicKeyFor: pasted } : undefined)
-      const privateKey = pasted || pair.privateKey
-      if (!privateKey) return { ok: false, error: 'No private key was generated.', errorCode: 'internal' }
-      const name = req.profileName.trim() || 'WireGuard'
-      const staged = await stageImportedSecrets(name, req.workspaceId, 'wireguard', { privateKey })
-      // Only once the replacement is safely written. Releasing first would
-      // lose the old key to a vault write that then failed.
-      if (req.replaces && req.replaces !== staged.vaultEntryId) {
-        await deleteVpnSecrets(req.replaces).catch(() => undefined)
-      }
-      return {
-        ok: true,
-        // Returned so the user can reveal and copy the key they just made.
-        // Nothing persists it: the profile carries the ref below instead.
-        privateKey,
-        publicKey: pair.publicKey,
-        privateKeyRef: staged.refs.privateKey,
-        vaultEntryId: staged.vaultEntryId
-      }
-    } catch (e) {
-      if (isVaultLockedError(e)) {
-        return {
-          ok: false,
-          error: 'Unlock the vault before generating a key — this is where it will be stored.',
-          errorCode: 'vault-locked'
-        }
-      }
-      return toVpnResult(e)
-    }
-  }
+    req: { profileName: string; workspaceId: string; privateKey: string; replaces?: string }
+  ): Promise<VpnKeygenResult> => storeKeypair(req)
 )
 // `wg pubkey`, and nothing else: no vault write, no side effect, safe to call
 // while the user is still typing. It exists because a private key is useless
