@@ -1,9 +1,9 @@
 # Third-Party Notices
 
-ShellPilot is licensed under the [Apache License, Version 2.0](LICENSE). It
-also incorporates open-source software from other projects, distributed
-under their own licenses. This file lists that software and satisfies the
-attribution requirements of those licenses.
+ShellPilot is licensed under the [MIT Licence](LICENSE). It also incorporates
+open-source software from other projects, distributed under their own
+licenses. This file lists that software and satisfies the attribution
+requirements of those licenses.
 
 No third-party source code is vendored or copied into this repository. Most of
 what is listed below is consumed as a normal npm package dependency,
@@ -27,7 +27,7 @@ the installer itself.
 
 | Component | Version | License | Source |
 |---|---|---|---|
-| `shellpilot-netd` | in-tree | Apache-2.0 | `sidecar/netd/` in this repository |
+| `shellpilot-netd` | in-tree | MIT | `sidecar/netd/` in this repository |
 | `wireguard-go` (linked into `shellpilot-netd`) | pinned in `sidecar/netd/go.mod` | MIT | `golang.zx2c4.com/wireguard` |
 | gVisor `netstack` (linked into `shellpilot-netd`) | pinned in `sidecar/netd/go.mod` | Apache-2.0 | `gvisor.dev/gvisor` |
 | `frpc` | v0.71.0 | Apache-2.0 | `github.com/fatedier/frp` |
@@ -38,8 +38,7 @@ into `resources/licenses/frp/`, which ships inside the app.
 
 ### OpenVPN is deliberately **not** bundled
 
-OpenVPN 2.x is **GPL-2.0**, which is incompatible with Apache-2.0 in that
-direction. ShellPilot supports OpenVPN by detecting a copy the user has already
+OpenVPN 2.x is **GPL-2.0** and ShellPilot is MIT. ShellPilot supports OpenVPN by detecting a copy the user has already
 installed and driving it over its management interface as a separate process —
 it never links against it and never ships it.
 

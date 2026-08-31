@@ -19,7 +19,7 @@ Your DevOps workstation, everywhere. Windows · macOS · Linux.
 [![Latest release](https://img.shields.io/github/v/release/ghauri01/ShellPilot?style=flat-square&label=release&color=22c7d6&labelColor=30363d&sort=semver)](https://github.com/ghauri01/ShellPilot/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ghauri01/ShellPilot/total?style=flat-square&label=downloads&color=22c7d6&labelColor=30363d)](https://github.com/ghauri01/ShellPilot/releases)
 [![Stars](https://img.shields.io/github/stars/ghauri01/ShellPilot?style=flat-square&label=stars&color=22c7d6&labelColor=30363d)](https://github.com/ghauri01/ShellPilot/stargazers)
-[![License](https://img.shields.io/badge/license-Apache%202.0-22c7d6?style=flat-square&labelColor=30363d)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-22c7d6?style=flat-square&labelColor=30363d)](LICENSE)
 
 [Features](#features) · [AI Agent Access](#ai-agent-access) · [Install](#install) · [Quick start](#quick-start) · [Comparison](#shellpilot-vs-mobaxterm-putty-termius-and-securecrt) · [Workspaces](#workspaces) · [Command palette](#command-palette) · [Shortcuts](#keyboard-shortcuts) · [Databases](#databases) · [Vault](#vault) · [Use cases](#real-world-use-cases) · [FAQ](#faq) · [Contributing](#contributing) · [Licence](#licence)
 
@@ -33,7 +33,7 @@ Your DevOps workstation, everywhere. Windows · macOS · Linux.
 >
 > The app is **not notarized**, and on Windows not signed at all — a code-signing
 > certificate costs $200–$400 a year for Windows and $99 a year for Apple, which a free
-> Apache-2.0-licensed project has no income to cover. The warning means your operating system
+> MIT-licensed project has no income to cover. The warning means your operating system
 > cannot confirm **who published** the app. It says nothing about whether the file is safe.
 >
 > Every release is **scanned by 70+ antivirus engines** and publishes a **SHA-256** for
@@ -52,7 +52,7 @@ Most terminal tools do one thing. A typical DevOps task needs four: open a shell
 
 - **No lock-in** — connections import from your existing `~/.ssh/config`
 - **No account** — nothing is uploaded, nothing phones home
-- **No cost** — Apache 2.0 licensed, free forever, contributions welcome
+- **No cost** — MIT licensed, free forever, contributions welcome
 - **No exposed credentials, even to AI** — Claude Code, Claude Desktop and Codex can run commands and read files through it, but never see a password, private key, IP or username — see [AI Agent Access](#ai-agent-access)
 
 ## ShellPilot vs MobaXterm, PuTTY, Termius and SecureCRT
@@ -63,7 +63,7 @@ this is the short version:
 
 | | **ShellPilot** | MobaXterm | PuTTY | Termius | SecureCRT |
 |---|---|---|---|---|---|
-| Price | **Free, Apache 2.0** | Free tier, paid Pro | Free | Free tier, paid Pro | Paid licence |
+| Price | **Free, MIT** | Free tier, paid Pro | Free | Free tier, paid Pro | Paid licence |
 | Open source | **Yes** | No | Yes | No | No |
 | Windows / macOS / Linux | **All three** | Windows only | All three | All three | All three |
 | Account required | **No** | No | No | Yes for sync | No |
@@ -325,7 +325,7 @@ not about the app.
 Windows and macOS both expect an application to be signed with a **code-signing
 certificate** — an identity certificate bought from a certificate authority, currently
 around **$200–$400 a year** for Windows (or roughly **$99/year** for an Apple Developer
-account on macOS). ShellPilot is free and Apache 2.0 licensed with no income behind it, so that
+account on macOS). ShellPilot is free and MIT licensed with no income behind it, so that
 certificate does not exist yet. Every unsigned app gets the same treatment, whoever wrote
 it.
 
@@ -842,7 +842,7 @@ That trade is deliberate. Reaching one bastion, one database or one internal ser
 - **frp states what it exposes, in words.** Each proxy carries a confirmation reading *"Make 127.0.0.1:5432 reachable from frp.example.com."* and the profile will not start until every one is ticked.
 - **An AI agent can never start an frp profile**, and starting any VPN always asks for approval — even for an access group that allows it.
 
-**OpenVPN is not bundled.** It is GPL-2.0, which is incompatible with ShellPilot's Apache-2.0, so ShellPilot drives a copy you install yourself rather than redistributing it. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). WireGuard (via the MIT `wireguard-go`) and frp (Apache-2.0) *are* bundled, built from source.
+**OpenVPN is not bundled.** It is GPL-2.0 and ShellPilot is MIT, so ShellPilot drives a copy you install yourself rather than redistributing it. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). WireGuard (via the MIT `wireguard-go`) and frp (Apache-2.0) *are* bundled, built from source.
 
 **There is no kill switch.** ShellPilot tears down what it started when a tunnel drops, and says so — it does not install firewall rules, and does not claim to.
 
@@ -907,7 +907,7 @@ ShellPilot is a free, open-source, cross-platform desktop application that combi
 terminal, an SFTP file browser, an SSH tunnel manager, a multi-engine database client, an
 encrypted secrets vault and a secure MCP bridge for AI coding agents (Claude Code, Claude
 Desktop, Codex and others) in a single window. It runs on Windows, macOS and Linux, is released
-under the Apache License 2.0, and needs no account.
+under the MIT licence, and needs no account.
 
 ### Which file should I download?
 
@@ -920,7 +920,7 @@ release page are build metadata — you never need to download them.
 
 ### Is ShellPilot really free?
 
-Yes. It is Apache 2.0 licensed, free for personal and commercial use, with no paid tier, no
+Yes. It is MIT licensed, free for personal and commercial use, with no paid tier, no
 session limit and no subscription. Nobody should be charging you for it.
 
 ### Is ShellPilot a good MobaXterm alternative?
@@ -978,7 +978,7 @@ file browsing and monitoring — so you enter a code once rather than once per t
 
 Because ShellPilot is not notarized, and on Windows not signed at all. Both systems expect
 an application to carry a code-signing certificate, which costs roughly $200–$400 a year for
-Windows and $99 a year for an Apple Developer account — money a free, Apache-2.0-licensed project
+Windows and $99 a year for an Apple Developer account — money a free, MIT-licensed project
 with no income does not have. The warning means the operating system cannot confirm **who**
 published the app, not that the file is unsafe. On Windows choose *More info → Run anyway*;
 on macOS use **System Settings → Privacy & Security → Open Anyway** (or right-click →
@@ -1031,9 +1031,9 @@ Good first issues are labelled [`good first issue`](https://github.com/ghauri01/
 
 ## Licence
 
-ShellPilot is released under the **[Apache License 2.0](LICENSE)** — free to use, copy, modify and share, for personal and commercial work alike, with no fee and no subscription.
+ShellPilot is released under the **[MIT Licence](LICENSE)** — free to use, copy, modify and share, for personal and commercial work alike, with no fee and no subscription.
 
-**This tool is not sold.** It is given to the community. If someone is charging you for ShellPilot itself, you are being overcharged — download it here for free. The Apache 2.0 licence does permit others to redistribute or build commercial products on top of it, and adds an explicit patent grant on top of what MIT offered; that is a deliberate part of being genuinely open source, and it is what lets companies adopt it without a legal review.
+**This tool is not sold.** It is given to the community. If someone is charging you for ShellPilot itself, you are being overcharged — download it here for free. The MIT licence does permit others to redistribute or build commercial products on top of it; that is a deliberate part of being genuinely open source, and it is what lets companies adopt it without a legal review.
 
 Please do keep the copyright notice, and do not imply the maintainers endorse a fork.
 

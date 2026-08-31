@@ -410,7 +410,7 @@ traffic, and every client that matters issues `CONNECT` for `https://`.
 
 ## Licensing
 
-`shellpilot-netd` is part of ShellPilot and is Apache-2.0, like the rest of the
+`shellpilot-netd` is part of ShellPilot and is MIT, like the rest of the
 repository.
 
 | Dependency | Licence |
