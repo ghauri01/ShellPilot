@@ -85,6 +85,7 @@ them apart from responses.
 | `wg.stats` | `{tunnelId}` | see below |
 | `wg.forward.open` | `{tunnelId, host, port, bindHost?, bindPort?}` | `{forwardId, bindHost, listenPort}` |
 | `wg.forward.close` | `{forwardId}` | `{forwardId}` |
+| `wg.keygen` | `{publicKeyFor?}` — optional, see below | `{privateKey?, publicKey}` |
 | `wg.down` | `{tunnelId}` | `{tunnelId}` |
 | `auth` | `{nonce}` | `{authenticated, privileged, version, buildSha}` — **`--privileged` only, and only as the first message** |
 | `shutdown` | — | `{stopping:true}`, then exit 0 |
@@ -136,6 +137,40 @@ them apart from responses.
   logger emits a line per worker goroutine at startup — roughly sixty log
   events per `wg.up` competing with responses on the same pipe. Verbose is
   therefore opt-in per tunnel; errors always get through.
+
+**`wg.keygen`:**
+
+```jsonc
+// → make a new keypair. Params are optional; this method is the only one
+//   that does not need them.
+{"id":"7","method":"wg.keygen"}
+// ←
+{"id":"7","ok":true,"result":{"privateKey":"<base64>","publicKey":"<base64>"}}
+
+// → `wg pubkey`: the public half of a key the caller already has
+{"id":"8","method":"wg.keygen","params":{"publicKeyFor":"<base64 private key>"}}
+// ← privateKey is absent: the caller already has it
+{"id":"8","ok":true,"result":{"publicKey":"<base64>"}}
+```
+
+This exists so that making a peer of your own does not mean installing
+wireguard-tools. Importing a provider's `.conf` never needed it — the key is in
+the file — but standing up your own peer meant `wg genkey` in a terminal, in an
+app whose whole claim is that WireGuard needs nothing installed.
+
+The keys are the same keys `wg` makes, and there is a test for exactly that:
+32 bytes from `crypto/rand` with the standard X25519 clamp, and one
+scalar-base multiplication for the public half, using the curve25519 the
+handshake itself already runs on. `publicKeyFor` does not clamp, because
+`wg pubkey` does not either and X25519 clamps its scalar internally regardless
+— so both modes agree with `wg` byte for byte.
+
+**The result of this method is the one thing on the protocol that is
+deliberately not redacted, and could not be:** `redact()` blanks anything
+shaped like 32 bytes of base64, so it would blank the answer. The safety comes
+from the other end — a generated private key is encoded into the response and
+written nowhere else. No log event, no error message, and no rejection path
+quotes what it was given, because what it was given is a private key.
 
 **`wg.stats` result:**
 
@@ -203,6 +238,29 @@ service, no privileged helper. The app asks the OS for administrator rights
 once per launch and those rights die with the process, so uninstalling
 ShellPilot leaves nothing behind that can still become root. Do not add an
 installed helper; a design that appears to need one needs a different design.
+
+One Windows caveat, stated rather than buried: `wintun.dll` ships beside the
+executable so that nothing has to be installed *by the user*, but the DLL
+registers its own signed kernel driver the first time an adapter is created,
+under the elevation that launch already has. That driver is the one thing on
+this path that outlives the process — a real TUN device on Windows needs a
+kernel driver of some kind, and Wintun's is the lightest one available and the
+only one that installs itself (tap-windows6 is the alternative, and it is
+heavier and carries its own installer).
+
+**The registration persists because we leave it, not because it cannot be
+helped.** Teardown closes the *adapter* — `NativeTun.Close` calls
+`WintunCloseAdapter` — and never calls `wintun.Uninstall`/`WintunDeleteDriver`,
+which is what would remove the driver itself. That is deliberate: deleting the
+driver is a machine-wide action, and another Wintun consumer (WireGuard for
+Windows, Tailscale) may be between uses of it. Do not "fix" this by calling
+`Uninstall` on teardown without deciding that question first.
+
+Verified rather than assumed, since it qualifies the paragraph above: the
+shipped `wintun.dll` (0.14.1, amd64) contains the strings `wintun.sys` and
+`wintun.cat`, calls `SetupCopyOEMInfW`, and carries eight embedded PE headers —
+the driver binaries it installs. So the "nothing is left behind" claim is true
+of ShellPilot and not of Wintun, and saying so is the honest version.
 
 ### The control channel, and why it is a socket
 
@@ -280,7 +338,7 @@ it in userspace, so Windows sets it with `netsh` explicitly.
 |---|---|
 | Not running as root (POSIX) | stderr + exit 3. Not a panic. |
 | Linux without `/dev/net/tun` (container, hardened kernel) | `permission-denied` naming `/dev/net/tun` and pointing at userspace mode (E06) |
-| Windows without `wintun.dll` | `unsupported`, naming the missing driver |
+| Windows where the bundled `wintun.dll` will not load | `unsupported`, naming the file and pointing at userspace mode. ShellPilot ships the DLL beside the executable, so this is quarantine or a broken install, not a missing prerequisite |
 | `ip` / `ifconfig` / `netsh` not installed | `unsupported`, naming the tool |
 | Listeners requested | `config-invalid` |
 

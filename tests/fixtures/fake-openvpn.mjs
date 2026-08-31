@@ -451,6 +451,29 @@ socket.on('close', () => {
   if (!exiting) process.exit(0)
 })
 
+// A real SIGTERM, drained rather than obeyed instantly.
+//
+// The supervisor's stop ladder runs gracefulStop, waits `gracefulTimeoutMs`,
+// and then sends an actual POSIX SIGTERM. Without a handler the default action
+// terminates this process immediately and throws away whatever is still sitting
+// in the stdout pipe — which is normally the very line the test is waiting on,
+// because the last thing written before a stop is the acknowledgement of it.
+// That is the load-sensitive failure: nothing is slow, the line is destroyed.
+//
+// Note this is a *different* hole from the one `exit()` already documents.
+// That comment is about `process.exit()` discarding the buffer from the inside;
+// this is the same loss arriving from the outside, which is why the 2000 ms
+// drain fallback in `exit()` never got the chance to help.
+//
+// Routing the signal through `exit()` reuses the draining path already proven
+// here. There is room: the supervisor allows TERM_TO_KILL_MS (5s) before it
+// escalates to SIGKILL, and this drains in milliseconds. Deliberately not
+// `process.exit()` — that is the bug, not the fix.
+//
+// The SIGTERM-ignoring behaviour some supervisor tests need is a separate
+// fixture (`fake-child.mjs --ignore-sigterm`), so this cannot weaken them.
+process.on('SIGTERM', () => exit(0))
+
 // Never outlive the test that started it.
 const guard = setTimeout(() => process.exit(0), 30000)
 guard.unref()

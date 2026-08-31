@@ -47,9 +47,25 @@ const flush = async (times = 30): Promise<void> => {
 // Real fs and pipe callbacks still complete while the clock is frozen, but not
 // on a predictable number of turns, so conditions are waited on rather than
 // counted.
-const waitFor = async (fn: () => boolean, turns = 300): Promise<void> => {
-  for (let i = 0; i < turns; i++) {
+//
+// The budget is wall-clock rather than a turn count, and that distinction is
+// the whole fix. A turn count measures how many times *this* loop got
+// scheduled, which has no fixed relationship to how long a real `fs` or pipe
+// callback takes to land — so on a loaded machine the budget ran out while the
+// I/O was still perfectly healthy. It failed in CI on the run that prompted
+// this, having proved nothing about the code under test.
+//
+// `performance.now()`, not `Date.now()`. `Date` is in this file's `toFake` list
+// (see the beforeEach below), so a `Date.now()` deadline would never advance
+// and this loop would spin until the test runner killed the worker — trading a
+// fast red test for a hung one, which is worse than the flake. `performance` is
+// not faked. Do not "simplify" this back to `Date`.
+const WAIT_BUDGET_MS = 10_000
+const waitFor = async (fn: () => boolean, budgetMs = WAIT_BUDGET_MS): Promise<void> => {
+  const deadline = performance.now() + budgetMs
+  for (;;) {
     if (fn()) return
+    if (performance.now() > deadline) break
     await new Promise((resolve) => setImmediate(resolve))
   }
   throw new Error('condition never became true')

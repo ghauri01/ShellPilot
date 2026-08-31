@@ -343,6 +343,38 @@ export interface VpnImportResultInternal extends VpnImportResult {
   secrets?: ImportedSecrets
 }
 
+// ------------------------------------------------------------- key material
+
+// A WireGuard keypair is the one place ShellPilot mints a secret rather than
+// being handed one, so these two shapes are separate on purpose.
+//
+// `VpnKeygenResult` carries a private key and therefore never leaves the
+// machine, but it does cross IPC: the user has to be able to reveal and copy
+// the key they just made, and the same channel already carries whole `.conf`
+// bodies in the other direction during an import. `VpnPublicKeyResult` carries
+// nothing secret at all and is what the live "what is the public half of this?"
+// preview uses.
+
+export interface VpnKeygenResult {
+  ok: boolean
+  error?: string
+  errorCode?: VpnErrorCode
+  // base64. Shown masked, copyable, and never persisted on the profile.
+  privateKey?: string
+  // base64. The half the user gives to their server or their provider.
+  publicKey?: string
+  // Where the private key was stored. Copy this onto `WireGuardSpec`.
+  privateKeyRef?: VpnSecretRef
+  vaultEntryId?: string
+}
+
+export interface VpnPublicKeyResult {
+  ok: boolean
+  error?: string
+  errorCode?: VpnErrorCode
+  publicKey?: string
+}
+
 export interface ImportedSecrets {
   privateKey?: string
   presharedKeys?: Record<string, string>

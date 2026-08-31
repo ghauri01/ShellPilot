@@ -499,11 +499,17 @@ func classifyDeviceErrorFor(goos string, err error, name string) error {
 				"Switch this profile to userspace mode, which creates no interface at all.")
 	}
 	if strings.Contains(msg, "wintun") {
-		// Wintun ships as a separate driver DLL that ShellPilot does not
-		// bundle. Saying so beats "Error loading wintun.dll".
+		// wintun.dll ships beside this executable, which is exactly where
+		// golang.zx2c4.com/wintun looks for it — it loads with
+		// LOAD_LIBRARY_SEARCH_APPLICATION_DIR, the directory of the running
+		// binary. So reaching here no longer means "not bundled"; it means the
+		// file that shipped is gone or unreadable, and antivirus quarantine is
+		// by far the likeliest reason. Naming the file and the likely cause
+		// beats "Error loading wintun.dll".
 		return codedf(ErrUnsupported,
-			"System mode on Windows needs wintun.dll, which this build of ShellPilot does not include. "+
-				"Switch this profile to userspace mode, which needs no driver.")
+			"System mode on Windows needs wintun.dll, which ShellPilot installs next to its network helper, "+
+				"and it could not be loaded. Antivirus quarantine is the usual cause; reinstalling ShellPilot puts it back. "+
+				"Userspace mode needs no driver and works in the meantime.")
 	}
 	if denied {
 		return codedf(ErrPermissionDenied,

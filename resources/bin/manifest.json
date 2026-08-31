@@ -31,35 +31,55 @@
       "size": 14337024,
       "version": "0.71.0"
     },
+    "win32-x64/wintun.dll": {
+      "sha256": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce",
+      "size": 427552,
+      "version": "0.14.1"
+    },
+    "win32-arm64/wintun.dll": {
+      "sha256": "f7ba89005544be9d85231a9e0d5f23b2d15b3311667e2dad0debd344918a3f80",
+      "size": 222488,
+      "version": "0.14.1"
+    },
+    "darwin-x64/openvpn": {
+      "sha256": "f1c2a53e45f7c6f9d9204dfddb097e627583cb30f5f9617206489e65950f4939",
+      "size": 6613456,
+      "version": "2.6.22"
+    },
+    "darwin-arm64/openvpn": {
+      "sha256": "15bf5970d99f904a8285844efb951ae28430ae2409b9f9fe989e10de5e52b11d",
+      "size": 6070424,
+      "version": "2.6.22"
+    },
     "darwin-x64/shellpilot-netd": {
-      "sha256": "7c1927965c1bf3ac50ab52dbdd54a95f4e465bb98bcf1a7aa109976e83996490",
-      "size": 6974560,
-      "version": "0.4.4"
+      "sha256": "792f9c06e59886d754d5a5489ee1deb037eb86b2a0448c84e580b41b51072374",
+      "size": 6978752,
+      "version": "0.5.1"
     },
     "darwin-arm64/shellpilot-netd": {
-      "sha256": "e1f0e3e8e284e0154784c689e4ceaae972a5e93a2853b1432488210c4b94a2ba",
-      "size": 6600242,
-      "version": "0.4.4"
+      "sha256": "a89f26a3a78a474e8703eca1b9d30ac598a97c48beb4a1bb7228c6292c627722",
+      "size": 6600338,
+      "version": "0.5.1"
     },
     "linux-x64/shellpilot-netd": {
-      "sha256": "f04b870a9c65a8448e113d6e2ae98c8ebdab0628b1aa4a911d868b833846f768",
-      "size": 6918270,
-      "version": "0.4.4"
+      "sha256": "abc6bb581428bb6eb35911b47cc938788406068aa35d9a0ab306464b251450b7",
+      "size": 6926462,
+      "version": "0.5.1"
     },
     "linux-arm64/shellpilot-netd": {
-      "sha256": "9968309967470c42a87a41ec9ebc5966ecbd574ac38cf7dd16ae99a563d1525f",
+      "sha256": "cbf0f152e0f8720781720256624be2fd602fb5ad20d1230f8fb119fa5df7ad62",
       "size": 6553726,
-      "version": "0.4.4"
+      "version": "0.5.1"
     },
     "win32-x64/shellpilot-netd.exe": {
-      "sha256": "816b7740c7bddb5e257cd4f46da0d14a074937ab9f86bde54dce1d77a3669f57",
-      "size": 7145984,
-      "version": "0.4.4"
+      "sha256": "07d34d2ca6b680f1c732e368a90db704049529c0d2030e0259078c827d6b7913",
+      "size": 7151104,
+      "version": "0.5.1"
     },
     "win32-arm64/shellpilot-netd.exe": {
-      "sha256": "5cc97b14dab3a0692e11f7333f454197ccca6ec52fe2fb21daccc15442bc4cfa",
-      "size": 6627328,
-      "version": "0.4.4"
+      "sha256": "0ba47c9ba515b87326ef5cc45f9761d0a0d8faba73f57beaaed49f408a92f59b",
+      "size": 6632448,
+      "version": "0.5.1"
     }
   }
 }

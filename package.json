@@ -1,6 +1,6 @@
 {
   "name": "shellpilot",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Free, open-source SSH client, SFTP browser, SSH tunnel manager, multi-engine database GUI and encrypted secrets vault in one cross-platform desktop app. A MobaXterm, PuTTY and Termius alternative for Windows, macOS and Linux.",
   "keywords": [
     "ssh",
@@ -62,7 +62,9 @@
     "build:cli": "esbuild src/cli/index.ts --bundle --platform=node --format=esm --outfile=out/cli/index.js --external:electron",
     "build:sidecar": "bash scripts/build-sidecar.sh",
     "build:frpc": "bash scripts/build-frpc.sh",
-    "build:engines": "npm run build:sidecar && npm run build:frpc",
+    "build:openvpn": "bash scripts/build-openvpn.sh",
+    "fetch:wintun": "bash scripts/fetch-wintun.sh",
+    "build:engines": "npm run build:sidecar && npm run build:frpc && npm run build:openvpn && npm run fetch:wintun",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck:cli": "tsc --noEmit -p tsconfig.cli.json",
@@ -73,7 +75,8 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "pack": "npm run build && electron-builder --dir",
     "dist:portable": "npm run build && electron-builder --win portable",
-    "test": "vitest run"
+    "test": "vitest run",
+    "check:advisories": "node scripts/check-engine-advisories.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

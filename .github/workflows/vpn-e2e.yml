@@ -55,6 +55,16 @@ jobs:
           else brew install wireguard-tools
           fi
 
+      # OpenVPN is built from source here, so its autotools toolchain has to be
+      # present. libcap-ng is not optional on Linux: OpenVPN 2.6's configure
+      # requires it unconditionally, with no flag to turn it off.
+      - name: Install the OpenVPN build toolchain
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y -qq autoconf automake libtool pkg-config libcap-ng-dev
+          else brew install autoconf automake libtool
+          fi
+
       - run: npm ci
 
       - name: Build the engines from source

@@ -5,6 +5,7 @@ import { readFile, realpath, stat } from 'node:fs/promises'
 import { delimiter, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { app } from 'electron'
 import type { VpnEngineInfo, VpnKind } from '../../../shared/vpn'
+import { isEngineBundledOn } from '../../../shared/vpnEngines'
 import { VpnError } from './errors'
 
 // Deciding which file to execute is the whole of this module, and it is the
@@ -14,10 +15,15 @@ import { VpnError } from './errors'
 //
 //  - `resolveBundled` for what we ship. We know the exact bytes, so we check
 //    them against a manifest on every app run before the first exec (E42).
-//  - `resolveSystem` for an engine the user already has (OpenVPN). We cannot
-//    know the bytes, so we constrain *where* it may come from instead, with
-//    no PATH search on Windows (E44) and no relative paths, world-writable
-//    parents, or symlinks out of an allowlisted root (E45).
+//  - `resolveSystem` for an engine the user already has. We cannot know the
+//    bytes, so we constrain *where* it may come from instead, with no PATH
+//    search on Windows (E44) and no relative paths, world-writable parents,
+//    or symlinks out of an allowlisted root (E45).
+//
+// `resolveEngineBinary` is the two in order, and is what the OpenVPN driver
+// calls: ShellPilot now ships `openvpn` on macOS and Linux, but a Windows
+// build has none — and someone may still want the copy they installed
+// themselves. See its own comment for why the ordering is not symmetric.
 
 // Read at call time, not module load: `process.platform` is stubbed in the
 // resolver tests, and a constant captured at import would silently ignore it.
@@ -57,6 +63,17 @@ const SYSTEM_CANDIDATES: Record<string, { posix: string[]; win32: string[] }> = 
 const PLATFORM_ROOTS: { posix: string[]; win32: string[] } = {
   posix: ['/usr', '/opt', '/bin', '/sbin'],
   win32: ['C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\Windows']
+}
+
+// Which build script produces which engine. Named in the "it is not here"
+// message, because "run scripts/build-sidecar.sh" — which this used to say for
+// every engine — sends someone chasing a missing OpenVPN with the WireGuard
+// build. An unknown name falls back to `npm run build:engines`, which is
+// always right and only less specific.
+const BUILD_SCRIPT: Record<string, string> = {
+  'shellpilot-netd': 'scripts/build-sidecar.sh',
+  frpc: 'scripts/build-frpc.sh',
+  openvpn: 'scripts/build-openvpn.sh'
 }
 
 interface ManifestEntry {
@@ -157,7 +174,7 @@ export async function resolveBundled(name: string): Promise<VpnEngineInfo> {
     // message naming the path (E43).
     throw new VpnError(
       'binary-missing',
-      `Looked for ${file}. If this is a development checkout, run scripts/build-sidecar.sh to build it; otherwise antivirus software may have quarantined it.`
+      `Looked for ${file}. If this is a development checkout, run ${BUILD_SCRIPT[name] ?? 'npm run build:engines'} to build it; otherwise antivirus software may have quarantined it.`
     )
   }
 
@@ -165,11 +182,11 @@ export async function resolveBundled(name: string): Promise<VpnEngineInfo> {
   const entry = entryOf(manifest, key)
   if (!entry) {
     // A missing manifest or a missing entry is the normal state of a dev
-    // checkout before the sidecar has been built. That is an absence, not a
+    // checkout before the engines have been built. That is an absence, not a
     // tamper, and calling it a tamper would train people to ignore the word.
     throw new VpnError(
       'binary-missing',
-      `${file} is not listed in ${join(root, 'manifest.json')}, so it cannot be verified. Run scripts/build-sidecar.sh to produce both.`
+      `${file} is not listed in ${join(root, 'manifest.json')}, so it cannot be verified. Run ${BUILD_SCRIPT[name] ?? 'npm run build:engines'} to produce both.`
     )
   }
 
@@ -261,6 +278,65 @@ export async function resolveSystem(
       ? `Looked in ${where}. ShellPilot does not search PATH on Windows.`
       : `Looked in ${where} and on PATH.`
   )
+}
+
+/**
+ * Locate an engine: the copy ShellPilot ships if there is one, otherwise the
+ * copy the user installed.
+ *
+ * The order is not symmetric, and each step is a separate decision:
+ *
+ *  1. **A confirmed `binaryPath` wins outright.** The user pointed at a file;
+ *     running a different one instead would be answering a question they did
+ *     not ask. Unconfirmed paths are still refused by `resolveSystem` (E44).
+ *  2. **Then the bundled copy.** We built it, we know its bytes, and the
+ *     manifest check runs before the first exec. A system install can be any
+ *     version, patched or not, and on Windows arrives from a `PATH` we refuse
+ *     to search at all.
+ *  3. **Then the system allowlist.** ShellPilot ships `openvpn` on macOS and
+ *     Linux only, so on Windows this is the sole path — and on the other two
+ *     it still serves the person who deliberately runs their distribution's
+ *     build.
+ *
+ * A bundled binary that *exists* but fails its hash check is a tamper, and
+ * that error is rethrown rather than falling through: silently running a
+ * different copy would turn the one signal we have into nothing at all.
+ */
+export async function resolveEngineBinary(
+  name: string,
+  opts: SystemResolveOptions = {}
+): Promise<VpnEngineInfo> {
+  if (opts.binaryPath) return resolveSystem(name, opts)
+  // Nothing to look for, so nothing to report about not finding it. Reporting
+  // "run scripts/build-openvpn.sh" on Windows would send the reader to build a
+  // target that does not exist.
+  // `process.platform` read here rather than inside the predicate, so the
+  // resolver tests that stub it still drive this decision.
+  if (!isEngineBundledOn(name, process.platform)) return resolveSystem(name, opts)
+
+  let bundledProblem: string
+  try {
+    return await resolveBundled(name)
+  } catch (e) {
+    if (e instanceof VpnError && e.code === 'binary-untrusted') throw e
+    // `detail`, not `message`: the message already carries the generic
+    // "could not be found" sentence, and the error thrown below adds it back.
+    bundledProblem = detailOf(e)
+  }
+
+  try {
+    return await resolveSystem(name, opts)
+  } catch (e) {
+    // Both halves in one detail. Reporting only the second would say "install
+    // openvpn" on a build that was supposed to ship one, which sends the
+    // reader to fix the wrong thing.
+    throw new VpnError('binary-missing', `${bundledProblem} ${detailOf(e)}`)
+  }
+}
+
+function detailOf(e: unknown): string {
+  if (e instanceof VpnError) return e.detail ?? e.message
+  return e instanceof Error ? e.message : String(e)
 }
 
 async function describe(kind: VpnKind, path: string): Promise<VpnEngineInfo> {

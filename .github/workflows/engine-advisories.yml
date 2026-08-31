@@ -1,0 +1,61 @@
+name: Engine advisories
+
+# ShellPilot bundles OpenVPN and OpenSSL on macOS and Linux, which moved their
+# CVEs onto us: a user who used to get a fix from brew or apt within days of an
+# advisory now gets it when we cut a release. Nothing else in CI would notice
+# that an advisory exists, so without this job the first warning is a bug report.
+#
+# The schedule is the point. A check that only runs on push would go quiet
+# exactly when the repository does, which is when an unpatched bundled binary
+# is most dangerous — the code stops changing, the advisories do not.
+
+on:
+  schedule:
+    # 07:00 UTC daily. NVD publishes on US business hours, so a morning-UTC run
+    # picks up the previous US day.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+  pull_request:
+    # Also on any change to the pins themselves or to the watcher, so bumping a
+    # version tells you straight away whether you bumped it to something with a
+    # known hole in it.
+    paths:
+      - 'scripts/build-openvpn.sh'
+      - 'scripts/check-engine-advisories.mjs'
+      - 'security/engine-advisory-suppressions.json'
+
+# A failure here is read by a human, and there is no reason for two runs of it
+# to be in flight at once.
+concurrency:
+  group: engine-advisories-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # No `npm ci`: the checker imports nothing outside Node's standard
+      # library, so it runs on a bare checkout. That is deliberate — this job
+      # has to keep working on a day the install is broken, since that is
+      # precisely a day someone is changing dependencies.
+      - name: Check bundled engines for published advisories
+        id: check
+        run: node scripts/check-engine-advisories.mjs
+
+      # Exit 2 means the feed could not be reached, which is not the same as
+      # clear and not the same as vulnerable. It still fails the job, because a
+      # watcher nobody notices has stopped working is not a watcher, but it says
+      # which of the two happened so the reader does not go hunting for a CVE
+      # that does not exist.
+      - name: Explain the failure
+        if: failure()
+        run: |
+          echo "::error::Engine advisory check failed."
+          echo "Exit 1 = an advisory affects a pinned engine and is not suppressed."
+          echo "Exit 2 = the advisory feed could not be read; the pins were NOT checked."
+          echo "See the step above for which, and scripts/check-engine-advisories.mjs for the codes."

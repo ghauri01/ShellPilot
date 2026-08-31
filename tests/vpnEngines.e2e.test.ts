@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
 import { join, resolve } from 'node:path'
 import net from 'node:net'
+import type { OpenVpnSpec } from '../src/shared/vpn'
+import { OpenVpnManagement } from '../src/main/services/vpn/openvpnManagement'
+import { emitOvpnConfig, ovpnArgs } from '../src/main/services/vpn/parsers'
 
 // Real engines, real sockets, no mocks.
 //
@@ -27,6 +30,9 @@ const platformDir = `${process.platform}-${process.arch}`
 const exe = process.platform === 'win32' ? '.exe' : ''
 const NETD = join(ROOT, 'resources', 'bin', platformDir, `shellpilot-netd${exe}`)
 const FRPC = join(ROOT, 'resources', 'bin', platformDir, `frpc${exe}`)
+// No `${exe}`: ShellPilot bundles openvpn on macOS and Linux only, so there is
+// never an openvpn.exe here to name.
+const OPENVPN = join(ROOT, 'resources', 'bin', platformDir, 'openvpn')
 
 function has(bin: string): boolean {
   return existsSync(bin)
@@ -230,10 +236,43 @@ describeE2e('shellpilot-netd against itself', () => {
 describeE2e('frpc admin API', () => {
   let dir = ''
   let proc: ChildProcess | null = null
-  const adminPort = 41732
+  let adminPort = 0
+  // A port with nothing on it, chosen the same way. This used to be the
+  // literal 7000, frp's documented default, and that is how this test lied on
+  // macOS: AirPlay Receiver listens on 7000, so frpc connected to *something*,
+  // the login did not fail, and the client stayed up. The test passed locally
+  // for a reason that had nothing to do with what it was testing.
+  let deadPort = 0
 
-  beforeAll(() => {
+  /** A port the OS says is free, rather than one we hoped was.
+   *
+   *  This was hardcoded to 41732, and it failed in CI on both runners while
+   *  passing on every developer machine. 41732 sits inside Linux's ephemeral
+   *  range (32768-60999), so a busy runner — one that has just spent minutes
+   *  pulling npm and Go packages — can legitimately already own it, and frpc's
+   *  bind then fails before it ever serves anything. An idle laptop almost
+   *  never collides, which is why a fixed port looks fine until it is running
+   *  somewhere that does real work.
+   *
+   *  Asking for port 0 and reading back what was assigned narrows this to the
+   *  instant between closing the probe and frpc binding. That race cannot be
+   *  removed without frpc accepting a pre-opened socket, but it is a window of
+   *  microseconds rather than a standing bet on one number. */
+  const freePort = async (): Promise<number> =>
+    new Promise((resolvePort, reject) => {
+      const srv = net.createServer()
+      srv.once('error', reject)
+      srv.listen(0, '127.0.0.1', () => {
+        const { port } = srv.address() as net.AddressInfo
+        srv.close(() => resolvePort(port))
+      })
+    })
+
+  beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'sp-frp-'))
+    adminPort = await freePort()
+    // Allocated and released, so it is closed rather than merely assumed to be.
+    deadPort = await freePort()
   })
 
   afterAll(() => {
@@ -250,13 +289,29 @@ describeE2e('frpc admin API', () => {
     // wrong one would go green before frpc had contacted the server at all.
     const cfg = [
       'serverAddr = "127.0.0.1"',
-      'serverPort = 7000',
+      `serverPort = ${deadPort}`,
       'auth.method = "token"',
       'auth.token = "{{ .Envs.SP_FRP_TOKEN }}"',
       'webServer.addr = "127.0.0.1"',
       `webServer.port = ${adminPort}`,
       'webServer.user = "shellpilot"',
       'webServer.password = "{{ .Envs.SP_FRP_ADMIN }}"',
+      // Without this frpc exits the moment its first login fails, and this
+      // test deliberately has no frps to reach — the whole point is the admin
+      // API's behaviour *before* the client has logged in, which is the window
+      // a readiness check can get wrong.
+      //
+      // Confirmed by the binary itself, in CI, after this line was wrongly
+      // removed: "login to the server failed ... With loginFailExit enabled,
+      // no additional retries will be attempted". It had looked unnecessary
+      // locally only because AirPlay was answering on the port the config then
+      // used, so the login never failed in the first place.
+      //
+      // Production does not set this; the default applies there and the
+      // supervisor's restart policy handles a failed login. This one field
+      // differs from a generated config, in the direction that lets the test
+      // observe the state it is about.
+      'loginFailExit = false',
       'log.to = "console"',
       '',
       '[[proxies]]',
@@ -274,8 +329,20 @@ describeE2e('frpc admin API', () => {
       env: { ...process.env, SP_FRP_TOKEN: 'zzsecrettokenvaluezz', SP_FRP_ADMIN: 'zzadminpwzz' }
     })
 
+    // Keep what frpc says. When this failed in CI it reported only
+    // `ECONNREFUSED`, which says the port is shut and nothing about why — and
+    // the reason was in the output nobody was keeping. A real binary's
+    // complaint is the most useful thing in the room when a real-binary test
+    // fails.
+    let output = ''
+    proc.stdout?.on('data', (c: Buffer) => (output += c.toString()))
+    proc.stderr?.on('data', (c: Buffer) => (output += c.toString()))
+    let died: string | null = null
+    proc.on('exit', (code, signal) => (died = `frpc exited early: code=${code} signal=${signal}`))
+
     const base = `http://127.0.0.1:${adminPort}`
     for (let i = 0; i < 40; i++) {
+      if (died) break
       try {
         if ((await fetch(`${base}/healthz`)).ok) break
       } catch {
@@ -284,7 +351,8 @@ describeE2e('frpc admin API', () => {
       await new Promise((r) => setTimeout(r, 250))
     }
 
-    expect((await fetch(`${base}/healthz`)).status).toBe(200)
+    expect(died, `${died}\n--- frpc output ---\n${output}`).toBeNull()
+    expect((await fetch(`${base}/healthz`)).status, `frpc output:\n${output}`).toBe(200)
     expect((await fetch(`${base}/api/status`)).status).toBe(401)
 
     const auth = { Authorization: `Basic ${Buffer.from('shellpilot:zzadminpwzz').toString('base64')}` }
@@ -306,5 +374,161 @@ describeE2e('frpc admin API', () => {
     // assertion fail for the wrong reason.
     expect(conf).not.toContain('zzsecrettokenvaluezz')
     expect(conf).not.toContain('zzadminpwzz')
+  }, 30_000)
+})
+
+// --------------------------------------------------------------- openvpn
+
+// The bundled OpenVPN, driven by the real driver plumbing.
+//
+// This is the test the bundling change turns on, and the reason it matters is
+// narrow: `ovpnArgs` emits eleven flags, `emitOvpnConfig` emits a config, and
+// `build-openvpn.sh` compiles OpenVPN with five features switched off. Nothing
+// in the unit suite can tell you whether the flags survive the build — a
+// fake binary accepts every argument. Here, an option this build does not
+// understand is a fatal parse error before the management channel is ever
+// dialled, and the test fails.
+//
+// No server, no certificates, no root. `--management-hold` makes openvpn stop
+// after parsing options and connect back to us, which is exactly the window
+// that proves the plumbing without needing a peer.
+describeE2e('bundled openvpn', () => {
+  let dir = ''
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'sp-ovpn-'))
+  })
+
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('is built', () => {
+    if (process.platform === 'win32') {
+      // Windows drives a system install; see docs/VPN.md.
+      console.warn('skipping: ShellPilot does not bundle openvpn on Windows')
+      return
+    }
+    expect(has(OPENVPN), `${OPENVPN} is missing. Run: npm run build:engines`).toBe(true)
+  })
+
+  it('is the version we pinned, statically linked against the OpenSSL we pinned', () => {
+    if (process.platform === 'win32' || !has(OPENVPN)) return
+    // `--version` exits non-zero on some builds, so the output is what is
+    // read, not the status.
+    let out = ''
+    try {
+      out = execFileSync(OPENVPN, ['--version'], { encoding: 'utf8' })
+    } catch (e) {
+      out = String((e as { stdout?: string }).stdout ?? '')
+    }
+    expect(out).toContain('OpenVPN 2.6')
+    expect(out).toMatch(/library versions: OpenSSL 3\./)
+    // The build script switches these off on purpose. If a configure flag is
+    // ever renamed upstream the build would quietly re-enable them, and the
+    // first sign would be a plugin directive loading something.
+    expect(out).toContain('enable_plugins=no')
+    expect(out).toContain('enable_lzo=no')
+    expect(out).toContain('enable_lz4=no')
+  })
+
+  it('accepts every argument the driver passes, and answers on the management channel', async () => {
+    if (process.platform === 'win32' || !has(OPENVPN)) return
+
+    const spec: OpenVpnSpec = {
+      kind: 'openvpn',
+      // Never dereferenced here: the config body is passed to
+      // `emitOvpnConfig` directly, the way the driver passes what it already
+      // read out of the vault.
+      configRef: { vaultEntryId: 'e2e', field: 'configBody' },
+      authMode: 'userpass',
+      redirectGateway: false
+    }
+    // openvpn validates the option set before it dials the management socket,
+    // and refuses a client config with no way to verify the peer and no way to
+    // authenticate to it. `peer-fingerprint` and a bare `auth-user-pass`
+    // satisfy both without a certificate on disk — and the bare form is what
+    // the real driver relies on, since the credentials come over the
+    // management channel rather than from a file (E28). The remote is never
+    // contacted: --management-hold stops openvpn before it dials.
+    const body = [
+      'client',
+      'dev tun',
+      'proto udp',
+      'remote 127.0.0.1 1194',
+      'nobind',
+      'auth-user-pass',
+      `peer-fingerprint ${new Array(32).fill('AB').join(':')}`
+    ].join('\n')
+
+    const events: string[] = []
+    const logs: string[] = []
+    const management = new OpenVpnManagement(
+      {
+        emit: (patch) => events.push(String(patch.state ?? '')),
+        log: (line, stream) => logs.push(`${stream}: ${line}`),
+        askUser: async () => null,
+        credentials: () => ({})
+      },
+      { runDir: dir }
+    )
+
+    const endpoint = await management.listen()
+    const configPath = join(dir, 'e2e.ovpn')
+    writeFileSync(configPath, emitOvpnConfig(spec, body), { mode: 0o600 })
+    const args = ovpnArgs(spec, {
+      configPath,
+      management: endpoint.socketPath
+        ? { kind: 'unix', path: endpoint.socketPath }
+        : { kind: 'tcp', host: '127.0.0.1', port: endpoint.port ?? 0 },
+      verb: 3
+    })
+
+    const proc = spawn(OPENVPN, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
+    const exited = new Promise<number | null>((res) => proc.once('exit', (code) => res(code)))
+
+    try {
+      // openvpn dials us. If any argument above were rejected, or any option
+      // the build no longer understands were in the config, it would have died
+      // at parse time and this would wait out the loop instead.
+      const seen = (needle: string): boolean => logs.some((l) => l.includes(needle))
+      for (let i = 0; i < 150 && !seen('>PASSWORD:'); i++) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      const transcript = logs.join('\n')
+      expect(logs.length, `openvpn never reached the management channel. exit=${proc.exitCode}`)
+        .toBeGreaterThan(0)
+
+      // Each of these is a distinct claim about the real binary, and each one
+      // is a thing a fake could not have told us:
+      //
+      //  - it speaks management protocol version 5, the one we parse;
+      //  - `--management-hold` took effect, so nothing was attempted before we
+      //    were listening;
+      //  - the three subscriptions the driver depends on were accepted —
+      //    without `state on` there is no status, without `bytecount` there
+      //    are no counters;
+      //  - and it asked us for the credential over the channel rather than
+      //    reading a file, which is the whole reason no secret is ever an
+      //    argument (E28).
+      expect(transcript).toContain('>INFO:OpenVPN Management Interface Version 5')
+      expect(transcript).toContain('>HOLD:')
+      expect(transcript).toContain('SUCCESS: real-time state notification set to ON')
+      expect(transcript).toContain('SUCCESS: bytecount interval changed')
+      expect(transcript).toContain(">PASSWORD:Need 'Auth' username/password")
+
+      // The stop ladder's first rung: signal over the control channel rather
+      // than a kill, because on Windows that is the only rung there is.
+      management.sigterm()
+      const code = await Promise.race([
+        exited,
+        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 10_000))
+      ])
+      expect(code, 'openvpn ignored SIGTERM sent over the management channel').not.toBe('timeout')
+      expect(logs.join('\n')).toContain('SUCCESS: signal SIGTERM thrown')
+    } finally {
+      management.close()
+      proc.kill('SIGKILL')
+    }
   }, 30_000)
 })

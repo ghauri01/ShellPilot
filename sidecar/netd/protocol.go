@@ -260,6 +260,29 @@ type PingResult struct {
 	BuildSha  string `json:"buildSha"`
 }
 
+// KeygenParams is `wg.keygen`, and it is the one method whose params are
+// optional: absent or `{}` means "make me a fresh keypair". PublicKeyFor
+// instead derives the public half of a private key the caller already holds,
+// which is the other thing anybody ever runs `wg` for.
+type KeygenParams struct {
+	// base64, 32 bytes decoded. A secret, on the way in as much as on the way
+	// out: it is never echoed back, never logged and never quoted in an error.
+	PublicKeyFor string `json:"publicKeyFor,omitempty"`
+}
+
+// KeygenResult carries base64 keys, and PrivateKey is present only when this
+// process generated it — a key supplied in PublicKeyFor is not sent back.
+//
+// This is the one result on the protocol that is deliberately NOT passed
+// through redact() on the way out, and it could not be: redact() blanks
+// anything 32-bytes-of-base64 shaped, so it would blank the very thing the
+// caller asked for. The safety comes from the other end instead — the result
+// goes into the response and nowhere near a log event.
+type KeygenResult struct {
+	PrivateKey string `json:"privateKey,omitempty"`
+	PublicKey  string `json:"publicKey"`
+}
+
 // StateData is the payload of the unsolicited `wg.state` event. `State` is a
 // member of the TS `VpnState` union.
 type StateData struct {

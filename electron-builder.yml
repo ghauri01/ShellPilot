@@ -22,10 +22,16 @@ files:
   - '!resources/bin/**'
   - package.json
 
-# Tunnel engines: shellpilot-netd (our WireGuard sidecar, MIT) and frpc
-# (Apache-2.0). Built by scripts/build-sidecar.sh and scripts/build-frpc.sh
-# before electron-builder runs; CI must do that or the app ships with no
-# engines and every VPN profile reports binary-missing.
+# Tunnel engines: shellpilot-netd (our WireGuard sidecar, MIT), frpc
+# (Apache-2.0), openvpn (GPL-2.0, macOS and Linux only) and wintun.dll
+# (proprietary, Windows only — see THIRD-PARTY-NOTICES.md). Built or fetched by
+# scripts/{build-sidecar,build-frpc,build-openvpn,fetch-wintun} before
+# electron-builder runs; CI must do that or the app ships with no engines and
+# every VPN profile reports binary-missing.
+#
+# The `filter: **/*` below is what carries wintun.dll: the directory is copied
+# whole rather than by a list of executable names, and the DLL has to land in
+# the same directory as shellpilot-netd.exe to be found at all.
 #
 # ${platform}-${arch} expands to Node's own names (darwin-arm64, win32-x64,
 # ...), which is exactly what process.platform/process.arch produce at

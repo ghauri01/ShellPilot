@@ -1,0 +1,40 @@
+{
+  "$comment": [
+    "Advisories against a pinned engine that do not reach ShellPilot, each with the",
+    "reason it does not. Read by scripts/check-engine-advisories.mjs.",
+    "",
+    "A suppression is a judgement made on a day about one version, so it carries both.",
+    "It stops applying when the pin moves (appliesToVersion) or when the reasoning ages",
+    "out (reviewBy), and in either case the CVE becomes a finding again rather than",
+    "passing quietly. Suppressions are matched by exact CVE id, so a newly published",
+    "advisory is never covered by an existing entry.",
+    "",
+    "Suppress reachability, never severity. 'Low score' is not a reason; 'the code is",
+    "not compiled in' is."
+  ],
+  "suppressions": [
+    {
+      "cve": "CVE-2026-11604",
+      "appliesToVersion": "2.6.22",
+      "addedOn": "2026-08-31",
+      "reviewBy": "2027-03-01",
+      "reason": "affects ovpn-dco-win, which we neither compile nor ship",
+      "detail": [
+        "A heap overflow in the epoch key generator of ovpn-dco-win, OpenVPN's",
+        "data-channel-offload kernel driver for Windows. NVD records it against the",
+        "cpe:2.3:a:openvpn:openvpn range 2.0.0 to 2.8.3, which is why it matches our",
+        "pin, but the affected code is the separate Windows driver rather than the",
+        "openvpn binary itself.",
+        "",
+        "Two independent reasons it cannot reach a ShellPilot user. The build passes",
+        "--disable-dco (scripts/build-openvpn.sh), so no DCO code is compiled into the",
+        "binary we ship. And we ship no OpenVPN binary on Windows at all: Windows keeps",
+        "the system-install requirement, so its openvpn comes from the OpenVPN",
+        "installer and is that project's to patch, not ours.",
+        "",
+        "Either alone would be sufficient. Both hold."
+      ],
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2026-11604"
+    }
+  ]
+}

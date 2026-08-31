@@ -71,8 +71,12 @@ import {
   vpnHandleWake
 } from './services/vpn/manager'
 import { vpnCommitImport, vpnDeleteSecrets, vpnImport } from './services/vpn/import'
+import { wireguardDriver } from './services/vpn/drivers/wireguard'
+import { deleteVpnSecrets, stageImportedSecrets } from './services/vpn/vaultBridge'
+import { toVpnResult } from './services/vpn/errors'
 import { withVpnTransport, withVpnTransportDb } from './services/vpn/transport'
-import type { VpnKind, VpnSpec } from '../shared/vpn'
+import { isVaultLockedError } from './services/credentialResolver'
+import type { VpnKeygenResult, VpnKind, VpnPublicKeyResult, VpnSpec } from '../shared/vpn'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
 import { backupExport, backupImport, backupInspect, deleteAllData, relaunchApp } from './services/backup'
 import { checkForUpdates, getUpdaterStatus, onUpdaterStatus, installUpdate, openReleasePage } from './services/updater'
@@ -571,6 +575,68 @@ ipcMain.handle(
     vpnCommitImport(name, workspaceId, kind, text, baseDir)
 )
 ipcMain.handle('vpn:deleteSecrets', (_e, vaultEntryId: string) => vpnDeleteSecrets(vaultEntryId))
+// A generated WireGuard key takes exactly the road an imported one takes:
+// `stageImportedSecrets` writes it into a `vpn` vault entry and the profile
+// keeps a ref. There is no second storage path — the renderer persists the
+// pointer, never the key.
+//
+// `privateKey` set means "adopt this one instead of minting one", which is how
+// a key pasted from somewhere else gets stored and how its public half is
+// confirmed at the same time. Neither branch logs: this handler is the only
+// thing between the sidecar and the reply, and it writes nothing anywhere else.
+ipcMain.handle(
+  'vpn:wireguardKeygen',
+  async (
+    _e,
+    req: { profileName: string; workspaceId: string; privateKey?: string; replaces?: string }
+  ): Promise<VpnKeygenResult> => {
+    try {
+      const pasted = req.privateKey?.trim()
+      const pair = await wireguardDriver.keygen(pasted ? { publicKeyFor: pasted } : undefined)
+      const privateKey = pasted || pair.privateKey
+      if (!privateKey) return { ok: false, error: 'No private key was generated.', errorCode: 'internal' }
+      const name = req.profileName.trim() || 'WireGuard'
+      const staged = await stageImportedSecrets(name, req.workspaceId, 'wireguard', { privateKey })
+      // Only once the replacement is safely written. Releasing first would
+      // lose the old key to a vault write that then failed.
+      if (req.replaces && req.replaces !== staged.vaultEntryId) {
+        await deleteVpnSecrets(req.replaces).catch(() => undefined)
+      }
+      return {
+        ok: true,
+        // Returned so the user can reveal and copy the key they just made.
+        // Nothing persists it: the profile carries the ref below instead.
+        privateKey,
+        publicKey: pair.publicKey,
+        privateKeyRef: staged.refs.privateKey,
+        vaultEntryId: staged.vaultEntryId
+      }
+    } catch (e) {
+      if (isVaultLockedError(e)) {
+        return {
+          ok: false,
+          error: 'Unlock the vault before generating a key — this is where it will be stored.',
+          errorCode: 'vault-locked'
+        }
+      }
+      return toVpnResult(e)
+    }
+  }
+)
+// `wg pubkey`, and nothing else: no vault write, no side effect, safe to call
+// while the user is still typing. It exists because a private key is useless
+// until you can tell your server which public key to authorise.
+ipcMain.handle(
+  'vpn:wireguardPublicKey',
+  async (_e, privateKey: string): Promise<VpnPublicKeyResult> => {
+    try {
+      const pair = await wireguardDriver.keygen({ publicKeyFor: privateKey })
+      return { ok: true, publicKey: pair.publicKey }
+    } catch (e) {
+      return toVpnResult(e)
+    }
+  }
+)
 ipcMain.handle('vpn:logs', (_e, id: string, limit?: number) => vpnLogs(id, limit))
 ipcMain.handle('vpn:dependents', (_e, id: string) => vpnDependentsOf(id))
 // Log lines stop at the ring buffer unless a drawer is open. Refcounted, so
