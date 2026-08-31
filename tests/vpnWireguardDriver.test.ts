@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import type { NetApplyContext, NetStateFile } from '../src/main/services/vpn/netstate'
 import type { RouteConflict } from '../src/main/services/vpn/routing/index'
 import type { Elevator } from '../src/main/services/vpn/elevation'
-import type { VpnProfile, VpnStatus, WireGuardSpec } from '../src/shared/vpn'
+import type { VpnEngineInfo, VpnProfile, VpnStatus, WireGuardSpec } from '../src/shared/vpn'
 import { isWireGuardKey, WG_HANDSHAKE_STALE_SEC } from '../src/shared/vpn'
 import { resetBinaryCache } from '../src/main/services/vpn/binaries'
 import type { ResolvedVpnSecrets, VpnDriverContext } from '../src/main/services/vpn/driver'
@@ -357,6 +357,22 @@ beforeEach(async () => {
   wireguardTuning.requestTimeoutMs = 8_000
 })
 
+/** Stands in for the bundled sidecar lookup.
+ *
+ *  The system-mode tests are about elevation, route conflicts and the argv the
+ *  privileged sidecar is launched with — none of which needs a real 6 MB Go
+ *  binary to exist. Depending on one made them pass on a developer machine that
+ *  had run `build:engines` and fail on a clean CI runner with `binary-missing`,
+ *  which is a test reporting the state of the checkout rather than the code. */
+const fakeEngine = async (): Promise<VpnEngineInfo> => ({
+  kind: 'wireguard',
+  available: true,
+  bundled: true,
+  path: '/nonexistent/shellpilot-netd',
+  version: '0.0.0-test',
+  sha256: '0'.repeat(64)
+})
+
 afterEach(async () => {
   await wireguardDriver.disposeAll?.().catch(() => undefined)
   await supervisor.stopAll().catch(() => undefined)
@@ -372,6 +388,7 @@ afterEach(async () => {
   wireguardTuning.elevator = null
   wireguardTuning.routeManager = null
   wireguardTuning.applyNet = null
+  wireguardTuning.resolveEngine = null
 
   if (previousBinDir === undefined) delete process.env.SHELLPILOT_VPN_BIN_DIR
   else process.env.SHELLPILOT_VPN_BIN_DIR = previousBinDir
@@ -737,6 +754,7 @@ describe('system mode', () => {
     const fake = fakePrivilegedSidecar()
     const applied: { plan: { interfaceName: string; routes?: unknown; dns?: unknown }; ctx: NetApplyContext }[] = []
     wireguardTuning.platform = 'linux'
+    wireguardTuning.resolveEngine = fakeEngine
     wireguardTuning.elevator = fake.elevator
     wireguardTuning.routeManager = { conflicts: async () => [] }
     wireguardTuning.applyNet = async (plan, netCtx) => {
@@ -771,6 +789,7 @@ describe('system mode', () => {
   it('elevates the sidecar with no secret on its command line, and authenticates with a 32-byte nonce', async () => {
     const fake = fakePrivilegedSidecar()
     wireguardTuning.platform = 'linux'
+    wireguardTuning.resolveEngine = fakeEngine
     wireguardTuning.elevator = fake.elevator
     wireguardTuning.routeManager = { conflicts: async () => [] }
     wireguardTuning.applyNet = async (plan) =>
@@ -804,6 +823,7 @@ describe('system mode', () => {
   it('sends wg.up with no listeners, the planned name and logLevel error', async () => {
     const fake = fakePrivilegedSidecar()
     wireguardTuning.platform = 'linux'
+    wireguardTuning.resolveEngine = fakeEngine
     wireguardTuning.elevator = fake.elevator
     wireguardTuning.routeManager = { conflicts: async () => [] }
     wireguardTuning.applyNet = async (plan) =>
@@ -831,6 +851,7 @@ describe('system mode', () => {
     const fake = fakePrivilegedSidecar()
     const reverted: string[] = []
     wireguardTuning.platform = 'linux'
+    wireguardTuning.resolveEngine = fakeEngine
     wireguardTuning.elevator = fake.elevator
     wireguardTuning.routeManager = { conflicts: async () => [] }
     wireguardTuning.applyNet = async (plan) =>
@@ -856,6 +877,7 @@ describe('system mode', () => {
     const fake = fakePrivilegedSidecar({ rejectAuth: true })
     let appliedAnything = false
     wireguardTuning.platform = 'linux'
+    wireguardTuning.resolveEngine = fakeEngine
     wireguardTuning.elevator = fake.elevator
     wireguardTuning.routeManager = { conflicts: async () => [] }
     wireguardTuning.applyNet = async () => {
@@ -874,6 +896,7 @@ describe('system mode', () => {
   it('turns a dismissed prompt for the sidecar itself into elevation-declined', async () => {
     let applied = false
     wireguardTuning.platform = 'linux'
+    wireguardTuning.resolveEngine = fakeEngine
     wireguardTuning.routeManager = { conflicts: async () => [] }
     wireguardTuning.applyNet = async () => {
       applied = true

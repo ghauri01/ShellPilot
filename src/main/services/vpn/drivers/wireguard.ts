@@ -101,7 +101,16 @@ export const wireguardTuning = {
    *  socket and the real `wg.up` without the result depending on — or
    *  rewriting — the route table of whatever machine is running it. */
   routeManager: null as Pick<RouteManager, 'conflicts'> | null,
-  applyNet: null as typeof applyNetState | null
+  applyNet: null as typeof applyNetState | null,
+  /** How the sidecar binary is located. Injectable so a test of the elevation
+   *  and routing logic does not also depend on a 6 MB Go binary having been
+   *  cross-compiled first — which is what made these tests pass locally and
+   *  fail on a clean CI runner with `binary-missing`. */
+  resolveEngine: null as (() => Promise<VpnEngineInfo>) | null
+}
+
+function resolveNetd(): Promise<VpnEngineInfo> {
+  return (wireguardTuning.resolveEngine ?? (() => resolveBundled(NETD)))()
 }
 
 function platformNow(): NodeJS.Platform {
@@ -920,7 +929,7 @@ async function gracefulStop(run: Run): Promise<void> {
  */
 async function startSystem(run: Run): Promise<void> {
   const platform = platformNow()
-  const engine = await resolveBundled(NETD)
+  const engine = await resolveNetd()
   if (!engine.path) {
     // The userspace path tolerates a bare name and lets the OS resolve it.
     // This one must not: `pkexec shellpilot-netd` resolved through an
@@ -1023,7 +1032,7 @@ async function start(
       run.started = true
       return { ok: true, listeners: [] }
     }
-    const engine = await resolveBundled(NETD)
+    const engine = await resolveNetd()
     runs.set(profile.id, run)
 
     const spec = supervisedSpec(run, engine.path ?? NETD, engine.sha256)

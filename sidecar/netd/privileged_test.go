@@ -604,13 +604,36 @@ func TestIPv4MaskRendersWhatNetshWants(t *testing.T) {
 // The privileged path never resolves a tool through PATH, because it is root
 // and an attacker-writable directory early in an inherited PATH would decide
 // what "ip" means.
+// Absoluteness, judged by the rules of the platform the path is *for* rather
+// than the platform the test happens to run on.
+func isAbsolutePosix(p string) bool {
+	return strings.HasPrefix(p, "/")
+}
+
+func isAbsoluteWindows(p string) bool {
+	if strings.HasPrefix(p, `\\`) {
+		return true
+	}
+	return len(p) >= 3 &&
+		((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) &&
+		p[1] == ':' &&
+		(p[2] == '\\' || p[2] == '/')
+}
+
 func TestToolsAreOnlyEverResolvedFromAbsolutePaths(t *testing.T) {
 	for name, paths := range toolPaths {
 		if len(paths) == 0 {
 			t.Fatalf("%s has no candidate paths", name)
 		}
 		for _, p := range paths {
-			if !filepath.IsAbs(p) {
+			// Not filepath.IsAbs: on Windows that applies Windows semantics, so
+			// the POSIX candidates ("/sbin/ip") read as relative and the test
+			// fails on a runner while the code under test is fine. What the
+			// invariant actually forbids is a bare name that PATH could
+			// resolve — this process is root, so a hijacked PATH entry would
+			// run as root. Accept either an absolute POSIX path or an absolute
+			// Windows path, and reject anything with no directory at all.
+			if !isAbsolutePosix(p) && !isAbsoluteWindows(p) {
 				t.Fatalf("%s candidate %q is not absolute", name, p)
 			}
 		}

@@ -172,8 +172,15 @@ describe('supervisor lifecycle', () => {
   })
 
   it('forgets the exponent once readiness has held for 60s', async () => {
-    const spec = make()
+    // Count readiness rather than assuming a fixed number of event-loop turns
+    // reaches it. The 60s healthy-reset timer is only armed once the relaunch
+    // is ready, and `flush()`'s fixed 30 turns were enough on an idle machine
+    // and not enough on a loaded CI runner — so this test failed intermittently
+    // while testing nothing about the supervisor.
+    let ready = 0
+    const spec = make({ onReady: () => { ready++ } })
     await sup.spawn(spec)
+    await waitFor(() => ready === 1)
 
     // One failure, so the next delay would be 2s if the exponent survived.
     spawns[0].child.exit(1)
@@ -182,7 +189,7 @@ describe('supervisor lifecycle', () => {
     await waitFor(() => spawns.length === 2)
     // The relaunch must reach readiness before the clock moves, or the 60s
     // timer this test is about would not exist yet when it is advanced past.
-    await flush()
+    await waitFor(() => ready === 2)
 
     await vi.advanceTimersByTimeAsync(60_000)
     await flush()
