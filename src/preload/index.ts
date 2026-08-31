@@ -29,6 +29,7 @@ import type {
   VpnEngineInfo,
   VpnImportResult,
   VpnKeygenResult,
+  VpnMintResult,
   VpnKind,
   VpnLogLine,
   VpnProfile,
@@ -259,16 +260,24 @@ const api = {
     // made — nothing persists it, and `privateKeyRef` is the only part that
     // goes on the profile.
     //
-    // `privateKey` on the way in means "adopt this instead of minting one",
-    // which is how a key pasted from elsewhere reaches the vault. `replaces`
-    // is the entry this profile pointed at before, released once the new one
-    // is written.
+    // Store a key in the vault and hand back the ref the profile carries.
+    //
+    // `privateKey` is required: this channel no longer mints. Minting moved to
+    // `wireguardMint` below so that generating a key and cancelling the form
+    // leaves nothing behind, which means every call here is a deliberate write.
+    // `replaces` is the entry this profile pointed at before, released once the
+    // new one is safely written.
     wireguardKeygen: (req: {
       profileName: string
       workspaceId: string
-      privateKey?: string
+      privateKey: string
       replaces?: string
     }): Promise<VpnKeygenResult> => ipcRenderer.invoke('vpn:wireguardKeygen', req),
+    // Mint a keypair and store nothing. Separate from `wireguardKeygen` above
+    // because that one writes to the vault: the form generates through this,
+    // holds the pair, and stages it through the other only on Save — so
+    // cancelling a dialog leaves no entry behind.
+    wireguardMint: (): Promise<VpnMintResult> => ipcRenderer.invoke('vpn:wireguardMint'),
     // `wg pubkey`. No vault write and no side effect, so it is safe to call
     // while the user is still typing a key in.
     wireguardPublicKey: (privateKey: string): Promise<VpnPublicKeyResult> =>

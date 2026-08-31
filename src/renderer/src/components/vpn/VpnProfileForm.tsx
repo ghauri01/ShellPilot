@@ -5,6 +5,7 @@ import { useApp } from '../../store/app'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
 import { bridgeHas } from '../../lib/bridge'
+import { withVaultUnlock } from '../../lib/withVaultUnlock'
 import { isCidr, isWireGuardKey, parseVpnEndpoint } from '../../../../shared/vpn'
 import { userSuppliesEngine } from '../../../../shared/vpnEngines'
 import type {
@@ -20,6 +21,17 @@ import type {
 } from '../../types'
 import { BindWarning } from './VpnStatusCard'
 import { FrpProxyEditor } from './FrpProxyEditor'
+
+/** A keypair that exists only in this form.
+ *
+ *  Generating or pasting a key used to write it to the vault on the spot, which
+ *  meant opening the dialog, pressing Generate, and pressing Cancel left an
+ *  entry behind that no profile referenced. Cancel has to mean cancel, so the
+ *  pair is held here and written by `save()` or not at all. */
+interface PendingKey {
+  privateKey: string
+  publicKey: string
+}
 
 const listStr = (a: string[] | undefined): string => (a ?? []).join(', ')
 const parseList = (s: string): string[] =>
@@ -102,13 +114,69 @@ export function VpnProfileForm({ profile, onClose, focus }: VpnProfileFormProps)
   // whatever was not.
   const shown = useMemo(() => new Set<string>(), [issues])
 
-  const blocking = issues.filter((i) => i.severity === 'error')
+  // A keypair the user generated or pasted, held here until Save.
+  //
+  // It deliberately does not live on the spec. The spec is plain JSON that gets
+  // persisted, and a private key has no business in it — that is the whole
+  // reason the profile carries a `privateKeyRef` instead. Holding it in form
+  // state means Cancel discards it the way Cancel discards every other edit.
+  const [pendingKey, setPendingKey] = useState<PendingKey | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  // The validator runs in main against the spec, so it cannot know a key is
+  // sitting in this component waiting to be written. Left alone it reports
+  // `private-key-missing`, which is an error, which disables Save — and Save is
+  // precisely the thing that would store the key. Dropping that one issue while
+  // a pending key exists is what makes deferring the write possible at all.
+  const blocking = issues.filter(
+    (i) => i.severity === 'error' && !(pendingKey && i.code === 'private-key-missing')
+  )
   const stripped = draft.spec.strippedDirectives ?? []
 
-  const save = (): void => {
-    if (blocking.length > 0 || !draft.name.trim()) return
-    upsertVpnProfile({ ...draft, name: draft.name.trim() })
-    toast(`${draft.name.trim()} saved`, 'ok')
+  const save = async (): Promise<void> => {
+    if (blocking.length > 0 || !draft.name.trim() || saving) return
+    const name = draft.name.trim()
+    let spec = draft.spec
+
+    // The one write this form performs, and only from here. `stageImportedSecrets`
+    // by way of `wireguardKeygen` — the same road an imported key travels, so
+    // there is still exactly one way a WireGuard private key enters the vault.
+    //
+    // Narrowed on `kind` rather than cast. Only the WireGuard field can set a
+    // pending key, so a cast would be correct today and quietly wrong the day
+    // another engine grows a generated secret — and it would be wrong by
+    // reading a `privateKeyRef` off a spec that has no such field.
+    if (pendingKey && spec.kind === 'wireguard') {
+      const wg: WireGuardSpec = spec
+      setSaving(true)
+      try {
+        const replaces = wg.privateKeyRef?.vaultEntryId
+        const stored = await withVaultUnlock(`Saving the key for ${name}`, () =>
+          Promise.resolve(
+            window.shellpilot?.vpn.wireguardKeygen({
+              profileName: name,
+              workspaceId: draft.workspaceId,
+              privateKey: pendingKey.privateKey,
+              // Released only once the replacement is written, so a profile is
+              // never left pointing at an entry that no longer exists.
+              ...(replaces ? { replaces } : {})
+            })
+          )
+        )
+        if (!stored?.ok || !stored.privateKeyRef) {
+          // The form stays open with the key still held, so the user can fix
+          // whatever went wrong and press Save again rather than losing it.
+          toast(stored?.error ?? 'The key could not be saved to the vault.', 'error')
+          return
+        }
+        spec = { ...wg, privateKeyRef: stored.privateKeyRef }
+      } finally {
+        setSaving(false)
+      }
+    }
+
+    upsertVpnProfile({ ...draft, name, spec })
+    toast(`${name} saved`, 'ok')
     onClose()
   }
 
@@ -133,10 +201,10 @@ export function VpnProfileForm({ profile, onClose, focus }: VpnProfileFormProps)
           </button>
           <button
             className="btn primary sm"
-            disabled={blocking.length > 0 || !draft.name.trim()}
-            onClick={save}
+            disabled={blocking.length > 0 || !draft.name.trim() || saving}
+            onClick={() => void save()}
           >
-            Save
+            {saving ? 'Saving…' : 'Save'}
           </button>
         </>
       }
@@ -166,14 +234,11 @@ export function VpnProfileForm({ profile, onClose, focus }: VpnProfileFormProps)
         {draft.spec.kind === 'wireguard' && (
           <WireGuardFields
             spec={draft.spec}
-            // The vault entry a generated key lands in is named after the
-            // profile, so the key material stays recognisable from the vault
-            // UI on its own — exactly as an imported profile's entry is.
-            profileName={draft.name}
-            workspaceId={draft.workspaceId}
             issue={byPath}
             shown={shown}
             onChange={setSpec}
+            pending={pendingKey}
+            onPending={setPendingKey}
           />
         )}
         {draft.spec.kind === 'openvpn' && (
@@ -399,20 +464,20 @@ function Hint({
 
 interface WgProps {
   spec: WireGuardSpec
-  profileName: string
-  workspaceId: string
   issue: IssueMap
   shown: Set<string>
   onChange: (spec: WireGuardSpec) => void
+  pending: PendingKey | null
+  onPending: (p: PendingKey | null) => void
 }
 
 function WireGuardFields({
   spec,
-  profileName,
-  workspaceId,
   issue,
   onChange,
-  shown
+  shown,
+  pending,
+  onPending
 }: WgProps): React.JSX.Element {
   const systemModeBlocked = useSystemModeBlocked()
   const set = (patch: Partial<WireGuardSpec>): void => onChange({ ...spec, ...patch })
@@ -455,11 +520,10 @@ function WireGuardFields({
 
       <InterfaceKeyField
         spec={spec}
-        profileName={profileName}
-        workspaceId={workspaceId}
         issue={issue}
         shown={shown}
-        onChange={onChange}
+        pending={pending}
+        onPending={onPending}
       />
 
       <label className="field">
@@ -597,11 +661,15 @@ const PUBKEY_DEBOUNCE_MS = 300
 
 interface KeyFieldProps {
   spec: WireGuardSpec
-  profileName: string
-  workspaceId: string
   issue: IssueMap
   shown: Set<string>
-  onChange: (spec: WireGuardSpec) => void
+  /** The pair the form is holding, if any. Written by Save, not by this field.
+   *
+   *  There is no `onChange` here any more, and its absence is the point: this
+   *  field no longer touches the spec. It reports a pair upwards and the form
+   *  decides, on Save, whether a `privateKeyRef` comes into existence. */
+  pending: PendingKey | null
+  onPending: (p: PendingKey | null) => void
 }
 
 /**
@@ -611,10 +679,14 @@ interface KeyFieldProps {
  *
  * The private key is a secret and the profile is plain JSON, so it never lives
  * on the spec — only a `privateKeyRef` into the vault does, exactly as an
- * imported profile's does. Generating and adopting both store the key through
- * `stageImportedSecrets`, the same function an import stores through, and then
- * patch the ref in; the key itself is held here, masked, only so the person who
- * just minted it can copy it once for their own records.
+ * imported profile's does.
+ *
+ * This field writes nothing. It mints, it derives, it hands the pair up to the
+ * form, and the form writes it on Save through the same `stageImportedSecrets`
+ * road an import travels. That split exists because the old arrangement stored
+ * on the button press: opening the dialog, pressing Generate and pressing
+ * Cancel left a vault entry no profile referenced. Cancel now discards the key
+ * along with every other unsaved edit, which is what Cancel is for.
  *
  * The public key is the whole point. A private key nobody can get the public
  * half out of is a key you cannot use: it is what the server's `[Peer]` section
@@ -630,27 +702,26 @@ interface KeyFieldProps {
  */
 function InterfaceKeyField({
   spec,
-  profileName,
-  workspaceId,
   issue,
   shown,
-  onChange
+  pending,
+  onPending
 }: KeyFieldProps): React.JSX.Element {
-  const [privateKey, setPrivateKey] = useState('')
+  const [privateKey, setPrivateKey] = useState(pending?.privateKey ?? '')
   const [reveal, setReveal] = useState(false)
-  const [publicKey, setPublicKey] = useState('')
-  // The public half of whatever is in the vault right now, when this session
-  // is what put it there. Distinguishes "typed but not stored" from "stored".
-  const [storedPublicKey, setStoredPublicKey] = useState('')
+  const [publicKey, setPublicKey] = useState(pending?.publicKey ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const bridge = window.shellpilot?.vpn as Record<string, unknown> | undefined
-  const canKeygen = bridgeHas(bridge, 'wireguardKeygen')
+  const canMint = bridgeHas(bridge, 'wireguardMint')
   const canDerive = bridgeHas(bridge, 'wireguardPublicKey')
   const shaped = isWireGuardKey(privateKey)
   const inVault = !!spec.privateKeyRef?.vaultEntryId
-  const dirty = shaped && publicKey !== '' && publicKey !== storedPublicKey
+  // A usable key on screen that the form is not yet holding. Compared against
+  // the pending pair rather than against the vault, because "will be saved" is
+  // now the state that matters and the vault has not been touched.
+  const dirty = shaped && publicKey !== '' && publicKey !== pending?.publicKey
 
   // Live `wg pubkey` while the user pastes. Cheap enough to run on a settled
   // keystroke and the only way the field is worth having.
@@ -672,36 +743,34 @@ function InterfaceKeyField({
     }
   }, [privateKey, shaped, canDerive])
 
-  /** Mint or adopt, store, and point the profile at what was stored. */
-  const stage = async (paste: string | undefined): Promise<void> => {
-    if (!canKeygen || busy) return
+  /** Mint a fresh pair. Nothing is stored — the form writes it on Save. */
+  const mint = async (): Promise<void> => {
+    if (!canMint || busy) return
     setBusy(true)
     setError(null)
     try {
-      const res = await window.shellpilot?.vpn.wireguardKeygen({
-        profileName,
-        workspaceId,
-        ...(paste ? { privateKey: paste } : {}),
-        // Released only once the replacement is written, so a profile is never
-        // left pointing at an entry that no longer exists.
-        ...(spec.privateKeyRef?.vaultEntryId ? { replaces: spec.privateKeyRef.vaultEntryId } : {})
-      })
-      if (!res?.ok || !res.privateKeyRef || !res.publicKey) {
-        setError(res?.error ?? 'The key could not be stored.')
+      const res = await window.shellpilot?.vpn.wireguardMint()
+      if (!res?.ok || !res.privateKey || !res.publicKey) {
+        setError(res?.error ?? 'The key could not be generated.')
         return
       }
-      // The key is shown so it can be copied once; it is the ref that is saved.
-      setPrivateKey(res.privateKey ?? paste ?? '')
+      setPrivateKey(res.privateKey)
       setPublicKey(res.publicKey)
-      setStoredPublicKey(res.publicKey)
       // Not revealed on arrival: a freshly generated key on screen is a key on
       // screen, and the eye is right there for the moment it is wanted.
       setReveal(false)
-      onChange({ ...spec, privateKeyRef: res.privateKeyRef })
-      toast(paste ? 'Private key saved to the vault' : 'Keypair generated', 'ok')
+      onPending({ privateKey: res.privateKey, publicKey: res.publicKey })
     } finally {
       setBusy(false)
     }
+  }
+
+  /** Take the key in the box. No IPC: its public half was already derived live
+   *  by the effect above, which is the only thing adopting ever needed. */
+  const adopt = (): void => {
+    if (!shaped || publicKey === '') return
+    setError(null)
+    onPending({ privateKey, publicKey })
   }
 
   return (
@@ -709,7 +778,7 @@ function InterfaceKeyField({
       <div className="row" style={{ gap: 8 }}>
         <span className="field-label">Interface key</span>
         <span className="grow" />
-        <button className="btn sm" disabled={!canKeygen || busy} onClick={() => void stage(undefined)}>
+        <button className="btn sm" disabled={!canMint || busy} onClick={() => void mint()}>
           <KeyRound size={13} /> Generate keypair
         </button>
       </div>
@@ -724,8 +793,17 @@ function InterfaceKeyField({
           placeholder={inVault ? 'Paste a private key to replace the stored one' : 'Paste a private key, or generate one'}
           value={privateKey}
           onChange={(e) => {
+            const next = e.target.value.trim()
             setError(null)
-            setPrivateKey(e.target.value.trim())
+            setPrivateKey(next)
+            // Emptying the box drops the held key.
+            //
+            // Otherwise the form goes on holding a pair the field no longer
+            // shows, and Save writes a key the user has visibly deleted. This
+            // is not the old behaviour — clearing the box could not unstore a
+            // key that was already in the vault — but nothing is in the vault
+            // yet, so the honest reading of an empty box is "not this one".
+            if (next === '' && pending) onPending(null)
           }}
         />
         <button
@@ -753,14 +831,26 @@ function InterfaceKeyField({
 
       {dirty && (
         <div className="row" style={{ gap: 6 }}>
-          <button className="btn primary sm" disabled={busy} onClick={() => void stage(privateKey)}>
-            {inVault ? 'Replace the stored key' : 'Save this key to the vault'}
+          <button className="btn primary sm" disabled={busy} onClick={adopt}>
+            {inVault ? 'Replace the stored key' : 'Use this key'}
           </button>
           <span className="field-hint">
             Until you do, this profile still uses{' '}
             {inVault ? 'the key already in the vault' : 'no key at all'}.
           </span>
         </div>
+      )}
+
+      {pending !== null && !dirty && (
+        // The state that did not exist before: a real key, held, not yet
+        // written. Saying so plainly is the price of deferring the write — a
+        // user who generated a key and closed the window has to be able to tell
+        // whether they have one.
+        <span className="field-hint">
+          {inVault
+            ? 'This key replaces the stored one when you press Save.'
+            : 'This key is saved to the vault when you press Save.'}
+        </span>
       )}
 
       {publicKey !== '' && (
@@ -796,17 +886,20 @@ function InterfaceKeyField({
       )}
 
       <span className="field-hint">
-        {!canKeygen
+        {!canMint
           ? 'This build cannot generate keys. Import a .conf that already carries one.'
           : dirty
-            ? // The dirty row above already says what to do about it; repeating
+            ? // The row above already says what to do about it; repeating
               // "stored in the vault" here would be a straight contradiction.
               'Nothing is written to the vault until you say so.'
-            : privateKey !== ''
-              ? 'Held in the vault. The private key is never written to this profile, to a config file, or to a log line.'
+            : pending !== null
+              ? // Deliberately not "held in the vault", which is what this said
+                // when the write happened on the button press. It is held here,
+                // in an unsaved form, and Cancel throws it away.
+                'The private key goes to the vault on Save, and never onto this profile, a config file, or a log line.'
               : inVault
                 ? 'Private key, held in the vault. ShellPilot cannot read it back to show you its public key — paste the key here to see it, or generate a new pair and authorise that one instead.'
-                : 'No private key yet. Generate a pair, or paste one you already have; either way it goes to the vault and the profile keeps only a pointer to it.'}
+                : 'No private key yet. Generate a pair, or paste one you already have; either way it goes to the vault on Save and the profile keeps only a pointer to it.'}
       </span>
     </div>
   )

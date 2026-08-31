@@ -346,7 +346,7 @@ export interface VpnImportResultInternal extends VpnImportResult {
 // ------------------------------------------------------------- key material
 
 // A WireGuard keypair is the one place ShellPilot mints a secret rather than
-// being handed one, so these two shapes are separate on purpose.
+// being handed one, so these shapes are separate on purpose.
 //
 // `VpnKeygenResult` carries a private key and therefore never leaves the
 // machine, but it does cross IPC: the user has to be able to reveal and copy
@@ -354,6 +354,23 @@ export interface VpnImportResultInternal extends VpnImportResult {
 // bodies in the other direction during an import. `VpnPublicKeyResult` carries
 // nothing secret at all and is what the live "what is the public half of this?"
 // preview uses.
+//
+// `VpnMintResult` is the third: a keypair that has been made and *not* stored.
+// The distinction is in the type rather than in a boolean parameter, because
+// "did this write a secret to the vault" is exactly the question a reader
+// should be able to answer from the call site. The absence of `privateKeyRef`
+// here is the whole point — there is no ref because there is nothing to point
+// at yet, and the form does not create one until the user presses Save.
+
+export interface VpnMintResult {
+  ok: boolean
+  error?: string
+  errorCode?: VpnErrorCode
+  // base64. Held in the form, shown masked, and lost if the form is cancelled.
+  privateKey?: string
+  // base64. The half the user gives to their server or their provider.
+  publicKey?: string
+}
 
 export interface VpnKeygenResult {
   ok: boolean
