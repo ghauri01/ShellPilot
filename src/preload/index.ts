@@ -28,10 +28,12 @@ import type {
   VpnDependent,
   VpnEngineInfo,
   VpnImportResult,
+  VpnKeygenResult,
   VpnKind,
   VpnLogLine,
   VpnProfile,
   VpnPrompt,
+  VpnPublicKeyResult,
   VpnResult,
   VpnSpec,
   VpnStartResult,
@@ -251,6 +253,26 @@ const api = {
     logs: (id: string, limit?: number): Promise<VpnLogLine[]> =>
       ipcRenderer.invoke('vpn:logs', id, limit),
     dependents: (id: string): Promise<VpnDependent[]> => ipcRenderer.invoke('vpn:dependents', id),
+    // A WireGuard keypair, stored the same way an imported one is: the main
+    // handler puts the private key in the vault and hands back a ref. The key
+    // itself comes back too, so the user can reveal and copy the one they just
+    // made — nothing persists it, and `privateKeyRef` is the only part that
+    // goes on the profile.
+    //
+    // `privateKey` on the way in means "adopt this instead of minting one",
+    // which is how a key pasted from elsewhere reaches the vault. `replaces`
+    // is the entry this profile pointed at before, released once the new one
+    // is written.
+    wireguardKeygen: (req: {
+      profileName: string
+      workspaceId: string
+      privateKey?: string
+      replaces?: string
+    }): Promise<VpnKeygenResult> => ipcRenderer.invoke('vpn:wireguardKeygen', req),
+    // `wg pubkey`. No vault write and no side effect, so it is safe to call
+    // while the user is still typing a key in.
+    wireguardPublicKey: (privateKey: string): Promise<VpnPublicKeyResult> =>
+      ipcRenderer.invoke('vpn:wireguardPublicKey', privateKey),
     // Called when a profile is deleted. The profile itself lives in the
     // renderer's data blob, but its key material lives in the vault and would
     // otherwise be orphaned there with no UI pointing at it.

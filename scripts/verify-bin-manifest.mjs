@@ -20,10 +20,27 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const BIN_ROOT = join(ROOT, 'resources', 'bin')
 
-// Every engine the app expects to find. Keep this in step with the drivers:
-// an engine added to the app but not listed here would ship missing and this
-// check would pass.
-const REQUIRED = ['shellpilot-netd', 'frpc']
+// Every file the app expects to find, per platform. Keep this in step with the
+// drivers: something added to the app but not listed here would ship missing
+// and this check would pass.
+//
+// The lists differ by platform, and the two differences are both deliberate:
+//
+//   * `openvpn` is bundled on macOS and Linux only. On Windows OpenVPN needs
+//     an adapter driver ShellPilot cannot install, so the Windows build still
+//     drives a system install — see docs/VPN.md.
+//   * `wintun.dll` is Windows-only by nature. It is not an executable, so it
+//     is listed with its extension and gets no `.exe`.
+const REQUIRED = {
+  darwin: ['shellpilot-netd', 'frpc', 'openvpn'],
+  linux: ['shellpilot-netd', 'frpc', 'openvpn'],
+  win32: ['shellpilot-netd', 'frpc', 'wintun.dll']
+}
+
+function fileNameFor(name, dir) {
+  if (name.includes('.')) return name
+  return dir.startsWith('win32') ? `${name}.exe` : name
+}
 
 function sha256File(path) {
   return new Promise((res, rej) => {
@@ -54,17 +71,22 @@ async function main() {
     process.exit(1)
   }
 
+  const required = REQUIRED[process.platform]
+  if (!required) {
+    console.error(`::error::no engine list for ${process.platform}; ShellPilot is not built there.`)
+    process.exit(1)
+  }
+
   const problems = []
   for (const dir of requiredDirs()) {
-    for (const name of REQUIRED) {
-      const exe = dir.startsWith('win32') ? '.exe' : ''
-      const key = `${dir}/${name}${exe}`
+    for (const name of required) {
+      const key = `${dir}/${fileNameFor(name, dir)}`
       const entry = manifest.binaries?.[key]
       if (!entry) {
         problems.push(`${key}: not in the manifest`)
         continue
       }
-      const file = join(BIN_ROOT, dir, `${name}${exe}`)
+      const file = join(BIN_ROOT, dir, fileNameFor(name, dir))
       let st
       try {
         st = await stat(file)

@@ -44,7 +44,7 @@ internal service — is better served by the default.
 
 ### What system mode does not do yet
 
-Three limits, stated plainly because each of them is a refusal you will meet
+Two limits, stated plainly because each of them is a refusal you will meet
 rather than a bug you will hit:
 
 - **A full tunnel (`AllowedIPs = 0.0.0.0/0` or `::/0`) is refused in system
@@ -61,12 +61,14 @@ rather than a bug you will hit:
 - **macOS system mode is blocked.** It needs a privileged helper, which needs an
   Apple Developer ID this project does not have. Userspace WireGuard works
   fully on macOS and needs no permission at all.
-- **Windows system mode needs `wintun.dll`**, which ShellPilot does not bundle —
-  install [WireGuard for Windows](https://www.wireguard.com/install/) and it is
-  provided. See [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) for why
-  it is not included. Userspace mode needs nothing.
 
-None of these affect the default. Userspace WireGuard runs on all three
+Windows system mode used to be a third limit, and is not one any more:
+`wintun.dll` now ships with ShellPilot, so nothing has to be installed for it.
+The DLL is proprietary — the one component in ShellPilot that is not open
+source — and [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) says so
+plainly along with what that does and does not permit.
+
+Neither limit affects the default. Userspace WireGuard runs on all three
 platforms with no administrator rights and no driver.
 
 ---
@@ -88,6 +90,22 @@ keep the file, and re-derives everything it runs from the parsed model.
 them expects those side effects, so silently dropping them and reporting
 success would be a lie about what you are connected to. The import fails and
 quotes the offending line.
+
+### Making your own keypair
+
+You do not need `wg` installed. The profile editor has a **Generate keypair**
+button: it mints a Curve25519 private key, stores it in the vault like any
+other credential, and shows you the matching **public key** with a copy button.
+
+The public key is the half you hand out — it goes in the `[Peer]` section on
+the server, or into your provider's dashboard. A private key you paste in
+yourself also gets its public half derived and shown, so an imported profile
+can tell you what to authorise without you running anything in a terminal.
+
+The keys are the same ones `wg` would produce: same Curve25519 clamp, same
+encoding, and the app's output is checked against `wg pubkey` in the test
+suite. A key that looked right but was subtly wrong would be the worst kind of
+bug here, so it is verified rather than assumed.
 
 ### Reading the status
 
@@ -115,33 +133,51 @@ portal you have not signed into yet.
 
 ## OpenVPN
 
-**OpenVPN is not bundled with ShellPilot.** It is GPL-2.0 licensed and
-ShellPilot is MIT; distributing the binary would create a corresponding-source
-obligation this project cannot honestly maintain across every platform, in
-perpetuity. See [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md).
+ShellPilot drives OpenVPN over OpenVPN's own management interface — the same
+mechanism the official GUI uses — as a separate process. It never links against
+it.
 
-So you install OpenVPN yourself and ShellPilot drives the copy you already
-have, over OpenVPN's own management interface — the same mechanism the official
-GUI uses.
+**On macOS and Linux, OpenVPN comes with ShellPilot.** There is nothing to
+install. It is built from a pinned upstream tag by `scripts/build-openvpn.sh`,
+statically linked against a pinned OpenSSL so it does not depend on anything on
+your machine, and hash-verified before it is run — the same treatment the
+WireGuard sidecar and the frp client get.
 
-| Platform | Install |
+**On Windows you still install OpenVPN yourself**, and the reason is a driver
+rather than a licence. OpenVPN needs a tun adapter, and neither adapter it
+supports can be provided by copying a file into place: `tap-windows6` is a
+kernel driver with its own installer, and Wintun — which ShellPilot *does*
+bundle, for WireGuard — is never loaded by `openvpn.exe`, which opens an
+adapter that already exists rather than creating one. The official package
+brings the driver, and it brings the Interactive Service, which is what removes
+the permission prompt on every connect.
+
+| Platform | What you need |
 |---|---|
-| Windows | the official OpenVPN MSI (installs the Interactive Service too — see below) |
-| macOS | `brew install openvpn` |
-| Debian/Ubuntu | `apt install openvpn` |
-| Fedora | `dnf install openvpn` |
+| macOS | nothing — included |
+| Linux | nothing — included |
+| Windows | the official OpenVPN MSI from [openvpn.net](https://openvpn.net/community-downloads/) (installs the Interactive Service too — see below) |
 
-ShellPilot looks in a fixed list of standard locations, and on POSIX also on
-`PATH`. **It never searches `PATH` on Windows**, where `PATH` and
-current-directory search is a well-known way to get the wrong `openvpn.exe`
-run. You can point at a specific binary explicitly; ShellPilot records its path,
-version and SHA-256 in the audit log the first time it is used and whenever it
-changes.
+Where the binary comes from, in order: a path you set on the profile and
+confirmed; then the copy ShellPilot ships; then a fixed list of standard
+install locations, and on POSIX also `PATH`. **It never searches `PATH` on
+Windows**, where `PATH` and current-directory search is a well-known way to get
+the wrong `openvpn.exe` run. ShellPilot records the resolved path, version and
+SHA-256 in the audit log the first time a binary is used and whenever it
+changes — so switching between the bundled copy and your own is visible rather
+than silent.
+
+OpenVPN is GPL-2.0 and ShellPilot is MIT. Running it as a separate process is
+mere aggregation, so ShellPilot's licence is unaffected; distributing the binary
+does oblige this project to publish the matching source, and every release
+carries it as an asset. [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) has
+the full reasoning.
 
 ### Administrator rights
 
 OpenVPN has no userspace mode — it needs a TUN device, so it needs elevation.
-ShellPilot asks per connect and never stores the answer:
+Bundling it removed the install, not the prompt: ShellPilot still asks on every
+connect, exactly as before, and never stores the answer.
 
 - **Windows**: if the OpenVPN Interactive Service is present (it comes with the
   official MSI) ShellPilot uses it and there is no UAC prompt. Otherwise you get
@@ -312,7 +348,7 @@ See [AI-SECURITY.md](AI-SECURITY.md).
 | WireGuard connects but nothing works; handshake never happens | Wrong endpoint, UDP blocked, or a captive portal you have not signed into |
 | Amber "degraded" after working fine | The tunnel stopped passing traffic — often a network change; it usually recovers |
 | Large transfers stall, small ones work | MTU. Try 1280 |
-| "The program that runs this tunnel could not be found" | For OpenVPN, install it. For WireGuard or frp, reinstall ShellPilot — antivirus sometimes quarantines bundled binaries |
+| "The program that runs this tunnel could not be found" | Reinstall ShellPilot — antivirus sometimes quarantines bundled binaries. On Windows only, an OpenVPN profile also needs OpenVPN installed |
 | "does not match its expected checksum" | The bundled binary was altered. Reinstall; do not override |
 | OpenVPN asks for the code again after a reconnect | Expected. Codes are never cached |
 | frp says "port already used" | Another proxy — possibly someone else's — already claims that remote port on that frp server |

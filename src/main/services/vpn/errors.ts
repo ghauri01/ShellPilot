@@ -65,7 +65,13 @@ export const VPN_ERROR_MESSAGE: Record<VpnErrorCode, string> = {
 // reads instead of clicking. The CLI and the log still print the sentence, so
 // it has to stand alone; it does not have to teach.
 export const VPN_ERROR_HINT: Record<VpnErrorCode, string> = {
-  'binary-missing': 'Install it, or set its path in the profile.',
+  // Deliberately empty. ShellPilot now ships the sidecar, frpc, and — on macOS
+  // and Linux — OpenVPN, so "install it" is wrong for three of the four
+  // engines, and which advice is right depends on both the engine and the
+  // platform. `resolveBundled` and `absentReason` already build a detail that
+  // knows both (reinstall vs. antivirus vs. openvpn.net), and describeVpnError
+  // appends this after it. A generic sentence here could only contradict them.
+  'binary-missing': '',
   'binary-untrusted': 'Reinstall ShellPilot — antivirus software sometimes alters bundled files.',
   // Not "check the highlighted fields": this arrives as a toast when the
   // profile form is closed, so there is nothing highlighted to look at.

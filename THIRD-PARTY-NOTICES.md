@@ -7,11 +7,17 @@ requirements of those licenses.
 
 No third-party source code is vendored or copied into this repository. Most of
 what is listed below is consumed as a normal npm package dependency,
-unmodified. The exception is the two tunnel engines described under **Bundled
-binaries**: they are compiled from pinned upstream source at build time and
-shipped inside the installer, so they are distributed rather than merely
-depended on. Licenses for everything listed here are unmodified and are not
-affected by ShellPilot's own license.
+unmodified. The exceptions are the components under **Bundled binaries**: they
+are compiled from pinned upstream source at build time (or, for Wintun,
+downloaded from the vendor and verified against a pinned hash) and shipped
+inside the installer, so they are distributed rather than merely depended on.
+Licenses for everything listed here are unmodified and are not affected by
+ShellPilot's own license.
+
+**One shipped component is not open source.** `wintun.dll` is proprietary. It is
+the only one, it is Windows-only, and it is described in full below rather than
+left to a table — ShellPilot is presented as open-source software and that
+claim should not have an unmentioned exception behind it.
 
 This list was generated from the actual installed dependency tree
 (`npm ls --all`), not by inspection of `package.json` alone, so it also
@@ -19,65 +25,118 @@ covers indirect (transitive) dependencies pulled in by the packages below.
 
 ## Bundled binaries
 
-Compiled from pinned upstream source by `scripts/build-sidecar.sh` and
-`scripts/build-frpc.sh`, verified against `resources/bin/manifest.json`, and
-shipped inside the installer at `Resources/bin/<platform>-<arch>/`. Unlike the
-npm packages below, these are *distributed*, so their licence terms apply to
-the installer itself.
+Built or fetched by the scripts in `scripts/`, verified against
+`resources/bin/manifest.json`, and shipped inside the installer at
+`Resources/bin/<platform>-<arch>/`. Unlike the npm packages below, these are
+*distributed*, so their licence terms apply to the installer itself.
 
-| Component | Version | License | Source |
-|---|---|---|---|
-| `shellpilot-netd` | in-tree | MIT | `sidecar/netd/` in this repository |
-| `wireguard-go` (linked into `shellpilot-netd`) | pinned in `sidecar/netd/go.mod` | MIT | `golang.zx2c4.com/wireguard` |
-| gVisor `netstack` (linked into `shellpilot-netd`) | pinned in `sidecar/netd/go.mod` | Apache-2.0 | `gvisor.dev/gvisor` |
-| `frpc` | v0.71.0 | Apache-2.0 | `github.com/fatedier/frp` |
+| Component | Version | License | Platforms | Source |
+|---|---|---|---|---|
+| `shellpilot-netd` | in-tree | MIT | all | `sidecar/netd/` in this repository |
+| `wireguard-go` (linked into `shellpilot-netd`) | pinned in `sidecar/netd/go.mod` | MIT | all | `golang.zx2c4.com/wireguard` |
+| gVisor `netstack` (linked into `shellpilot-netd`) | pinned in `sidecar/netd/go.mod` | Apache-2.0 | all | `gvisor.dev/gvisor` |
+| `frpc` | v0.71.0 | Apache-2.0 | all | `github.com/fatedier/frp` |
+| `openvpn` | v2.6.22 | **GPL-2.0** with OpenSSL exception | macOS, Linux | `github.com/OpenVPN/openvpn` |
+| OpenSSL (statically linked into `openvpn`) | 3.5.8 | Apache-2.0 | macOS, Linux | `github.com/openssl/openssl` |
+| `wintun.dll` | 0.14.1 | **Proprietary** — see below | Windows | `wintun.net/builds` (prebuilt, unmodified) |
 
 Apache-2.0 section 4 requires the licence text and any `NOTICE` file to travel
 with the binary. `scripts/build-frpc.sh` copies frp's `LICENSE` and `NOTICE`
-into `resources/licenses/frp/`, which ships inside the app.
+into `resources/licenses/frp/`, which ships inside the app. The same is done
+for OpenVPN (`resources/licenses/openvpn/`) and Wintun
+(`resources/licenses/wintun/`).
 
-### OpenVPN is deliberately **not** bundled
+### OpenVPN is bundled on macOS and Linux, and it is GPL-2.0
 
-OpenVPN 2.x is **GPL-2.0** and ShellPilot is MIT. ShellPilot supports OpenVPN by detecting a copy the user has already
-installed and driving it over its management interface as a separate process —
-it never links against it and never ships it.
+`scripts/build-openvpn.sh` compiles OpenVPN 2.6.22 from the pinned upstream tag
+and ships the result inside the installer. Two things follow from that, and
+neither is optional.
 
-This is a deliberate distribution decision, not an oversight. Bundling the
-binary would put ShellPilot in the position of *distributing* GPL-2.0 software,
-carrying a corresponding-source obligation (GPL-2.0 §3) for every platform
-build, in perpetuity. Running an independently-installed program as a separate
-process over a documented control protocol is ordinary use: it creates no
-combined work and no source obligation.
+**ShellPilot stays MIT.** OpenVPN 2.x is GPL-2.0 (with an OpenSSL linking
+exception, which is what makes the static OpenSSL link lawful). ShellPilot does
+not link against OpenVPN: it starts `openvpn` as a *separate process* and
+drives it over OpenVPN's own management socket — separate address space, no
+shared symbols, a documented control protocol. That is GPL-2.0 §2 "mere
+aggregation" — two programs on one medium, not one combined work — so the GPL
+does not reach ShellPilot's own source.
 
-Practical consequences, which the app states in its own UI rather than leaving
-the user to discover:
+**ShellPilot owes you the source.** What bundling *does* create is the GPL-2.0
+§3 obligation that falls on anyone who distributes GPL binaries. It is
+discharged by publication, not by an offer: every ShellPilot release that
+contains an OpenVPN binary also carries `openvpn-<version>-source.tar.gz` as a
+release asset — a `git archive` of the exact commit that was compiled, with its
+SHA-256 in the release's checksum table. `scripts/build-openvpn.sh` in this
+repository is the recipe that turns that source into the shipped binary, and it
+pins the tag, the commit hash, the OpenSSL version and the OpenSSL tarball
+hash. Nothing about the build depends on what happened to be installed on the
+machine that ran it.
 
-- An OpenVPN profile cannot connect until OpenVPN is installed. ShellPilot says
-  so, and says where to get it.
-- ShellPilot resolves the binary from a fixed allowlist of standard install
-  locations, and on POSIX only, also `PATH`. It never searches `PATH` on
-  Windows, where `PATH`/CWD search is a well-known hijack vector.
-- The resolved path, version and SHA-256 are recorded in the audit log on first
-  use and whenever they change.
+The build switches off `--enable-plugins`, `--enable-lzo`, `--enable-lz4`,
+`--enable-pkcs11` and `--enable-dco`. Removing plugin support is a security
+decision as much as a size one: ShellPilot already rejects `plugin` directives
+when importing a `.ovpn`, and a binary that cannot load a plugin cannot be
+talked into loading one.
+
+**Windows is the exception, and still needs an install.** OpenVPN on Windows
+needs a tun adapter driver, and neither of the two available drivers can be
+provided by copying a file. `tap-windows6` is a kernel driver with its own
+installer. Wintun would seem to be the way out — ShellPilot does bundle
+`wintun.dll` — but `openvpn.exe` never loads it: it opens an adapter that
+already exists (`at_least_one_tap_win` in `tun.c`) and has no code path that
+calls `WintunCreateAdapter`, which is the only way an adapter, and Wintun's
+driver, come into being. So on Windows ShellPilot still drives an OpenVPN the
+user installed, whose installer brings the driver — and the Interactive
+Service, which removes the elevation prompt on every connect.
+
+**Bundling removes the install, not the administrator prompt.** OpenVPN has no
+userspace mode: it needs a TUN device, so it needs elevation, and ShellPilot
+still asks on every connect. That was true before this change and is true
+after it.
 
 **If you repackage ShellPilot** — an AppImage, a Flatpak, a Homebrew cask, a
-distro package — and you vendor `openvpn` into that package, the GPL obligation
-lands on **you**, not on this project.
+distro package — the GPL-2.0 §3 obligation for the OpenVPN binary inside it
+travels with your package and lands on **you**. The source archive on the
+matching ShellPilot release is what you need to redistribute alongside it.
 
-### Wintun is not bundled either
+### Wintun is bundled on Windows, and it is **not open source**
 
-Windows **system mode** needs `wintun.dll`, the adapter driver the WireGuard
-project ships. ShellPilot does not include it; installing
-[WireGuard for Windows](https://www.wireguard.com/install/) provides it, and
-userspace mode — the default — needs nothing.
+This is the one component in ShellPilot that is proprietary software, and it is
+stated here in the open rather than filed in a table.
 
-Unlike OpenVPN this is not a licence obstacle. Wintun's *source* is GPL-2.0, but
-wintun.net states the precompiled signed DLLs are released under "a more
-permissive license than GPL 2.0", and that those signed DLLs are the only
-supported way to redistribute Wintun. Bundling them is therefore likely
-permissible; it has not been done because the exact terms live in the licence
-file inside the official ZIP, and a redistribution decision should be made by a
-human who has read it rather than inferred from a summary.
+`wintun.dll` is the userspace half of the Wintun network adapter driver.
+Windows **system mode** — WireGuard with a real network interface — cannot work
+without it. Wintun's *source* is GPL-2.0, but the prebuilt DLLs published at
+wintun.net are not: they carry a separate **"Prebuilt Binaries License"** from
+WireGuard LLC, which is proprietary and is the only terms under which
+redistribution is permitted at all. The full text ships in the app at
+`resources/licenses/wintun/LICENSE.txt`.
+
+Redistribution is permitted here because clause 3(d) allows it "insofar as the
+Software is distributed alongside other software that uses the Software only
+via the Permitted API" — the interfaces declared in `wintun.h`. ShellPilot's
+sidecar uses exactly that API, through `golang.zx2c4.com/wintun`, and nothing
+else. The conditions that come with it are honoured as follows:
+
+- **Unmodified.** `scripts/fetch-wintun.sh` copies `wintun.dll` straight out of
+  the official signed ZIP. It is never rebuilt, repacked, stripped or re-signed
+  (clause 3(a)).
+- **Nothing extracted from it.** The DLL carries Wintun's kernel driver inside
+  it and installs it itself on first use. ShellPilot does not unpack that
+  (clause 3(a)).
+- **Its notices travel with it.** `LICENSE.txt` is copied into
+  `resources/licenses/wintun/` and ships in the installer (clause 3(c)).
+- **No endorsement is implied.** ShellPilot is not affiliated with, and not
+  endorsed by, WireGuard LLC or the Wintun project (clause 3(e)).
+
+The ZIP is pinned by SHA-256 (`07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51`
+for 0.14.1) and verified on every build, because HTTPS authenticates the host
+and says nothing about the bytes.
+
+**If a proprietary component in the installer is not acceptable to you**, the
+DLL is only reached by WireGuard *system* mode on Windows. Userspace mode — the
+default, on every platform — never loads it, and deleting
+`resources/bin/win32-*/wintun.dll` from a build removes it entirely at the cost
+of that one feature.
 
 ### Trademarks
 
@@ -132,6 +191,10 @@ License summary: **199 MIT · 12 ISC · 7 BSD-3-Clause · 7 Apache-2.0 · 2
 BlueOak-1.0.0 · 2 BSD-2-Clause · 1 Python-2.0 · 1 0BSD · 1 Unlicense** — 232
 packages total. No GPL, AGPL, LGPL, SSPL, or proprietary-licensed
 dependencies were found anywhere in the tree.
+
+That statement is about the **npm tree only**. It is not a statement about the
+installer, which also contains a GPL-2.0 program (`openvpn`) and a proprietary
+library (`wintun.dll`) — both described under **Bundled binaries** above.
 
 <details>
 <summary>Full list (click to expand)</summary>
@@ -381,9 +444,11 @@ dependencies were found anywhere in the tree.
   license, comparable to MIT/ISC in what it allows. Not copyleft, not a
   compliance concern — flagged only because it is less common than MIT/ISC.
 - **No GPL, LGPL, AGPL, or SSPL dependencies** were found in the production
-  dependency tree.
+  dependency tree. The bundled `openvpn` binary is GPL-2.0 and is not an npm
+  dependency; see **Bundled binaries** for how that obligation is met.
 - **No proprietary or "custom" licenses** were found; every package resolves
-  to a standard SPDX identifier.
+  to a standard SPDX identifier. The bundled `wintun.dll` is proprietary and,
+  likewise, is not an npm dependency; see **Bundled binaries**.
 - **No dependency had an unverifiable or missing license field** in the
   production tree audited above.
 - This file was generated by walking the installed `node_modules` tree with

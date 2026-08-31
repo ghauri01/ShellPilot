@@ -37,4 +37,12 @@ jobs:
           go test ./...
       - name: Sidecar cross-compile
         run: npm run build:sidecar
+      # The engine build scripts only ever run in the release workflow, so a
+      # typo in one of them is discovered by a failed release. A parse check
+      # costs a second and catches the whole class. It is not a substitute for
+      # running them — building OpenSSL and OpenVPN from source would add a
+      # quarter of an hour to every pull request, which is why the release
+      # workflow is where that happens.
+      - name: Engine build scripts parse
+        run: bash -n scripts/build-openvpn.sh scripts/fetch-wintun.sh scripts/build-frpc.sh scripts/build-sidecar.sh
       - run: npm run test

@@ -56,19 +56,49 @@ jobs:
           fi
 
       # The WireGuard sidecar and the frp client are Go programs built from
-      # source into resources/bin. electron-builder pulls them in through
-      # extraResources, and a missing build is silent at package time — it only
-      # surfaces at runtime as "binary-missing" on every tunnel. So this step
-      # runs before the build, and the verification step below fails the
-      # release rather than shipping an app with no engines.
+      # source into resources/bin, and OpenVPN is a C program built the same
+      # way. electron-builder pulls them in through extraResources, and a
+      # missing build is silent at package time — it only surfaces at runtime
+      # as "binary-missing" on every tunnel. So this step runs before the
+      # build, and the verification step below fails the release rather than
+      # shipping an app with no engines.
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
           cache-dependency-path: sidecar/netd/go.sum
 
+      # OpenVPN is autotools, and it is built from a git checkout rather than a
+      # release tarball, so the generated `configure` does not exist yet and
+      # autoreconf has to make one. Windows needs none of this: it does not
+      # bundle OpenVPN, and build-openvpn.sh exits cleanly there.
+      - name: Install the OpenVPN build toolchain (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install autoconf automake libtool
+
+      - name: Install the OpenVPN build toolchain (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq autoconf automake libtool
+
       - name: Build tunnel engines
         shell: bash
         run: npm run build:engines
+
+      # GPL-2.0 §3. We distribute OpenVPN binaries, so we owe the corresponding
+      # source, and an offer nobody can act on is not compliance. This is the
+      # exact tree the step above compiled — `git archive` of the pinned
+      # commit — uploaded here and attached to the release beside the
+      # installers, with its SHA-256 in the checksum table.
+      #
+      # Only from the Linux job: all three build the same tag from the same
+      # commit, so three identical uploads would collide at merge time for no
+      # gain.
+      - name: Upload OpenVPN corresponding source
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openvpn-source
+          path: .openvpn-src/*.tar.gz
+          if-no-files-found: error
 
       - name: Verify engine manifest covers this platform
         shell: bash
@@ -218,10 +248,12 @@ jobs:
           VERSION="${TAG#v}"
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
           # download-artifact nests one directory per build job, so find rather
-          # than a flat glob. Only the four installer types — .blockmap and
-          # latest*.yml are updater metadata nobody downloads by hand.
+          # than a flat glob. The four installer types plus the OpenVPN source
+          # tarball — .blockmap and latest*.yml are updater metadata nobody
+          # downloads by hand.
           CHECKSUMS=$(cd artifacts && find . -type f \
-              \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \) \
+              \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
+                 -o -name 'openvpn-*-source.tar.gz' \) \
             | sort \
             | xargs -r sha256sum \
             | awk '{ name = $2; sub(/.*\//, "", name); printf "| `%s` | `%s` |\n", name, $1 }')
@@ -248,6 +280,21 @@ jobs:
             echo "|---|---|"
             echo "| [\`ShellPilot-${VERSION}-x86_64.AppImage\`]($BASE/ShellPilot-${VERSION}-x86_64.AppImage) | Any distribution — \`chmod +x\` and run |"
             echo "| [\`ShellPilot-${VERSION}-amd64.deb\`]($BASE/ShellPilot-${VERSION}-amd64.deb) | Debian and Ubuntu — \`sudo apt install ./ShellPilot-${VERSION}-amd64.deb\` |"
+            echo
+            echo "---"
+            echo
+            echo "### Source for the bundled OpenVPN"
+            echo
+            OVPN_SRC=$(cd artifacts && find . -name 'openvpn-*-source.tar.gz' -printf '%f\n' 2>/dev/null | head -n1)
+            if [ -n "$OVPN_SRC" ]; then
+              echo "ShellPilot bundles OpenVPN on macOS and Linux. OpenVPN is GPL-2.0, so the"
+              echo "corresponding source for the exact build in these installers is published"
+              echo "here as [\`$OVPN_SRC\`]($BASE/$OVPN_SRC) — the pinned upstream commit,"
+              echo "unmodified, with its SHA-256 in the table below. \`scripts/build-openvpn.sh\`"
+              echo "in this repository is the recipe that turns it into the shipped binary."
+            else
+              echo "**The OpenVPN source archive is missing from this release.** It should not be."
+            fi
             echo
             echo "---"
             echo

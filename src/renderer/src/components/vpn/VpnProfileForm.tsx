@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, Plus, ScrollText, Trash2 } from 'lucide-react'
+import { AlertTriangle, Copy, Eye, EyeOff, KeyRound, Plus, ScrollText, Trash2 } from 'lucide-react'
 import { Modal } from '../common/Modal'
 import { useApp } from '../../store/app'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
 import { bridgeHas } from '../../lib/bridge'
 import { isCidr, isWireGuardKey, parseVpnEndpoint } from '../../../../shared/vpn'
+import { userSuppliesEngine } from '../../../../shared/vpnEngines'
 import type {
   FrpProxy,
   FrpSpec,
@@ -26,6 +27,15 @@ const parseList = (s: string): string[] =>
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean)
+
+/** Onto the clipboard, with a receipt. A key the user cannot tell they copied
+ *  gets copied again, and the second attempt is the one that grabs the wrong
+ *  field. */
+function copyValue(label: string, value: string): void {
+  if (!value) return
+  window.shellpilot?.clipboard.write(value)
+  toast(`${label} copied`, 'ok')
+}
 
 const KIND_SUBTITLE: Record<VpnProfile['spec']['kind'], string> = {
   wireguard: 'WireGuard',
@@ -154,7 +164,17 @@ export function VpnProfileForm({ profile, onClose, focus }: VpnProfileFormProps)
         <div className="divider" />
 
         {draft.spec.kind === 'wireguard' && (
-          <WireGuardFields spec={draft.spec} issue={byPath} shown={shown} onChange={setSpec} />
+          <WireGuardFields
+            spec={draft.spec}
+            // The vault entry a generated key lands in is named after the
+            // profile, so the key material stays recognisable from the vault
+            // UI on its own — exactly as an imported profile's entry is.
+            profileName={draft.name}
+            workspaceId={draft.workspaceId}
+            issue={byPath}
+            shown={shown}
+            onChange={setSpec}
+          />
         )}
         {draft.spec.kind === 'openvpn' && (
           <OpenVpnFields
@@ -245,12 +265,12 @@ function UnrenderedIssues({
 
 // ---------------------------------------------------------------- shared bits
 
-/** Why system mode cannot be chosen here, or null when it can.
+/** The host platform, or null until the round trip lands.
  *
- *  Kept in one place so the wording matches what the driver actually throws —
- *  a form that offers a mode the engine refuses is worse than one that never
- *  offered it. */
-function useSystemModeBlocked(): string | null {
+ *  Several fields read differently depending on what ShellPilot ships here, and
+ *  a wrong answer during the first frame is worse than a vague one, so callers
+ *  are expected to treat null as "not yet known" rather than as a platform. */
+function usePlatform(): NodeJS.Platform | null {
   const [platform, setPlatform] = useState<NodeJS.Platform | null>(null)
   useEffect(() => {
     let live = true
@@ -261,6 +281,16 @@ function useSystemModeBlocked(): string | null {
       live = false
     }
   }, [])
+  return platform
+}
+
+/** Why system mode cannot be chosen here, or null when it can.
+ *
+ *  Kept in one place so the wording matches what the driver actually throws —
+ *  a form that offers a mode the engine refuses is worse than one that never
+ *  offered it. */
+function useSystemModeBlocked(): string | null {
+  const platform = usePlatform()
   if (platform !== 'darwin') return null
   return 'System mode is not available on macOS: ShellPilot has no signed privileged helper, so it cannot create a system network interface. Userspace mode gives the same tunnel through local listeners and needs no administrator rights.'
 }
@@ -369,12 +399,21 @@ function Hint({
 
 interface WgProps {
   spec: WireGuardSpec
+  profileName: string
+  workspaceId: string
   issue: IssueMap
   shown: Set<string>
   onChange: (spec: WireGuardSpec) => void
 }
 
-function WireGuardFields({ spec, issue, onChange, shown }: WgProps): React.JSX.Element {
+function WireGuardFields({
+  spec,
+  profileName,
+  workspaceId,
+  issue,
+  onChange,
+  shown
+}: WgProps): React.JSX.Element {
   const systemModeBlocked = useSystemModeBlocked()
   const set = (patch: Partial<WireGuardSpec>): void => onChange({ ...spec, ...patch })
   const setPeer = (i: number, patch: Partial<WireGuardPeer>): void =>
@@ -413,6 +452,15 @@ function WireGuardFields({ spec, issue, onChange, shown }: WgProps): React.JSX.E
             : 'Creates a real network interface and changes routes and DNS. Asks for elevation every time it starts. A full tunnel (0.0.0.0/0) is not supported in this mode.'}
         </span>
       </div>
+
+      <InterfaceKeyField
+        spec={spec}
+        profileName={profileName}
+        workspaceId={workspaceId}
+        issue={issue}
+        shown={shown}
+        onChange={onChange}
+      />
 
       <label className="field">
         <span className="field-label">Addresses</span>
@@ -541,6 +589,229 @@ function WireGuardFields({ spec, issue, onChange, shown }: WgProps): React.JSX.E
   )
 }
 
+// ------------------------------------------------------------ interface key
+
+/** How long to leave a key alone before asking what its public half is. Longer
+ *  than the validation debounce next door because this one spawns a process. */
+const PUBKEY_DEBOUNCE_MS = 300
+
+interface KeyFieldProps {
+  spec: WireGuardSpec
+  profileName: string
+  workspaceId: string
+  issue: IssueMap
+  shown: Set<string>
+  onChange: (spec: WireGuardSpec) => void
+}
+
+/**
+ * The interface key: generate one, or paste one, and see the public half.
+ *
+ * Two things make this the shape it is.
+ *
+ * The private key is a secret and the profile is plain JSON, so it never lives
+ * on the spec — only a `privateKeyRef` into the vault does, exactly as an
+ * imported profile's does. Generating and adopting both store the key through
+ * `stageImportedSecrets`, the same function an import stores through, and then
+ * patch the ref in; the key itself is held here, masked, only so the person who
+ * just minted it can copy it once for their own records.
+ *
+ * The public key is the whole point. A private key nobody can get the public
+ * half out of is a key you cannot use: it is what the server's `[Peer]` section
+ * needs, or what the provider asks you to paste into their web form. So it is
+ * shown large, in monospace, with a copy button, and it updates live while a
+ * key is being pasted — including for a profile that was imported, which is the
+ * one case where the answer was previously "run `wg pubkey` yourself".
+ *
+ * What is NOT here is the public key of a key already in the vault. The
+ * renderer cannot read vault secrets, and adding a route so that it could —
+ * just to display a value the user can also obtain by pasting the key back in —
+ * would be a much worse trade than the sentence below saying so.
+ */
+function InterfaceKeyField({
+  spec,
+  profileName,
+  workspaceId,
+  issue,
+  shown,
+  onChange
+}: KeyFieldProps): React.JSX.Element {
+  const [privateKey, setPrivateKey] = useState('')
+  const [reveal, setReveal] = useState(false)
+  const [publicKey, setPublicKey] = useState('')
+  // The public half of whatever is in the vault right now, when this session
+  // is what put it there. Distinguishes "typed but not stored" from "stored".
+  const [storedPublicKey, setStoredPublicKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const bridge = window.shellpilot?.vpn as Record<string, unknown> | undefined
+  const canKeygen = bridgeHas(bridge, 'wireguardKeygen')
+  const canDerive = bridgeHas(bridge, 'wireguardPublicKey')
+  const shaped = isWireGuardKey(privateKey)
+  const inVault = !!spec.privateKeyRef?.vaultEntryId
+  const dirty = shaped && publicKey !== '' && publicKey !== storedPublicKey
+
+  // Live `wg pubkey` while the user pastes. Cheap enough to run on a settled
+  // keystroke and the only way the field is worth having.
+  useEffect(() => {
+    if (!shaped || !canDerive) {
+      setPublicKey('')
+      return
+    }
+    let live = true
+    const t = setTimeout(() => {
+      void window.shellpilot?.vpn.wireguardPublicKey(privateKey).then((r) => {
+        if (!live) return
+        setPublicKey(r?.ok && r.publicKey ? r.publicKey : '')
+      })
+    }, PUBKEY_DEBOUNCE_MS)
+    return () => {
+      live = false
+      clearTimeout(t)
+    }
+  }, [privateKey, shaped, canDerive])
+
+  /** Mint or adopt, store, and point the profile at what was stored. */
+  const stage = async (paste: string | undefined): Promise<void> => {
+    if (!canKeygen || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await window.shellpilot?.vpn.wireguardKeygen({
+        profileName,
+        workspaceId,
+        ...(paste ? { privateKey: paste } : {}),
+        // Released only once the replacement is written, so a profile is never
+        // left pointing at an entry that no longer exists.
+        ...(spec.privateKeyRef?.vaultEntryId ? { replaces: spec.privateKeyRef.vaultEntryId } : {})
+      })
+      if (!res?.ok || !res.privateKeyRef || !res.publicKey) {
+        setError(res?.error ?? 'The key could not be stored.')
+        return
+      }
+      // The key is shown so it can be copied once; it is the ref that is saved.
+      setPrivateKey(res.privateKey ?? paste ?? '')
+      setPublicKey(res.publicKey)
+      setStoredPublicKey(res.publicKey)
+      // Not revealed on arrival: a freshly generated key on screen is a key on
+      // screen, and the eye is right there for the moment it is wanted.
+      setReveal(false)
+      onChange({ ...spec, privateKeyRef: res.privateKeyRef })
+      toast(paste ? 'Private key saved to the vault' : 'Keypair generated', 'ok')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="field">
+      <div className="row" style={{ gap: 8 }}>
+        <span className="field-label">Interface key</span>
+        <span className="grow" />
+        <button className="btn sm" disabled={!canKeygen || busy} onClick={() => void stage(undefined)}>
+          <KeyRound size={13} /> Generate keypair
+        </button>
+      </div>
+
+      <div className="row" style={{ gap: 6 }}>
+        <input
+          className="input"
+          style={{ flex: 1 }}
+          type={reveal ? 'text' : 'password'}
+          spellCheck={false}
+          autoComplete="off"
+          placeholder={inVault ? 'Paste a private key to replace the stored one' : 'Paste a private key, or generate one'}
+          value={privateKey}
+          onChange={(e) => {
+            setError(null)
+            setPrivateKey(e.target.value.trim())
+          }}
+        />
+        <button
+          className="icon-btn sm"
+          title={reveal ? 'Hide private key' : 'Show private key'}
+          onClick={() => setReveal((v) => !v)}
+        >
+          {reveal ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
+        <button
+          className="icon-btn sm"
+          title="Copy private key"
+          disabled={!privateKey}
+          onClick={() => copyValue('Private key', privateKey)}
+        >
+          <Copy size={14} />
+        </button>
+      </div>
+      <Issue at="privateKeyRef" map={issue} shown={shown} />
+      <Hint
+        when={privateKey !== ''}
+        ok={shaped}
+        text="A WireGuard key is 44 base64 characters ending in '='."
+      />
+
+      {dirty && (
+        <div className="row" style={{ gap: 6 }}>
+          <button className="btn primary sm" disabled={busy} onClick={() => void stage(privateKey)}>
+            {inVault ? 'Replace the stored key' : 'Save this key to the vault'}
+          </button>
+          <span className="field-hint">
+            Until you do, this profile still uses{' '}
+            {inVault ? 'the key already in the vault' : 'no key at all'}.
+          </span>
+        </div>
+      )}
+
+      {publicKey !== '' && (
+        // Large, monospace and copyable, because this is the value that leaves
+        // the machine: it goes in the server's [Peer] section, or into the
+        // provider's form. A public key you cannot get out is a keypair you
+        // cannot use.
+        <div className="hop-card" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span className="field-label">Public key</span>
+          <div className="row" style={{ gap: 6 }}>
+            <code className="mono" style={{ flex: 1, fontSize: 12, wordBreak: 'break-all' }}>
+              {publicKey}
+            </code>
+            <button
+              className="icon-btn sm"
+              title="Copy public key"
+              onClick={() => copyValue('Public key', publicKey)}
+            >
+              <Copy size={14} />
+            </button>
+          </div>
+          <span className="field-hint">
+            Give this to your VPN provider, or add it to your server’s [Peer] section. It is not a
+            secret — the private key above is.
+          </span>
+        </div>
+      )}
+
+      {error !== null && (
+        <span className="field-hint" style={{ color: 'var(--danger)' }}>
+          {error}
+        </span>
+      )}
+
+      <span className="field-hint">
+        {!canKeygen
+          ? 'This build cannot generate keys. Import a .conf that already carries one.'
+          : dirty
+            ? // The dirty row above already says what to do about it; repeating
+              // "stored in the vault" here would be a straight contradiction.
+              'Nothing is written to the vault until you say so.'
+            : privateKey !== ''
+              ? 'Held in the vault. The private key is never written to this profile, to a config file, or to a log line.'
+              : inVault
+                ? 'Private key, held in the vault. ShellPilot cannot read it back to show you its public key — paste the key here to see it, or generate a new pair and authorise that one instead.'
+                : 'No private key yet. Generate a pair, or paste one you already have; either way it goes to the vault and the profile keeps only a pointer to it.'}
+      </span>
+    </div>
+  )
+}
+
 // ------------------------------------------------------------------ listeners
 
 interface ListenerProps {
@@ -665,6 +936,7 @@ const AUTH_LABEL: Record<OpenVpnAuthMode, string> = {
 
 function OpenVpnFields({ spec, issue, onChange, shown, focus }: OvpnProps): React.JSX.Element {
   const set = (patch: Partial<OpenVpnSpec>): void => onChange({ ...spec, ...patch })
+  const platform = usePlatform()
 
   return (
     <>
@@ -738,9 +1010,16 @@ function OpenVpnFields({ spec, issue, onChange, shown, focus }: OvpnProps): Reac
           onChange={(e) => set({ binaryPath: e.target.value || undefined })}
         />
         <Issue at="binaryPath" map={issue} shown={shown} />
+        {/* Which of these is true depends on whether we ship OpenVPN here, and
+            `shared/vpnEngines.ts` is the one place that knows. Deliberately not
+            phrased as "on Windows": the day another platform drops off that
+            list, naming the platform here would be the thing that goes stale. */}
         <span className="field-hint">
-          ShellPilot does not ship an OpenVPN binary. Leave this empty to use an allowlisted system
-          install.
+          {userSuppliesEngine('openvpn', platform)
+            ? 'ShellPilot does not ship OpenVPN on this platform. Leave this empty to use an allowlisted system install.'
+            : platform
+              ? 'ShellPilot ships an OpenVPN and uses it by default. Set a path only to run a copy you installed yourself.'
+              : 'Leave this empty to use the OpenVPN ShellPilot finds by itself.'}
         </span>
       </label>
     </>

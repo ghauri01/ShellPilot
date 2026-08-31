@@ -9,12 +9,19 @@ release
 .npmrc
 *.tsbuildinfo
 
-# Tunnel engines are built from source by scripts/build-{sidecar,frpc}.sh.
-# The manifest is committed so a clone knows which hashes it expects; the
-# binaries themselves are build output.
+# Tunnel engines are built from source by scripts/build-{sidecar,frpc,openvpn}.sh
+# and fetched by scripts/fetch-wintun.sh. The manifest is committed so a clone
+# knows which hashes it expects; the binaries themselves are build output.
 resources/bin/*
 !resources/bin/manifest.json
 .frp-build/
+.openvpn-build/
+.wintun-build/
+
+# The GPL-2.0 §3 corresponding source for the OpenVPN we ship. Produced by
+# scripts/build-openvpn.sh and attached to the GitHub release; it is a copy of
+# upstream, so there is nothing to gain from committing it here.
+.openvpn-src/
 
 # Scratch root for tests that need a directory no other user can write to
 # (os.tmpdir() is /tmp on Linux, which the binary resolver correctly refuses).

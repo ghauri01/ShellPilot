@@ -19,6 +19,7 @@ import { bytes, clsx } from '../../lib/format'
 import { bridgeHas } from '../../lib/bridge'
 import { withVaultUnlock } from '../../lib/withVaultUnlock'
 import { isVpnRunning } from '../../../../shared/vpn'
+import { userSuppliesEngine } from '../../../../shared/vpnEngines'
 import type {
   FrpProxy,
   VpnDependent,
@@ -125,6 +126,7 @@ interface Remedies {
 function remedyFor(
   code: VpnErrorCode | undefined,
   kind: VpnKind,
+  platform: NodeJS.Platform | null,
   r: Remedies
 ): ToastAction | undefined {
   switch (code) {
@@ -133,11 +135,13 @@ function remedyFor(
     // originally pressed.
     case 'vault-locked':
       return { label: 'Unlock vault', run: r.start }
-    // Only OpenVPN is the user's to install. WireGuard and frp ship inside
-    // ShellPilot, so a missing one is a damaged install and a download page
-    // would send them to the wrong project entirely.
+    // WireGuard and frp always ship inside ShellPilot, and OpenVPN does too
+    // everywhere except Windows — so on every other combination a missing
+    // engine is a damaged install, which no button in this window can repair.
+    // Offering a download page there would send the reader off to install
+    // something they already have.
     case 'binary-missing':
-      return kind === 'openvpn'
+      return kind === 'openvpn' && userSuppliesEngine('openvpn', platform)
         ? { label: 'Install OpenVPN', run: () => openExternal(OPENVPN_DOWNLOAD) }
         : undefined
     case 'exposure-unacknowledged':
@@ -231,6 +235,19 @@ export function VpnManager(): React.JSX.Element {
     attached: { id: string; kind: string; name: string }[]
   } | null>(null)
   const [engines, setEngines] = useState<Partial<Record<VpnKind, VpnEngineInfo>>>({})
+  // Feeds `userSuppliesEngine`, which decides whether a missing engine is the
+  // user's to install or a damaged install of ours. Null until the round trip
+  // lands, and that shared helper treats null as "not the user's".
+  const [platform, setPlatform] = useState<NodeJS.Platform | null>(null)
+  useEffect(() => {
+    let live = true
+    void window.shellpilot?.platform().then((p) => {
+      if (live) setPlatform(p)
+    })
+    return () => {
+      live = false
+    }
+  }, [])
 
   // `start` reports its failures through `report`, and several of `report`'s
   // buttons start. They genuinely refer to each other, so one of the two is
@@ -325,7 +342,7 @@ export function VpnManager(): React.JSX.Element {
   const report = (id: string, error: string, code?: VpnErrorCode): void => {
     const p = useApp.getState().vpns.find((v) => v.id === id)
     const action = p
-      ? remedyFor(code, p.spec.kind, {
+      ? remedyFor(code, p.spec.kind, platform, {
           profile: (focus) => setEditing({ profile: p, focus }),
           log: () => setLogsFor(p),
           start: () => void start(p),
@@ -535,14 +552,21 @@ export function VpnManager(): React.JSX.Element {
             <div className="row" style={{ gap: 6, color: 'var(--danger)', fontSize: 11 }}>
               <AlertTriangle size={12} style={{ flexShrink: 0 }} />
               <span className="grow">{engineProblem}</span>
-              {/* Only OpenVPN is the user's to install or to point us at.
-                  WireGuard and frp ship with ShellPilot, so neither button
-                  would lead anywhere for them. */}
+              {/* "Set the path" holds everywhere OpenVPN is involved: pointing
+                  at a copy you installed yourself is a valid answer whether or
+                  not we ship one. "Install OpenVPN" does not — see
+                  `userSuppliesEngine`. WireGuard and frp get neither; both
+                  always ship with ShellPilot. */}
               {p.spec.kind === 'openvpn' && (
                 <>
-                  <button className="btn sm primary" onClick={() => openExternal(OPENVPN_DOWNLOAD)}>
-                    Install OpenVPN
-                  </button>
+                  {userSuppliesEngine('openvpn', platform) && (
+                    <button
+                      className="btn sm primary"
+                      onClick={() => openExternal(OPENVPN_DOWNLOAD)}
+                    >
+                      Install OpenVPN
+                    </button>
+                  )}
                   <button
                     className="btn sm"
                     onClick={() => setEditing({ profile: p, focus: 'binaryPath' })}

@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
 import { join, resolve } from 'node:path'
 import net from 'node:net'
+import type { OpenVpnSpec } from '../src/shared/vpn'
+import { OpenVpnManagement } from '../src/main/services/vpn/openvpnManagement'
+import { emitOvpnConfig, ovpnArgs } from '../src/main/services/vpn/parsers'
 
 // Real engines, real sockets, no mocks.
 //
@@ -27,6 +30,9 @@ const platformDir = `${process.platform}-${process.arch}`
 const exe = process.platform === 'win32' ? '.exe' : ''
 const NETD = join(ROOT, 'resources', 'bin', platformDir, `shellpilot-netd${exe}`)
 const FRPC = join(ROOT, 'resources', 'bin', platformDir, `frpc${exe}`)
+// No `${exe}`: ShellPilot bundles openvpn on macOS and Linux only, so there is
+// never an openvpn.exe here to name.
+const OPENVPN = join(ROOT, 'resources', 'bin', platformDir, 'openvpn')
 
 function has(bin: string): boolean {
   return existsSync(bin)
@@ -306,5 +312,161 @@ describeE2e('frpc admin API', () => {
     // assertion fail for the wrong reason.
     expect(conf).not.toContain('zzsecrettokenvaluezz')
     expect(conf).not.toContain('zzadminpwzz')
+  }, 30_000)
+})
+
+// --------------------------------------------------------------- openvpn
+
+// The bundled OpenVPN, driven by the real driver plumbing.
+//
+// This is the test the bundling change turns on, and the reason it matters is
+// narrow: `ovpnArgs` emits eleven flags, `emitOvpnConfig` emits a config, and
+// `build-openvpn.sh` compiles OpenVPN with five features switched off. Nothing
+// in the unit suite can tell you whether the flags survive the build — a
+// fake binary accepts every argument. Here, an option this build does not
+// understand is a fatal parse error before the management channel is ever
+// dialled, and the test fails.
+//
+// No server, no certificates, no root. `--management-hold` makes openvpn stop
+// after parsing options and connect back to us, which is exactly the window
+// that proves the plumbing without needing a peer.
+describeE2e('bundled openvpn', () => {
+  let dir = ''
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'sp-ovpn-'))
+  })
+
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('is built', () => {
+    if (process.platform === 'win32') {
+      // Windows drives a system install; see docs/VPN.md.
+      console.warn('skipping: ShellPilot does not bundle openvpn on Windows')
+      return
+    }
+    expect(has(OPENVPN), `${OPENVPN} is missing. Run: npm run build:engines`).toBe(true)
+  })
+
+  it('is the version we pinned, statically linked against the OpenSSL we pinned', () => {
+    if (process.platform === 'win32' || !has(OPENVPN)) return
+    // `--version` exits non-zero on some builds, so the output is what is
+    // read, not the status.
+    let out = ''
+    try {
+      out = execFileSync(OPENVPN, ['--version'], { encoding: 'utf8' })
+    } catch (e) {
+      out = String((e as { stdout?: string }).stdout ?? '')
+    }
+    expect(out).toContain('OpenVPN 2.6')
+    expect(out).toMatch(/library versions: OpenSSL 3\./)
+    // The build script switches these off on purpose. If a configure flag is
+    // ever renamed upstream the build would quietly re-enable them, and the
+    // first sign would be a plugin directive loading something.
+    expect(out).toContain('enable_plugins=no')
+    expect(out).toContain('enable_lzo=no')
+    expect(out).toContain('enable_lz4=no')
+  })
+
+  it('accepts every argument the driver passes, and answers on the management channel', async () => {
+    if (process.platform === 'win32' || !has(OPENVPN)) return
+
+    const spec: OpenVpnSpec = {
+      kind: 'openvpn',
+      // Never dereferenced here: the config body is passed to
+      // `emitOvpnConfig` directly, the way the driver passes what it already
+      // read out of the vault.
+      configRef: { vaultEntryId: 'e2e', field: 'configBody' },
+      authMode: 'userpass',
+      redirectGateway: false
+    }
+    // openvpn validates the option set before it dials the management socket,
+    // and refuses a client config with no way to verify the peer and no way to
+    // authenticate to it. `peer-fingerprint` and a bare `auth-user-pass`
+    // satisfy both without a certificate on disk — and the bare form is what
+    // the real driver relies on, since the credentials come over the
+    // management channel rather than from a file (E28). The remote is never
+    // contacted: --management-hold stops openvpn before it dials.
+    const body = [
+      'client',
+      'dev tun',
+      'proto udp',
+      'remote 127.0.0.1 1194',
+      'nobind',
+      'auth-user-pass',
+      `peer-fingerprint ${new Array(32).fill('AB').join(':')}`
+    ].join('\n')
+
+    const events: string[] = []
+    const logs: string[] = []
+    const management = new OpenVpnManagement(
+      {
+        emit: (patch) => events.push(String(patch.state ?? '')),
+        log: (line, stream) => logs.push(`${stream}: ${line}`),
+        askUser: async () => null,
+        credentials: () => ({})
+      },
+      { runDir: dir }
+    )
+
+    const endpoint = await management.listen()
+    const configPath = join(dir, 'e2e.ovpn')
+    writeFileSync(configPath, emitOvpnConfig(spec, body), { mode: 0o600 })
+    const args = ovpnArgs(spec, {
+      configPath,
+      management: endpoint.socketPath
+        ? { kind: 'unix', path: endpoint.socketPath }
+        : { kind: 'tcp', host: '127.0.0.1', port: endpoint.port ?? 0 },
+      verb: 3
+    })
+
+    const proc = spawn(OPENVPN, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
+    const exited = new Promise<number | null>((res) => proc.once('exit', (code) => res(code)))
+
+    try {
+      // openvpn dials us. If any argument above were rejected, or any option
+      // the build no longer understands were in the config, it would have died
+      // at parse time and this would wait out the loop instead.
+      const seen = (needle: string): boolean => logs.some((l) => l.includes(needle))
+      for (let i = 0; i < 150 && !seen('>PASSWORD:'); i++) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      const transcript = logs.join('\n')
+      expect(logs.length, `openvpn never reached the management channel. exit=${proc.exitCode}`)
+        .toBeGreaterThan(0)
+
+      // Each of these is a distinct claim about the real binary, and each one
+      // is a thing a fake could not have told us:
+      //
+      //  - it speaks management protocol version 5, the one we parse;
+      //  - `--management-hold` took effect, so nothing was attempted before we
+      //    were listening;
+      //  - the three subscriptions the driver depends on were accepted —
+      //    without `state on` there is no status, without `bytecount` there
+      //    are no counters;
+      //  - and it asked us for the credential over the channel rather than
+      //    reading a file, which is the whole reason no secret is ever an
+      //    argument (E28).
+      expect(transcript).toContain('>INFO:OpenVPN Management Interface Version 5')
+      expect(transcript).toContain('>HOLD:')
+      expect(transcript).toContain('SUCCESS: real-time state notification set to ON')
+      expect(transcript).toContain('SUCCESS: bytecount interval changed')
+      expect(transcript).toContain(">PASSWORD:Need 'Auth' username/password")
+
+      // The stop ladder's first rung: signal over the control channel rather
+      // than a kill, because on Windows that is the only rung there is.
+      management.sigterm()
+      const code = await Promise.race([
+        exited,
+        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 10_000))
+      ])
+      expect(code, 'openvpn ignored SIGTERM sent over the management channel').not.toBe('timeout')
+      expect(logs.join('\n')).toContain('SUCCESS: signal SIGTERM thrown')
+    } finally {
+      management.close()
+      proc.kill('SIGKILL')
+    }
   }, 30_000)
 })

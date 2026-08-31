@@ -18,6 +18,7 @@ import type {
 import type { ResolvedVpnSecrets, VpnDriverContext } from '../src/main/services/vpn/driver'
 import type { ElevatedProcess, ElevationRequest, Elevator } from '../src/main/services/vpn/elevation'
 import { emitOvpnConfig, OVPN_PULL_FILTER_REJECTS } from '../src/main/services/vpn/parsers'
+import { resetBinaryCache } from '../src/main/services/vpn/binaries'
 import { Supervisor } from '../src/main/services/vpn/supervisor'
 import {
   createOpenVpnDriver,
@@ -659,29 +660,62 @@ describe('OpenVPN driver validation and probe', () => {
     ])
   })
 
-  it('tells the user how to install OpenVPN, and does not lecture them about licences', async () => {
-    // No spec, so no override: on a machine without openvpn this is the real
-    // resolver's answer, and on one with it the probe simply succeeds.
-    const info = await createOpenVpnDriver({ platform: 'win32' }).probe()
-    if (info.available) {
-      expect(info.bundled).toBe(false)
-      return
+  // `probe()` resolves through the real `binaries.ts`, which reads
+  // `process.platform` rather than the driver's injected one — it has to, since
+  // it is deciding which file on this machine to run. So the two Windows-copy
+  // tests below stub the process value, not just the driver option. Without
+  // that they would resolve the macOS/Linux bundled openvpn and assert nothing
+  // about Windows at all.
+  async function probeAs(platform: NodeJS.Platform): Promise<VpnEngineInfo> {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+    Object.defineProperty(process, 'platform', { value: platform, configurable: true })
+    resetBinaryCache()
+    try {
+      return await createOpenVpnDriver({ platform }).probe()
+    } finally {
+      if (descriptor) Object.defineProperty(process, 'platform', descriptor)
+      resetBinaryCache()
     }
+  }
+
+  it('tells a Windows user how to install OpenVPN, and does not lecture them about licences', async () => {
+    // Windows is the one platform ShellPilot does not bundle OpenVPN for, so
+    // it is the one platform where "install it" is still the right answer.
+    const info = await probeAs('win32')
+    // On a real Windows machine with OpenVPN installed the probe succeeds and
+    // there is no hint to check.
+    if (info.available) return
     expect(info.reason).toContain('openvpn.net')
     expect(info.reason).toContain('Interactive Service')
     // This used to carry "ShellPilot does not include OpenVPN, because its
-    // licence and ShellPilot's cannot be combined" — true, and of no use at all
-    // to somebody whose tunnel will not start. Why we do not ship it is in
-    // THIRD-PARTY-NOTICES.md and docs/VPN.md; an error gets the one thing the
-    // reader can act on.
+    // licence and ShellPilot's cannot be combined" — true when it was written,
+    // no longer true, and of no use at all to somebody whose tunnel will not
+    // start. The licence reasoning lives in THIRD-PARTY-NOTICES.md and
+    // docs/VPN.md; an error gets the one thing the reader can act on.
     expect(info.reason).not.toContain('licence')
     expect(info.reason).not.toContain('does not include OpenVPN')
   })
 
   it('says PATH is not searched on Windows', async () => {
-    const info = await createOpenVpnDriver({ platform: 'win32' }).probe()
+    const info = await probeAs('win32')
     if (info.available) return
     // The message comes from the resolver, which is where the rule lives (E44).
     expect(info.reason).toMatch(/PATH|Program Files/)
+  })
+
+  it('finds the bundled OpenVPN on macOS and Linux without asking the user to install anything', async () => {
+    if (process.platform === 'win32') return
+    const info = await createOpenVpnDriver().probe()
+    // A checkout that has not run `npm run build:engines` has no binary to
+    // find, and that is a build state rather than a product claim — but the
+    // message must still not be an install instruction, because installing
+    // OpenVPN is not what fixes it.
+    if (!info.available) {
+      expect(info.reason).toContain('Reinstall ShellPilot')
+      expect(info.reason).not.toContain('brew install')
+      return
+    }
+    expect(info.bundled).toBe(true)
+    expect(info.version).toContain('2.6')
   })
 })

@@ -106,9 +106,15 @@ describe('inline shell in the release job does not keep growing', () => {
   // pipeline nobody could run — are discoverable only by publishing. Extracting
   // it to a script the test suite can call is the real fix; until then this
   // stops it getting worse.
+  //
+  // Raised once, from 102, when GPL-2.0 §3 compliance moved into the notes:
+  // bundling OpenVPN obliges us to publish its corresponding source, and a
+  // release asset nobody is told about is not an offer. That is a section and
+  // a fallback line for when the archive is missing, and it is the kind of
+  // growth the ratchet exists to make deliberate rather than to prevent.
   const CEILING: Record<string, number> = {
     'Scan installers with ClamAV': 25,
-    'Build release notes': 102,
+    'Build release notes': 120,
     'Publish release notes': 50
   }
 
@@ -147,5 +153,43 @@ describe('macOS build hardening', () => {
     const plist = readFileSync('build/entitlements.mac.plist', 'utf8')
     expect(plist).toContain('com.apple.security.cs.disable-library-validation')
     expect(plist).toContain('com.apple.security.cs.allow-jit')
+  })
+})
+
+describe('GPL-2.0 §3: the OpenVPN source is published with the binaries', () => {
+  // ShellPilot bundles OpenVPN on macOS and Linux. That makes this project a
+  // distributor of GPL-2.0 binaries, and §3 obliges a distributor to supply
+  // the corresponding source. The obligation is not discharged by a script
+  // that *can* produce a tarball — it is discharged by the tarball being on
+  // the release page. So it is asserted here, where a workflow edit that
+  // dropped it fails a pull request rather than a licence.
+  const upload = steps(wf.jobs.build).find(
+    (s) => (s.uses ?? '').includes('upload-artifact') && s.with?.name === 'openvpn-source'
+  )
+
+  it('uploads the source archive from the build job', () => {
+    expect(upload, 'no step uploads an "openvpn-source" artifact').toBeTruthy()
+    expect(upload?.with?.path).toContain('.openvpn-src')
+  })
+
+  it('fails the build when the archive was not produced', () => {
+    // A silent no-op here publishes GPL binaries with no source beside them,
+    // and every step still goes green.
+    expect(upload?.with?.['if-no-files-found']).toBe('error')
+  })
+
+  it('names the archive in the release notes', () => {
+    // An asset nobody is pointed at is not an offer of source.
+    const notes = steps(wf.jobs.release).find((s) => s.name === 'Build release notes')?.run ?? ''
+    expect(notes).toContain('openvpn-*-source.tar.gz')
+    expect(notes).toMatch(/GPL-2\.0/)
+  })
+
+  it('includes the archive in the checksum table', () => {
+    // The checksums are how a downloader proves the source they got is the
+    // source this workflow archived.
+    const notes = steps(wf.jobs.release).find((s) => s.name === 'Build release notes')?.run ?? ''
+    const checksumBlock = notes.slice(notes.indexOf('CHECKSUMS='), notes.indexOf('sha256sum'))
+    expect(checksumBlock).toContain('openvpn-*-source.tar.gz')
   })
 })

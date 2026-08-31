@@ -331,6 +331,8 @@ func (s *Server) dispatch(req *Request) {
 		s.handle(req, s.forwardOpen)
 	case "wg.forward.close":
 		s.handle(req, s.forwardClose)
+	case "wg.keygen":
+		s.handle(req, s.wgKeygen)
 	case "auth":
 		// Only ever valid as the very first message on a --privileged
 		// connection, where privileged.go consumes it before this dispatcher
@@ -495,6 +497,27 @@ func (s *Server) wgStats(req *Request) (interface{}, error) {
 		return nil, err
 	}
 	return t.stats()
+}
+
+// wgKeygen is the only method with no tunnel, no device and no state. It lives
+// here because the alternative was telling users to install wireguard-tools to
+// make a key for an app that bundles everything else WireGuard needs.
+//
+// Nothing it produces is written anywhere but the response.
+func (s *Server) wgKeygen(req *Request) (interface{}, error) {
+	var p KeygenParams
+	// Params are optional here and required everywhere else: `wg.keygen` with
+	// nothing to say is the common case, and making the caller send `{}` to
+	// mean "generate one" would be ceremony for its own sake.
+	if len(req.Params) > 0 {
+		if err := decodeParams(req, &p); err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(p.PublicKeyFor) != "" {
+		return derivePublicKey(p.PublicKeyFor)
+	}
+	return generateKeypair()
 }
 
 func (s *Server) forwardOpen(req *Request) (interface{}, error) {

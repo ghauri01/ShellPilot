@@ -1,0 +1,3 @@
+openvpn v2.6.22 (c9b790f5b9e8ebca5da38c22f479c31bb8d33686)
+statically linked against openssl 3.5.8
+corresponding source: openvpn-2.6.22-source.tar.gz, attached to the ShellPilot release this binary shipped in

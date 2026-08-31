@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { connect, isIP } from 'node:net'
@@ -86,6 +87,10 @@ export const wireguardTuning = {
    *  the supervisor's ladder is what fixes that, so this only has to be long
    *  enough that a busy `wg.up` is not mistaken for one. */
   requestTimeoutMs: 20_000,
+  /** `wg.keygen` is 32 random bytes and one curve multiplication, so anything
+   *  approaching this is a sidecar that never started rather than one that is
+   *  thinking. Short enough that a form does not sit on a spinner. */
+  keygenTimeoutMs: 10_000,
   healthIntervalMs: 15_000,
   gracefulTimeoutMs: 5_000,
   /** Split so a test can jump the wall clock backwards without touching the
@@ -125,10 +130,15 @@ function platformNow(): NodeJS.Platform {
 //  - **linux** — open. `shellpilot-netd --privileged` opens `/dev/net/tun`,
 //    `pkexec`/`sudo` elevate it for one launch, and `ip` gives the interface
 //    its address. Nothing is installed and nothing survives the process.
-//  - **win32** — open. UAC elevates for one launch and `netsh` applies the
-//    address. Wintun's driver DLL is not bundled today, so a machine without
-//    `wintun.dll` gets a refusal from the sidecar that names it, rather than a
-//    tunnel that half exists.
+//  - **win32** — open, and no longer conditional on anything the user
+//    installed. `wintun.dll` ships beside `shellpilot-netd.exe`
+//    (`scripts/fetch-wintun.sh`), which is where the sidecar looks for it:
+//    golang.zx2c4.com/wintun loads it with LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
+//    the directory of the running executable, so adjacency is the whole
+//    mechanism. The DLL installs its own kernel driver on first use, under
+//    the UAC elevation the launch already needs. The sidecar's "wintun.dll is
+//    missing" refusal stays reachable for a build where the file was
+//    quarantined, which is now the only way to meet it.
 //  - **darwin** — closed, and not because of the sidecar (E02). See below.
 //
 // A platform absent from this map is one nobody has taught the routing and DNS
@@ -1645,8 +1655,140 @@ export function parseNetdVersion(raw: string | undefined): string | undefined {
   }
 }
 
-export const wireguardDriver: VpnDriver<WireGuardSpec> = {
+// -------------------------------------------------------------------- keygen
+
+/** `wg.keygen`'s answer. `privateKey` is present only when the sidecar
+ *  generated one — the derive mode is handed a private key and does not send
+ *  it back. */
+export interface WireGuardKeypair {
+  privateKey?: string
+  publicKey: string
+}
+
+// Every one-shot request uses the same id: there is exactly one in flight and
+// the process is gone immediately afterwards.
+const ONE_SHOT_ID = '1'
+
+/**
+ * One request to a sidecar that exists only for that request.
+ *
+ * `wg.keygen` has no tunnel, no device, no listener and no state, so none of
+ * the machinery a run needs applies to it. It deliberately does NOT go through
+ * the supervisor, and the reason is the log ring: the supervisor captures a
+ * child's output and hands it to `ctx.log`, and the answer to this particular
+ * request is a private key. Here there is no logger to reach — stdout is read
+ * for one response and stderr is not read at all.
+ *
+ * stdin is closed as the request is written. netd treats an EOF on stdin as
+ * "the parent is gone", which is exactly right: it answers what is in flight
+ * and exits on its own, so nothing is left behind even if the kill below never
+ * lands.
+ */
+async function askNetdOnce<T>(method: string, params?: unknown): Promise<T> {
+  const engine = await resolveNetd()
+  if (engine.available === false) {
+    throw new VpnError('binary-missing', engine.reason)
+  }
+  const file = engine.path ?? NETD
+
+  return new Promise<T>((resolve, reject) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(file, [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })
+    } catch (e) {
+      reject(new VpnError('internal', `The WireGuard sidecar could not be started: ${describe(e)}`))
+      return
+    }
+
+    let settled = false
+    const end = (error: VpnError | null, value?: T): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      // Killed rather than asked to shut down gracefully: this process holds
+      // no tunnel, no listen port and no route, so there is nothing for a
+      // graceful stop to protect, and it has already said everything it had.
+      child.kill('SIGKILL')
+      if (error) reject(error)
+      else resolve(value as T)
+    }
+
+    const timer = setTimeout(() => {
+      end(new VpnError('internal', `The WireGuard sidecar did not answer ${method} in time.`))
+    }, wireguardTuning.keygenTimeoutMs)
+
+    child.on('error', (e: Error) =>
+      end(new VpnError('internal', `The WireGuard sidecar could not be started: ${e.message}`))
+    )
+    // `close` waits for the stdio streams, so every line the child wrote has
+    // already been through the reader below by the time this fires.
+    child.on('close', () =>
+      end(new VpnError('internal', `The WireGuard sidecar exited without answering ${method}.`))
+    )
+
+    let buffered = ''
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => {
+      buffered += chunk
+      for (let nl = buffered.indexOf('\n'); nl >= 0; nl = buffered.indexOf('\n')) {
+        const line = buffered.slice(0, nl).trim()
+        buffered = buffered.slice(nl + 1)
+        if (!line.startsWith('{')) continue
+        let msg: NetdResponse
+        try {
+          msg = JSON.parse(line) as NetdResponse
+        } catch {
+          // Never logged and never quoted. A line this reader could not parse
+          // is a line that might still hold the key it was carrying.
+          continue
+        }
+        if (msg.id !== ONE_SHOT_ID) continue
+        if (msg.ok) end(null, msg.result as T)
+        else end(wireError(msg.error))
+        return
+      }
+    })
+
+    child.stdin?.end(`${JSON.stringify({ id: ONE_SHOT_ID, method, params })}\n`)
+  })
+}
+
+/**
+ * A WireGuard keypair, or the public half of one the caller already has.
+ *
+ * ShellPilot bundles everything WireGuard needs to run and, until this
+ * existed, no way at all to make a key: importing a provider's `.conf` worked
+ * because the key is in the file, and setting up your own peer meant running
+ * `wg genkey`, which meant installing wireguard-tools in an app whose headline
+ * claim is that WireGuard needs nothing installed.
+ *
+ * Nothing on this path logs. The key is spoken once, by one process, to one
+ * caller.
+ */
+async function keygen(opts?: { publicKeyFor?: string }): Promise<WireGuardKeypair> {
+  const pasted = opts?.publicKeyFor?.trim()
+  const res = await askNetdOnce<{ privateKey?: unknown; publicKey?: unknown }>(
+    'wg.keygen',
+    pasted ? { publicKeyFor: pasted } : undefined
+  )
+  if (typeof res?.publicKey !== 'string' || !res.publicKey) {
+    throw new VpnError('internal', 'The WireGuard sidecar answered wg.keygen without a public key.')
+  }
+  return {
+    publicKey: res.publicKey,
+    ...(typeof res.privateKey === 'string' && res.privateKey ? { privateKey: res.privateKey } : {})
+  }
+}
+
+/** `keygen` is not on `VpnDriver`: it is the one thing this engine can do that
+ *  has nothing to do with running a profile, and putting it on the interface
+ *  would oblige OpenVPN and frp to answer a question about WireGuard keys. */
+export const wireguardDriver: VpnDriver<WireGuardSpec> & {
+  keygen(opts?: { publicKeyFor?: string }): Promise<WireGuardKeypair>
+} = {
   kind: 'wireguard',
+
+  keygen,
 
   validateConfig(spec: WireGuardSpec): VpnValidation {
     return validateWireGuardSpec(spec)

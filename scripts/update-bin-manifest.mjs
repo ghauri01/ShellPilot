@@ -2,15 +2,21 @@
 // Rebuild resources/bin/manifest.json for one engine, leaving the other
 // engines' entries alone.
 //
-// Two build scripts write into the same tree (build-sidecar.sh, build-frpc.sh)
-// and they run independently, so neither can own the whole file: whichever ran
-// last would erase the other's entries and the app would refuse to exec a
-// binary it has no hash for. Merging here, keyed by binary name, is what makes
-// the two scripts order-independent.
+// Four build scripts write into the same tree (build-sidecar.sh, build-frpc.sh,
+// build-openvpn.sh, fetch-wintun.sh) and they run independently, so none can
+// own the whole file: whichever ran last would erase the others' entries and
+// the app would refuse to exec a binary it has no hash for. Merging here, keyed
+// by binary name, is what makes the scripts order-independent.
 //
-// Usage: node scripts/update-bin-manifest.mjs <binaryBaseName>
+// Usage: node scripts/update-bin-manifest.mjs <binaryName>
 //   e.g. node scripts/update-bin-manifest.mjs frpc
 //        node scripts/update-bin-manifest.mjs shellpilot-netd
+//        node scripts/update-bin-manifest.mjs wintun.dll
+//
+// A name with no extension is an executable and picks up `.exe` under the
+// win32 directories. A name that already carries an extension is used
+// verbatim — `wintun.dll` is a library, not a program, and `wintun.dll.exe`
+// is not a file anyone has.
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
@@ -55,10 +61,16 @@ async function readManifest() {
   return { version: 1, binaries: {} }
 }
 
+/** The on-disk filename for this engine under `dir`. */
+function fileNameFor(name, dir) {
+  if (name.includes('.')) return name
+  return dir.startsWith('win32') ? `${name}.exe` : name
+}
+
 async function main() {
   const name = process.argv[2]
   if (!name) {
-    console.error('usage: update-bin-manifest.mjs <binaryBaseName>')
+    console.error('usage: update-bin-manifest.mjs <binaryName>')
     process.exit(2)
   }
 
@@ -74,8 +86,7 @@ async function main() {
 
   let found = 0
   for (const dir of PLATFORM_DIRS) {
-    const exe = dir.startsWith('win32') ? '.exe' : ''
-    const file = join(BIN_ROOT, dir, `${name}${exe}`)
+    const file = join(BIN_ROOT, dir, fileNameFor(name, dir))
     let st
     try {
       st = await stat(file)
@@ -87,8 +98,8 @@ async function main() {
     // resolver falls back to running the binary with --version, and
     // shellpilot-netd answers that in JSON — so the engine version shown in
     // the UI would be a JSON document rather than a version.
-    const version = process.env[`${name.toUpperCase().replace(/-/g, '_')}_VERSION`]
-    manifest.binaries[`${dir}/${name}${exe}`] = {
+    const version = process.env[`${name.toUpperCase().replace(/[-.]/g, '_')}_VERSION`]
+    manifest.binaries[`${dir}/${fileNameFor(name, dir)}`] = {
       sha256: await sha256File(file),
       size: st.size,
       // Recorded for support: "which build is this?" is otherwise unanswerable

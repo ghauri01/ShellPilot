@@ -10,7 +10,7 @@ import type {
   VpnValidation,
   VpnValidationIssue
 } from '../../../../shared/vpn'
-import { resolveSystem } from '../binaries'
+import { resolveEngineBinary } from '../binaries'
 import type { VpnDriver, VpnDriverContext } from '../driver'
 import type { ElevationProbe, Elevator } from '../elevation'
 import { elevationErrorCode, elevatorForPlatform } from '../elevation'
@@ -259,7 +259,7 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
     // hard-rejects every path directive in a `.ovpn` file, so its presence
     // here is the user's own confirmed choice and nobody else's (E44).
     ((spec: OpenVpnSpec) =>
-      resolveSystem('openvpn', {
+      resolveEngineBinary('openvpn', {
         binaryPath: spec.binaryPath,
         confirmed: spec.binaryPath !== undefined
       }))
@@ -368,7 +368,7 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
         )
       }
       if (spec.binaryPath !== undefined && spec.binaryPath.trim() === '') {
-        error('binaryPath', 'empty-path', 'The program path is blank. Clear it to use the installed OpenVPN.')
+        error('binaryPath', 'empty-path', 'The program path is blank. Clear it to use the OpenVPN that came with ShellPilot.')
       }
       if (spec.httpProxy) {
         if (!spec.httpProxy.host.trim()) {
@@ -392,7 +392,7 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
 
     async probe(): Promise<VpnEngineInfo> {
       try {
-        return await resolveSystem('openvpn', {})
+        return await resolveEngineBinary('openvpn', {})
       } catch (e) {
         return { kind: 'openvpn', available: false, bundled: false, reason: absentReason(e, platform) }
       }
@@ -653,30 +653,31 @@ function describe(e: unknown): string {
 
 /** Why OpenVPN is not here, and what to do about it.
  *
- *  ShellPilot never bundles it: OpenVPN is GPL-2.0 and ShellPilot is MIT
- *  (`THIRD-PARTY-NOTICES.md`), so shipping them together is not a packaging
- *  decision anyone is free to revisit. "Not found" therefore always means
- *  "install it", never "our download failed". */
+ *  ShellPilot ships `openvpn` on macOS and Linux, built from a pinned tag by
+ *  `scripts/build-openvpn.sh`, so on those two "not found" means the install
+ *  is damaged rather than incomplete. Windows is the exception and the hint
+ *  below is the only one that still asks the user to install anything. */
 function absentReason(e: unknown, platform: NodeJS.Platform): string {
   const detail = e instanceof VpnError ? e.message : describe(e)
-  // No licence explanation here. It used to say "ShellPilot does not include
-  // OpenVPN, because its licence and ShellPilot's cannot be combined", which is
-  // true, is the reason, and is of no use whatsoever to somebody who just wants
-  // their tunnel to start. Why we do not ship it belongs in
-  // THIRD-PARTY-NOTICES.md and docs/VPN.md, both of which say it at length; an
-  // error message gets the one thing the reader can act on.
+  // No licence explanation here, and none should come back. The reader wants
+  // their tunnel to start; why the licence permits what it permits belongs in
+  // THIRD-PARTY-NOTICES.md and docs/VPN.md, which say it at length.
   return `${detail} ${installHint(platform)}`
 }
 
 function installHint(platform: NodeJS.Platform): string {
   if (platform === 'win32') {
-    // The official package is the only supported route on Windows — there is
-    // no PATH search there (E44) — and it also installs the Interactive
-    // Service, which removes the permission prompt on every connect (E05).
-    // That second fact is worth knowing but is not what the reader needs in
-    // the first line, so the renderer keeps it behind Details.
+    // Windows is the one platform where ShellPilot still cannot supply
+    // OpenVPN. OpenVPN needs a tun adapter driver — tap-windows6, or Wintun —
+    // and neither can be installed by copying a file: openvpn.exe opens an
+    // adapter that already exists rather than creating one. The official
+    // package brings both the driver and the Interactive Service, and the
+    // service is what removes the permission prompt on every connect (E05).
     return 'Install OpenVPN from openvpn.net/community-downloads. Its installer also adds the OpenVPN Interactive Service, so tunnels connect without a Windows permission prompt each time.'
   }
-  if (platform === 'darwin') return 'Install it with Homebrew: brew install openvpn.'
-  return 'Install your distribution’s openvpn package, for example apt install openvpn or dnf install openvpn.'
+  // Not "install openvpn": ShellPilot shipped one, so the copy that should be
+  // here has gone. Quarantine is the usual reason and reinstalling is the fix;
+  // sending the reader to Homebrew or apt would have them solve a different
+  // problem and still not know why the bundled engine vanished.
+  return 'Reinstall ShellPilot — antivirus software sometimes quarantines bundled programs. You can also point this profile at an OpenVPN you installed yourself.'
 }
