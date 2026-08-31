@@ -319,6 +319,12 @@ CONFIGURE_FLAGS=(
 # object we fall back to it rather than refusing to build, but say so, because
 # the resulting binary is less portable than the one we intend to ship and the
 # linkage check at the end of this script is what will catch it.
+# Expanded at the call site as ${CAPNG_ARGS[@]+"${CAPNG_ARGS[@]}"} rather than
+# "${CAPNG_ARGS[@]}". Under `set -u`, bash 3.2 treats an empty array's [@]
+# expansion as an unbound variable, and bash 3.2 is what macOS ships — so the
+# plain form built fine on Linux and failed every macOS release with
+# "CAPNG_ARGS[@]: unbound variable". This array is empty on macOS by
+# definition, which is exactly where the old bash is.
 CAPNG_ARGS=()
 if [ "$HOST_OS" != darwin ]; then
   capng_a="$(pkg-config --variable=libdir libcap-ng)/libcap-ng.a"
@@ -338,7 +344,7 @@ build_openvpn() {
     "$SRC/configure" "${CONFIGURE_FLAGS[@]}" \
       OPENSSL_CFLAGS="-I$sslprefix/include" \
       OPENSSL_LIBS="$sslprefix/lib/libssl.a $sslprefix/lib/libcrypto.a" \
-      "${CAPNG_ARGS[@]}" \
+      ${CAPNG_ARGS[@]+"${CAPNG_ARGS[@]}"} \
       CFLAGS="-O2 $archflags" \
       LDFLAGS="$archflags"
     make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
