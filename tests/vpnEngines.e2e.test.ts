@@ -237,6 +237,12 @@ describeE2e('frpc admin API', () => {
   let dir = ''
   let proc: ChildProcess | null = null
   let adminPort = 0
+  // A port with nothing on it, chosen the same way. This used to be the
+  // literal 7000, frp's documented default, and that is how this test lied on
+  // macOS: AirPlay Receiver listens on 7000, so frpc connected to *something*,
+  // the login did not fail, and the client stayed up. The test passed locally
+  // for a reason that had nothing to do with what it was testing.
+  let deadPort = 0
 
   /** A port the OS says is free, rather than one we hoped was.
    *
@@ -265,6 +271,8 @@ describeE2e('frpc admin API', () => {
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'sp-frp-'))
     adminPort = await freePort()
+    // Allocated and released, so it is closed rather than merely assumed to be.
+    deadPort = await freePort()
   })
 
   afterAll(() => {
@@ -281,13 +289,29 @@ describeE2e('frpc admin API', () => {
     // wrong one would go green before frpc had contacted the server at all.
     const cfg = [
       'serverAddr = "127.0.0.1"',
-      'serverPort = 7000',
+      `serverPort = ${deadPort}`,
       'auth.method = "token"',
       'auth.token = "{{ .Envs.SP_FRP_TOKEN }}"',
       'webServer.addr = "127.0.0.1"',
       `webServer.port = ${adminPort}`,
       'webServer.user = "shellpilot"',
       'webServer.password = "{{ .Envs.SP_FRP_ADMIN }}"',
+      // Without this frpc exits the moment its first login fails, and this
+      // test deliberately has no frps to reach — the whole point is the admin
+      // API's behaviour *before* the client has logged in, which is the window
+      // a readiness check can get wrong.
+      //
+      // Confirmed by the binary itself, in CI, after this line was wrongly
+      // removed: "login to the server failed ... With loginFailExit enabled,
+      // no additional retries will be attempted". It had looked unnecessary
+      // locally only because AirPlay was answering on the port the config then
+      // used, so the login never failed in the first place.
+      //
+      // Production does not set this; the default applies there and the
+      // supervisor's restart policy handles a failed login. This one field
+      // differs from a generated config, in the direction that lets the test
+      // observe the state it is about.
+      'loginFailExit = false',
       'log.to = "console"',
       '',
       '[[proxies]]',
