@@ -99,6 +99,11 @@ jobs:
           name: openvpn-source
           path: .openvpn-src/*.tar.gz
           if-no-files-found: error
+          # The directory starts with a dot, and upload-artifact skips hidden
+          # paths by default — so the tarball was written, found by nobody, and
+          # the release failed on a file that existed. This is the GPL-2.0 §3
+          # corresponding source, so it is not optional.
+          include-hidden-files: true
 
       - name: Verify engine manifest covers this platform
         shell: bash
