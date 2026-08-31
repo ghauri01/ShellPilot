@@ -22,6 +22,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_ROOT="$ROOT/resources/bin"
 WORK="${FRP_WORKDIR:-$ROOT/.frp-build}"
 
+# Retries for every step below that reaches the network; see the file itself
+# for why these are shared rather than duplicated.
+. "$ROOT/scripts/lib/net-retry.sh"
+
 # GOOS/GOARCH on the left, Node's platform-arch on the right. The right-hand
 # names are what process.platform/process.arch produce and what
 # electron-builder's ${platform}-${arch} macro expands to, so the lookup path
@@ -41,10 +45,10 @@ command -v git >/dev/null 2>&1 || { echo "git not found" >&2; exit 1; }
 if [ ! -d "$WORK/frp/.git" ]; then
   echo "==> cloning frp $FRP_VERSION"
   mkdir -p "$WORK"
-  git clone --depth 1 --branch "$FRP_VERSION" "$FRP_REPO" "$WORK/frp"
+  retry_network "cloning frp" clone_pinned "$WORK/frp" "$FRP_REPO" "$FRP_VERSION"
 else
   echo "==> reusing $WORK/frp"
-  git -C "$WORK/frp" fetch --depth 1 origin "$FRP_VERSION"
+  retry_network "fetching frp $FRP_VERSION" git -C "$WORK/frp" fetch --depth 1 origin "$FRP_VERSION"
   git -C "$WORK/frp" checkout -q FETCH_HEAD
 fi
 
@@ -70,6 +74,9 @@ if [ ! -f "$WORK/frp/web/frpc/dist/index.html" ]; then
 build the dashboard assets. The API under /api and /healthz is unaffected.</p>
 HTML
 fi
+
+# Everything the six builds below need, fetched once and retried.
+prefetch_modules "$WORK/frp" ./cmd/frpc
 
 mkdir -p "$OUT_ROOT"
 

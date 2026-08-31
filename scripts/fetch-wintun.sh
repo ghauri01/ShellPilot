@@ -40,6 +40,10 @@ WINTUN_SHA256="${WINTUN_SHA256:-07c256185d6ee3652e09fa55c0b673e2624b565e02c4b909
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_ROOT="$ROOT/resources/bin"
 LIC_ROOT="$ROOT/resources/licenses/wintun"
+
+# Retries for every step below that reaches the network; see the file itself
+# for why these are shared rather than duplicated.
+. "$ROOT/scripts/lib/net-retry.sh"
 WORK="${WINTUN_WORKDIR:-$ROOT/.wintun-build}"
 
 # Left of the arrow is the directory inside the ZIP, right is Node's
@@ -66,7 +70,7 @@ mkdir -p "$WORK" "$LIC_ROOT"
 ZIP="$WORK/wintun-${WINTUN_VERSION}.zip"
 if [ ! -f "$ZIP" ]; then
   echo "==> fetching wintun ${WINTUN_VERSION}"
-  curl -fsSL -o "$ZIP.part" "$WINTUN_URL"
+  retry_network "fetching wintun ${WINTUN_VERSION}" curl -fsSL -o "$ZIP.part" "$WINTUN_URL"
   mv "$ZIP.part" "$ZIP"
 fi
 

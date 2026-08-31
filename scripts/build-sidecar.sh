@@ -19,6 +19,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/sidecar/netd"
 OUT_ROOT="$ROOT/resources/bin"
 
+# Retries for every step below that reaches the network; see the file itself
+# for why these are shared rather than duplicated.
+. "$ROOT/scripts/lib/net-retry.sh"
+
 # The sidecar version tracks the app version: they are released together and a
 # mismatch between the two is a packaging bug, not a supported configuration.
 VERSION="${SHELLPILOT_NETD_VERSION:-$(node -p "require('$ROOT/package.json').version" 2>/dev/null || echo '0.0.0-dev')}"
@@ -61,6 +65,10 @@ command -v node >/dev/null 2>&1 || { echo "node not found (needed to merge the m
 
 echo "==> shellpilot-netd $VERSION ($BUILD_SHA)"
 echo "==> $(go version)"
+
+# Before vet and test, not only before the build loop: those are the first
+# commands here that reach the network.
+prefetch_modules "$SRC" .
 
 # Fail the build rather than ship something that does not compile or whose
 # tests are red. A tunnel sidecar that panics has the app's network stack in
