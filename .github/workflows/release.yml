@@ -77,7 +77,7 @@ jobs:
 
       - name: Install the OpenVPN build toolchain (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq autoconf automake libtool
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq autoconf automake libtool pkg-config libcap-ng-dev
 
       - name: Build tunnel engines
         shell: bash

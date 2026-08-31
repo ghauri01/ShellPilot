@@ -114,6 +114,17 @@ if [ "$HOST_OS" = darwin ]; then
 else
   need autoreconf 'apt install autoconf automake libtool pkg-config'
   need libtoolize 'apt install libtool'
+  # OpenVPN 2.6 requires libcap-ng on Linux and offers no way to opt out — the
+  # check in configure.ac is unconditional for *-*-linux*, with no
+  # --disable-capng to reach for. So it is a hard build dependency rather than
+  # a choice, and saying so here beats a hundred lines of ./configure output
+  # ending in a message about pkg-config.
+  need pkg-config 'apt install pkg-config'
+  pkg-config --exists libcap-ng || {
+    echo "libcap-ng development files not found." >&2
+    echo "  apt install libcap-ng-dev" >&2
+    exit 1
+  }
 fi
 
 # ------------------------------------------------------------------ targets
@@ -295,6 +306,29 @@ CONFIGURE_FLAGS=(
   --disable-dependency-tracking
 )
 
+# libcap-ng, linked statically where we can.
+#
+# We ship this binary inside a .deb and an AppImage. A .deb can declare a
+# dependency; an AppImage carries no system libraries at all, so anything left
+# dynamically linked has to already exist on the user's machine. libcap-ng is
+# usually there and that is exactly the problem — "usually" is how a bundled
+# binary fails for the minority who then have no idea why.
+#
+# The static archive is preferred for the same reason OpenSSL is linked
+# statically a few lines above. If the distribution ships only the shared
+# object we fall back to it rather than refusing to build, but say so, because
+# the resulting binary is less portable than the one we intend to ship and the
+# linkage check at the end of this script is what will catch it.
+CAPNG_ARGS=()
+if [ "$HOST_OS" != darwin ]; then
+  capng_a="$(pkg-config --variable=libdir libcap-ng)/libcap-ng.a"
+  if [ -f "$capng_a" ]; then
+    CAPNG_ARGS=(LIBCAPNG_CFLAGS="$(pkg-config --cflags libcap-ng)" LIBCAPNG_LIBS="$capng_a")
+  else
+    echo "warning: no static libcap-ng at $capng_a; linking it dynamically" >&2
+  fi
+fi
+
 build_openvpn() {
   local sslprefix="$1" archflags="$2" outdir="$3"
   rm -rf "$outdir"
@@ -304,6 +338,7 @@ build_openvpn() {
     "$SRC/configure" "${CONFIGURE_FLAGS[@]}" \
       OPENSSL_CFLAGS="-I$sslprefix/include" \
       OPENSSL_LIBS="$sslprefix/lib/libssl.a $sslprefix/lib/libcrypto.a" \
+      "${CAPNG_ARGS[@]}" \
       CFLAGS="-O2 $archflags" \
       LDFLAGS="$archflags"
     make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
@@ -331,6 +366,55 @@ else
     chmod 755 "$OUT_ROOT/$nodedir/openvpn"
   done
 fi
+
+# ------------------------------------------------------------ linkage check
+
+# What does the binary we are about to ship actually need at run time?
+#
+# Until now nothing asked. The static OpenSSL link was asserted in a VERSION
+# file and never verified against the artefact, and libcap-ng arrived as a hard
+# Linux dependency without anyone noticing it would be dynamically linked. That
+# is precisely the class of mistake that cannot fail on a build machine, which
+# has every development package installed, and can only fail on a user's.
+#
+# So: enumerate the dynamic dependencies and refuse anything outside a baseline
+# that every target system has by definition. libssl or libcap-ng appearing
+# here means the static link silently did not happen.
+check_linkage() {
+  local bin="$1" bad=''
+
+  if [ "$HOST_OS" = darwin ]; then
+    # Everything under /usr/lib and /System is part of the OS on macOS. A
+    # Homebrew path is the tell: that is a library the user does not have.
+    bad="$(otool -L "$bin" | tail -n +2 | awk '{print $1}' \
+      | grep -vE '^(/usr/lib/|/System/Library/)' || true)"
+  else
+    # glibc's own pieces plus the loader. Anything else is a bet on the user's
+    # distribution. Note libcap-ng is deliberately NOT in this list.
+    bad="$(ldd "$bin" | awk '{print $1}' \
+      | grep -vE '^(linux-vdso\.so|/lib64/ld-linux|/lib/ld-linux|ld-linux|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so)' || true)"
+  fi
+
+  if [ -n "$bad" ]; then
+    echo "==> $bin links libraries the user may not have:" >&2
+    printf '      %s\n' $bad >&2
+    echo "    Everything beyond libc must be linked statically; see the" >&2
+    echo "    OPENSSL_LIBS and LIBCAPNG_LIBS arguments to configure." >&2
+    return 1
+  fi
+  echo "==> $bin: no dynamic dependencies beyond the base system"
+}
+
+for t in "${TARGETS[@]}"; do
+  read -r _ _ nodedir <<<"$t"
+  # Only the slice matching this machine can be inspected: `ldd` and `otool -L`
+  # read the binary that will run here, and a cross-built or thinned foreign
+  # slice is not it.
+  case "$nodedir" in
+    *"-$(node -p 'process.arch' 2>/dev/null || echo unknown)")
+      check_linkage "$OUT_ROOT/$nodedir/openvpn" ;;
+  esac
+done
 
 # --------------------------------------------------------------- attribution
 
