@@ -1,5 +1,16 @@
 # VPN & Tunnel Clients for ShellPilot
 
+> **Status: partly superseded, 2026-08-31.** This is the design record as written,
+> kept unedited below so the reasoning stays readable. One decision has since been
+> reversed: **OpenVPN is now bundled on macOS and Linux.** The §3 corresponding-source
+> obligation this document treats as disqualifying is real, and is discharged by
+> publishing the exact pinned source tarball as a release asset; the aggregation
+> question is settled by running `openvpn` as a separate process over its management
+> socket (GPL-2.0 §2), so ShellPilot stays MIT. Windows is unchanged and still needs a
+> system install, for driver reasons rather than licence ones. Wintun's proprietary DLL
+> is also now bundled. See `docs/VPN.md` and `THIRD-PARTY-NOTICES.md` for what actually
+> ships; where they disagree with this file, they are right.
+
 ## 1. Executive summary + recommendation
 
 Ship **WireGuard first, in fully userspace mode, with no admin rights** — a single small MIT Go sidecar (`shellpilot-netd`) that statically links `wireguard-go` plus its gVisor `tun/netstack` TCP/IP stack and exposes each tunnel as a local SOCKS5 listener and/or ephemeral port-forwards, driven over newline-delimited JSON on stdin/stdout so private keys never touch argv or disk. This maps one-to-one onto the SOCKS/local-forward UX the app already has (`src/main/services/tunnel.ts:250-262`) and onto `openEphemeralForward` (`src/main/services/tunnel.ts:313`), which means SSH-over-VPN and DB-over-VPN fall out almost for free. **Bundle `frpc` (Apache-2.0) and drive it through its documented admin API**; **never bundle `openvpn`** — it is GPL-2.0 and shipping the binary would saddle an MIT volunteer project with a perpetual per-platform corresponding-source obligation, so detect a system install instead and drive it through the management interface. Model VPN as a **separate `VpnProfile` domain**, not an extension of `TunnelKind` — `TunnelConfig` (`src/shared/tunnel.ts:5-16`) is SSH-shaped and the renderer already has a `vpns` slice waiting for a real type (`src/renderer/src/types.ts:82-97`, `src/renderer/src/store/app.ts:93`). Treat every imported `.ovpn`/`.conf`/`.toml` as hostile input: parse into a typed model against a strict allowlist and **re-emit** a config we generated, because `up`/`down`/`script-security` in a `.ovpn` and `unix_domain_socket` in an frp TOML are both remote-code-execution primitives.
