@@ -60,6 +60,10 @@ OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-${OPEN
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_ROOT="$ROOT/resources/bin"
 LIC_ROOT="$ROOT/resources/licenses/openvpn"
+
+# Retries for every step below that reaches the network; see the file itself
+# for why these are shared rather than duplicated.
+. "$ROOT/scripts/lib/net-retry.sh"
 WORK="${OPENVPN_WORKDIR:-$ROOT/.openvpn-build}"
 # Not under resources/: this is the GPL §3 corresponding source, a release
 # asset, and it has no business inside the installed app.
@@ -172,7 +176,7 @@ mkdir -p "$WORK" "$OUT_ROOT" "$LIC_ROOT" "$SRC_OUT"
 TARBALL="$WORK/openssl-${OPENSSL_VERSION}.tar.gz"
 if [ ! -f "$TARBALL" ]; then
   echo "==> fetching openssl ${OPENSSL_VERSION}"
-  curl -fsSL -o "$TARBALL.part" "$OPENSSL_URL"
+  retry_network "fetching openssl ${OPENSSL_VERSION}" curl -fsSL -o "$TARBALL.part" "$OPENSSL_URL"
   mv "$TARBALL.part" "$TARBALL"
 fi
 
@@ -249,10 +253,11 @@ fi
 SRC="$WORK/openvpn"
 if [ ! -d "$SRC/.git" ]; then
   echo "==> cloning openvpn $OPENVPN_TAG"
-  git clone --depth 1 --branch "$OPENVPN_TAG" "$OPENVPN_REPO" "$SRC"
+  retry_network "cloning openvpn" clone_pinned "$SRC" "$OPENVPN_REPO" "$OPENVPN_TAG"
 else
   echo "==> reusing $SRC"
-  git -C "$SRC" fetch --depth 1 origin "refs/tags/$OPENVPN_TAG:refs/tags/$OPENVPN_TAG" --force
+  retry_network "fetching openvpn $OPENVPN_TAG" \
+    git -C "$SRC" fetch --depth 1 origin "refs/tags/$OPENVPN_TAG:refs/tags/$OPENVPN_TAG" --force
   git -C "$SRC" checkout -q "refs/tags/$OPENVPN_TAG"
 fi
 

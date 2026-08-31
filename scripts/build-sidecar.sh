@@ -19,6 +19,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/sidecar/netd"
 OUT_ROOT="$ROOT/resources/bin"
 
+# Retries for every step below that reaches the network; see the file itself
+# for why these are shared rather than duplicated.
+. "$ROOT/scripts/lib/net-retry.sh"
+
 # The sidecar version tracks the app version: they are released together and a
 # mismatch between the two is a packaging bug, not a supported configuration.
 VERSION="${SHELLPILOT_NETD_VERSION:-$(node -p "require('$ROOT/package.json').version" 2>/dev/null || echo '0.0.0-dev')}"
@@ -62,75 +66,8 @@ command -v node >/dev/null 2>&1 || { echo "node not found (needed to merge the m
 echo "==> shellpilot-netd $VERSION ($BUILD_SHA)"
 echo "==> $(go version)"
 
-# Fetch what the build needs before anything compiles, retrying the network.
-#
-# A CI run of this script died mid-download with
-#
-#   github.com/fatedier/yamux@v0.0.0-...: read
-#   "https://proxy.golang.org/.../@v/....zip": stream error: INTERNAL_ERROR
-#
-# and passed unchanged on a re-run: proxy.golang.org dropped a stream. An
-# ordinary network flake, and it would not be worth much here except that the
-# release workflow runs this same script. A flake during a release is not a
-# re-run — it is a failed build across three runners, a tag to delete and
-# re-cut, and the draft releases from the half that succeeded to clean up.
-#
-# `go list -deps`, and not the two more obvious choices.
-#
-# Not `go build`, because a retry around a compile would run a genuine error
-# three times and then report it as a network problem — a worse failure than
-# the one being fixed. `go list` resolves and downloads without compiling, so
-# there is no compile error for it to mistake.
-#
-# Not `go mod download` either, which was the first thing tried here and is
-# wrong in a way worth recording: it resolves the whole module *graph*, so it
-# demands more than the build does. In this very repo it fails while the build
-# succeeds — frp's `gmsm` dependency requires `grpc@v1.31.0`, whose .mod file
-# `go mod download` insists on reading even though nothing in frpc imports
-# grpc. Prefetching with it would have enlarged the network surface this is
-# meant to shrink, and broken builds that work today from a warm cache.
-#
-# Run once per target because imports are build-constraint sensitive: a package
-# reached only under GOOS=windows is not in a linux resolution. Each pass after
-# the first is served from the module cache and costs nothing.
-#
-# Duplicated in build-frpc.sh rather than sourced from a shared file, and
-# that is deliberate. The scripts in here are self-contained by convention —
-# three of them, no `source` between them, each re-deriving its own paths and
-# tool checks — and one function is not worth introducing the first sourcing
-# relationship in the tree along with the path-resolution failure it brings.
-# The case against duplication elsewhere in this repo was about a *rule* two
-# copies could disagree on; this is mechanism, and a drifting copy costs
-# nothing.
-prefetch_modules() {
-  local dir="$1"
-  local pkg="$2"
-  local t goos goarch nodedir attempt delay
-  for t in "${TARGETS[@]}"; do
-    read -r goos goarch nodedir <<<"$t"
-    attempt=1
-    delay=5
-    while :; do
-      # stdout is the package list and is not wanted; stderr is left alone, so
-      # the last attempt's real error is the one that reaches the log.
-      if ( cd "$dir" && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-             go list -deps "$pkg" >/dev/null ); then
-        break
-      fi
-      if [ "$attempt" -ge 3 ]; then
-        echo "==> could not fetch modules for $goos/$goarch after 3 attempts" >&2
-        return 1
-      fi
-      echo "==> module fetch for $goos/$goarch failed (attempt $attempt of 3); retrying in ${delay}s" >&2
-      sleep "$delay"
-      attempt=$((attempt + 1))
-      delay=$((delay * 2))
-    done
-  done
-}
-
 # Before vet and test, not only before the build loop: those are the first
-# commands here that reach the network, so a flake would hit them first.
+# commands here that reach the network.
 prefetch_modules "$SRC" .
 
 # Fail the build rather than ship something that does not compile or whose

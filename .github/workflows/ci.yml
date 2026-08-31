@@ -44,5 +44,5 @@ jobs:
       # quarter of an hour to every pull request, which is why the release
       # workflow is where that happens.
       - name: Engine build scripts parse
-        run: bash -n scripts/build-openvpn.sh scripts/fetch-wintun.sh scripts/build-frpc.sh scripts/build-sidecar.sh
+        run: bash -n scripts/lib/net-retry.sh scripts/build-openvpn.sh scripts/fetch-wintun.sh scripts/build-frpc.sh scripts/build-sidecar.sh
       - run: npm run test
