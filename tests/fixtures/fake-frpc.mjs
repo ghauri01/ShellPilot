@@ -27,7 +27,47 @@
 //   --fail crash-after <ms>  serves normally, then exits 1 after <ms>
 
 import http from 'node:http'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeSync } from 'node:fs'
+
+// ------------------------------------------------------------------ output
+//
+// Every line this fixture emits goes out with a *synchronous* write, and that
+// is load-bearing rather than stylistic.
+//
+// `process.stdout.write` to a pipe — which is always the case here, because the
+// supervisor captures it — is asynchronous. `process.exit()` discards whatever
+// is still buffered, and so does the default action for a signal. This fixture
+// writes a line and then exits in three places: the `--version` path, the
+// `/api/stop` handler (ten milliseconds later), and the shutdown handler. Two
+// of those three have tests asserting on the line written immediately before
+// the exit, so the assertion is racing the flush and winning only because the
+// gap is usually enough.
+//
+// This is not hypothetical. The same shape in `fake-openvpn.mjs` produced an
+// intermittent failure that cost two agents most of a day to diagnose, and the
+// obvious fix — a longer timeout — could not have worked, because the line is
+// destroyed rather than delayed.
+//
+// A synchronous write cannot be lost: it has reached the pipe before the call
+// returns. The cost is that a full pipe blocks this process, which for a
+// fixture emitting a few dozen short lines is exactly the trade we want.
+// EAGAIN is retried because a non-blocking pipe can refuse a write that would
+// otherwise have succeeded.
+function writeFd(fd, text) {
+  const buf = Buffer.from(text, 'utf8')
+  let off = 0
+  while (off < buf.length) {
+    try {
+      off += writeSync(fd, buf, off, buf.length - off)
+    } catch (err) {
+      if (err.code === 'EAGAIN') continue
+      if (err.code === 'EPIPE') return
+      throw err
+    }
+  }
+}
+const out = (text) => writeFd(1, text)
+const err = (text) => writeFd(2, text)
 
 const VERSION = '0.71.0'
 
@@ -51,7 +91,7 @@ const args = parseArgv(process.argv.slice(2))
 
 if (args.version) {
   // The real binary prints the bare version and nothing else.
-  process.stdout.write(`${VERSION}\n`)
+  out(`${VERSION}\n`)
   process.exit(0)
 }
 
@@ -79,7 +119,7 @@ let firstLine = true
 function log(level, where, message) {
   const prefix = firstLine ? '' : RESET
   firstLine = false
-  process.stdout.write(`${prefix}${COLOUR[level]}${stamp()} [${level}] [${where}] ${message}\n`)
+  out(`${prefix}${COLOUR[level]}${stamp()} [${level}] [${where}] ${message}\n`)
 }
 const info = (where, message) => log('I', where, message)
 const warn = (where, message) => log('W', where, message)
@@ -383,7 +423,7 @@ const server = http.createServer((req, res) => {
 // ------------------------------------------------------------------ main
 
 if (!args.config) {
-  process.stderr.write('flag needs an argument: -c\n')
+  err('flag needs an argument: -c\n')
   process.exit(1)
 }
 
@@ -391,7 +431,7 @@ let configText
 try {
   configText = readFileSync(args.config, 'utf8')
 } catch (e) {
-  process.stderr.write(`load config error: ${e.message}\n`)
+  err(`load config error: ${e.message}\n`)
   process.exit(1)
 }
 
@@ -406,13 +446,13 @@ if (args.fail === 'auth') {
   const line =
     "login to server failed: authentication failed: token in login doesn't match token from configuration"
   errorLog('client/service.go:340', line)
-  process.stderr.write(`${line}\n`)
+  err(`${line}\n`)
   process.exit(1)
 }
 if (args.fail === 'version') {
   const line = `login to server failed: version mismatch, frps version 0.60.0 is not compatible with frpc ${VERSION}`
   errorLog('client/service.go:340', line)
-  process.stderr.write(`${line}\n`)
+  err(`${line}\n`)
   process.exit(1)
 }
 
@@ -427,14 +467,14 @@ server.listen(state.admin.port, state.admin.addr, () => {
   if (args.fail === 'crash-after') {
     setTimeout(() => {
       errorLog('client/control.go:280', 'control connection closed unexpectedly')
-      process.stderr.write('control connection closed unexpectedly\n')
+      err('control connection closed unexpectedly\n')
       process.exit(1)
     }, args.crashAfterMs)
   }
 })
 
 server.on('error', (e) => {
-  process.stderr.write(`admin server listen error: ${e.message}\n`)
+  err(`admin server listen error: ${e.message}\n`)
   process.exit(1)
 })
 
