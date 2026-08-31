@@ -63,6 +63,30 @@ if (!HAVE_NETD) {
   console.warn(`[vpnWireguardDriver] ${NETD_PATH} is missing; run scripts/build-sidecar.sh. Integration tests skipped.`)
 }
 
+/**
+ * How long a test that drives two real WireGuard devices may take.
+ *
+ * This has to exceed the driver's own `firstHandshakeTimeoutMs`, and that is
+ * the entire point of it existing. vitest's global `testTimeout` is 15 s; the
+ * beforeEach below deliberately gives the driver 25 s to see a first handshake,
+ * because under a parallel suite two real devices occasionally need longer than
+ * the 8 s it used to allow.
+ *
+ * Those two numbers were in the wrong order, and the effect was worse than
+ * either alone. A handshake slower than 15 s could not succeed — vitest killed
+ * the test first — and it could not fail usefully either, because the driver's
+ * own error, the one that names the endpoint, the UDP port and the peer key
+ * (E22/E27), was not due for another ten seconds. All that survived was
+ * `Test timed out in 15000ms`, pointing at whichever test happened to be
+ * running. That is why this flake outlived two attempts to diagnose it: the
+ * budget raise landed, and the executioner's clock was never moved to match.
+ *
+ * Kept comfortably above the driver's budget rather than equal to it, so the
+ * driver always loses the race and gets to explain itself. `guards the
+ * handshake budget` below fails if the order is ever inverted again.
+ */
+const REAL_SIDECAR_TIMEOUT_MS = 40_000
+
 const SERVER_IP = '10.7.0.2'
 const CLIENT_IP = '10.7.0.1'
 // Nothing listens here inside the peer's netstack, which is the point: the
@@ -119,6 +143,12 @@ interface PeerReply {
 class PeerNode {
   private seq = 0
   private readonly pending = new Map<string, (r: PeerReply) => void>()
+  private readonly rejects = new Map<string, (e: Error) => void>()
+  /** Everything the peer said on stderr, kept so a failure can quote it.
+   *  Also drained rather than ignored: an unread pipe fills at 64 KB and the
+   *  writer blocks there, which would be a hang caused by the harness. */
+  private stderr = ''
+  private died: string | null = null
 
   private constructor(
     private readonly child: ChildProcess,
@@ -126,18 +156,77 @@ class PeerNode {
     readonly publicKey: string
   ) {}
 
-  static async start(clientPublicKey: string): Promise<PeerNode> {
+  /** Start a peer, retrying when the port it picked is taken.
+   *
+   *  `freeUdpPort` binds port 0, reads the number and closes the socket, so
+   *  what it returns is a port that *was* free. Between that close and the
+   *  sidecar binding it there is a process spawn and a request round trip, and
+   *  under a parallel suite full of sidecars something else occasionally takes
+   *  it — observed here as `wg.up failed: ... bind: address already in use`,
+   *  about once in eighty runs with six copies of this file running at once.
+   *
+   *  The window cannot be closed from the test side: the protocol has no way to
+   *  ask the sidecar to bind an arbitrary free port and report which one it
+   *  got, and adding one to the Go sidecar to suit a test is the wrong trade.
+   *  So losing the race is made harmless instead of impossible. Three attempts
+   *  makes a collision on every one of them vanishingly unlikely, and a
+   *  genuinely broken bind still fails on the last attempt with its real error
+   *  rather than being retried into a timeout. */
+  static async start(clientPublicKey: string, attempt = 1): Promise<PeerNode> {
+    try {
+      return await PeerNode.startOnce(clientPublicKey)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      if (attempt < 3 && /address already in use/i.test(message)) {
+        return PeerNode.start(clientPublicKey, attempt + 1)
+      }
+      throw e
+    }
+  }
+
+  private static async startOnce(clientPublicKey: string): Promise<PeerNode> {
     const keys = keypair()
     const port = await freeUdpPort()
     const child = nodeSpawn(NETD_PATH, [], { stdio: ['pipe', 'pipe', 'pipe'] })
     const node = new PeerNode(child, port, keys.publicKey)
 
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (c: string) => (node.stderr += c))
+
+    // A peer that dies owes an answer to every call still waiting on it.
+    // Without this the promise simply never settles and the test reports a
+    // bare "timed out in 15000ms" naming whichever test lost the race, with
+    // nothing about the peer at all — which is precisely how this flake stayed
+    // undiagnosed.
+    const abandon = (why: string): void => {
+      node.died = why
+      for (const [id, reject] of node.rejects) {
+        node.pending.delete(id)
+        reject(new Error(`${why}${node.stderr ? `\nstderr: ${node.stderr.trim()}` : ''}`))
+      }
+      node.rejects.clear()
+    }
+    child.on('exit', (code, signal) => {
+      // SIGKILL is `stop()` doing its job at the end of a test.
+      if (signal !== 'SIGKILL') abandon(`peer sidecar exited: code=${code} signal=${signal}`)
+    })
+    child.on('error', (e) => abandon(`peer sidecar could not be started: ${e.message}`))
+
     createInterface({ input: child.stdout!, crlfDelay: Infinity }).on('line', (line) => {
       if (!line.startsWith('{')) return
-      const msg = JSON.parse(line) as PeerReply & { id?: string }
+      let msg: PeerReply & { id?: string }
+      try {
+        msg = JSON.parse(line) as PeerReply & { id?: string }
+      } catch {
+        // Throwing in here is an unhandled exception in a readline callback,
+        // which takes the whole worker down rather than failing one test.
+        node.stderr += `\nunparseable stdout line: ${line}`
+        return
+      }
       if (typeof msg.id === 'string') {
         const done = node.pending.get(msg.id)
         node.pending.delete(msg.id)
+        node.rejects.delete(msg.id)
         done?.(msg)
       }
     })
@@ -157,15 +246,56 @@ class PeerNode {
       peers: [{ publicKey: clientPublicKey, endpoint: '', allowedIps: [`${CLIENT_IP}/32`] }],
       listeners: []
     })
-    if (!up.ok) throw new Error(`peer wg.up failed: ${up.error?.message}`)
+    if (!up.ok) {
+      // Reap it before retrying, or a losing attempt leaves a live sidecar
+      // behind for the rest of the file.
+      child.kill('SIGKILL')
+      throw new Error(`peer wg.up failed: ${up.error?.message}`)
+    }
     return node
   }
 
-  call(method: string, params?: unknown): Promise<PeerReply> {
+  /** Ask the peer something, and fail rather than wait forever.
+   *
+   *  The budget is below vitest's per-test timeout on purpose: a call that
+   *  gives up first can say which method hung and what the peer printed, where
+   *  the test timeout can only say that fifteen seconds passed. */
+  call(method: string, params?: unknown, ms = 10_000): Promise<PeerReply> {
     const id = String(++this.seq)
-    return new Promise((resolve) => {
-      this.pending.set(id, resolve)
-      this.child.stdin!.write(`${JSON.stringify({ id, method, params })}\n`)
+    return new Promise((resolve, reject) => {
+      if (this.died) {
+        reject(new Error(`${this.died} (before ${method})`))
+        return
+      }
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        this.rejects.delete(id)
+        reject(
+          new Error(
+            `peer never answered ${method} within ${ms}ms` +
+              `${this.stderr ? `\nstderr: ${this.stderr.trim()}` : ''}`
+          )
+        )
+      }, ms)
+      this.pending.set(id, (r) => {
+        clearTimeout(timer)
+        resolve(r)
+      })
+      this.rejects.set(id, (e) => {
+        clearTimeout(timer)
+        reject(e)
+      })
+      this.child.stdin!.write(`${JSON.stringify({ id, method, params })}\n`, (err) => {
+        // An EPIPE here means the peer is already gone. Reported rather than
+        // swallowed, because the alternative is waiting out the timeout for a
+        // process that will never read the request.
+        if (err) {
+          this.pending.delete(id)
+          this.rejects.delete(id)
+          clearTimeout(timer)
+          reject(new Error(`could not send ${method} to the peer: ${err.message}`))
+        }
+      })
     })
   }
 
@@ -1038,6 +1168,41 @@ describe('system mode', () => {
 
 // ================================================================ engine I/O
 
+// Not gated on the sidecar being built: this is a relationship between two
+// numbers, it costs nothing to check, and a checkout without the sidecar is
+// exactly where someone edits a timeout without being able to run the tests
+// that would notice.
+describe('timeout budgets', () => {
+  it('guards the handshake budget against the test timeout that kills it', () => {
+    // The invariant this whole file's stability rests on, asserted rather than
+    // remembered.
+    //
+    // The driver is allowed to wait `firstHandshakeTimeoutMs` for two real
+    // devices to complete a Noise handshake. If the harness kills the test
+    // before that budget expires, a slow handshake can neither succeed nor
+    // report why it failed: what surfaces is a bare `Test timed out`, naming
+    // whichever test drew the short straw and saying nothing about WireGuard.
+    // That is exactly what happened when the budget was raised from 8 s to 25 s
+    // and vitest's 15 s `testTimeout` was left behind, and it cost two
+    // investigations that both concluded "undiagnosed".
+    //
+    // Revert `REAL_SIDECAR_TIMEOUT_MS` to the global 15 s and this fails here,
+    // immediately and by name, instead of intermittently and anonymously
+    // somewhere else.
+    expect(
+      REAL_SIDECAR_TIMEOUT_MS,
+      'the per-test timeout must outlast the driver\'s first-handshake budget, ' +
+        'or the driver never gets to report a handshake-timeout'
+    ).toBeGreaterThan(wireguardTuning.firstHandshakeTimeoutMs)
+
+    // And with room to spare: the test also has to start a peer sidecar and run
+    // its assertions after the handshake lands.
+    expect(REAL_SIDECAR_TIMEOUT_MS - wireguardTuning.firstHandshakeTimeoutMs).toBeGreaterThanOrEqual(
+      10_000
+    )
+  })
+})
+
 describe.skipIf(!HAVE_NETD)('probe', () => {
   it('finds and hashes the bundled sidecar and reports a readable version', async () => {
     const info = await wireguardDriver.probe()
@@ -1103,7 +1268,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
       targetHost: SERVER_IP,
       targetPort: CLOSED_PORT
     })
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('sends every key on stdin and puts nothing on argv or in the environment', async () => {
     await startConnected()
@@ -1121,7 +1286,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
     // happened.
     expect(stdinWrites.join('')).toContain(client.privateKey)
     expect(stdinWrites.join('')).toContain('"wg.up"')
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('reports live stats with a handshake age computed from the pinned clock', async () => {
     await startConnected()
@@ -1136,7 +1301,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
     expect(stats?.txBytes).toBeGreaterThan(0)
     expect(stats?.rxBytes).toBeGreaterThan(0)
     expect(wireguardDriver.status(PROFILE_ID)?.state).toBe('connected')
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('calls a stale handshake degraded, not error (the 180 s boundary)', async () => {
     // The pinned clock is set 400 s ahead of the sidecar's, so the handshake
@@ -1155,7 +1320,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
     expect(status?.errorCode).toBe('handshake-timeout')
     expect(status?.error).toMatch(new RegExp(`over ${WG_HANDSHAKE_STALE_SEC}s`))
     expect(status?.error).toMatch(/still up/i)
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('clamps the age at zero when the clock says the handshake is in the future (E63)', async () => {
     const realNow = Date.now()
@@ -1168,7 +1333,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
     expect(stats?.lastHandshakeSec).toBe(0)
     expect(stats?.lastHandshakeSec).not.toBeLessThan(0)
     expect(wireguardDriver.status(PROFILE_ID)?.state).toBe('connected')
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('carries a SOCKS5 conversation and dials through the tunnel', async () => {
     await startConnected()
@@ -1193,7 +1358,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
     const after = await peerCounters()
     expect(after.rxBytes).toBeGreaterThan(before.rxBytes)
     expect(after.txBytes).toBeGreaterThan(before.txBytes)
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('accepts a connection on a forward listener and fails the dial cleanly', async () => {
     await startConnected({
@@ -1211,7 +1376,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
 
     const after = await peerCounters()
     expect(after.rxBytes).toBeGreaterThan(before.rxBytes)
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('opens and closes an ephemeral forward', async () => {
     await startConnected()
@@ -1235,7 +1400,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
         return (e as NodeJS.ErrnoException).code === 'ECONNREFUSED'
       }
     })
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('tears everything down on stop and leaves no listener behind', async () => {
     await startConnected({
@@ -1262,7 +1427,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
       })
       await new Promise<void>((resolve) => srv.close(() => resolve()))
     }
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('sends wg.down before shutdown so the ports are free before the process goes', async () => {
     await startConnected()
@@ -1272,7 +1437,7 @@ describe.skipIf(!HAVE_NETD)('start, over a real handshake', () => {
     expect(written).toContain('"wg.down"')
     expect(written).toContain('"shutdown"')
     expect(written.indexOf('"wg.down"')).toBeLessThan(written.indexOf('"shutdown"'))
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 })
 
 describe.skipIf(!HAVE_NETD)('failures the user can act on', () => {
@@ -1301,7 +1466,7 @@ describe.skipIf(!HAVE_NETD)('failures the user can act on', () => {
     expect(spawns).toHaveLength(1)
     expect(supervisor.get(PROFILE_ID)).toBeUndefined()
     await waitFor('the sidecar to exit', () => children[0].exitCode !== null || children[0].signalCode !== null)
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('names the port that is already in use (E24)', async () => {
     const taken = await occupyPort()
@@ -1318,7 +1483,7 @@ describe.skipIf(!HAVE_NETD)('failures the user can act on', () => {
     expect(result.error).toContain(String(taken))
     expect(result.error).toMatch(/leave it as 0/i)
     expect(supervisor.get(PROFILE_ID)).toBeUndefined()
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('reports a non-loopback bind back verbatim so the UI can warn (E25)', async () => {
     peer = await PeerNode.start(client.publicKey)
@@ -1334,7 +1499,7 @@ describe.skipIf(!HAVE_NETD)('failures the user can act on', () => {
     // hiding a LAN-visible proxy.
     expect(result.listeners?.[0].bindHost).toBe('0.0.0.0')
     expect(logs.some((l) => /reachable from your local network/i.test(l))).toBe(true)
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('refuses a profile whose key never made it out of the vault', async () => {
     peer = await PeerNode.start(client.publicKey)
@@ -1344,7 +1509,7 @@ describe.skipIf(!HAVE_NETD)('failures the user can act on', () => {
     expect(result.ok).toBe(false)
     expect(result.errorCode).toBe('config-invalid')
     expect(supervisor.get(PROFILE_ID)).toBeUndefined()
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 
   it('returns null stats and no forward for a profile that is not running', async () => {
     expect(await wireguardDriver.stats(PROFILE_ID)).toBeNull()
@@ -1352,7 +1517,7 @@ describe.skipIf(!HAVE_NETD)('failures the user can act on', () => {
     await expect(wireguardDriver.openForward!(PROFILE_ID, SERVER_IP, CLOSED_PORT)).rejects.toMatchObject({
       code: 'internal'
     })
-  })
+  }, REAL_SIDECAR_TIMEOUT_MS)
 })
 
 // Accepts an async predicate too: some conditions can only be observed by
