@@ -236,10 +236,35 @@ describeE2e('shellpilot-netd against itself', () => {
 describeE2e('frpc admin API', () => {
   let dir = ''
   let proc: ChildProcess | null = null
-  const adminPort = 41732
+  let adminPort = 0
 
-  beforeAll(() => {
+  /** A port the OS says is free, rather than one we hoped was.
+   *
+   *  This was hardcoded to 41732, and it failed in CI on both runners while
+   *  passing on every developer machine. 41732 sits inside Linux's ephemeral
+   *  range (32768-60999), so a busy runner — one that has just spent minutes
+   *  pulling npm and Go packages — can legitimately already own it, and frpc's
+   *  bind then fails before it ever serves anything. An idle laptop almost
+   *  never collides, which is why a fixed port looks fine until it is running
+   *  somewhere that does real work.
+   *
+   *  Asking for port 0 and reading back what was assigned narrows this to the
+   *  instant between closing the probe and frpc binding. That race cannot be
+   *  removed without frpc accepting a pre-opened socket, but it is a window of
+   *  microseconds rather than a standing bet on one number. */
+  const freePort = async (): Promise<number> =>
+    new Promise((resolvePort, reject) => {
+      const srv = net.createServer()
+      srv.once('error', reject)
+      srv.listen(0, '127.0.0.1', () => {
+        const { port } = srv.address() as net.AddressInfo
+        srv.close(() => resolvePort(port))
+      })
+    })
+
+  beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'sp-frp-'))
+    adminPort = await freePort()
   })
 
   afterAll(() => {
@@ -280,8 +305,20 @@ describeE2e('frpc admin API', () => {
       env: { ...process.env, SP_FRP_TOKEN: 'zzsecrettokenvaluezz', SP_FRP_ADMIN: 'zzadminpwzz' }
     })
 
+    // Keep what frpc says. When this failed in CI it reported only
+    // `ECONNREFUSED`, which says the port is shut and nothing about why — and
+    // the reason was in the output nobody was keeping. A real binary's
+    // complaint is the most useful thing in the room when a real-binary test
+    // fails.
+    let output = ''
+    proc.stdout?.on('data', (c: Buffer) => (output += c.toString()))
+    proc.stderr?.on('data', (c: Buffer) => (output += c.toString()))
+    let died: string | null = null
+    proc.on('exit', (code, signal) => (died = `frpc exited early: code=${code} signal=${signal}`))
+
     const base = `http://127.0.0.1:${adminPort}`
     for (let i = 0; i < 40; i++) {
+      if (died) break
       try {
         if ((await fetch(`${base}/healthz`)).ok) break
       } catch {
@@ -290,7 +327,8 @@ describeE2e('frpc admin API', () => {
       await new Promise((r) => setTimeout(r, 250))
     }
 
-    expect((await fetch(`${base}/healthz`)).status).toBe(200)
+    expect(died, `${died}\n--- frpc output ---\n${output}`).toBeNull()
+    expect((await fetch(`${base}/healthz`)).status, `frpc output:\n${output}`).toBe(200)
     expect((await fetch(`${base}/api/status`)).status).toBe(401)
 
     const auth = { Authorization: `Basic ${Buffer.from('shellpilot:zzadminpwzz').toString('base64')}` }
