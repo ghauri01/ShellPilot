@@ -95,7 +95,10 @@ export interface AppSettings {
   terminalFontSize: number
   // Host metrics docked under the terminal.
   showMonitorStrip: boolean
-  // Warn when a host's CPU or memory stays at or above the threshold.
+  // The master switch for ALL alerting: CPU/memory thresholds, failed systemd
+  // units, and webhook delivery. Named `resourceAlerts` before unit alerts and
+  // webhooks existed; the name is kept so saved settings still load, but the
+  // UI calls it "Alerts" and says what it covers.
   resourceAlertsEnabled: boolean
   resourceAlertThreshold: number
   // Sample every server in the workspace on a schedule from the main process,
@@ -105,6 +108,14 @@ export interface AppSettings {
   // start doing to someone without asking.
   fleetSamplingEnabled: boolean
   fleetSamplingIntervalMs: number
+  // Webhook delivery. These live in settings rather than in the webhook
+  // service because settings are persisted and the service is not: an earlier
+  // version held `enabled` in a module-level variable, so every restart
+  // silently switched off a feature whose entire job is noticing failures
+  // while you are not looking. The URL itself stays in safeStorage — it is a
+  // credential and does not belong in a settings file or a backup.
+  webhookAlertsEnabled: boolean
+  webhookNotifyOnResolved: boolean
   // Tightens row heights and paddings across the app.
   compactDensity: boolean
   // Command used to open remote files. Empty means the OS default handler.
@@ -142,6 +153,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   resourceAlertThreshold: 80,
   fleetSamplingEnabled: false,
   fleetSamplingIntervalMs: FLEET_INTERVAL_DEFAULT_MS,
+  webhookAlertsEnabled: false,
+  webhookNotifyOnResolved: true,
   compactDensity: false,
   externalEditorCommand: 'code',
   openFilesExternally: false,

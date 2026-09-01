@@ -46,54 +46,105 @@ describe('webhook URL validation', () => {
   })
 })
 
-describe('what a payload is allowed to contain', () => {
-  // The load-bearing decision in this feature. Every field is a constant, a
-  // number, or a name the user typed. Nothing is passed through from a
-  // command, a log line or a file -- which is the only reason this can be sent
-  // to a third party without running it past secretRedaction first.
-  const payload: AlertPayload = {
-    source: 'shellpilot',
-    version: '0.8.0',
-    event: 'raised',
-    kind: 'unit-failed',
-    server: 'Prod Code 1',
-    summary: '2 units failed on Prod Code 1',
-    at: new Date().toISOString(),
-    units: ['postfix@-.service', 'uwsgi.service']
-  }
+describe('payload sanitising — what actually leaves the machine', () => {
+  // Replaces an earlier version of these tests that asserted on an object
+  // literal the test file itself wrote. Those passed because the author had not
+  // typed the word "host"; they would have passed unchanged if the code started
+  // shipping journal output. These drive the real sanitiser instead.
 
-  it('carries no host, IP, username or port', () => {
-    // docs/AI-SECURITY.md makes "an agent never receives a real host, IP or
-    // username" a property of the product. A webhook is an easier way to leak
-    // an estate's addressing than the MCP bridge ever was, so the same rule
-    // holds here. The friendly name is what a person needs to act on.
-    const json = JSON.stringify(payload)
-    for (const banned of ['host', 'ip', 'username', 'port', 'password', 'key']) {
-      expect(Object.keys(payload)).not.toContain(banned)
-    }
-    expect(json).not.toMatch(/\b\d{1,3}(\.\d{1,3}){3}\b/)
-  })
-
-  it('carries unit names but not descriptions or output', () => {
-    // A name is enough to act on. Everything past the name is text the host
-    // chose rather than text we did.
-    expect(payload.units).toEqual(['postfix@-.service', 'uwsgi.service'])
-    expect(Object.keys(payload)).not.toContain('description')
-    expect(Object.keys(payload)).not.toContain('output')
-    expect(Object.keys(payload)).not.toContain('log')
-  })
-
-  it('has a fixed key set, so a future field is a deliberate decision', () => {
-    // If this fails because someone added a field, that is the point: the
-    // question "can this leave the machine" should be asked out loud.
-    expect(Object.keys(payload).sort()).toEqual(
-      ['at', 'event', 'kind', 'server', 'source', 'summary', 'units', 'version'].sort()
+  it('rebuilds from a whitelist, dropping anything it was not asked for', async () => {
+    // The renderer can put anything on this IPC -- AlertPayload constrains its
+    // source, not the runtime object -- so main must not forward what it got.
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      source: 'not-shellpilot',
+      event: 'raised',
+      kind: 'cpu',
+      server: 'box',
+      summary: 'CPU high',
+      version: '0.8.0',
+      at: '1999-01-01T00:00:00.000Z',
+      host: '10.0.0.5',
+      username: 'root',
+      password: 'hunter2',
+      privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----',
+      logs: 'Sep 1 12:00:00 sshd: Accepted password for root'
+    })
+    expect(out).not.toBeNull()
+    expect(Object.keys(out!).sort()).toEqual(
+      ['at', 'event', 'kind', 'server', 'source', 'summary', 'version'].sort()
     )
+    expect(JSON.stringify(out)).not.toMatch(/hunter2|PRIVATE KEY|10\.0\.0\.5|sshd/)
   })
 
-  it('identifies itself so a shared endpoint can tell who posted', () => {
-    expect(payload.source).toBe('shellpilot')
-    expect(payload.version).toBeTruthy()
+  it('forces source and timestamp rather than trusting them', async () => {
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({ event: 'raised', kind: 'cpu', at: 'whenever', source: 'spoofed' })
+    expect(out!.source).toBe('shellpilot')
+    expect(() => new Date(out!.at).toISOString()).not.toThrow()
+  })
+
+  it('rejects a payload whose event or kind is not one of ours', async () => {
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    expect(sanitisePayload({ event: 'exfil', kind: 'cpu' })).toBeNull()
+    expect(sanitisePayload({ event: 'raised', kind: 'whatever' })).toBeNull()
+    expect(sanitisePayload(null)).toBeNull()
+    expect(sanitisePayload('a string')).toBeNull()
+  })
+
+  it('caps text, so an unbounded string cannot become an exfil channel', async () => {
+    // The rate limiter caps request COUNT, not body size. Without this, 30
+    // POSTs a minute of unbounded strings is whatever bandwidth you want.
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      event: 'raised',
+      kind: 'cpu',
+      server: 'x'.repeat(10_000),
+      summary: 'y'.repeat(10_000)
+    })
+    expect(out!.server.length).toBeLessThanOrEqual(200)
+    expect(out!.summary.length).toBeLessThanOrEqual(200)
+  })
+
+  it('strips a hostile unit name instead of posting it', async () => {
+    // Unit names come off a machine that may be compromised. `<!channel>`
+    // contains no whitespace, so it survives parseServices -- and would ping an
+    // entire Slack workspace on a loop, from an integration the user trusts.
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      event: 'raised',
+      kind: 'unit-failed',
+      server: 'box',
+      summary: 'failed',
+      units: ['<!channel>.service', 'https://evil.example/x.service', 'nginx.service']
+    })
+    // `<`, `>` and `/` are gone, so neither a Slack control sequence nor a
+    // clickable link survives. The colon stays because systemd unit names may
+    // contain one, which is why the result still reads oddly -- but it is inert.
+    expect(out!.units).toEqual(['channel.service', 'https:evil.examplex.service', 'nginx.service'])
+    expect(JSON.stringify(out)).not.toMatch(/[<>]/)
+    expect(JSON.stringify(out)).not.toMatch(/\/\//)
+  })
+
+  it('caps the number and length of unit names', async () => {
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      event: 'raised',
+      kind: 'unit-failed',
+      units: Array.from({ length: 500 }, (_, i) => `u${i}.service`).concat(['z'.repeat(9999)])
+    })
+    expect(out!.units!.length).toBeLessThanOrEqual(20)
+    for (const u of out!.units!) expect(u.length).toBeLessThanOrEqual(128)
+  })
+
+  it('coerces numbers and drops ones that are not', async () => {
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      event: 'raised', kind: 'cpu', value: '91', threshold: Number.NaN, minutes: {}
+    })
+    expect(out!.value).toBe(91)
+    expect(out!.threshold).toBeUndefined()
+    expect(out!.minutes).toBeUndefined()
   })
 })
 

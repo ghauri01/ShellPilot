@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useApp, useWorkspaceServers } from '../../store/app'
 import { useFleet } from '../../store/fleet'
 import { checkResourceAlerts, checkUnitAlerts } from '../../store/alerts'
@@ -44,9 +44,19 @@ function toTarget(s: Server): FleetTarget {
 
 export function FleetWatcher(): null {
   const servers = useWorkspaceServers()
+  // Read through a ref inside the subscription. The handler is registered once
+  // on purpose -- resubscribing on every server edit would drop events during
+  // the gap -- but that means a plain closure over `servers` goes stale, and a
+  // server added after mount would alert under its raw UUID instead of the
+  // name its owner chose.
+  const serversRef = useRef(servers)
+  serversRef.current = servers
   const enabled = useApp((s) => s.settings.fleetSamplingEnabled)
   const intervalMs = useApp((s) => s.settings.fleetSamplingIntervalMs)
+  const webhookEnabled = useApp((s) => s.settings.webhookAlertsEnabled)
+  const webhookOnResolved = useApp((s) => s.settings.webhookNotifyOnResolved)
   const report = useFleet((s) => s.report)
+  const reportError = useFleet((s) => s.reportError)
 
   // Demo servers have nothing to sample, and an offline one is a connection
   // attempt per sweep that will not succeed — main reports the failure rather
@@ -61,13 +71,18 @@ export function FleetWatcher(): null {
   // settings change.
   useEffect(() => {
     const off = bridgeOn('fleet.onSample', window.shellpilot?.fleet?.onSample, (e) => {
-      if (!e.host) return
+      if (!e.host) {
+        // Recorded, not dropped. A host refusing SSH for six hours used to be
+        // indistinguishable from one that is fine, because this returned here.
+        if (e.error) reportError(e.serverId, e.error, e.at)
+        return
+      }
       report(e.serverId, e.host)
       // Thresholds live in the renderer because that is where the settings
       // and the toast surface are. Before this, they were evaluated inside
       // the monitor's own poll — so an alert could only fire while the user
       // was already looking at the screen that would have shown the problem.
-      const name = servers.find((s) => s.id === e.serverId)?.name ?? e.serverId
+      const name = serversRef.current.find((s) => s.id === e.serverId)?.name ?? e.serverId
       checkResourceAlerts(e.serverId, name, e.host.cpu, e.host.memPct)
       // The reason the feature exists. A failed unit does not move a CPU or
       // memory graph, so thresholds would never have caught the case this was
@@ -82,16 +97,26 @@ export function FleetWatcher(): null {
       )
     })
     return () => off?.()
-    // `servers` is read only to name a server in an alert; re-subscribing on
-    // every server edit would drop events during the gap.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report])
+  }, [report, reportError])
 
   // Reconfigure whenever what should be watched changes. Main treats this as
   // the complete desired state, so removing a server here stops sampling it.
   useEffect(() => {
     void window.shellpilot?.fleet?.configure({ enabled, intervalMs, targets })
   }, [enabled, intervalMs, targets])
+
+  // Push webhook settings to main on mount, not only when the toggle moves.
+  //
+  // The service holds them in memory; the persisted copy lives here. Without
+  // this effect the only thing that ever told main they were on was the
+  // settings switch, so a restart silently disabled a feature whose whole job
+  // is noticing failures while nobody is looking at the app.
+  useEffect(() => {
+    void window.shellpilot?.webhook?.configure({
+      enabled: webhookEnabled,
+      notifyOnResolved: webhookOnResolved
+    })
+  }, [webhookEnabled, webhookOnResolved])
 
   return null
 }

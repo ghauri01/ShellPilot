@@ -21,6 +21,7 @@ interface Harness {
   sampler: FleetSampler
   events: FleetSampleEvent[]
   calls: string[]
+  released: string[]
   setUnlocked: (v: boolean) => void
   resolveAll: () => void
 }
@@ -28,6 +29,7 @@ interface Harness {
 function harness(over: { slow?: boolean } = {}): Harness {
   const events: FleetSampleEvent[] = []
   const calls: string[] = []
+  const released: string[] = []
   let unlocked = true
   const pending: (() => void)[] = []
 
@@ -37,6 +39,7 @@ function harness(over: { slow?: boolean } = {}): Harness {
       if (over.slow) await new Promise<void>((r) => pending.push(r))
       return { ok: true, data: { hostname: key } }
     },
+    release: (k) => released.push(k),
     emit: (e) => events.push(e),
     vaultUnlocked: () => unlocked
   })
@@ -45,6 +48,7 @@ function harness(over: { slow?: boolean } = {}): Harness {
     sampler,
     events,
     calls,
+    released,
     setUnlocked: (v) => {
       unlocked = v
     },
@@ -216,6 +220,7 @@ describe('sweep behaviour', () => {
         if (key === 'fleet:b') throw new Error('connect ETIMEDOUT')
         return { ok: true, data: { hostname: key } }
       },
+      release: () => {},
       emit: (e) => events.push(e),
       vaultUnlocked: () => true
     })
@@ -240,6 +245,7 @@ describe('sweep behaviour', () => {
     const events: FleetSampleEvent[] = []
     const sampler = new FleetSampler({
       sample: async () => ({ ok: false, error: 'permission denied' }),
+      release: () => {},
       emit: (e) => events.push(e),
       vaultUnlocked: () => true
     })

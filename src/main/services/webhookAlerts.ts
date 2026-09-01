@@ -80,6 +80,72 @@ function allowedByRateLimit(now: number): boolean {
   return true
 }
 
+// Everything that crosses the IPC boundary is rebuilt here, field by field.
+//
+// AlertPayload is a TypeScript type, which means it constrains the renderer's
+// source and nothing at runtime: `webhook:notify` receives a deserialised
+// object and used to hand it straight to JSON.stringify. That gave anything
+// running in the renderer an arbitrary-JSON-to-arbitrary-URL primitive from
+// the main process — a hole straight through the CSP that is the only reason a
+// renderer compromise is survivable at all.
+//
+// It also bounds host-controlled text. `units` are systemd unit names scraped
+// from a machine that may itself be compromised; a unit named `<!channel>`
+// posts a workspace-wide ping into someone's incident channel on a loop, from
+// an integration they trust.
+const LITERAL = {
+  event: ['raised', 'resolved'],
+  kind: ['cpu', 'memory', 'unit-failed']
+} as const
+
+const MAX_TEXT = 200
+const MAX_UNITS = 20
+const MAX_UNIT_NAME = 128
+
+const text = (v: unknown, max = MAX_TEXT): string =>
+  typeof v === 'string' ? v.slice(0, max) : ''
+
+const num = (v: unknown): number | undefined => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : undefined
+}
+
+export function sanitisePayload(raw: unknown): AlertPayload | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const r = raw as Record<string, unknown>
+
+  const event = LITERAL.event.find((e) => e === r.event)
+  const kind = LITERAL.kind.find((k) => k === r.kind)
+  if (!event || !kind) return null
+
+  const out: AlertPayload = {
+    source: 'shellpilot',
+    version: text(r.version, 32),
+    event,
+    kind,
+    server: text(r.server),
+    summary: text(r.summary),
+    at: new Date().toISOString()
+  }
+
+  const value = num(r.value)
+  const threshold = num(r.threshold)
+  const minutes = num(r.minutes)
+  if (value !== undefined) out.value = value
+  if (threshold !== undefined) out.threshold = threshold
+  if (minutes !== undefined) out.minutes = minutes
+
+  if (Array.isArray(r.units)) {
+    out.units = r.units
+      .slice(0, MAX_UNITS)
+      // A unit name is [A-Za-z0-9._@:-] plus the `\x2d` escapes systemd uses.
+      // Anything else is not a unit name, whatever the host claims.
+      .map((u) => text(u, MAX_UNIT_NAME).replace(/[^A-Za-z0-9._@:\-\\]/g, ''))
+      .filter((u) => u.length > 0)
+  }
+  return out
+}
+
 async function post(url: string, payload: AlertPayload): Promise<WebhookTestResult> {
   let lastError = 'unknown error'
 
@@ -91,8 +157,31 @@ async function post(url: string, payload: AlertPayload): Promise<WebhookTestResu
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
+        // Do NOT follow redirects.
+        //
+        // validateWebhookUrl runs once, on the string the user typed. With
+        // redirects followed, the ENDPOINT then chooses where the request
+        // actually lands — a 308 to http://10.0.0.5/ puts this payload on a
+        // cleartext hop to an internal host, from a process sitting inside the
+        // user's network and possibly behind a VPN the app itself raised. That
+        // makes both the https rule and the loopback-only-http rule advisory.
+        //
+        // Every real receiver — Slack, Discord, Teams, PagerDuty, Alertmanager
+        // — answers 2xx directly. None needs a redirect.
+        redirect: 'manual',
         signal: ac.signal
       })
+      // A 3xx here is `redirect: 'manual'` refusing to follow, not success.
+      if (res.status >= 300 && res.status < 400) {
+        return {
+          ok: false,
+          status: res.status,
+          error: `The endpoint redirected (HTTP ${res.status}). Point the webhook at its final URL — redirects are not followed, because the destination could be an internal or cleartext host.`
+        }
+      }
+      // Deliberate: the response body is never read. That is what keeps a
+      // hostile or mistyped endpoint from becoming a read primitive into the
+      // user's network. Do not "improve" this by surfacing the body.
       if (res.ok) return { ok: true, status: res.status }
 
       // 4xx means the request is wrong and will be wrong again — a revoked
@@ -119,8 +208,11 @@ async function post(url: string, payload: AlertPayload): Promise<WebhookTestResu
  * sample. Failures are recorded on `status` rather than thrown at a caller that
  * has nothing useful to do with them.
  */
-export function webhookNotify(payload: AlertPayload): void {
+export function webhookNotify(raw: unknown): void {
   if (!enabled) return
+  // Rebuilt from a whitelist, never forwarded as received. See sanitisePayload.
+  const payload = sanitisePayload(raw)
+  if (!payload) return
   if (payload.event === 'resolved' && !notifyOnResolved) return
   const url = getSecret(SECRET_ID)
   if (!url) return

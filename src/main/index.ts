@@ -560,6 +560,7 @@ const fleetSampler = new FleetSampler({
   // is unlocked or a credential is edited, and the sampler would go on using
   // it until something happened to reconfigure.
   sample: (key, cfg) => metricsSample(key, resolveChainSecrets(cfg as SshConnectConfig)),
+  release: (key) => metricsDisconnect(key),
   emit: (event) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet:sample', event)
   },
@@ -581,9 +582,19 @@ ipcMain.handle('fleet:status', () => fleetSampler.status())
 // ---- Webhook alerts ----
 //
 // Delivery lives in main because the renderer's CSP is `connect-src 'self'`
-// and cannot make this call — and should not. Keeping it here means the
-// webhook URL, which is a bearer credential, never crosses into the renderer,
-// so a compromised renderer can neither read it nor aim it somewhere else.
+// and cannot make this call. The URL is a bearer credential and never crosses
+// back: there is no getter, and `webhook:status` returns only whether one is
+// set.
+//
+// A compromised renderer CAN still aim and fire this, and saying otherwise —
+// as an earlier version of this comment did — is the kind of claim that stops
+// the next reviewer looking. What limits the damage is not the boundary, it is
+// that `webhookNotify` rebuilds every payload from a whitelist
+// (`sanitisePayload`) rather than forwarding what it was handed, that
+// `post()` never follows a redirect or reads a response body, and that the URL
+// is validated on the way in. Without those this IPC is an
+// arbitrary-JSON-to-arbitrary-host primitive that walks straight through the
+// CSP, which is the only thing making a renderer compromise survivable.
 //
 // Deliberately NOT reachable from the MCP bridge. An agent that can point a
 // webhook at an endpoint it controls has an exfiltration channel out of an app
@@ -595,7 +606,23 @@ ipcMain.handle('webhook:delivery', () => webhookDeliveryStatus())
 ipcMain.handle('webhook:configure', (_e, cfg: { enabled: boolean; notifyOnResolved: boolean }) =>
   webhookConfigure(cfg)
 )
-ipcMain.handle('webhook:set-url', (_e, url: string) => webhookSetUrl(url))
+ipcMain.handle('webhook:set-url', (_e, url: string) => {
+  // Refuse our own MCP port. Loopback http is allowed (a self-hosted receiver
+  // on the same machine is a real setup), but /pair/start is unauthenticated —
+  // so a webhook aimed there would raise an agent-pairing prompt in lockstep
+  // with every alert, which is a tidy way to get someone to approve one.
+  const port = getMcpConfig().port
+  try {
+    const u = new URL(String(url).trim())
+    const loopback = ['localhost', '127.0.0.1', '::1'].includes(u.hostname)
+    if (loopback && Number(u.port) === port) {
+      return { ok: false, error: `That is ShellPilot's own MCP port (${port}). Pick another endpoint.` }
+    }
+  } catch {
+    // Not a URL — webhookSetUrl reports that properly.
+  }
+  return webhookSetUrl(url)
+})
 ipcMain.handle('webhook:test', () => webhookTest())
 ipcMain.handle('webhook:notify', (_e, payload: AlertPayload) => {
   webhookNotify(payload)

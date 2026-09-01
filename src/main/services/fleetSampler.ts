@@ -38,6 +38,17 @@ type Sampler = (key: string, cfg: FleetTarget['cfg']) => Promise<{ ok: boolean; 
 export interface FleetSamplerDeps {
   // metricsSample, injected so the schedule can be tested without SSH.
   sample: Sampler
+  // metricsDisconnect. Called for every target the sampler stops watching.
+  //
+  // metricsSample holds a pooled connection per key and only releases it when
+  // this is called; release() starts the SSH master's idle timer only once its
+  // refcount reaches zero. Without this, background sampling pinned an
+  // authenticated master to every server forever and silently made
+  // `sshMasterIdleMinutes` inert — a setting whose documented purpose is
+  // deciding how often a two-factor code has to be re-entered. Overriding a
+  // security control the user set, invisibly, is worse than the feature is
+  // worth.
+  release: (key: string) => void
   emit: (event: FleetSampleEvent) => void
   // Reports whether credentials can currently be resolved at all. When they
   // cannot, sweeping every target would produce one failure per server per
@@ -84,7 +95,16 @@ export class FleetSampler {
   configure(next: FleetSamplerConfig): void {
     if (this.disposed) return
     this.generation++
+    const previous = this.cfg.targets.map((t) => t.serverId)
     this.cfg = { ...next, intervalMs: clampInterval(next.intervalMs) }
+
+    // Hand back the connection for anything no longer watched — a server
+    // removed from the workspace, or every target when the feature is switched
+    // off. Otherwise the pool keeps an authenticated master alive for a host
+    // nobody is asking about any more.
+    const keep = new Set(next.enabled ? next.targets.map((t) => t.serverId) : [])
+    for (const id of previous) if (!keep.has(id)) this.deps.release(fleetKey(id))
+
     this.stopTimer()
     if (this.shouldRun()) this.schedule(0)
   }
@@ -183,5 +203,7 @@ export class FleetSampler {
     this.disposed = true
     this.generation++
     this.stopTimer()
+    // Stopping the timer is not enough: the pooled connections outlive it.
+    for (const t of this.cfg.targets) this.deps.release(fleetKey(t.serverId))
   }
 }
