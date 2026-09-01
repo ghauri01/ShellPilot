@@ -12,7 +12,7 @@ import {
   Keyboard,
   Bell,
   Wrench,
-  DatabaseBackup, Compass, Lock, LockOpen } from 'lucide-react'
+  DatabaseBackup, Compass, Lock, LockOpen, Blocks } from 'lucide-react'
 import { useApp } from '../../store/app'
 import type { ThemeMode } from '../../store/app'
 import { useNav } from '../../store/nav'
@@ -28,6 +28,7 @@ import { useOnboarding } from '../../store/onboarding'
 import { SshSessions } from './SshSessions'
 import { WebhookAlertSettings } from './WebhookAlertSettings'
 import { alertCoverageText } from './alertCoverage'
+import { MODULES, moduleEnabled } from '../../../../shared/modules'
 import { useFleetStatus } from '../../store/fleetStatus'
 import { toast } from '../../store/toast'
 
@@ -44,6 +45,7 @@ const SECTION_META: Record<SettingsSection, { label: string; icon: React.JSX.Ele
   security: { label: 'Security', icon: <Shield size={16} /> },
   sftp: { label: 'SFTP', icon: <FolderCog size={16} /> },
   monitoring: { label: 'Monitoring', icon: <Activity size={16} /> },
+  modules: { label: 'Modules', icon: <Blocks size={16} /> },
   editor: { label: 'Editor', icon: <Code2 size={16} /> },
   shortcuts: { label: 'Keyboard Shortcuts', icon: <Keyboard size={16} /> },
   backup: { label: 'Backup & Restore', icon: <DatabaseBackup size={16} /> },
@@ -60,6 +62,7 @@ const SECTIONS: SettingsSection[] = [
   'security',
   'sftp',
   'monitoring',
+  'modules',
   'editor',
   'shortcuts',
   'backup',
@@ -443,6 +446,40 @@ export function Settings(): React.JSX.Element {
                 onChange={(v) => setSettings({ openFilesExternally: v })}
               />
             </div>
+          )}
+
+          {section === 'modules' && (
+            <>
+              <h2>Modules</h2>
+              <p className="muted">
+                Features that ship with ShellPilot but stay off until you turn them on. Everything
+                here is first-party code in the same repo, reviewed the same way — this is about not
+                carrying what you do not use, not about running anyone else&rsquo;s code.
+              </p>
+              {/* A module added by an update is off until you switch it on,
+                  even though a new install would have it on. An upgrade is not
+                  consent — see backfillModules. */}
+              <p className="muted">
+                A module added by an update stays off on an existing install until you enable it
+                here.
+              </p>
+              {MODULES.map((m) => (
+                <div className="setting-row" key={m.id}>
+                  <div className="s-info">
+                    <div className="s-title">{m.label}</div>
+                    <div className="s-desc">{m.detail}</div>
+                  </div>
+                  <span
+                    className={clsx('switch', moduleEnabled(settings.modules, m.id) && 'on')}
+                    onClick={() =>
+                      setSettings({
+                        modules: { ...settings.modules, [m.id]: !moduleEnabled(settings.modules, m.id) }
+                      })
+                    }
+                  />
+                </div>
+              ))}
+            </>
           )}
 
           {section === 'monitoring' && (

@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { FLEET_INTERVAL_DEFAULT_MS } from '../../../shared/fleet'
+import { defaultModuleState, type ModuleState } from '../../../shared/modules'
 import { forgetServer } from './serverCleanup'
 import type {
   ActivityView,
@@ -109,6 +110,9 @@ export interface AppSettings {
   // start doing to someone without asking.
   fleetSamplingEnabled: boolean
   fleetSamplingIntervalMs: number
+  // Optional first-party modules. Absent reads as OFF, and an upgrade never
+  // switches a new one on for an existing install — see backfillModules.
+  modules: ModuleState
   // Webhook delivery. These live in settings rather than in the webhook
   // service because settings are persisted and the service is not: an earlier
   // version held `enabled` in a module-level variable, so every restart
@@ -154,6 +158,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   resourceAlertThreshold: 80,
   fleetSamplingEnabled: false,
   fleetSamplingIntervalMs: FLEET_INTERVAL_DEFAULT_MS,
+  modules: defaultModuleState(),
   webhookAlertsEnabled: false,
   webhookNotifyOnResolved: true,
   compactDensity: false,

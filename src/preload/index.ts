@@ -14,6 +14,7 @@ import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '.
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import type { CronEntry } from '../shared/cron'
+import type { DockerProbe } from '../shared/docker'
 import type {
   AlertPayload,
   WebhookConfig,
@@ -244,6 +245,15 @@ const api = {
   // Background sampling of the whole estate, scheduled in main so it continues
   // when the monitor is not on screen. `metrics` above is the foreground path:
   // one server, fast cadence, driven by a mounted card.
+  docker: {
+    list: (cfg: unknown): Promise<DockerProbe> => ipcRenderer.invoke('docker:list', cfg),
+    logs: (
+      cfg: unknown,
+      ref: string,
+      lines: number
+    ): Promise<{ ok: boolean; output: string; error?: string }> =>
+      ipcRenderer.invoke('docker:logs', cfg, ref, lines)
+  },
   cron: {
     collect: (
       targets: { serverId: string; serverName: string; cfg: unknown }[]

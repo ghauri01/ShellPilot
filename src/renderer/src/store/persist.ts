@@ -1,4 +1,5 @@
 import { useApp } from './app'
+import { backfillModules } from '../../../shared/modules'
 import type { Server, MonitorGroup } from '../types'
 
 // Bump when the seed/shape changes in a way that should discard older on-disk
@@ -43,6 +44,13 @@ export async function initPersistence(): Promise<void> {
   const saved = await bridge.data.load<Persisted>()
   if (saved && saved.version === SEED_VERSION && Array.isArray(saved.servers)) {
     useApp.getState().replaceAll(saved as never)
+    // Modules added by an upgrade are OFF for an existing install. Loading
+    // saved data IS the definition of "existing" here: the user has already
+    // decided what their app looks like, and shipping a new feature is not
+    // consent to switch it on. A fresh install gets the defaults instead, via
+    // defaultModuleState() in the initial settings.
+    const st = useApp.getState()
+    st.setSettings({ modules: backfillModules(st.settings.modules, false) })
   } else {
     // No data, or data written by an older (dummy-seeded) version — start clean
     // and overwrite it with the current empty seed.

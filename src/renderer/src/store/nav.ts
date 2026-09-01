@@ -18,6 +18,7 @@ export type SettingsSection =
   | 'security'
   | 'sftp'
   | 'monitoring'
+  | 'modules'
   | 'editor'
   | 'shortcuts'
   | 'backup'

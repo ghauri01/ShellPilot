@@ -21,6 +21,8 @@ import { FleetSearch } from './FleetSearch'
 import { BroadcastPanel } from './BroadcastPanel'
 import { LogTailPanel } from './LogTailPanel'
 import { CronPanel } from './CronPanel'
+import { moduleEnabled } from '../../../../shared/modules'
+import { DockerPanel } from '../docker/DockerPanel'
 
 function pct(used: number, total: number): number {
   return total > 0 ? (used / total) * 100 : 0
@@ -209,6 +211,9 @@ function GroupSection({
 export function FleetMonitor(): React.JSX.Element {
   const servers = useWorkspaceServers()
   const openServerTab = useApp((s) => s.openServer)
+  // A disabled module is one more branch, not a new mechanism — the same way
+  // the activity bar and viewbar already hide what does not apply.
+  const modules = useApp((s) => s.settings.modules)
   const groups = useWorkspaceMonitorGroups()
   const hosts = useFleet((s) => s.hosts)
   const workspaceId = useApp((s) => s.activeWorkspaceId)
@@ -287,15 +292,19 @@ export function FleetMonitor(): React.JSX.Element {
       {/* Above the health panel: when someone types here they are looking
           for one thing, and should not have to scroll past the estate
           summary to see whether it was found. */}
-      <FleetSearch servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+      {moduleEnabled(modules, 'fleetSearch') && (
+        <FleetSearch servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+      )}
 
-      <BroadcastPanel servers={servers} />
+      {moduleEnabled(modules, 'broadcast') && <BroadcastPanel servers={servers} />}
 
       {/* Directly under broadcast: the monitor says a unit failed, broadcast
           lets you act on it, and this is the "why" that belongs between them. */}
-      <LogTailPanel servers={servers} />
+      {moduleEnabled(modules, 'logTail') && <LogTailPanel servers={servers} />}
 
-      <CronPanel servers={servers} />
+      {moduleEnabled(modules, 'cron') && <CronPanel servers={servers} />}
+
+      {moduleEnabled(modules, 'docker') && <DockerPanel servers={servers} />}
 
       <FleetHealth servers={servers} />
 

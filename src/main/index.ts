@@ -53,6 +53,8 @@ import { BroadcastRunner } from './services/broadcast'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry } from '../shared/cron'
+import { DockerReader } from './services/docker'
+import { buildDockerLogsCommand } from '../shared/docker'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
@@ -661,6 +663,35 @@ ipcMain.handle('logtail:stop', (_e, tailId: string) => {
 // rather than failing the collection.
 //
 // Sequential across hosts, like the fleet sweep, for the same bastion reason.
+// ---- Docker ----
+//
+// Shelling out to the host's own `docker` binary rather than speaking the API:
+// it inherits the user's existing auth, including cloud credential helpers we
+// would otherwise reimplement. The cost is unstructured errors, which is why
+// classification lives in shared/docker.ts and is tested — "no containers" for
+// a missing binary, a stopped daemon and a permissions problem alike is a UI
+// lying about two of the three.
+//
+// `docker exec` is arbitrary code execution on the host and membership of the
+// docker group is root-equivalent on most installs. The module is off by
+// default for that reason.
+const dockerReader = new DockerReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs)
+})
+
+ipcMain.handle('docker:list', (_e, cfg: unknown) => dockerReader.list(cfg))
+ipcMain.handle('docker:logs', async (_e, cfg: unknown, ref: string, lines: number) => {
+  // buildDockerLogsCommand throws on an invalid reference rather than escaping
+  // it; let that surface as a rejected invoke rather than running anything.
+  const r = await sshExec(
+    resolveChainSecrets(cfg as SshConnectConfig),
+    buildDockerLogsCommand(ref, lines),
+    20_000
+  )
+  return { ok: r.ok, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error }
+})
+
 ipcMain.handle(
   'cron:collect',
   async (_e, targets: { serverId: string; serverName: string; cfg: unknown }[]) => {
