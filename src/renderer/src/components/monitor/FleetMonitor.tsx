@@ -21,7 +21,8 @@ import { FleetSearch } from './FleetSearch'
 import { BroadcastPanel } from './BroadcastPanel'
 import { LogTailPanel } from './LogTailPanel'
 import { CronPanel } from './CronPanel'
-import { moduleEnabled } from '../../../../shared/modules'
+import { MODULES, moduleEnabled } from '../../../../shared/modules'
+import { openSettings } from '../../store/nav'
 import { DockerPanel } from '../docker/DockerPanel'
 
 function pct(used: number, total: number): number {
@@ -292,6 +293,20 @@ export function FleetMonitor(): React.JSX.Element {
       {/* Above the health panel: when someone types here they are looking
           for one thing, and should not have to scroll past the estate
           summary to see whether it was found. */}
+      {/* Correctly switching every new module off on upgrade has a cost: the
+          user sees nothing new and has no reason to look for it. One line,
+          shown only when they are ALL off, rather than a per-module nag that
+          would teach people to ignore this row. */}
+      {MODULES.every((m) => !moduleEnabled(modules, m.id)) && (
+        <div className="s-desc" style={{ marginBottom: 12 }}>
+          Search, running a command across servers, log tailing, scheduled jobs and Docker are
+          available and switched off.{' '}
+          <button className="btn ghost sm" onClick={() => openSettings('modules')}>
+            Choose modules
+          </button>
+        </div>
+      )}
+
       {moduleEnabled(modules, 'fleetSearch') && (
         <FleetSearch servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
       )}

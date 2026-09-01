@@ -1183,13 +1183,18 @@ app.on('before-quit', (e) => {
   teardownStarted = true
   e.preventDefault()
 
+  // Before sshDisposeAll, not after: both of these hold pooled connections and
+  // should hand their references back while the pool is still there to take
+  // them. The comments were also the wrong way round — each now sits above what
+  // it describes.
+  //
+  // A following journalctl keeps a channel open past the window.
+  logTailer.disposeAll()
+  // Queued hosts must not start after the window is gone.
+  broadcast.disposeAll()
   sshDisposeAll()
   localDisposeAll()
   sftpDisposeAll()
-  // Queued hosts must not start after the window is gone.
-  // Otherwise a following journalctl keeps a channel open past the window.
-  logTailer.disposeAll()
-  broadcast.disposeAll()
   fleetSampler.dispose()
   metricsDisposeAll()
   dbDisposeAll()

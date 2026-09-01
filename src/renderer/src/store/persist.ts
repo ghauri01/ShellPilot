@@ -1,5 +1,5 @@
 import { useApp } from './app'
-import { backfillModules } from '../../../shared/modules'
+import { backfillModules, type ModuleState } from '../../../shared/modules'
 import type { Server, MonitorGroup } from '../types'
 
 // Bump when the seed/shape changes in a way that should discard older on-disk
@@ -43,14 +43,23 @@ export async function initPersistence(): Promise<void> {
 
   const saved = await bridge.data.load<Persisted>()
   if (saved && saved.version === SEED_VERSION && Array.isArray(saved.servers)) {
+    // Read what was actually SAVED, before replaceAll runs. replaceAll merges
+    // `{ ...DEFAULT_SETTINGS, ...data.settings }`, and DEFAULT_SETTINGS carries
+    // defaultModuleState() — so after it, every module key is present and
+    // backfillModules, which only fills ABSENT keys, has nothing left to do.
+    // The saved object is the only thing that still knows this install predates
+    // the module.
+    //
+    // Getting this wrong switched three modules on for every existing install
+    // on upgrade, which is the exact thing backfillModules was written to
+    // prevent. The unit test passed throughout because it exercised the
+    // function with a partial object rather than the real call site.
+    const savedModules = (saved as { settings?: { modules?: ModuleState } }).settings?.modules
     useApp.getState().replaceAll(saved as never)
-    // Modules added by an upgrade are OFF for an existing install. Loading
-    // saved data IS the definition of "existing" here: the user has already
-    // decided what their app looks like, and shipping a new feature is not
-    // consent to switch it on. A fresh install gets the defaults instead, via
-    // defaultModuleState() in the initial settings.
-    const st = useApp.getState()
-    st.setSettings({ modules: backfillModules(st.settings.modules, false) })
+    // An upgrade is not consent: the user has already decided what their app
+    // looks like. A fresh install gets the defaults instead, from
+    // defaultModuleState() in DEFAULT_SETTINGS.
+    useApp.getState().setSettings({ modules: backfillModules(savedModules, false) })
   } else {
     // No data, or data written by an older (dummy-seeded) version — start clean
     // and overwrite it with the current empty seed.
