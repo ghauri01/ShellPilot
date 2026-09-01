@@ -35,6 +35,32 @@ Two things those unlocked, now unblocked rather than done: **fleet-wide search**
 index a complete estate rather than whatever was last looked at, and any future scheduled work has
 a scheduler to live in.
 
+### What the pre-release review changed
+
+Three adversarial reviewers went over both features before release and returned about thirty
+findings. Two patterns account for most of them, and both are worth remembering rather than
+just fixed.
+
+**The main process was built carefully and the renderer used only its happy path.** `fleet.status()`,
+`fleet.sampleNow()`, `webhook.delivery()`, `clearUnitAlerts()`, `useFleet.forget()` and
+`clearServer()` were each wired through IPC with a docstring saying what they prevented, and each
+was called from nowhere. The settings screen showed a webhook as healthy while alerts were being
+dropped; the monitor rendered nothing on first run; a deleted server kept counting in the status
+bar. None of that was visible from the main-process side, where everything looked complete.
+
+**Four tests asserted only negatives or literals, and each passed against the bug it was written to
+catch.** One checked a packaging glob by asserting the pattern string rather than running it — the
+pattern matched nothing and shipped two Windows binaries that should not have been there. Every fix
+in this round was verified by reverting it and watching its test fail, and one new test had to be
+tightened when that check showed it passing against the bug (`toContain` on an array is exact
+equality, so a forged line with a trailing suffix slipped past it).
+
+Two defects were already live in 0.8.0. `get_server_metrics` passed systemd unit descriptions,
+process names and the kernel string to the agent verbatim through a `readOnlyHint` tool that needs
+no approval — an injection channel from any host under an attacker's control. And the capability
+grid still said "Server metrics" after that tool began returning a full service and port inventory,
+so consent had been given for something narrower than what was taken.
+
 **Not verified against a real estate.** The sampler has unit tests and the webhook has been proved
 against a live local endpoint, but nobody has yet turned background checking on with fifteen hosts
 behind bastions and watched what happens to connection count, bastion load or battery. That is the
