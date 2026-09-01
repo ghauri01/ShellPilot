@@ -216,7 +216,20 @@ function makeHarness(o: HarnessOptions = {}): Harness {
   })
 }
 
-const waitFor = async (fn: () => boolean, ms = 5_000): Promise<void> => {
+// The budget is deliberately just under vitest's own testTimeout (15s) rather
+// than a tighter number of its own. These tests spawn a real stub binary and
+// wait on its management channel, so the only honest deadline is "longer than
+// this can legitimately take"; a second, tighter clock invented here fails runs
+// that prove nothing about the driver.
+//
+// This is a mitigation, not a diagnosis. `stops cleanly when the one-time code
+// prompt is dismissed` failed on CI at 5086ms against the old 5s budget while
+// taking 115ms locally — a 43x gap that plain CPU contention does not explain.
+// If it recurs at 12s the budget was never the cause: look instead at whether
+// the stub exits on its own after `--fail otp` before the driver gets to write
+// SIGTERM over the channel, which would mean the awaited line never arrives at
+// any budget.
+const waitFor = async (fn: () => boolean, ms = 12_000): Promise<void> => {
   const deadline = Date.now() + ms
   while (!fn()) {
     if (Date.now() > deadline) throw new Error('condition never held')
