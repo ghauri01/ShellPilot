@@ -28,6 +28,7 @@ import { UpdatePanel } from './UpdatePanel'
 import { useOnboarding } from '../../store/onboarding'
 import { SshSessions } from './SshSessions'
 import { WebhookAlertSettings } from './WebhookAlertSettings'
+import { alertCoverageText } from './alertCoverage'
 import { toast } from '../../store/toast'
 
 // Keyed by the nav store's union rather than by a list that describes itself,
@@ -97,14 +98,23 @@ function SettingSwitch({
 // all present as a switch in the "on" position and a screen that looks exactly
 // like a healthy one. fleet.status() is the only thing that can tell them
 // apart, and until this it was wired through IPC and read by nobody.
-function FleetSamplerLine(): React.JSX.Element | null {
+// The sampler's real state, shared by every row that describes it.
+//
+// Shared deliberately. The threshold row used to read `fleetSamplingEnabled`
+// — the switch position — and tell the user "background checks are on, so
+// alerts fire wherever you are in the app" while the sampler sat paused on a
+// locked vault. Two rows a centimetre apart, one claiming alerts were covered
+// and the other saying nothing was being checked. A settings screen may not
+// describe a capability from the setting that requests it; only from whether
+// it is actually running.
+//
+// Polled rather than pushed: main emits an event per sample, not per status
+// change, and these numbers move on the order of a sweep. Ten seconds is
+// slow enough to be free and fast enough that a vault unlocked in another
+// window is reflected before the user gives up on it. The interval is
+// cleared with the pane, so nothing polls while Settings is closed.
+function useFleetStatus(): FleetSamplerStatus | null {
   const [status, setStatus] = useState<FleetSamplerStatus | null>(null)
-
-  // Polled rather than pushed: main emits an event per sample, not per status
-  // change, and these numbers move on the order of a sweep. Ten seconds is
-  // slow enough to be free and fast enough that a vault unlocked in another
-  // window is reflected before the user gives up on it. The interval is
-  // cleared with the pane, so nothing polls while Settings is closed.
   useEffect(() => {
     let live = true
     const read = (): void => {
@@ -119,6 +129,11 @@ function FleetSamplerLine(): React.JSX.Element | null {
       clearInterval(t)
     }
   }, [])
+  return status
+}
+
+function FleetSamplerLine(): React.JSX.Element | null {
+  const status = useFleetStatus()
 
   // 'disabled' is the one idle reason the switch already explains.
   if (!status || status.idleReason === 'disabled') return null
@@ -293,6 +308,9 @@ export function Settings(): React.JSX.Element {
   const section = useNav((s) => s.settingsSection)
   const setSection = useNav((s) => s.setSettingsSection)
   const startTour = useOnboarding((s) => s.start)
+  // Same source the sampler line below reads, so the two rows cannot disagree
+  // about whether background checking is actually happening.
+  const fleetStatus = useFleetStatus()
   const theme = useApp((s) => s.theme)
   const setTheme = useApp((s) => s.setTheme)
   const settings = useApp((s) => s.settings)
@@ -480,9 +498,7 @@ export function Settings(): React.JSX.Element {
                   <div className="s-title">Alert threshold</div>
                   <div className="s-desc">
                     The same figure applies to CPU and to memory.{' '}
-                    {settings.fleetSamplingEnabled
-                      ? 'Background checks are on, so alerts fire wherever you are in the app.'
-                      : 'Without background checks below, a host is only sampled while its monitor is on screen — so an alert can only fire while you are already looking at it.'}
+                    {alertCoverageText(fleetStatus?.running, settings.fleetSamplingEnabled)}
                   </div>
                 </div>
                 <div className="segment">
