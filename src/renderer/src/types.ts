@@ -158,12 +158,39 @@ export interface DatabaseConn {
 export type PanelView = 'terminal' | 'monitor' | 'files'
 export type ActivityView = 'connections' | 'databases' | 'tunnels' | 'monitor' | 'vault' | 'ai' | 'settings'
 
-export interface Tab {
+interface TabBase {
   id: UUID
   // Tabs belong to the workspace they were opened in, so switching workspaces
   // does not show another workspace's sessions.
   workspaceId: UUID
-  serverId: UUID | null
   title: string
   view: PanelView
 }
+
+// A tab backed by a saved server. `serverId` is non-null here on purpose: it
+// was typed `UUID | null` while every consumer assumed non-null, which is how
+// "Session unavailable" became reachable for reasons other than a deleted
+// server.
+export interface SshTab extends TabBase {
+  kind: 'ssh'
+  serverId: UUID
+}
+
+// A tab backed by a shell on this machine. It has no server, and deliberately
+// does not synthesize one: `servers` is persisted (store/persist.ts:16) and
+// mirrored into the MCP data cache by `data:save`, so a fake row there would
+// make the local terminal an MCP-addressable target without anyone
+// registering a tool for it.
+export interface LocalTab extends TabBase {
+  kind: 'local'
+  // A LocalShell.id from src/shared/local.ts. Opaque — a readable prefix plus
+  // a digest of the shell's path ('darwin-zsh-b663616e'). Resolve it against
+  // the discovered list; never parse it.
+  shellId: string
+  // Where the shell was started, when the user asked for somewhere specific.
+  cwd?: string
+  // Only 'terminal' is meaningful; Monitor and Files are SSH-only views.
+  view: 'terminal'
+}
+
+export type Tab = SshTab | LocalTab

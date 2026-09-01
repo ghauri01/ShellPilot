@@ -29,6 +29,10 @@ jobs:
             script: dist:win
           - os: macos-latest
             script: dist:mac
+            # One job builds both dmgs from one node_modules, so the packed
+            # bundles must carry both architectures' node-pty prebuilds — see
+            # "Install both macOS node-pty prebuilds" below.
+            packArgs: --arch x64 --arch arm64
           - os: ubuntu-latest
             script: dist:linux
 
@@ -113,10 +117,61 @@ jobs:
 
       - run: npm run typecheck
 
+      # electron-builder packs ONE node_modules into BOTH macOS bundles, and
+      # @lydell/node-pty's prebuilds do not live in the package npm resolves —
+      # they live in per-platform siblings (@lydell/node-pty-darwin-x64 and
+      # -darwin-arm64) that declare "os"/"cpu". So `npm ci` on this arm64 runner
+      # installs exactly one of them, electron-builder copies that one tree into
+      # the x64 dmg as well, and every Intel Mac gets MODULE_NOT_FOUND the first
+      # time it opens a local tab. Nothing catches it: a --dir pack covers the
+      # host arch only, and the signature check below reads whichever .app it
+      # walks first.
+      #
+      # `--force` is what gets past npm's EBADPLATFORM for the sibling that does
+      # not match this runner. It is scoped to these two package names; --os /
+      # --cpu are NOT used, because they apply to the whole reify and would swap
+      # esbuild and rollup — which are also cpu-gated — to the wrong
+      # architecture for the machine that has to run them.
+      #
+      # The alternative was splitting this into a per-arch matrix with a
+      # target-arch `npm ci` before each electron-builder run. Rejected: each
+      # run writes its own latest-mac.yml listing only its own dmg, so the two
+      # jobs would race and the loser's architecture would be handed the other's
+      # download by every auto-update check. That is a worse bug than 1 MB of
+      # unused prebuild in each dmg, and it is one nobody would notice for a
+      # release or two.
+      - name: Install both macOS node-pty prebuilds
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d node_modules/@lydell/node-pty ]; then
+            echo "@lydell/node-pty is not installed for this build; nothing to do."
+            exit 0
+          fi
+          VER=$(node -p "require('./node_modules/@lydell/node-pty/package.json').version")
+          echo "pinning both darwin prebuilds to $VER"
+          npm i --no-save --force "@lydell/node-pty-darwin-x64@$VER" "@lydell/node-pty-darwin-arm64@$VER"
+          for arch in x64 arm64; do
+            dir="node_modules/@lydell/node-pty-darwin-$arch/prebuilds/darwin-$arch"
+            if [ ! -f "$dir/pty.node" ]; then
+              echo "::error::$dir/pty.node is missing; the x64 dmg would ship an arm64 binding"
+              exit 1
+            fi
+          done
+
       - name: Build installers
         run: npm run ${{ matrix.script }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same layout assertions the pack job runs on every pull request, now
+      # against the artifacts that are actually about to be published — and on
+      # macOS against both architectures, which is the one thing a pull request
+      # cannot check from a single-arch runner.
+      - name: Verify the packed node-pty layout
+        shell: bash
+        run: node scripts/verify-local-pty-pack.mjs release ${{ matrix.packArgs }}
 
       # The engines are Mach-O executables under Resources/bin and arm64 macOS
       # refuses to run an unsigned one at all. electron-builder signs nested
@@ -127,15 +182,53 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APP=$(find release -maxdepth 3 -name '*.app' -type d | head -n1)
-          if [ -z "$APP" ]; then echo "::error::no .app found under release/"; exit 1; fi
-          echo "verifying $APP"
-          codesign --verify --strict --deep --verbose=2 "$APP"
-          for bin in "$APP/Contents/Resources/bin"/*/*; do
-            [ -f "$bin" ] || continue
-            echo "checking $bin"
-            codesign --verify --strict "$bin"
-          done
+          # EVERY .app, not `head -n1`. This job produces two bundles — x64 and
+          # arm64 — and they are not built from the same inputs: each takes its
+          # engines from its own resources/bin/darwin-<arch>. Checking one and
+          # reporting on both is how an unsigned or missing binary ships.
+          APPS=$(find release -maxdepth 3 -name '*.app' -type d)
+          if [ -z "$APPS" ]; then echo "::error::no .app found under release/"; exit 1; fi
+          # Only assert on node-pty in a build that has it, so this step stays
+          # correct if the dependency is ever rolled back.
+          if [ -d node_modules/@lydell/node-pty ]; then PTY=1; else PTY=0; fi
+          while IFS= read -r APP; do
+            [ -n "$APP" ] || continue
+            echo "verifying $APP"
+            codesign --verify --strict --deep --verbose=2 "$APP"
+            for bin in "$APP/Contents/Resources/bin"/*/*; do
+              [ -f "$bin" ] || continue
+              echo "checking $bin"
+              codesign --verify --strict "$bin"
+            done
+
+            # node-pty's binding and its spawn-helper live outside the asar
+            # (asarUnpack), so a config change that stops unpacking them is
+            # invisible until the first local tab dies on a user's machine.
+            #
+            # This counts. The obvious form — `[ -d .../@lydell ] || exit 1` —
+            # passes as soon as the 13.5 KB meta package is copied, which
+            # happens whether or not the sibling that holds the actual binary
+            # was unpacked; `find` would then match nothing, the loop body would
+            # never run, and the release would go green with a binding-less app.
+            #
+            # What is deliberately NOT asserted here is `codesign --verify` on
+            # each of these files. They arrive from npm already adhoc,
+            # linker-signed, so that check passes no matter what we do to them
+            # and proves nothing. The --deep verification of the whole bundle
+            # above is the assertion with teeth: it fails if anything under
+            # Contents/ is not covered by the seal.
+            if [ "$PTY" -eq 0 ]; then continue; fi
+            UNPACKED="$APP/Contents/Resources/app.asar.unpacked/node_modules/@lydell"
+            if [ ! -d "$UNPACKED" ]; then
+              echo "::error::@lydell/node-pty is not unpacked in $APP"; exit 1
+            fi
+            COUNT=$(find "$UNPACKED" \( -name 'pty.node' -o -name 'spawn-helper' \) | wc -l | tr -d ' ')
+            echo "$APP: $COUNT unpacked node-pty binaries"
+            if [ "$COUNT" -eq 0 ]; then
+              echo "::error::no pty.node or spawn-helper under $UNPACKED — the prebuild sibling was not unpacked"
+              exit 1
+            fi
+          done <<< "$APPS"
 
       # Defender is already installed on the Windows runner, so scanning the
       # installers we just produced costs nothing and catches a problem before

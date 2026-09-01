@@ -49,6 +49,14 @@ export const COMMANDS: Command[] = [
 
   { id: 'new-server', name: 'New Server', group: 'Tabs', scope: 'app', keys: 'Ctrl+N' },
   { id: 'new-terminal', name: 'New Terminal', group: 'Tabs', scope: 'app', keys: 'Ctrl+T' },
+  {
+    id: 'new-local-terminal',
+    name: 'New Local Terminal',
+    group: 'Tabs',
+    scope: 'app',
+    keys: 'Ctrl+Shift+T',
+    hint: 'Opens a shell on this machine, not on a server.'
+  },
   { id: 'duplicate-tab', name: 'Duplicate Tab', group: 'Tabs', scope: 'app', keys: 'Ctrl+Shift+D' },
   { id: 'close-tab', name: 'Close Tab', group: 'Tabs', scope: 'app', keys: 'Ctrl+W' },
   { id: 'next-tab', name: 'Next Tab', group: 'Tabs', scope: 'global', keys: 'Ctrl+Tab' },

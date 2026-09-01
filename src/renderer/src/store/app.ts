@@ -6,6 +6,8 @@ import type {
   PanelView,
   Server,
   Tab,
+  LocalTab,
+  UUID,
   Workspace,
   Folder,
   FolderKind,
@@ -15,6 +17,7 @@ import type {
   Tunnel,
   DatabaseConn
 } from '../types'
+import type { LocalShell } from '../../../shared/local'
 import { bridgeHas } from '../lib/bridge'
 
 // Clean default: a single empty workspace. No sample servers/VPNs/tunnels.
@@ -32,9 +35,45 @@ const uid = (p: string): string => `${p}-${Date.now().toString(36)}-${seq++}`
 
 export type ThemeMode = 'dark' | 'light' | 'system'
 
-// Terminal split direction for a tab. 'v' puts the second pane to the right,
-// 'h' puts it underneath; null is a single pane.
-export type TabSplit = 'h' | 'v' | null
+// The axis a tab's panes are laid out along. 'v' puts the next pane to the
+// right, 'h' puts it underneath — the same two letters `toggleSplit` has always
+// taken, so the shortcuts and the viewbar buttons keep their contract.
+export type SplitDirection = 'h' | 'v'
+
+// What a pane is connected to. A pane, not a tab, is what owns a session, so a
+// tab can hold a remote shell beside a local one — which is the whole reason to
+// split rather than open a second tab.
+export type PaneTarget =
+  | { kind: 'ssh'; serverId: string }
+  | { kind: 'local'; shellId: string; cwd?: string }
+
+export interface Pane {
+  // Minted by the store when the pane is created and never derived during
+  // render. `tabSession`/`tabCwd` are keyed by it, and a lazily synthesized id
+  // would change every render — writing each session under a key that no longer
+  // exists on the next one, which is how SFTP cwd-follow would break for
+  // *unsplit* tabs that work today. It is also the React key of the pane's
+  // subtree, so an unstable one tears down xterm and its scrollback.
+  id: string
+  target: PaneTarget
+}
+
+export interface TabPanes {
+  // A flat, ordered list laid out along one axis. Not a tree: tmux's nested
+  // splits are a much larger surface and nothing in the brief needs them.
+  direction: SplitDirection
+  panes: Pane[]
+  // Always one of `panes`. The active pane is what SFTP follows and what a new
+  // split clones, so it is maintained rather than derived.
+  activePaneId: string
+}
+
+// Past four the terminals are too narrow to read and every one of them holds a
+// live process. Overflow is a no-op in the store rather than a toast or a
+// throw: the button that would exceed it renders disabled, so the cap is stated
+// in the UI before it is enforced here, and a hotkey that hits it does nothing
+// rather than opening a dialog over the terminal you are typing into.
+export const MAX_PANES = 4
 
 export interface AppSettings {
   // Set whenever stored data changes and cleared on a successful export, so
@@ -64,6 +103,18 @@ export interface AppSettings {
   externalEditorCommand: string
   // Double-clicking a file opens it externally rather than in the inline editor.
   openFilesExternally: boolean
+  // Whether shells on this machine can be opened at all: the `+` menu, the
+  // palette group and the New Local Terminal shortcut all read it.
+  //
+  // Defaults to `true`, and must stay that way. Settings are persisted
+  // wholesale (store/persist.ts save()) and merged saved-over-default here
+  // (`replaceAll`), so a `false` that ever shipped as the default would be
+  // written to every install's data file and permanently outrank a later
+  // change — the trap `shortcuts` documents a few lines above. Main keeps its
+  // own copy of this flag (main/services/localGate.ts) and treats *absence* as
+  // enabled for the same reason; the two must agree, so only an explicit user
+  // toggle may ever persist `false`.
+  localTerminalEnabled: boolean
   // Keyboard shortcut overrides, command id -> canonical combo ("Ctrl+Shift+P").
   // Only commands the user actually rebound are stored, so later releases can
   // change a default and have it reach existing installs. An empty string is a
@@ -84,9 +135,21 @@ export const DEFAULT_SETTINGS: AppSettings = {
   compactDensity: false,
   externalEditorCommand: 'code',
   openFilesExternally: false,
+  localTerminalEnabled: true,
   shortcuts: {}
 }
 export type ModalKind = 'add-server' | 'workspaces' | 'route-editor' | 'add-database' | 'import-ssh' | null
+
+// What openTab takes: a Tab minus the fields the store mints, with the
+// workspace optional.
+//
+// Written distributively (`T extends Tab ? … : never`) because `Omit` is NOT
+// distributive: `Omit<Tab, 'id' | 'workspaceId'>` over a union collapses to the
+// keys the members share, which drops both `serverId` and `shellId` and leaves
+// a shape no tab can be built from.
+type NewTab<T extends Tab = Tab> = T extends Tab
+  ? Omit<T, 'id' | 'workspaceId'> & { workspaceId?: UUID }
+  : never
 
 interface AppState {
   // data
@@ -112,13 +175,28 @@ interface AppState {
   // tabs
   tabs: Tab[]
   activeTabId: string | null
-  // per-tab terminal session id + working directory (for SFTP <-> terminal sync)
+  // Terminal session id + working directory (for SFTP <-> terminal sync),
+  // keyed by **pane** id, not tab id. A tab can hold up to MAX_PANES live
+  // terminals and each has its own session and its own cwd; keying by tab meant
+  // the second pane's OSC-7 cwd and session id went nowhere.
+  //
+  // Every entry is owned by a pane in `panes`, and `dropTabs`/`closePane` are
+  // the only things that remove one — see the note on `dropTabs`.
   tabSession: Record<string, string>
   tabCwd: Record<string, string>
-  // Split layout per tab. Lives here rather than in the panel so the split
-  // shortcut can reach it; not persisted, since a split is a view state that
-  // belongs to a live session.
-  tabSplit: Record<string, TabSplit>
+  // Pane layout per tab, keyed by tab id. Lives here rather than in the panel so
+  // the split shortcut can reach it; not persisted, since a live session is not
+  // something a backup can restore. Every tab the store creates gets an entry
+  // with exactly one pane, so `panes[tab.id]` is present for the tab's lifetime.
+  panes: Record<string, TabPanes>
+
+  // Shells discovered on this machine, as main reported them. Never persisted:
+  // it describes the machine the app is running on right now, so restoring it
+  // from a backup taken elsewhere would offer shells that are not installed.
+  // Main owns the cache; this is the renderer's copy of the last answer, shared
+  // by the shell menu, the palette and openLocalById so they cannot disagree
+  // about which shells exist.
+  localShells: LocalShell[]
 
   // overlays
   modal: ModalKind
@@ -160,7 +238,21 @@ interface AppState {
   toggleSidebar: () => void
   openServer: (serverId: string, view?: PanelView) => void
   newSession: (serverId: string) => void
-  openTab: (tab: Omit<Tab, 'id' | 'workspaceId'> & { workspaceId?: string }) => void
+  // A shell on this machine, in a new tab. Never focuses an existing one: a
+  // second local shell is a second shell, never the same one.
+  openLocal: (shell: LocalShell, cwd?: string) => void
+  // The same, resolved against `localShells`. Synchronous on purpose — the
+  // hotkey RUNNERS entries are `(s) => boolean` and cannot await a lookup.
+  // Unknown ids are a no-op rather than a fallback to the default shell:
+  // silently spawning a different shell than the one asked for is how a
+  // shellId stops meaning anything.
+  openLocalById: (shellId: string, cwd?: string) => void
+  // Refreshes `localShells` from main. Safe to call before the preload bridge
+  // grows its `local` namespace — it no-ops rather than throwing. `refresh`
+  // makes main re-enumerate rather than answer from its cache, which is what
+  // the menu's Rescan entry is for.
+  refreshLocalShells: (refresh?: boolean) => Promise<void>
+  openTab: (tab: NewTab) => void
   closeTab: (id: string) => void
   duplicateTab: (id: string) => void
   closeOtherTabs: (id: string) => void
@@ -170,9 +262,24 @@ interface AppState {
   setActiveTab: (id: string) => void
   cycleTab: (dir: 1 | -1) => void
   setTabView: (id: string, view: PanelView) => void
-  setTabSession: (tabId: string, sessionId: string | null) => void
-  setTabCwd: (tabId: string, path: string) => void
-  toggleSplit: (tabId: string, dir: Exclude<TabSplit, null>) => void
+  // Both take a **pane** id. Named for the tab because that is what they were
+  // keyed by before panes existed and every caller passes whatever it was given
+  // as `tabId`; the terminal hook receives a pane id there now.
+  setTabSession: (paneId: string, sessionId: string | null) => void
+  setTabCwd: (paneId: string, path: string) => void
+  // Adds a pane to a tab, defaulting to the same target the active pane has.
+  // A no-op at MAX_PANES, and a no-op for a tab that does not exist.
+  splitPane: (tabId: string, dir: SplitDirection, target?: PaneTarget) => void
+  // Removes one pane and its session/cwd entries. A no-op on the last pane of a
+  // tab: a tab with no panes is not representable, and making a pane-level
+  // action close the tab means the small × inside a pane can take the whole tab
+  // with it. Closing the last pane is closing the tab, which the tab's own × and
+  // Ctrl+W already do.
+  closePane: (tabId: string, paneId: string) => void
+  setActivePane: (tabId: string, paneId: string) => void
+  // The pre-pane split contract, kept so the two viewbar buttons and Ctrl+\ need
+  // no new concepts. See the implementation for the full truth table.
+  toggleSplit: (tabId: string, dir: SplitDirection) => void
   setModal: (m: ModalKind) => void
   openRouteEditor: (serverId: string) => void
   openServerEditor: (serverId: string) => void
@@ -241,21 +348,48 @@ interface AppState {
   ) => void
 }
 
-type TabSlice = Pick<AppState, 'tabs' | 'activeTabId' | 'tabSession' | 'tabCwd' | 'tabSplit'>
+type TabSlice = Pick<AppState, 'tabs' | 'activeTabId' | 'tabSession' | 'tabCwd' | 'panes'>
+type PaneSlice = Pick<AppState, 'tabSession' | 'tabCwd' | 'panes'>
+
+// Everything a set of departing tabs owned: their layout, and the session and
+// cwd of every pane inside it.
+//
+// It is a separate function because `dropTabs` is not the only way a tab is
+// removed — `deleteWorkspace` and `deleteServer` both filter `s.tabs` directly,
+// and both left their per-tab state behind long before panes existed. Nothing
+// ever prunes these maps otherwise, so a missed call is a leak that lasts as
+// long as the app runs, and one this cheap to route through one place.
+function prunePaneState(s: PaneSlice, doomed: Set<string>): PaneSlice {
+  if (doomed.size === 0) return { tabSession: s.tabSession, tabCwd: s.tabCwd, panes: s.panes }
+  const tabSession = { ...s.tabSession }
+  const tabCwd = { ...s.tabCwd }
+  const panes = { ...s.panes }
+  for (const id of doomed) {
+    // Reached through `panes[id]`, never by the tab id: the entries are keyed by
+    // **pane** id, so `delete tabSession[id]` — the form this had while a tab
+    // held exactly one session — matches nothing and strands one entry per pane
+    // per closed tab.
+    for (const p of panes[id]?.panes ?? []) {
+      delete tabSession[p.id]
+      delete tabCwd[p.id]
+    }
+    delete panes[id]
+  }
+  return { tabSession, tabCwd, panes }
+}
 
 // Removes a set of tabs and picks the next active one: the nearest surviving
 // neighbour in the same workspace, searching right first — the behaviour every
-// tabbed editor has. Per-tab session/cwd/split entries are dropped with them.
+// tabbed editor has.
+//
+// The session/cwd entries deleted here are keyed by **pane** id, so they have to
+// be reached through `panes[tabId]` rather than by the tab id. Deleting
+// `tabSession[tabId]` (which is what this did while both were tab-keyed) now
+// matches nothing and strands one entry per pane per closed tab, forever, in a
+// map that is never otherwise pruned.
 function dropTabs(s: TabSlice, doomed: Set<string>): TabSlice {
   const tabs = s.tabs.filter((t) => !doomed.has(t.id))
-  const tabSession = { ...s.tabSession }
-  const tabCwd = { ...s.tabCwd }
-  const tabSplit = { ...s.tabSplit }
-  for (const id of doomed) {
-    delete tabSession[id]
-    delete tabCwd[id]
-    delete tabSplit[id]
-  }
+  const { tabSession, tabCwd, panes } = prunePaneState(s, doomed)
   let activeTabId = s.activeTabId
   if (activeTabId && doomed.has(activeTabId)) {
     const idx = s.tabs.findIndex((t) => t.id === activeTabId)
@@ -266,7 +400,33 @@ function dropTabs(s: TabSlice, doomed: Set<string>): TabSlice {
       [...s.tabs.slice(0, idx)].reverse().find(survives)?.id ??
       null
   }
-  return { tabs, activeTabId, tabSession, tabCwd, tabSplit }
+  return { tabs, activeTabId, tabSession, tabCwd, panes }
+}
+
+// The pane every tab starts with: one, on the tab's own target.
+//
+// Minted here — inside the action that creates the tab — rather than
+// synthesized by the grid during render. A render-time id is a different id
+// every render, and `tabSession`/`tabCwd` are keyed by it.
+function initialPanes(tab: Tab): TabPanes {
+  const target: PaneTarget =
+    tab.kind === 'local'
+      ? { kind: 'local', shellId: tab.shellId, cwd: tab.cwd }
+      : { kind: 'ssh', serverId: tab.serverId }
+  const pane: Pane = { id: uid('pane'), target }
+  return { direction: 'v', panes: [pane], activePaneId: pane.id }
+}
+
+// The direction the tab is *currently* split in, or null when it holds a single
+// pane. This is what the viewbar's two toggle buttons highlight on, and it
+// replaces reading `tabSplit[id]`: with one pane there is no split to show, even
+// though `TabPanes.direction` always holds a letter.
+export function splitDirectionOf(
+  panes: Record<string, TabPanes>,
+  tabId: string | null | undefined
+): SplitDirection | null {
+  const tp = tabId ? panes[tabId] : undefined
+  return tp && tp.panes.length > 1 ? tp.direction : null
 }
 
 // Tabs of the workspace that sit before/after the given one, as shown in the
@@ -281,10 +441,50 @@ function sideTabs(all: Tab[], id: string, side: 'left' | 'right'): Set<string> {
   return new Set(slice.map((t) => t.id))
 }
 
-// Sessions for the same server are numbered "name", "name (2)", "name (3)".
-function sessionTitle(tabs: Tab[], serverId: string | null, name: string): string {
-  const count = tabs.filter((t) => t.serverId === serverId).length
+// Repeat sessions are numbered "name", "name (2)", "name (3)". Counting is
+// per-target, and the target is a server for an SSH tab and a shell for a local
+// one — a single `t.serverId === serverId` comparison across both would compare
+// `undefined === null`, never match, and title every local tab identically.
+function sessionTitle(tabs: Tab[], match: (t: Tab) => boolean, name: string): string {
+  const count = tabs.filter(match).length
   return count ? `${name} (${count + 1})` : name
+}
+
+// Tabs on the same target as `src`, for the numbering above. Kept beside
+// sessionTitle so the two halves of "what counts as the same session" cannot
+// drift apart.
+function sameTarget(src: Tab): (t: Tab) => boolean {
+  return src.kind === 'local'
+    ? (t) => t.kind === 'local' && t.shellId === src.shellId
+    : (t) => t.kind === 'ssh' && t.serverId === src.serverId
+}
+
+// The copy duplicateTab inserts. Built per kind rather than by spreading `src`
+// and patching: the discriminant and its kind-specific fields have to travel
+// together, and a spread that loses one produces a tab the union cannot
+// describe.
+function duplicateOf(tabs: Tab[], servers: Server[], src: Tab, id: UUID): Tab {
+  if (src.kind === 'local') {
+    return {
+      id,
+      kind: 'local',
+      workspaceId: src.workspaceId,
+      shellId: src.shellId,
+      cwd: src.cwd,
+      title: sessionTitle(tabs, sameTarget(src), src.title.replace(/ \(\d+\)$/, '')),
+      view: 'terminal'
+    }
+  }
+  const server = servers.find((sv) => sv.id === src.serverId)
+  const base = server?.name ?? src.title.replace(/ \(\d+\)$/, '')
+  return {
+    id,
+    kind: 'ssh',
+    workspaceId: src.workspaceId,
+    serverId: src.serverId,
+    title: sessionTitle(tabs, sameTarget(src), base),
+    view: src.view
+  }
 }
 
 // The id every list filters against. An id that matches no workspace — a save
@@ -327,6 +527,12 @@ function vpnVaultEntryIds(spec: VpnSpec): string[] {
 // the profile is already gone from the slice, and a failed release leaves an
 // unreferenced entry rather than a broken UI.
 function releaseVpnSecrets(profiles: VpnProfile[]): void {
+  // `typeof window` rather than `window?.` — a bare reference to an undeclared
+  // global is a ReferenceError, not undefined, so the optional chain below does
+  // not help outside a browser. The store is exercised by the test suite under
+  // `environment: 'node'`, where every deleteWorkspace/removeVpnProfile call
+  // used to throw here before reaching the state it was asserting on.
+  if (typeof window === 'undefined') return
   if (!bridgeHas(window.shellpilot?.vpn as Record<string, unknown> | undefined, 'deleteSecrets')) return
   for (const p of profiles) {
     for (const entryId of vpnVaultEntryIds(p.spec)) {
@@ -371,7 +577,8 @@ export const useApp = create<AppState>((set, get) => ({
   activeTabId: null,
   tabSession: {},
   tabCwd: {},
-  tabSplit: {},
+  panes: {},
+  localShells: [],
 
   modal: null,
   routeEditorServerId: null,
@@ -492,22 +699,29 @@ export const useApp = create<AppState>((set, get) => ({
   openServer: (serverId, view = 'terminal') => {
     const server = get().servers.find((s) => s.id === serverId)
     if (!server) return
-    const existing = get().tabs.find((t) => t.serverId === serverId)
+    const existing = get().tabs.find((t) => t.kind === 'ssh' && t.serverId === serverId)
     if (existing) {
       set((s) => ({
         activeTabId: existing.id,
-        tabs: s.tabs.map((t) => (t.id === existing.id ? { ...t, view } : t))
+        // Re-narrowed inside the map: `view` is a PanelView and only an SSH tab
+        // can hold Monitor or Files.
+        tabs: s.tabs.map((t) => (t.id === existing.id && t.kind === 'ssh' ? { ...t, view } : t))
       }))
       return
     }
     const tab: Tab = {
       id: uid('tab'),
+      kind: 'ssh',
       workspaceId: server.workspaceId,
       serverId,
       title: server.name,
       view
     }
-    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }))
+    set((s) => ({
+      tabs: [...s.tabs, tab],
+      activeTabId: tab.id,
+      panes: { ...s.panes, [tab.id]: initialPanes(tab) }
+    }))
   },
 
   // Always open an additional session tab for a server (multiple terminals).
@@ -516,42 +730,128 @@ export const useApp = create<AppState>((set, get) => ({
     if (!server) return
     const tab: Tab = {
       id: uid('tab'),
+      kind: 'ssh',
       workspaceId: server.workspaceId,
       serverId,
-      title: sessionTitle(get().tabs, serverId, server.name),
+      title: sessionTitle(get().tabs, (t) => t.kind === 'ssh' && t.serverId === serverId, server.name),
       view: 'terminal'
     }
-    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }))
+    set((s) => ({
+      tabs: [...s.tabs, tab],
+      activeTabId: tab.id,
+      panes: { ...s.panes, [tab.id]: initialPanes(tab) }
+    }))
   },
 
-  // Opens a second session on the same server, next to the original, keeping
-  // its view and remote directory. The SSH session itself is not shared: the
-  // new tab dials its own shell over the pooled connection.
+  // A shell on this machine. Nothing is written to `servers` here, and that is
+  // the entire point of the union: `servers` is persisted and mirrored into the
+  // MCP data cache, so a synthesized row would hand an agent a target that no
+  // tool ever declared.
+  openLocal: (shell, cwd) => {
+    const tab: LocalTab = {
+      id: uid('tab'),
+      kind: 'local',
+      workspaceId: get().activeId(),
+      shellId: shell.id,
+      cwd,
+      title: sessionTitle(
+        get().tabs,
+        (t) => t.kind === 'local' && t.shellId === shell.id,
+        shell.label
+      ),
+      view: 'terminal'
+    }
+    set((s) => ({
+      tabs: [...s.tabs, tab],
+      activeTabId: tab.id,
+      panes: { ...s.panes, [tab.id]: initialPanes(tab) }
+    }))
+  },
+
+  openLocalById: (shellId, cwd) => {
+    // Shell ids are opaque ('darwin-zsh-b663616e' — a readable prefix plus a
+    // digest of the path), so this is an exact lookup and never a parse.
+    const shell = get().localShells.find((sh) => sh.id === shellId)
+    if (!shell) return
+    get().openLocal(shell, cwd)
+  },
+
+  refreshLocalShells: async (refresh) => {
+    // Guarded twice on purpose. `typeof window` covers the store being driven
+    // outside a browser (the test suite runs under `environment: 'node'`), and
+    // `bridgeHas` covers the dev-server case the whole module exists for: the
+    // renderer hot-reloads while the process keeps the preload bundle it booted
+    // with, so a method added in this session is undefined for the rest of it.
+    // A missing shell list is an empty menu, never a thrown effect.
+    if (typeof window === 'undefined') return
+    const ns = window.shellpilot?.local
+    if (!ns || !bridgeHas(ns as Record<string, unknown> | undefined, 'shells')) return
+    const shells = await ns.shells(refresh)
+    set({ localShells: Array.isArray(shells) ? shells : [] })
+  },
+
+  // Opens a second session on the same target, next to the original, keeping
+  // its view and working directory. The session itself is not shared: an SSH
+  // tab dials its own shell over the pooled connection, and a local tab spawns
+  // its own pty.
   duplicateTab: (id) =>
     set((s) => {
       const src = s.tabs.find((t) => t.id === id)
       if (!src) return {}
-      const server = s.servers.find((sv) => sv.id === src.serverId)
-      const base = server?.name ?? src.title.replace(/ \(\d+\)$/, '')
-      const tab: Tab = {
-        id: uid('tab'),
-        workspaceId: src.workspaceId,
-        serverId: src.serverId,
-        title: sessionTitle(s.tabs, src.serverId, base),
-        view: src.view
-      }
+      const tab = duplicateOf(s.tabs, s.servers, src, uid('tab'))
       const idx = s.tabs.findIndex((t) => t.id === id)
-      const cwd = s.tabCwd[id]
+
+      // The layout is copied pane for pane — duplicating a split tab that came
+      // back as a single pane would be a surprise — but every pane gets a fresh
+      // id, because a pane id keys a live session and the copy is a new one.
+      //
+      // The cwd copy travels with it. It used to read `tabCwd[id]`, which was
+      // the tab's own key; once sessions moved to pane ids that lookup silently
+      // matched nothing and the duplicate stopped inheriting the remote
+      // directory, contradicting this action's own promise.
+      const srcPanes = s.panes[id]
+      const tabCwd = { ...s.tabCwd }
+      let panes = s.panes
+      if (srcPanes) {
+        const copies = srcPanes.panes.map((p) => {
+          const copy: Pane = { id: uid('pane'), target: p.target }
+          const cwd = s.tabCwd[p.id]
+          if (cwd) tabCwd[copy.id] = cwd
+          return { from: p.id, copy }
+        })
+        panes = {
+          ...s.panes,
+          [tab.id]: {
+            direction: srcPanes.direction,
+            panes: copies.map((c) => c.copy),
+            activePaneId:
+              copies.find((c) => c.from === srcPanes.activePaneId)?.copy.id ?? copies[0].copy.id
+          }
+        }
+      } else {
+        panes = { ...s.panes, [tab.id]: initialPanes(tab) }
+      }
+
       return {
         tabs: [...s.tabs.slice(0, idx + 1), tab, ...s.tabs.slice(idx + 1)],
         activeTabId: tab.id,
-        tabCwd: cwd ? { ...s.tabCwd, [tab.id]: cwd } : s.tabCwd
+        tabCwd,
+        panes
       }
     }),
 
   openTab: (tab) => {
-    const t: Tab = { ...tab, workspaceId: tab.workspaceId ?? get().activeWorkspaceId, id: uid('tab') }
-    set((s) => ({ tabs: [...s.tabs, t], activeTabId: t.id }))
+    const workspaceId = tab.workspaceId ?? get().activeWorkspaceId
+    const id = uid('tab')
+    // Narrowed before the spread, not after: spreading the union directly
+    // produces an object TypeScript cannot match to either member, because the
+    // discriminant is widened away along with everything keyed off it.
+    const t: Tab = tab.kind === 'ssh' ? { ...tab, workspaceId, id } : { ...tab, workspaceId, id }
+    set((s) => ({
+      tabs: [...s.tabs, t],
+      activeTabId: t.id,
+      panes: { ...s.panes, [t.id]: initialPanes(t) }
+    }))
   },
 
   closeTab: (id) => set((s) => dropTabs(s, new Set([id]))),
@@ -585,8 +885,14 @@ export const useApp = create<AppState>((set, get) => ({
       return { activeTabId: mine[next].id }
     }),
 
+  // Monitor and Files are SSH-only views, so this is a no-op on a local tab
+  // rather than a state the UI has no way to render. It used to be reachable
+  // from the open-files shortcut, which would have blanked the pane with no
+  // way back.
   setTabView: (id, view) =>
-    set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? { ...t, view } : t)) })),
+    set((s) => ({
+      tabs: s.tabs.map((t) => (t.id === id && t.kind === 'ssh' ? { ...t, view } : t))
+    })),
 
   setTabSession: (tabId, sessionId) =>
     set((s) => {
@@ -596,14 +902,119 @@ export const useApp = create<AppState>((set, get) => ({
       return { tabSession: next }
     }),
 
-  setTabCwd: (tabId, path) => set((s) => ({ tabCwd: { ...s.tabCwd, [tabId]: path } })),
+  setTabCwd: (paneId, path) => set((s) => ({ tabCwd: { ...s.tabCwd, [paneId]: path } })),
 
-  // Pressing the same direction again collapses back to a single pane, which
-  // is what the split buttons in the tab bar have always done.
-  toggleSplit: (tabId, dir) =>
-    set((s) => ({
-      tabSplit: { ...s.tabSplit, [tabId]: s.tabSplit[tabId] === dir ? null : dir }
-    })),
+  splitPane: (tabId, dir, target) =>
+    set((s) => {
+      const tp = s.panes[tabId]
+      if (!tp || tp.panes.length >= MAX_PANES) return {}
+      const source = tp.panes.find((p) => p.id === tp.activePaneId) ?? tp.panes[0]
+      const pane: Pane = { id: uid('pane'), target: target ?? source.target }
+      // Inserted after the pane it was split from, not appended: splitting the
+      // left pane of three should put the new one next to it.
+      const at = tp.panes.findIndex((p) => p.id === source.id) + 1
+      return {
+        panes: {
+          ...s.panes,
+          [tabId]: {
+            direction: dir,
+            panes: [...tp.panes.slice(0, at), pane, ...tp.panes.slice(at)],
+            activePaneId: pane.id
+          }
+        }
+      }
+    }),
+
+  closePane: (tabId, paneId) =>
+    set((s) => {
+      const tp = s.panes[tabId]
+      if (!tp || tp.panes.length < 2) return {}
+      const idx = tp.panes.findIndex((p) => p.id === paneId)
+      if (idx === -1) return {}
+      const remaining = tp.panes.filter((p) => p.id !== paneId)
+      const tabSession = { ...s.tabSession }
+      const tabCwd = { ...s.tabCwd }
+      delete tabSession[paneId]
+      delete tabCwd[paneId]
+      return {
+        tabSession,
+        tabCwd,
+        panes: {
+          ...s.panes,
+          [tabId]: {
+            ...tp,
+            panes: remaining,
+            // Focus moves to the neighbour on the right, then the left — the
+            // same rule dropTabs uses for tabs.
+            activePaneId:
+              tp.activePaneId === paneId
+                ? (remaining[idx] ?? remaining[idx - 1]).id
+                : tp.activePaneId
+          }
+        }
+      }
+    }),
+
+  setActivePane: (tabId, paneId) =>
+    set((s) => {
+      const tp = s.panes[tabId]
+      if (!tp || tp.activePaneId === paneId || !tp.panes.some((p) => p.id === paneId)) return {}
+      return { panes: { ...s.panes, [tabId]: { ...tp, activePaneId: paneId } } }
+    }),
+
+  // The shim the two viewbar buttons and Ctrl+\ / Ctrl+Shift+\ still call.
+  //
+  //  | panes | current dir | toggleSplit(dir) | result                        |
+  //  |-------|-------------|------------------|-------------------------------|
+  //  | 0/none| —           | either           | no-op (no such tab)           |
+  //  | 1     | any         | 'v'              | split → 2 panes, direction 'v'|
+  //  | 1     | any         | 'h'              | split → 2 panes, direction 'h'|
+  //  | 2     | same as dir | dir              | collapse to the ACTIVE pane   |
+  //  | 2     | other       | dir              | re-orient, still 2 panes      |
+  //  | 3–4   | same as dir | dir              | no-op                         |
+  //  | 3–4   | other       | dir              | re-orient, panes unchanged    |
+  //  | 4     | other       | dir              | re-orient (adds no pane, so   |
+  //  |       |             |                  | the cap does not apply)       |
+  //
+  // Two decisions worth stating. **Collapse keeps the active pane, not the
+  // first**: pressing the button that un-splits should leave you in the terminal
+  // you were typing in. And **collapse only applies at exactly two panes** —
+  // the count the pre-pane model could ever be in, which is what this shim
+  // exists to reproduce. With three or four live shells the same keystroke
+  // would kill two or three of them with no confirmation and no undo, so it
+  // does nothing instead and the panes are closed one at a time.
+  // Written as a plain body rather than a `set` updater because the split case
+  // delegates to `splitPane`, and calling one action's `set` from inside
+  // another's updater applies both but discards the first's result from the
+  // reference the outer merge is built on.
+  toggleSplit: (tabId, dir) => {
+    const tp = get().panes[tabId]
+    if (!tp) return
+    if (tp.panes.length === 1) {
+      get().splitPane(tabId, dir)
+      return
+    }
+    if (tp.direction !== dir) {
+      set((s) => ({ panes: { ...s.panes, [tabId]: { ...tp, direction: dir } } }))
+      return
+    }
+    if (tp.panes.length > 2) return
+    const kept = tp.panes.find((p) => p.id === tp.activePaneId) ?? tp.panes[0]
+    set((s) => {
+      const tabSession = { ...s.tabSession }
+      const tabCwd = { ...s.tabCwd }
+      for (const p of tp.panes) {
+        if (p.id === kept.id) continue
+        delete tabSession[p.id]
+        delete tabCwd[p.id]
+      }
+      return {
+        tabSession,
+        tabCwd,
+        panes: { ...s.panes, [tabId]: { ...tp, panes: [kept], activePaneId: kept.id } }
+      }
+    })
+  },
 
   setModal: (m) => set({ modal: m, editServerId: null }),
   openServerEditor: (serverId) => set({ editServerId: serverId, modal: 'add-server' }),
@@ -668,7 +1079,16 @@ export const useApp = create<AppState>((set, get) => ({
       // The profiles go with the workspace, but their vault entries do not go by
       // themselves — release them for the same reason removeVpnProfile does.
       releaseVpnSecrets(s.vpns.filter((v) => v.workspaceId === id))
+      // Tabs go with their workspace whatever backs them — a local tab has no
+      // server to cascade from, so filtering on doomedServers alone would leave
+      // it stranded in a workspace that no longer exists, unreachable from the
+      // tab bar and still holding a live pty.
+      const keptTabs = s.tabs.filter(
+        (t) => t.workspaceId !== id && (t.kind !== 'ssh' || !doomedServers.has(t.serverId))
+      )
+      const kept = new Set(keptTabs.map((t) => t.id))
       return {
+        ...prunePaneState(s, new Set(s.tabs.filter((t) => !kept.has(t.id)).map((t) => t.id))),
         workspaces: remaining,
         folders: s.folders.filter((f) => f.workspaceId !== id),
         servers: detachVpn(s.servers.filter((v) => v.workspaceId !== id), doomedVpns),
@@ -676,10 +1096,11 @@ export const useApp = create<AppState>((set, get) => ({
         databases: detachVpn(s.databases.filter((d) => d.workspaceId !== id), doomedVpns),
         vpns: s.vpns.filter((v) => v.workspaceId !== id),
         tunnels: s.tunnels.filter((t) => t.workspaceId !== id),
-        tabs: s.tabs.filter((t) => !t.serverId || !doomedServers.has(t.serverId)),
-        activeTabId: s.tabs.find((t) => t.id === s.activeTabId && t.serverId && doomedServers.has(t.serverId))
-          ? null
-          : s.activeTabId,
+        tabs: keptTabs,
+        // Asked of the surviving list rather than of the doomed one: the old
+        // form only cleared the active tab when a *server* took it, so an
+        // active tab removed for any other reason left activeTabId dangling.
+        activeTabId: keptTabs.some((t) => t.id === s.activeTabId) ? s.activeTabId : null,
         activeWorkspaceId: s.activeWorkspaceId === id ? remaining[0].id : s.activeWorkspaceId,
         unlockedWorkspaces: s.unlockedWorkspaces.filter((w) => w !== id)
       }
@@ -728,12 +1149,19 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) => ({ servers: s.servers.map((sv) => (sv.id === id ? { ...sv, ...patch } : sv)) })),
 
   deleteServer: (id) =>
-    set((s) => ({
-      servers: s.servers.filter((sv) => sv.id !== id),
-      // Close any tabs pointing at the server that no longer exists.
-      tabs: s.tabs.filter((t) => t.serverId !== id),
-      activeTabId: s.tabs.find((t) => t.id === s.activeTabId)?.serverId === id ? null : s.activeTabId
-    })),
+    set((s) => {
+      // Close any tabs pointing at the server that no longer exists. Local tabs
+      // are not among them: they have no server, so deleting one cannot orphan
+      // them and they keep running.
+      const keptTabs = s.tabs.filter((t) => t.kind !== 'ssh' || t.serverId !== id)
+      const kept = new Set(keptTabs.map((t) => t.id))
+      return {
+        ...prunePaneState(s, new Set(s.tabs.filter((t) => !kept.has(t.id)).map((t) => t.id))),
+        servers: s.servers.filter((sv) => sv.id !== id),
+        tabs: keptTabs,
+        activeTabId: keptTabs.some((t) => t.id === s.activeTabId) ? s.activeTabId : null
+      }
+    }),
 
   setServerStatus: (serverId, status) =>
     set((s) => ({

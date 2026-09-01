@@ -40,6 +40,7 @@ Knowing the design may help you assess a finding.
 | Servers, folders, workspaces | `shellpilot-data.json` | Plaintext. Contains no credentials. |
 | AI/MCP agent sessions | `shellpilot-mcp-sessions.json` | Only a SHA-256 hash and a 4-character preview of the bearer token is stored — never the raw token. |
 | AI/MCP audit log | `shellpilot-ai-audit.jsonl` | Plaintext, append-only. Free-text fields are passed through the same secret-redaction as command output before being written, so it should never contain a credential. |
+| Local terminal sessions | `shellpilot-local-sessions.jsonl` | Plaintext, append-only, `0600`. One entry when a local shell starts and one when it exits — shell label, resolved path, pid, working directory, exit status. **Never keystrokes and never output.** Kept separate from the AI audit log, which answers a different question. |
 | AI/MCP access-group policy | `shellpilot-ai-policy.json` | Plaintext. Contains no credentials — capability rules and file-path patterns only. |
 
 ### SSH host keys
@@ -146,6 +147,66 @@ Two consequences worth being concrete about:
 
 It remains a real barrier against someone who picks up an unlocked laptop, and it
 is why the feature exists. It is not a barrier against code running as you.
+
+### Local terminal
+
+ShellPilot can open a shell on the machine it is running on — your own zsh or
+bash, PowerShell, Git Bash, a WSL distribution — in a tab next to the SSH ones.
+Two things about that are worth stating, and they pull in opposite directions.
+
+**It is not a new privilege.** The shell runs as you, in your environment, with
+whatever your account can already reach. Terminal.app, Windows Terminal and your
+desktop's own launcher have always been one click away, and nothing here hands a
+person at your keyboard anything they did not already have. Read no more into it
+than that.
+
+**What changes is the distance.** Two statements above rest on an assumption this
+feature does not break but does bring within reach: *Process hardening* says the
+hardened runtime is what stops a process running as the same user reading an
+unlocked vault key out of memory, and *What biometric unlock actually protects*
+says it "is not a barrier against code running as you."
+After this feature, code running as you is a UI affordance inside the same
+window, while the vault is open. Concretely, a shell started from that tab can
+read — with no prompt, no elevation and no ShellPilot involvement:
+
+- `shellpilot-vault-bio.json`, if you chose to keep biometric unlock across
+  restarts. It holds the vault's **derived key**, and `safeStorage` unwraps it
+  for anything running as you. (This is the same point the section above makes;
+  it is repeated here because the terminal is where it becomes convenient.)
+- `shellpilot-secrets.json` — SSH passwords, key paths and key passphrases. On
+  Windows (DPAPI) and Linux (libsecret) `safeStorage` is scoped to the user, not
+  to the application, so any process running as you decrypts it.
+- `shellpilot-ai-policy.json` — the access-group rules that constrain an AI
+  agent.
+- `shellpilot-mcp-sessions.json` — which agent sessions exist and when they
+  expire.
+- `shellpilot-ai-audit.jsonl` — the record of what an agent did. Append-only to
+  ShellPilot; an ordinary writable file to a shell.
+
+**That list is exactly why the local terminal is a human-UI-only surface.** It is
+not exposed over the MCP bridge or the `shellpilot` CLI, it is not behind an AI
+capability, and it is not behind an ASK prompt — because no value of either would
+make it safe. Every constraint ShellPilot advertises to an agent is a file on the
+same disk as the shell, so an agent that can run one local command can read the
+policy store that limits it and the audit log that records it. The answer is "not
+reachable", not "gated".
+
+That is enforced by `tests/localTerminalNotExposed.test.ts` rather than by
+reviewer memory. It asserts the tool list the bridge actually serves against a
+reviewed whitelist, walks the transitive import closure of
+`src/main/services/mcpServer.ts` and everything under `src/cli/` to prove neither
+can so much as import the pty module, and checks that no AI capability names a
+local shell. If one of those fails, the failure is the finding.
+
+The `local:*` IPC handlers are gated in the main process
+(`src/main/services/localGate.ts`), not only in the renderer: the
+`localTerminalEnabled` setting is mirrored on the main side and the connect
+arguments — session id, working directory, terminal dimensions — are validated
+there, because a renderer-side flag constrains only an honest renderer. Starting
+ShellPilot with `ELECTRON_DISABLE_LOCAL_TERMINAL=1` stops the pseudo-terminal
+binding being loaded at all. Neither is a security boundary against someone at
+your keyboard — they have a terminal either way — they are there so a machine can
+run ShellPilot without the feature.
 
 ## Known limitations
 

@@ -18,6 +18,22 @@ import {
 } from './services/ssh'
 import type { KeyboardRequest } from './services/ssh'
 import {
+  localConnect,
+  localWrite,
+  localAck,
+  localResize,
+  localClose,
+  localDisposeAll,
+  localDisposeForWebContents
+} from './services/localPty'
+import { listShells } from './services/shellDiscovery'
+import {
+  isLocalTerminalEnabled,
+  isValidSessionId,
+  parseLocalConnect,
+  syncLocalTerminalEnabled
+} from './services/localGate'
+import {
   sftpConnect,
   sftpList,
   sftpRead,
@@ -249,8 +265,14 @@ function createWindow(): void {
     // as a live target in the meantime.
     vpnSetCadence('idle')
   })
+  const wcId = mainWindow.webContents.id
   mainWindow.webContents.on('destroyed', () => {
     if (mainWindow) vpnDetachRenderer(mainWindow.webContents)
+    // Reap this window's shells. Without it they keep running until quit,
+    // holding a WebContents that send() refuses to write to — live processes
+    // with nowhere left to report. The id is captured above because the
+    // WebContents is already gone by the time this fires.
+    localDisposeForWebContents(wcId)
   })
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
@@ -417,6 +439,61 @@ ipcMain.handle('ssh:pool-idle', (_e, minutes: number) => setPoolIdle(minutes))
 ipcMain.on('ssh:write', (_e, id: string, data: string) => sshWrite(id, data))
 ipcMain.on('ssh:resize', (_e, id: string, cols: number, rows: number) => sshResize(id, cols, rows))
 ipcMain.on('ssh:close', (_e, id: string) => sshClose(id))
+
+// ---- Local terminal ----
+//
+// A shell on this machine, with this user's privileges. Deliberately NOT
+// reachable from the MCP bridge or the CLI: there is no capability for it, no
+// ASK path and no tool, because an agent that can run local commands can read
+// the vault file, the policy store and the audit log that are supposed to
+// constrain it. tests/localTerminalNotExposed.test.ts is what keeps that true.
+//
+// Every handler checks isLocalTerminalEnabled() in main rather than trusting the
+// renderer's own toggle, and every session is bound to the WebContents that
+// opened it, so one window cannot drive another's shell by guessing an id.
+ipcMain.handle('local:shells', (_e, refresh?: unknown) => {
+  if (!isLocalTerminalEnabled()) return []
+  return listShells(refresh === true)
+})
+
+ipcMain.handle('local:connect', (e, raw: unknown) => {
+  if (!isLocalTerminalEnabled()) return
+  const parsed = parseLocalConnect(raw)
+  if (!parsed.ok) {
+    // Report through the same status channel a spawn failure would use, so the
+    // renderer has one error path rather than two.
+    const id = (raw as { sessionId?: unknown })?.sessionId
+    if (isValidSessionId(id) && !e.sender.isDestroyed()) {
+      e.sender.send(`local:status:${id}`, {
+        sessionId: id,
+        phase: 'error',
+        message: parsed.reason
+      })
+    }
+    return
+  }
+  return localConnect(e.sender, parsed.cfg)
+})
+
+ipcMain.on('local:write', (e, id: unknown, data: unknown) => {
+  if (!isLocalTerminalEnabled()) return
+  if (!isValidSessionId(id) || typeof data !== 'string') return
+  localWrite(e.sender.id, id, data)
+})
+ipcMain.on('local:ack', (e, id: unknown, units: unknown) => {
+  if (!isValidSessionId(id) || typeof units !== 'number') return
+  localAck(e.sender.id, id, units)
+})
+ipcMain.on('local:resize', (e, id: unknown, cols: unknown, rows: unknown) => {
+  if (!isValidSessionId(id) || typeof cols !== 'number' || typeof rows !== 'number') return
+  localResize(e.sender.id, id, cols, rows)
+})
+// Close is never gated on the flag: turning the feature off must still let the
+// renderer tear down sessions it already has.
+ipcMain.on('local:close', (e, id: unknown) => {
+  if (!isValidSessionId(id)) return
+  localClose(id, e.sender.id)
+})
 
 // ---- SFTP ----
 ipcMain.handle('sftp:connect', (_e, key: string, cfg: SshConnectConfig & { serverId?: string }) =>
@@ -703,6 +780,11 @@ ipcMain.handle('secrets:delete', (_e, id: string) => deleteSecret(id))
 ipcMain.handle('data:load', () => loadData())
 ipcMain.handle('data:save', (_e, data: unknown) => {
   saveData(data)
+  // The local terminal's kill switch is a renderer setting, but a renderer-side
+  // flag stops only the honest UI — a compromised renderer would call
+  // local.connect() directly and never read it. So main keeps its own copy,
+  // refreshed from the same blob, and every local:* handler consults that.
+  syncLocalTerminalEnabled(data)
   // The MCP bridge resolves friendly server/workspace names from this same
   // file (see mcpDataCache.ts) rather than round-tripping through the
   // renderer on every tool call, so its cache is refreshed right after the
@@ -842,6 +924,7 @@ app.on('before-quit', (e) => {
   e.preventDefault()
 
   sshDisposeAll()
+  localDisposeAll()
   sftpDisposeAll()
   metricsDisposeAll()
   dbDisposeAll()
@@ -929,6 +1012,10 @@ app.whenReady().then(() => {
   // Primed once at launch so the MCP bridge can resolve server/workspace
   // names even before the renderer's first data:save call.
   refreshMcpDataCache()
+  // Same reasoning for the local terminal's kill switch: the renderer may open a
+  // shell before its first data:save, so main reads the persisted setting itself
+  // rather than starting from a default it would later have to correct.
+  syncLocalTerminalEnabled(loadData())
   // Before the MCP server: the bridge asks the manager what is running, and a
   // bridge that answered "nothing" because the manager had not booted would be
   // lying about the state of the user's network. This also reaps any engine a

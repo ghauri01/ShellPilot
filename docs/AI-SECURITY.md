@@ -21,6 +21,16 @@ The bridge's HTTP listener binds to `127.0.0.1` only (`startMcpServer`, `mcpServ
 no configuration option that exposes it to a network interface — the boundary is not "trust
 whoever can reach this port," it's "nothing beyond this machine can reach this port at all."
 
+**The local terminal is on the human side of that boundary, permanently.** ShellPilot can open a
+shell on the machine it is itself running on — your own zsh, PowerShell, WSL, with your own
+privileges — and no part of that surface is reachable from the left of the arrow. It is not a tool,
+not a capability and not an ASK prompt, because an agent that can run local commands can read the
+vault file, the policy store and the audit log that are supposed to constrain it: every constraint
+described in this document is a file on the same disk as that shell. See
+["No local terminal" is a narrower claim than "no local process"](#no-local-terminal-is-a-narrower-claim-than-no-local-process)
+below for what that does and does not rule out, and the *Local terminal* section of
+[SECURITY.md](../SECURITY.md) for what such a shell reaches.
+
 ## What an AI agent never receives
 
 Regardless of which access group a session holds:
@@ -41,10 +51,48 @@ Regardless of which access group a session holds:
 - **A server's real host, IP, port or username.** Every tool that names a server takes and
   returns a friendly name (e.g. "Production API"); `get_server_details` returns OS, access group
   and effective permissions, never connection details.
+- **A shell on your own machine.** ShellPilot's local terminal — the tab that runs your zsh, bash,
+  PowerShell or WSL with your own privileges — has no MCP tool, no capability and no ASK prompt,
+  and that is deliberate rather than a gap waiting to be filled. There is no setting of either that
+  would make it safe: an agent that can run local commands can read the vault file, the policy store
+  and the audit log that are supposed to constrain it. So the answer is not "gated", it is "not
+  reachable", and `tests/localTerminalNotExposed.test.ts` fails the build if that stops being true —
+  it walks the transitive import closure of `mcpServer.ts` and `src/cli/`, so the module cannot even
+  be *imported* by anything an agent talks to, let alone called.
 - **A VPN's endpoint, keys or listener addresses.** `list_vpns` reports which profiles exist,
   which engine carries each one and whether it is up. The cached record it reads from
   (`CachedVpn`, `mcpDataCache.ts`) does not hold an endpoint, a key ref or a bind address at all,
   so this is a shape that cannot leak one rather than a field somebody remembered not to print.
+
+## "No local terminal" is a narrower claim than "no local process"
+
+Worth drawing out, because the broad version of the claim is false and stating the narrow one is
+the only way to keep the guard honest.
+
+ShellPilot does run programs on this machine while serving an agent. Ten modules inside the very
+import closure that `tests/localTerminalNotExposed.test.ts` walks spawn child processes:
+`vpn/supervisor.ts`, `vpn/binaries.ts`, `vpn/drivers/wireguard.ts`, `vpn/netstate.ts`, the three
+`vpn/elevation/*.ts`, `vpn/driver.ts`, and two modules under `src/cli/`. Bringing up a WireGuard
+tunnel means executing a binary locally; there is no version of that feature that does not.
+
+Those are fine, and the reasons they are fine are exactly the properties a shell lacks:
+
+- **The argv is ShellPilot's, not the agent's.** An agent supplies a profile name. It never supplies
+  a command, an argument or a path. `vpn/binaries.ts` runs either an engine ShellPilot ships,
+  checked against a manifest of its exact bytes before the first exec, or a system-installed one
+  from a fixed allowlist of directories — never a `PATH` search, because on Windows the search *is*
+  the vulnerability.
+- **They are behind `vpnControl` and an approval.** No built-in group grants it outright, and
+  starting a VPN is ASK on every group including one raised to ALLOW — see the section below.
+- **The two `src/cli` spawns are not agent-driven at all.** They are what `shellpilot claude`,
+  `shellpilot codex` and `shellpilot run -- …` do when a human types them in their own terminal:
+  launch that agent's CLI as a child of the CLI process, before any MCP session exists. No tool call
+  reaches them.
+
+An interactive shell has none of that. Its entire purpose is that the argv is whatever gets typed.
+So the claim this document makes — and the one the test enforces — is that **no agent-facing surface
+reaches an interactive shell on this machine**, not that no local process ever runs at an agent's
+request.
 
 ## Threat model
 
@@ -59,8 +107,25 @@ Regardless of which access group a session holds:
 | Secrets leaking through command output (`env`, a misconfigured app, a `cat` of a file with a key in it) | Known credential values blanked verbatim; pattern rules catch `PASSWORD=`/`TOKEN=`-style assignments, PEM key blocks, bearer tokens, AWS access key IDs, connection-string passwords | `secretRedaction.ts` |
 | A leaked or stolen token granting standing access | Only a SHA-256 hash + 4-character preview is ever stored; every session has its own expiry and is individually revocable, or all revocable at once | `mcpAuth.ts` |
 | Lateral movement — a session reaching a workspace it wasn't granted | A server outside the session's granted workspace(s) is never in the candidate list a tool call resolves against — invisible, not merely denied. Workspaces are chosen explicitly per session, never "all, including future ones" | `mcpDataCache.ts`, `serverResolver.ts` |
-| No record of what an agent actually did | Every decision — allowed, asked, approved, denied, failed — is written to an append-only, redacted audit log | `auditLog.ts` |
+| No record of what an agent actually did | Every decision the bridge makes — allowed, asked, approved, denied, failed — is written to an append-only, redacted audit log. It records the *bridge*, not the whole application — see the note under this table | `auditLog.ts` |
 | A compromised local process trying to complete CLI pairing on its own | The pairing code is shown only inside the ShellPilot window, never returned over HTTP to whatever process asked for it | `cliPairing.ts` |
+
+**What the audit log does and does not cover.** `recordAudit` is called from `mcpServer.ts` and
+nowhere else, so `shellpilot-ai-audit.jsonl` is a record of **the MCP bridge**, not of everything
+that happens in ShellPilot. Nothing an agent does is missing from it, so the row above holds for the
+threat it names — but do not read the broader claim out of that row.
+
+The local terminal is logged **separately**, to `shellpilot-local-sessions.jsonl`
+(`localSessionLog.ts`, append-only, `0600`, same discipline). One entry when a shell starts and one
+when it exits: shell label, resolved path, pid, working directory, exit status. **Never keystrokes,
+never output** — a shell session's contents are yours, and a log of them would be a more attractive
+target than the thing it was meant to protect. There is a test asserting no field capable of holding
+terminal input or output has been added.
+
+Two files rather than one is deliberate. The AI audit log answers *"what did an agent do"*; its
+entries are agent-shaped (`agentName`, `capability`, `approval`) and it is displayed in the AI
+section. Local terminal rows there would mean an AI-labelled log full of things no AI did, which is
+how a log stops being trusted.
 
 ## Granting `vpnControl` is a bigger decision than it looks
 

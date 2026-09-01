@@ -79,6 +79,7 @@
     "check:advisories": "node scripts/check-engine-advisories.mjs"
   },
   "dependencies": {
+    "@lydell/node-pty": "1.2.0-beta.15",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.15.0",
@@ -108,8 +109,8 @@
     "electron": "^43.4.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
-    "js-yaml": "^4.1.0",
     "esbuild": "^0.25.12",
+    "js-yaml": "^4.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.2",

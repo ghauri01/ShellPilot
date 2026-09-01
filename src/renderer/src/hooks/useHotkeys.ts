@@ -24,12 +24,28 @@ const RUNNERS: Record<string, (s: Store, term?: TerminalActions) => boolean> = {
   'toggle-sidebar-global': (s) => (s.toggleSidebar(), true),
 
   'new-server': (s) => (s.setModal('add-server'), true),
-  // Mirrors the tab bar's + button: another session on the current server, or
-  // the add-server dialog when there is nothing to open a session against.
+  // Mirrors the tab bar's + button: another session on whatever the current tab
+  // is already talking to — a server or a local shell — or the add-server
+  // dialog when there is nothing to open a session against.
   'new-terminal': (s) => {
-    const serverId = s.activeTab()?.serverId
-    if (serverId) s.newSession(serverId)
+    const tab = s.activeTab()
+    if (tab?.kind === 'ssh') s.newSession(tab.serverId)
+    else if (tab?.kind === 'local') s.openLocalById(tab.shellId, tab.cwd)
     else s.setModal('add-server')
+    return true
+  },
+  // A shell on this machine, whatever the current tab is. The default shell is
+  // picked with `isDefault` and never by inspecting an id: shell ids are opaque
+  // and parsing one is how the wrong shell gets spawned under the right name.
+  //
+  // False, not a fallback, when the feature is off or nothing has been
+  // discovered yet — the key then reaches whatever would normally receive it,
+  // which is the contract every runner here has.
+  'new-local-terminal': (s) => {
+    if (s.settings.localTerminalEnabled === false) return false
+    const shell = s.localShells.find((sh) => sh.isDefault) ?? s.localShells[0]
+    if (!shell) return false
+    s.openLocalById(shell.id)
     return true
   },
   'duplicate-tab': (s) => {
@@ -52,9 +68,12 @@ const RUNNERS: Record<string, (s: Store, term?: TerminalActions) => boolean> = {
     return true
   },
 
+  // SFTP needs a server to talk to. On a local tab this used to switch the view
+  // to 'files' anyway, which left an empty pane and no shortcut back to the
+  // terminal — so the key falls through instead of appearing to do something.
   'open-files': (s) => {
     const tab = s.activeTab()
-    return tab ? (s.setTabView(tab.id, 'files'), true) : false
+    return tab?.kind === 'ssh' ? (s.setTabView(tab.id, 'files'), true) : false
   },
   'open-monitor': (s) => (s.setActivity('monitor'), true),
   'zoom-in': (s) => (s.zoomTerminal(1), true),
@@ -70,10 +89,11 @@ const RUNNERS: Record<string, (s: Store, term?: TerminalActions) => boolean> = {
   'term-find-alt': (_s, term) => (term?.find ? (term.find(), true) : false)
 }
 
-// Splitting only means anything for a terminal tab backed by a live server.
+// Splitting applies to any terminal tab, local or remote. It used to require a
+// serverId, which silently made Ctrl+\ a no-op in a local tab.
 function splitActive(s: Store, dir: 'h' | 'v'): boolean {
   const tab = s.activeTab()
-  if (!tab?.serverId) return false
+  if (!tab) return false
   s.toggleSplit(tab.id, dir)
   return true
 }

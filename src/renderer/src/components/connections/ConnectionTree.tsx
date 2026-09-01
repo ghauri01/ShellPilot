@@ -138,7 +138,7 @@ export function ConnectionTree(): React.JSX.Element {
 
   const ServerRow = ({ s, nested }: { s: Server; nested?: boolean }): React.JSX.Element => (
     <div
-      className={clsx('tree-row', activeTab?.serverId === s.id && 'active')}
+      className={clsx('tree-row', activeTab?.kind === 'ssh' && activeTab.serverId === s.id && 'active')}
       style={nested ? undefined : { paddingLeft: 8 }}
       draggable
       onDragStart={() => setDragId(s.id)}

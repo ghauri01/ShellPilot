@@ -20,6 +20,30 @@ files:
   # cross-compiled targets in every artifact would add tens of megabytes of
   # binaries the machine can never execute.
   - '!resources/bin/**'
+  # node-pty's Windows prebuild ships a redistributable ConPTY — conpty.dll and
+  # OpenConsole.exe — that this app never loads: localPty.ts sets
+  # useConptyDll: false, so the ConPTY in the system's own conhost.exe is used
+  # instead. Shipping unsigned Microsoft binaries we do not use through an
+  # installer is precisely what the Defender and ClamAV hard-fail gates in the
+  # release workflow are there to catch.
+  #
+  # Two things about the shape of this pattern:
+  #
+  #   * It ends at the `conpty/` DIRECTORY. conpty.node and
+  #     conpty_console_list.node — the actual bindings — sit one level up as
+  #     files, so they survive. A `conpty*` pattern would take them out and
+  #     break Windows entirely.
+  #   * It is scoped to @lydell/node-pty-*. `prebuilds/` is a prebuildify
+  #     convention, not a node-pty invention, so an unscoped
+  #     '!**/prebuilds/**/conpty/**' would silently strip files out of any
+  #     future dependency that happens to lay itself out the same way.
+  #
+  # There is deliberately no '!**/prebuilds/**/*.pdb' beside this:
+  # electron-builder already drops *.pdb from node_modules unless includePdb is
+  # set (appFileCopier.js:128-132), so that pattern is a no-op that reads like a
+  # protection. tests/localPackaging.test.ts asserts the flag stays unset
+  # instead.
+  - '!**/node_modules/@lydell/node-pty-*/prebuilds/**/conpty/**'
   - package.json
 
 # Tunnel engines: shellpilot-netd (our WireGuard sidecar, MIT), frpc
@@ -52,6 +76,30 @@ extraResources:
 asarUnpack:
   - '**/node_modules/cpu-features/**'
   - '**/node_modules/ssh2/**'
+  # The whole package directory, deliberately not a '*.node' glob.
+  #
+  # node-pty is not only a loadable binding: on macOS and Linux it ships
+  # `spawn-helper`, a Mach-O/ELF *executable* it fork/execs for every session.
+  # lib/unixTerminal.js:31-34 builds that helper's path from __dirname and
+  # rewrites `app.asar` to `app.asar.unpacked` in it — which only helps if the
+  # file is actually there. A glob matching only .node files leaves the helper
+  # inside the archive, where it has no path on disk to hand to posix_spawn and
+  # every spawn fails with ENOENT. Unpacking the directory at build time is also
+  # what preserves its +x bit; asar's runtime extraction does not.
+  #
+  # The second pattern is the load-bearing one. @lydell/node-pty is a 13.5 KB,
+  # five-file meta package with no binary in it at all: its index.js does
+  # require(`@lydell/node-pty-${process.platform}-${process.arch}`), and that
+  # sibling package is where prebuilds/<platform>-<arch>/pty.node and
+  # spawn-helper live. Unpacking only the meta package unpacks nothing that
+  # matters.
+  #
+  # They are two patterns because one cannot cover both: minimatch compares
+  # whole path segments, so '@lydell/node-pty/**' does not match
+  # '@lydell/node-pty-darwin-arm64/...'. Verified against minimatch with
+  # electron-builder's own {dot: true} options.
+  - '**/node_modules/@lydell/node-pty/**'
+  - '**/node_modules/@lydell/node-pty-*/**'
   - 'out/cli/**'
   - 'bin/**'
 
@@ -130,12 +178,59 @@ mac:
   hardenedRuntime: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # macOS TCC prompt copy for the local terminal.
+  #
+  # On macOS 10.15+ the first access to ~/Documents, ~/Desktop, ~/Downloads or a
+  # removable volume by any process inside this bundle — the shell the user just
+  # opened very much included — raises a consent prompt, and these strings are
+  # its body text.
+  #
+  # They are OPTIONAL for the Files-and-Folders class: without them the system
+  # supplies generic copy, and a denial surfaces as EPERM ("Operation not
+  # permitted"), not a crash. (Termination on a missing usage description is
+  # real, but for the hardware and personal-data classes — Camera, Contacts,
+  # Photos — not this one. Terminal.app declares none of these keys.) They are
+  # set because a dialog that explains why a terminal wants your Downloads
+  # folder gets approved, and a generic one gets declined. The child shell
+  # inherits the app bundle's TCC identity, so the strings belong here and
+  # nowhere in the child's environment.
+  #
+  # The cost specific to this app: with `identity: '-'` there is no Team ID for
+  # TCC to key the grant on, so it falls back to the ad-hoc cdhash — which
+  # changes on every build. Every release therefore re-prompts, for all four.
+  # Same root cause as the keychain-ACL note above, and another entry on the
+  # Developer ID case.
+  extendInfo:
+    NSDocumentsFolderUsageDescription: >-
+      ShellPilot needs access to your Documents folder so that commands you run
+      in a local terminal can read and write files there.
+    NSDesktopFolderUsageDescription: >-
+      ShellPilot needs access to your Desktop so that commands you run in a
+      local terminal can read and write files there.
+    NSDownloadsFolderUsageDescription: >-
+      ShellPilot needs access to your Downloads folder so that commands you run
+      in a local terminal can read and write files there.
+    NSRemovableVolumesUsageDescription: >-
+      ShellPilot needs access to removable volumes so that commands you run in a
+      local terminal can read and write files on external drives.
   # The tunnel engines under Resources/bin are Mach-O executables and arm64
   # macOS refuses to run an unsigned one at all. electron-builder discovers and
   # signs nested binaries, and they are spawned as separate processes rather
   # than dlopen'd, so library validation does not apply to them the way it does
   # to the ssh2 bindings. `codesign --verify --strict --deep` on the packaged
   # .app is the check that this stayed true — it is in the release workflow.
+  # Both mac architectures come out of ONE job, ONE npm ci and ONE
+  # electron-builder run, and electron-builder copies the same node_modules into
+  # both bundles. That is fine for pure JS and for the engines (extraResources
+  # picks resources/bin/${platform}-${arch} per bundle), but it is not fine for a
+  # dependency npm installs per-architecture: @lydell/node-pty-* declares
+  # "os"/"cpu", so a plain `npm ci` on the arm64 runner installs the arm64
+  # sibling only and the x64 dmg would ship a binding it cannot load.
+  #
+  # The release workflow force-installs both siblings before packaging — see
+  # "Install both macOS node-pty prebuilds" in .github/workflows/release.yml,
+  # which also records why that beats splitting this into a per-arch build.
+  # Anyone building an x64 dmg by hand needs the same step.
   target:
     - target: dmg
       arch: [x64, arm64]

@@ -14,6 +14,14 @@ inside the installer, so they are distributed rather than merely depended on.
 Licenses for everything listed here are unmodified and are not affected by
 ShellPilot's own license.
 
+Three of the npm packages also carry **prebuilt native binaries** that npm
+installs and the installer then ships: `ssh2`, `cpu-features` and
+`@lydell/node-pty`. They stay in the npm tables rather than under **Bundled
+binaries**, because that section is about provenance — code this repository's
+own `scripts/` compile or fetch — and these arrive from the registry like any
+other dependency. They are called out under **Key runtime dependencies** so
+that "merely depended on" is not read as "not distributed".
+
 **One shipped component is not open source.** `wintun.dll` is proprietary. It is
 the only one, it is Windows-only, and it is described in full below rather than
 left to a table — ShellPilot is presented as open-source software and that
@@ -160,6 +168,7 @@ what ships in the packaged app and are attributed here for that reason.
 | scheduler | 0.27.0 | MIT | React's internal scheduler (bundled into the renderer) |
 | @xterm/xterm | 5.5.0 | MIT | Terminal emulator |
 | @xterm/addon-fit, addon-search, addon-web-links, addon-webgl | 0.10.0 / 0.15.0 / 0.11.0 / 0.18.0 | MIT | xterm.js addons |
+| @lydell/node-pty | 1.2.0-beta.15 | MIT | Pseudo-terminal for local shells — pinned to an exact version, and it ships native binaries (see below) |
 | ssh2 | 1.17.0 | MIT | SSH/SFTP client |
 | mongodb | 7.5.0 | Apache-2.0 | MongoDB driver |
 | mssql | 12.7.0 | MIT | SQL Server driver |
@@ -179,6 +188,38 @@ licenses (BSD-style and MIT). ShellPilot redistributes these only as the
 official, unmodified Electron binary via `electron-builder` and does not
 alter or separately relicense them.
 
+### `@lydell/node-pty` is an npm dependency that ships executables
+
+It is listed here rather than under **Bundled binaries** because that is what it
+is: a package `npm ci` installs, pinned to the exact string `1.2.0-beta.15` in
+`package.json` — not a caret range, so a later beta cannot arrive on its own.
+Nothing in `scripts/` builds or fetches it, and it is not verified against
+`resources/bin/manifest.json`, which is what everything in that other table has
+in common. `ssh2` and `cpu-features` are in the same position and are listed the
+same way.
+
+It is worth naming separately anyway, because it is the furthest an npm package
+in this tree goes toward being a shipped binary. `@lydell/node-pty` itself is a
+five-file meta package with no binary in it; at runtime it requires
+`@lydell/node-pty-${process.platform}-${process.arch}`, and that sibling —
+installed for one platform and architecture only, via `optionalDependencies`
+gated on `os`/`cpu` — is where `prebuilds/<platform>-<arch>/` holds:
+
+- **`pty.node`**, a Node-API binding, `dlopen`ed like `ssh2`'s and
+  `cpu-features`'.
+- **`spawn-helper`** on macOS and Linux, a Mach-O/ELF **executable** that node-pty
+  `posix_spawn`s for every session. That is a program in the installer, not a
+  library — which is why `electron-builder.yml` unpacks the whole package
+  directory out of the asar archive (a `*.node` glob would leave the helper
+  inside, with no path on disk to hand to `posix_spawn`) and why the release
+  verifier asserts its `+x` bit.
+
+Both packages are MIT. The sibling's `LICENSE` carries three notices — Christopher
+Jeffrey (`pty.js`), Daniel Imms and Microsoft (`node-pty`) — reproduced unmodified
+in the package as installed, which is what MIT attribution requires; this fork
+adds Simon Lydell's own MIT notice on the meta package. Upstream is
+`github.com/lydell/node-pty`, a repackaging of `github.com/microsoft/node-pty`.
+
 ## Full dependency license inventory (production tree)
 
 Every package below is a direct or transitive **production** dependency —
@@ -187,14 +228,22 @@ Build-only tooling (TypeScript, Vite, Vitest, esbuild, electron-builder,
 `@types/*`, etc.) is excluded, since it never ships. License data comes
 from each package's own `package.json`.
 
-License summary: **199 MIT · 12 ISC · 7 BSD-3-Clause · 7 Apache-2.0 · 2
-BlueOak-1.0.0 · 2 BSD-2-Clause · 1 Python-2.0 · 1 0BSD · 1 Unlicense** — 232
+License summary: **201 MIT · 12 ISC · 7 BSD-3-Clause · 7 Apache-2.0 · 2
+BlueOak-1.0.0 · 2 BSD-2-Clause · 1 Python-2.0 · 1 0BSD · 1 Unlicense** — 234
 packages total. No GPL, AGPL, LGPL, SSPL, or proprietary-licensed
 dependencies were found anywhere in the tree.
 
 That statement is about the **npm tree only**. It is not a statement about the
 installer, which also contains a GPL-2.0 program (`openvpn`) and a proprietary
 library (`wintun.dll`) — both described under **Bundled binaries** above.
+
+The count includes one `@lydell/node-pty-<platform>-<arch>` sibling. Six of them
+exist upstream, each declaring `os` and `cpu`, so `npm ci` installs only the one
+matching the host and a tree installed elsewhere carries a differently named
+package in that row. The macOS release job installs both `darwin` siblings
+deliberately, because it packs an x64 and an arm64 dmg out of one `node_modules`
+(see `.github/workflows/release.yml`). All six are MIT, so none of this changes
+the licence position.
 
 <details>
 <summary>Full list (click to expand)</summary>
@@ -221,6 +270,8 @@ library (`wintun.dll`) — both described under **Bundled binaries** above.
 | @hono/node-server | 2.1.1 | MIT |
 | @ioredis/commands | 2.0.0 | MIT |
 | @js-joda/core | 6.1.0 | BSD-3-Clause |
+| @lydell/node-pty | 1.2.0-beta.15 | MIT |
+| @lydell/node-pty-`<platform>`-`<arch>` | 1.2.0-beta.15 | MIT |
 | @modelcontextprotocol/sdk | 1.30.0 | MIT |
 | @mongodb-js/saslprep | 1.5.0 | MIT |
 | @tediousjs/connection-string | 1.1.0 | MIT |

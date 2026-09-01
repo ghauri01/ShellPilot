@@ -10,6 +10,12 @@ import type {
   MetricsResult,
   SshCloseInfo
 } from '../shared/ssh'
+import type {
+  LocalCloseInfo,
+  LocalConnectConfig,
+  LocalShell,
+  LocalStatus
+} from '../shared/local'
 
 export interface SshPromptRequest {
   id: string
@@ -122,6 +128,45 @@ const api = {
     onClose: (id: string, cb: (info: SshCloseInfo) => void): (() => void) => {
       const ch = `ssh:close:${id}`
       const h = (_e: IpcRendererEvent, info: SshCloseInfo): void => cb(info ?? {})
+      ipcRenderer.on(ch, h)
+      return () => ipcRenderer.removeListener(ch, h)
+    }
+  },
+  // Mirrors `ssh` above, channel for channel, but a separate namespace rather
+  // than one with a `kind` discriminator: the two take different configs, and a
+  // union the renderer has to narrow at every call site is how a local session
+  // ends up in a code path that tries to dial it.
+  //
+  // Nothing here is reachable from the MCP bridge or the CLI, deliberately.
+  // tests/localTerminalNotExposed.test.ts is what keeps that true.
+  local: {
+    shells: (refresh?: boolean): Promise<LocalShell[]> =>
+      ipcRenderer.invoke('local:shells', refresh),
+    connect: (cfg: LocalConnectConfig): Promise<void> => ipcRenderer.invoke('local:connect', cfg),
+    write: (id: string, data: string): void => ipcRenderer.send('local:write', id, data),
+    // Reports how many UTF-16 code units the terminal has actually parsed, which
+    // is what lets main stop reading the pty when the renderer falls behind.
+    // Code units, not bytes: main counts the same unit on the way out, and
+    // mixing the two accrues a deficit that never repays and wedges the session.
+    ack: (id: string, units: number): void => ipcRenderer.send('local:ack', id, units),
+    resize: (id: string, cols: number, rows: number): void =>
+      ipcRenderer.send('local:resize', id, cols, rows),
+    close: (id: string): void => ipcRenderer.send('local:close', id),
+    onData: (id: string, cb: (data: string) => void): (() => void) => {
+      const ch = `local:data:${id}`
+      const h = (_e: IpcRendererEvent, d: string): void => cb(d)
+      ipcRenderer.on(ch, h)
+      return () => ipcRenderer.removeListener(ch, h)
+    },
+    onStatus: (id: string, cb: (s: LocalStatus) => void): (() => void) => {
+      const ch = `local:status:${id}`
+      const h = (_e: IpcRendererEvent, s: LocalStatus): void => cb(s)
+      ipcRenderer.on(ch, h)
+      return () => ipcRenderer.removeListener(ch, h)
+    },
+    onClose: (id: string, cb: (info: LocalCloseInfo) => void): (() => void) => {
+      const ch = `local:close:${id}`
+      const h = (_e: IpcRendererEvent, info: LocalCloseInfo): void => cb(info ?? {})
       ipcRenderer.on(ch, h)
       return () => ipcRenderer.removeListener(ch, h)
     }

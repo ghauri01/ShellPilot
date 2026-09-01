@@ -144,8 +144,24 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
 
   // Sync with the terminal: follow its cwd (via OSC 7) and push `cd` when the
   // user navigates here.
-  const session = useApp((s) => (tabId ? s.tabSession[tabId] : undefined))
-  const termCwd = useApp((s) => (tabId ? s.tabCwd[tabId] : undefined))
+  //
+  // Both live under the **active pane's** id, not the tab's: a tab holds up to
+  // four terminals and "the terminal" this view follows is whichever one has
+  // focus. Reading `tabSession[tabId]` — which is what this did while a tab had
+  // exactly one session — now matches nothing at all, so the link silently
+  // stops working rather than following the wrong pane.
+  //
+  // And only a pane on *this* server: a tab can hold a local shell beside a
+  // remote one, and a local pane's OSC-7 cwd is a path on this machine. Left
+  // unfiltered, focusing it would send the browser off to list `/Users/…` on
+  // the server and push a `cd` for it down the wrong session.
+  const paneId = useApp((s) => {
+    const tp = tabId ? s.panes[tabId] : undefined
+    const pane = tp?.panes.find((p) => p.id === tp.activePaneId)
+    return pane?.target.kind === 'ssh' && pane.target.serverId === server.id ? pane.id : undefined
+  })
+  const session = useApp((s) => (paneId ? s.tabSession[paneId] : undefined))
+  const termCwd = useApp((s) => (paneId ? s.tabCwd[paneId] : undefined))
   const setTabCwd = useApp((s) => s.setTabCwd)
 
   const cfg = useCallback(
@@ -216,13 +232,13 @@ function RealSftp({ server, tabId }: { server: Server; tabId?: string }): React.
     async (p: string): Promise<void> => {
       const ok = await list(p)
       if (!ok) return
-      if (tabId) setTabCwd(tabId, p)
+      if (paneId) setTabCwd(paneId, p)
       if (linked && session) {
         const q = p.replace(/'/g, `'\\''`)
         window.shellpilot?.ssh.write(session, `cd '${q}'\n`)
       }
     },
-    [list, tabId, setTabCwd, linked, session]
+    [list, paneId, setTabCwd, linked, session]
   )
 
   // Opening the channel, and the way back in after it failed. Retrying a failed

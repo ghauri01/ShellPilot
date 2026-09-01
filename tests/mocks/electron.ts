@@ -14,6 +14,10 @@ export const app = {
   // clientConfig.ts derives the bridge script path from this; outside a
   // packaged build it is the project root, exactly as in `electron-vite dev`.
   getAppPath: (): string => process.cwd(),
+  // shellDiscovery.ts stamps this into TERM_PROGRAM_VERSION for every local
+  // shell. A fixed string rather than the real package version so a release
+  // bump does not have to touch a test assertion.
+  getVersion: (): string => '0.0.0-test',
   isPackaged: false
 }
 

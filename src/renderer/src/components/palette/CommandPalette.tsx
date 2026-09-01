@@ -67,6 +67,27 @@ export function CommandPalette(): React.JSX.Element {
           }
         })
       )
+    // Shells on this machine. Read straight from the store slice — nothing is
+    // fetched here, because a useMemo cannot await and a palette that populated
+    // itself asynchronously would render its first frame without these. The
+    // slice is filled by the tab bar's shell menu, which is mounted for the life
+    // of the workspace panel.
+    if (store.settings.localTerminalEnabled !== false) {
+      store.localShells.forEach((sh) =>
+        list.push({
+          id: `local-${sh.id}`,
+          group: 'Local Shells',
+          title: sh.label,
+          // The path, never the id: ids are opaque and mean nothing to a reader.
+          sub: sh.isDefault ? `${sh.path} · default` : sh.path,
+          icon: <TerminalIcon size={16} />,
+          run: () => {
+            store.setActivity('connections')
+            store.openLocal(sh)
+          }
+        })
+      )
+    }
     store
       .workspaceTunnels()
       .forEach((t) =>

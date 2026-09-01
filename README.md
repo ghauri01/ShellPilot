@@ -21,7 +21,7 @@ Your DevOps workstation, everywhere. Windows · macOS · Linux.
 [![Stars](https://img.shields.io/github/stars/ghauri01/ShellPilot?style=flat-square&label=stars&color=22c7d6&labelColor=30363d)](https://github.com/ghauri01/ShellPilot/stargazers)
 [![License](https://img.shields.io/badge/license-MIT-22c7d6?style=flat-square&labelColor=30363d)](LICENSE)
 
-[Features](#features) · [AI Agent Access](#ai-agent-access) · [Install](#install) · [Quick start](#quick-start) · [Comparison](#shellpilot-vs-mobaxterm-putty-termius-and-securecrt) · [Workspaces](#workspaces) · [Command palette](#command-palette) · [Shortcuts](#keyboard-shortcuts) · [Databases](#databases) · [Vault](#vault) · [Use cases](#real-world-use-cases) · [FAQ](#faq) · [Contributing](#contributing) · [Licence](#licence)
+[Features](#features) · [AI Agent Access](#ai-agent-access) · [Install](#install) · [Quick start](#quick-start) · [Comparison](#shellpilot-vs-mobaxterm-putty-termius-and-securecrt) · [Workspaces](#workspaces) · [Local terminal](#local-terminal) · [Command palette](#command-palette) · [Shortcuts](#keyboard-shortcuts) · [Databases](#databases) · [Vault](#vault) · [Use cases](#real-world-use-cases) · [FAQ](#faq) · [Contributing](#contributing) · [Licence](#licence)
 
 </div>
 
@@ -87,6 +87,7 @@ sends you to a second application the moment you need to query a table or look u
 | | |
 |---|---|
 | **SSH terminal** | Full xterm terminal with GPU rendering, search, split panes, copy-on-select and configurable zoom |
+| **Local terminal** | Your own zsh, bash, PowerShell, Git Bash, MSYS2 or WSL in a tab beside the SSH ones — discovered per platform, a login shell on macOS, and reachable by no AI agent |
 | **Jump hosts / bastions** | Unlimited chained hops per server, each with its own credentials |
 | **Two-factor auth** | Answers keyboard-interactive challenges; connections are shared so you enter a code once, not per session |
 | **SFTP browser** | Browse, edit, upload, rename and delete files over the same connection |
@@ -647,6 +648,58 @@ They are designed not to interrupt you:
 - Nothing steals focus, and nothing must be dismissed before you carry on
 - Alerts are evaluated from metrics **already being sampled**, so switching them
   on adds no extra SSH load
+
+## Local terminal
+
+A tab can also be a shell on **your own machine**, next to the SSH ones — same
+terminal, same search, same copy-on-select, same scrollback. It is there so the
+`ssh-keygen`, the `git push` and the `kubectl` you run between remote sessions do
+not need a second application, and it runs as you, in your environment, exactly
+as your usual terminal would.
+
+ShellPilot finds the shells rather than asking you to configure one:
+
+| Platform | What appears in the list |
+|---|---|
+| **macOS** | Your login shell — from `$SHELL`, or from Directory Services when the app was started from Finder and `$SHELL` is unset — plus `/bin/zsh` and `/bin/bash` if they are not already it |
+| **Linux** | Your login shell from `$SHELL` or the passwd entry, plus `bash`, `zsh` and `fish` where they exist |
+| **Windows** | Command Prompt, Windows PowerShell 5.1, PowerShell 7, Git Bash, MSYS2 (UCRT64), and one entry per installed WSL distribution |
+
+A shell that is not usable interactively is not offered — `dash` in particular,
+where arrow keys print `^[[A` and there is no history. On Debian and Ubuntu
+`/bin/sh` *is* dash, so the check follows the symlink rather than trusting the
+name. On Windows every shell is found by absolute path and never by searching
+`PATH`, because a writable directory earlier on `PATH` than System32 is a local
+privilege escalation.
+
+**On macOS the shell is a login shell, and that is not a preference.** A GUI
+application is launched by launchd, whose `PATH` is the minimal
+`/usr/bin:/bin:/usr/sbin:/sbin`. Everything a developer actually uses —
+`/opt/homebrew/bin`, `/usr/local/bin`, whatever `/etc/paths.d` contributes — is
+assembled by `path_helper`, which runs from `/etc/zprofile` and `/etc/profile`,
+and those are read by a **login** shell only. Without `-l` you would get a
+terminal where `brew`, `node` and `git` are simply not found, and it would look
+like ShellPilot had broken your machine. Terminal.app and iTerm2 start login
+shells for the same reason. On Linux `bash` gets `-i` instead: a login bash reads
+`~/.bash_profile` and deliberately skips `~/.bashrc`, which is where Linux users
+keep their aliases and prompt, and the desktop session has already sourced
+`~/.profile`, so there is no `PATH` problem to solve there.
+
+**macOS re-asks for folder access after every update, and that is expected.** The
+first time a command touches `~/Documents`, `~/Desktop`, `~/Downloads` or a
+removable volume, macOS shows its Files-and-Folders prompt naming ShellPilot and
+saying it is for locally run commands. macOS records that grant against the app's
+`cdhash`, and because ShellPilot is [ad-hoc signed](#first-run-why-your-computer-shows-a-warning)
+rather than signed with a developer certificate, the `cdhash` changes with every
+build. So **every release starts from no grants and prompts again**. It is not a
+bug, and re-approving is the only way round it until the app is signed with a
+stable identity. A denial is an ordinary permission error, not a crash.
+
+**No AI agent can reach any of this.** The local terminal is deliberately absent
+from the MCP bridge and the `shellpilot` CLI — not gated behind a capability or
+an approval, absent — and a test fails the build if that changes. See the *Local
+terminal* section of [SECURITY.md](SECURITY.md) for why, and what a local shell
+can read.
 
 ## Fleet Monitor
 

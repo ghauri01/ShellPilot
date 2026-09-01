@@ -10,15 +10,19 @@ import {
   Activity,
   SplitSquareHorizontal,
   SplitSquareVertical,
+  Columns3,
   Search,
   Server as ServerIcon
 } from 'lucide-react'
-import { useApp, useWorkspaceTabs } from '../../store/app'
-import type { TabSplit } from '../../store/app'
+import { MAX_PANES, splitDirectionOf, useApp, useWorkspaceTabs } from '../../store/app'
+import type { TabPanes } from '../../store/app'
 import { ContextMenu, MenuEntry } from '../connections/ContextMenu'
 import { clsx } from '../../lib/format'
 import { EmptyState } from '../common/EmptyState'
 import { TerminalView } from '../terminal/TerminalView'
+import { localTransport, sshTransport } from '../../lib/transport'
+import { LocalShellMenu } from '../terminal/LocalShellMenu'
+import { PaneGrid } from './PaneGrid'
 import { MonitorView } from './MonitorView'
 import { MonitorStrip } from './MonitorStrip'
 import { SftpView } from './SftpView'
@@ -38,12 +42,14 @@ const VIEWS: { id: PanelView; label: string; icon: React.ReactNode }[] = [
 function TabPane({
   tab,
   server,
-  split,
+  tp,
   active
 }: {
   tab: Tab
   server: Server | undefined
-  split: TabSplit
+  // The tab's panes. Undefined only for a tab written into the store directly
+  // rather than through one of the actions that create one — see Terminals().
+  tp: TabPanes | undefined
   // Every tab stays mounted so sessions survive, so background work must be
   // gated on visibility rather than on being rendered.
   active: boolean
@@ -52,6 +58,13 @@ function TabPane({
   useEffect(() => {
     setVisited((v) => (v.has(tab.view) ? v : new Set(v).add(tab.view)))
   }, [tab.view])
+
+  // A local tab has no server and must never be handed one: Monitor, the
+  // docked strip and SFTP all take a non-optional `Server` and would need a
+  // synthesized row, which is exactly what the tab union exists to prevent.
+  // Only the terminal is meaningful here, so it is rendered on its own rather
+  // than inside the view-switching frame below.
+  if (tab.kind === 'local') return <Terminals tab={tab} tp={tp} />
 
   if (!server) {
     return <EmptyState icon={<TerminalIcon size={26} />} title="Session unavailable" message="This server no longer exists." />
@@ -68,18 +81,7 @@ function TabPane({
     <>
       {visited.has('terminal') && (
         <div style={paneStyle('terminal')}>
-          {split ? (
-            <div className="splits" style={{ flexDirection: split === 'h' ? 'column' : 'row' }}>
-              <div className="split-pane">
-                <TerminalView server={server} tabId={tab.id} />
-              </div>
-              <div className="split-pane">
-                <TerminalView server={server} />
-              </div>
-            </div>
-          ) : (
-            <TerminalView server={server} tabId={tab.id} />
-          )}
+          <Terminals tab={tab} tp={tp} />
           {/* Docked under the terminal rather than a separate view, so host
               load can be watched while working. */}
           <MonitorStrip server={server} visible={active} />
@@ -99,6 +101,44 @@ function TabPane({
   )
 }
 
+// The terminal half of a tab: its panes, or — for a tab that somehow has none —
+// the single-pane rendering this file had before panes existed.
+//
+// The fallback is unreachable through the store, which mints `panes[tab.id]` in
+// every action that creates a tab. It exists so that a tab written straight into
+// state (a test, or a future session-restore path) still shows a working
+// terminal instead of a blank rectangle; it just cannot be split, and its
+// session is keyed by the tab id rather than a pane id.
+function Terminals({ tab, tp }: { tab: Tab; tp: TabPanes | undefined }): React.JSX.Element {
+  const servers = useApp((s) => s.servers)
+  const localShells = useApp((s) => s.localShells)
+  const setServerStatus = useApp((s) => s.setServerStatus)
+
+  if (tp) return <PaneGrid tabId={tab.id} tp={tp} />
+
+  if (tab.kind === 'local') {
+    const shell = localShells.find((sh) => sh.id === tab.shellId)
+    if (!shell) {
+      return (
+        <EmptyState
+          icon={<TerminalIcon size={26} />}
+          title="Session unavailable"
+          message="This shell is no longer available on this machine."
+        />
+      )
+    }
+    return <TerminalView transport={localTransport(shell, tab.cwd)} tabId={tab.id} />
+  }
+  const server = servers.find((sv) => sv.id === tab.serverId)
+  if (!server) {
+    return <EmptyState icon={<TerminalIcon size={26} />} title="Session unavailable" message="This server no longer exists." />
+  }
+  // A demo server has no transport: TerminalView falls through to the
+  // simulated shell, which is what `server` is still passed for.
+  const transport = server.demo === false ? sshTransport(server, setServerStatus) : undefined
+  return <TerminalView transport={transport} server={server} tabId={tab.id} />
+}
+
 export function WorkspacePanel(): React.JSX.Element {
   // Tabs shown in the bar: this workspace only.
   const tabs = useWorkspaceTabs()
@@ -111,21 +151,40 @@ export function WorkspacePanel(): React.JSX.Element {
   const setTabView = useApp((s) => s.setTabView)
   const setModal = useApp((s) => s.setModal)
   const newSession = useApp((s) => s.newSession)
+  const openLocalById = useApp((s) => s.openLocalById)
   const duplicateTab = useApp((s) => s.duplicateTab)
   const closeOtherTabs = useApp((s) => s.closeOtherTabs)
   const closeTabsToLeft = useApp((s) => s.closeTabsToLeft)
   const closeTabsToRight = useApp((s) => s.closeTabsToRight)
   const closeAllTabs = useApp((s) => s.closeAllTabs)
   const servers = useApp((s) => s.servers)
+  const localShells = useApp((s) => s.localShells)
   const active = tabs.find((t) => t.id === activeTabId) ?? null
-  const splits = useApp((s) => s.tabSplit)
+  const panes = useApp((s) => s.panes)
   const toggleSplit = useApp((s) => s.toggleSplit)
+  const splitPane = useApp((s) => s.splitPane)
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tabId: string } | null>(null)
 
-  const server = active ? servers.find((s) => s.id === active.serverId) : undefined
-  const activeSplit = active ? splits[active.id] ?? null : null
+  const server = active?.kind === 'ssh' ? servers.find((s) => s.id === active.serverId) : undefined
+  // Null while the tab holds a single pane: `TabPanes.direction` always holds a
+  // letter, but there is no split to highlight until there are two panes. This
+  // is the replacement for reading `tabSplit[id]`, which is gone.
+  const activeSplit = splitDirectionOf(panes, active?.id)
+  const activePaneCount = active ? panes[active.id]?.panes.length ?? 1 : 1
+  const atPaneCap = activePaneCount >= MAX_PANES
+  // What the viewbar says the tab is talking to. An SSH tab names the account;
+  // a local one names the shell it started, which is the only comparable fact
+  // and the one the dead-session overlay shows too.
+  const activeShellPath =
+    active?.kind === 'local'
+      ? localShells.find((sh) => sh.id === active.shellId)?.path
+      : undefined
+  // A new session on whatever the current tab is: another shell on the same
+  // server, another shell of the same kind on this machine, or — with no tab
+  // at all — the only thing left to offer, which is adding a server.
   const addTab = (): void => {
-    if (active?.serverId) newSession(active.serverId)
+    if (active?.kind === 'ssh') newSession(active.serverId)
+    else if (active?.kind === 'local') openLocalById(active.shellId, active.cwd)
     else setModal('add-server')
   }
 
@@ -162,7 +221,7 @@ export function WorkspacePanel(): React.JSX.Element {
     <div className="main">
       <div className="tabbar">
         {tabs.map((t) => {
-          const srv = servers.find((s) => s.id === t.serverId)
+          const srv = t.kind === 'ssh' ? servers.find((s) => s.id === t.serverId) : undefined
           return (
             <div
               key={t.id}
@@ -188,9 +247,12 @@ export function WorkspacePanel(): React.JSX.Element {
             </div>
           )
         })}
+        {/* A split button: the plus repeats whatever the current tab is, the
+            caret opens the list of shells on this machine. */}
         <button className="tab-new" title="New session" onClick={addTab}>
           <Plus size={16} />
         </button>
+        <LocalShellMenu />
       </div>
 
       {tabMenu && (
@@ -202,22 +264,29 @@ export function WorkspacePanel(): React.JSX.Element {
         />
       )}
 
-      {active && server && (
+      {/* The viewbar used to be gated on `active && server`, which left a local
+          tab with no viewbar and therefore no split controls. The three-view
+          segment is the only SSH-only half; the split controls belong to any
+          terminal. An SSH tab whose server is gone still shows nothing, which is
+          the case the old condition was actually covering. */}
+      {active && (active.kind === 'local' || server) && (
         <div className="viewbar">
-          <div className="segment">
-            {VIEWS.map((v) => (
-              <button
-                key={v.id}
-                className={clsx('seg-btn', active.view === v.id && 'active')}
-                onClick={() => setTabView(active.id, v.id)}
-              >
-                {v.icon} {v.label}
-              </button>
-            ))}
-          </div>
+          {active.kind === 'ssh' && (
+            <div className="segment">
+              {VIEWS.map((v) => (
+                <button
+                  key={v.id}
+                  className={clsx('seg-btn', active.view === v.id && 'active')}
+                  onClick={() => setTabView(active.id, v.id)}
+                >
+                  {v.icon} {v.label}
+                </button>
+              ))}
+            </div>
+          )}
           <span className="spacer" />
           <div className="server-meta mono">
-            {server.username}@{server.host}:{server.port}
+            {server ? `${server.username}@${server.host}:${server.port}` : activeShellPath ?? ''}
           </div>
           {active.view === 'terminal' && (
             <div className="row" style={{ gap: 2 }}>
@@ -237,6 +306,23 @@ export function WorkspacePanel(): React.JSX.Element {
                 onClick={() => toggleSplit(active.id, 'h')}
               >
                 <SplitSquareVertical size={15} />
+              </button>
+              {/* The two buttons above are toggles — they take a tab between
+                  one pane and two, which is the contract they have always had.
+                  Panes three and four are reachable only from here, and the cap
+                  is shown as a disabled button rather than enforced silently
+                  when it is pressed. */}
+              <button
+                className="icon-btn"
+                disabled={atPaneCap}
+                title={
+                  atPaneCap
+                    ? `Maximum of ${MAX_PANES} panes per tab`
+                    : 'Add a pane on the same target'
+                }
+                onClick={() => splitPane(active.id, activeSplit ?? 'v')}
+              >
+                <Columns3 size={15} />
               </button>
             </div>
           )}
@@ -266,8 +352,8 @@ export function WorkspacePanel(): React.JSX.Element {
           >
             <TabPane
               tab={t}
-              server={servers.find((s) => s.id === t.serverId)}
-              split={splits[t.id] ?? null}
+              server={t.kind === 'ssh' ? servers.find((s) => s.id === t.serverId) : undefined}
+              tp={panes[t.id]}
               active={t.id === activeTabId}
             />
           </div>

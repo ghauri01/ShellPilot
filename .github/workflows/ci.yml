@@ -46,3 +46,52 @@ jobs:
       - name: Engine build scripts parse
         run: bash -n scripts/lib/net-retry.sh scripts/build-openvpn.sh scripts/fetch-wintun.sh scripts/build-frpc.sh scripts/build-sidecar.sh
       - run: npm run test
+
+  # CI has always been ubuntu-only and has never run electron-builder, so
+  # nothing here proved that a PACKAGED app could load a native module or exec a
+  # helper binary — until this job the first test of that was a release tag. A
+  # native dependency makes the gap load-bearing: @lydell/node-pty resolves its
+  # binding out of a sibling package and fork/execs a `spawn-helper` that needs a
+  # real path on disk, and both of those depend entirely on asarUnpack having
+  # done its job. So this packs on all three runners and asserts the layout the
+  # app depends on at runtime.
+  #
+  # It does NOT launch Electron. See docs/plans/local-terminal-plan.md,
+  # "Testing strategy", for what that leaves unverified and why.
+  pack:
+    name: Pack ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # electron-builder's isSignAllowed() (macCodeSign.js:21) returns false as
+      # soon as GITHUB_BASE_REF is set, which it always is on a pull request.
+      # Without this the .app packed on a PR is unsigned while the one packed on
+      # main is signed — one job producing two different artifacts, with the
+      # signing-shaped failures visible only after merge. The usual objection to
+      # CSC_FOR_PULL_REQUEST is that it exposes signing secrets to fork PRs;
+      # there are none here to expose. `identity: '-'` is ad-hoc signing, which
+      # needs no certificate and no keychain.
+      CSC_FOR_PULL_REQUEST: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # The tunnel engines are not built here: extraResources' `from`
+      # directories are simply absent, which electron-builder warns about and
+      # continues past (fileMatcher.js:271-275). This job is about the asar
+      # layout, not the engines — scripts/verify-bin-manifest.mjs in the release
+      # workflow covers those.
+      - run: npx electron-builder --dir --publish never
+      - run: node scripts/verify-local-pty-pack.mjs release
+      # Proves the prebuilt binding loads and, on POSIX, that spawn-helper
+      # actually execs under plain Node on this OS. Node-API is what makes that
+      # transferable to Electron; a NAN/V8 module could not be checked this way
+      # at all.
+      - run: npx vitest run tests/localPtySmoke.test.ts
