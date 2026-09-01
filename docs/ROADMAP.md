@@ -1,7 +1,12 @@
 # ShellPilot roadmap
 
-Ten things we intend to build, what each one actually rests on in the code today, and what is
+Fifteen things we intend to build, what each one actually rests on in the code today, and what is
 genuinely hard about it. Written after 0.8.0.
+
+Items 1–10 were the original list. **Items 11–15 were not, and four of the five outrank most of what
+was** — they came out of asking what changes when one person runs fifteen servers instead of three,
+which is the actual user. The ordering at the end is the useful part of this document; the write-ups
+exist so that ordering can be argued with.
 
 This is a statement of direction, not a schedule. Sizes are rough and relative — "weeks" means a
 focused person, not a calendar quarter. Where something is a real unknown it says so rather than
@@ -83,6 +88,96 @@ is easy to get wrong.
 
 **Size.** Weeks for one channel, then days each. Start with a generic webhook: it is the one that
 cannot be wrong about anyone's API, and Slack is a webhook.
+
+---
+
+## The fleet gap — what fifteen servers need that three do not
+
+These were not on the original list and belong near the top of it. They share a shape: each is
+about the *estate*, and each is invisible until the server count passes roughly ten. The reference
+user runs ~15 hosts behind two jump boxes, across prod, staging and database tiers.
+
+### 11. Run one command across many servers
+
+Select a group — a tag, a workspace, a hand-picked set — and run one command against all of it, with
+the results readable side by side.
+
+**Why it is the largest gap on this page.** It is the defining problem of managing fifteen servers
+instead of three, and nothing else here touches it. "Check disk on every prod box", "restart nginx
+on the three web servers", "which of these has the old package" is fifteen tabs and fifteen pastes
+today. MobaXterm has multi-exec and Termius has it; a tool positioned against both cannot not have
+it.
+
+**What exists.** More than it looks. `execute_command`, the policy engine, approvals and the audit
+log are all per-server already, and the supervisor gives a model for running many things at once
+and collecting their output. Fan-out is orchestration over machinery that exists.
+
+**What is actually new, and it is not the execution.** It is the results view — fifteen outputs that
+have to be scannable, with "same on all twelve, different on these three" as the primary reading
+rather than a wall of text. And it is the safety model, which deserves more thought than the
+feature: one approval for fifteen hosts is a categorically different decision from fifteen
+approvals, and a command aimed at a tag that silently acquired a production box is exactly how
+outages happen. Dry-run, an explicit resolved target list shown before execution, and a hard stop on
+first failure as the default all matter more than throughput does.
+
+**Size.** Weeks for a solid version. The policy question is worth settling before any of it.
+
+### 12. Live log tailing across hosts
+
+Follow a file, a unit or a container across several servers at once, merged and filtered.
+
+**Why.** The Fleet Monitor now says `uwsgi` failed. It cannot say why, and "why" is the next thing
+anyone asks. `tail -f` on one box is easy; merged, filtered, colour-coded tailing across three web
+servers is the daily reality of running a tier, and no GUI client does it well.
+
+**What exists.** The streaming half. The SSH data plane already handles continuous output with
+coalescing and backpressure, and `TerminalTransport` is the right abstraction to hang this on.
+
+**What is actually new.** Merging streams with per-host attribution, filtering that does not lose
+the stream while you type, and bounded buffers so a chatty host cannot exhaust memory. Also a
+decision about `journalctl` versus files versus `docker logs`, which is really the same target
+model that items 4 and 6 need.
+
+**Size.** Weeks.
+
+### 13. Fleet-wide search
+
+"Which host has port 5432 open?" "Where is this unit running?" "Which boxes have this process?"
+
+**Why this one is nearly free, and worth more than it sounds.** The Fleet Monitor *already collects*
+every listening socket with its owning process and every systemd unit on every reporting host, on
+every sample. That is a searchable index of the estate that exists in memory and is thrown away
+after being rendered as a table. Exposing it is a small feature that makes the data already being
+gathered worth gathering — and it is the kind of thing nobody else has, because nobody else is
+already holding the data.
+
+**What is actually new.** An index and a query surface. Note the honest limits up front: it reflects
+the last sample, not the present, and a host that could not report is a gap in the answer rather
+than an absence of the thing — the same `null`-is-not-empty distinction the monitor already respects
+must survive into search results, or the feature will confidently tell someone a port is closed.
+
+**Size.** Days to weeks. The best value-to-effort ratio on this page.
+
+### 14. Human session audit
+
+A record of what *you* did — commands run, files changed, on which host, when.
+
+**Why.** There is a meticulous audit log for what agents did and nothing for what the operator did.
+"What did I change on Tuesday" is a real question during an incident, and for anyone in a regulated
+environment it stops being a convenience and becomes a procurement requirement.
+
+**What exists.** `auditLog.ts`, the redaction pipeline, and — from 0.8.0 — the precedent of a
+*separate* log file for a different question, since local terminal sessions already write to
+`shellpilot-local-sessions.jsonl` rather than polluting the AI log.
+
+**What is actually new.** Deciding what is recorded, and being conservative. Commands and targets,
+yes. Full terminal output, no: it is enormous, it is full of secrets that redaction will not
+reliably catch, and a log of everything a person's shell printed is a more attractive target than
+most of what it was meant to protect. This should follow the local-session log's shape — metadata,
+never content — and it should be off by default with a clear switch, because recording a person's
+work is a different consent question from recording an agent's.
+
+**Size.** Weeks, most of it deciding what not to store.
 
 ---
 
@@ -222,6 +317,69 @@ than for us.
 
 ---
 
+### 15. A plugin system — so nobody ships or runs what they do not use
+
+Not every user needs Kubernetes, or n8n, or five database drivers. The app should not carry them for
+everyone.
+
+**Separate the two things this phrase usually means, because only one of them is cheap.**
+
+**(a) Optional first-party modules.** Features that ship with the app but are off until enabled, and
+whose weight is not paid until they are. This is what "we don't want to ship bloatware" actually
+asks for, and it introduces no new trust boundary — the code is still ours, still reviewed, still in
+the repo. It is achievable now.
+
+**(b) A third-party extension API.** Code we did not write, running inside the app. This is what
+"plugin system" usually means and it is a fundamentally different proposition here, for a reason
+specific to this product: ShellPilot's entire thesis is that credentials never leave it. A plugin
+that can call `credentialResolver` is a vault with no lock, and an ecosystem where the answer to
+"can I trust this extension" is "read its source" is not a security model. Not impossible — it needs
+a real sandbox and a capability-scoped API — but it is a product in itself, not a refactor.
+
+**Do (a) first, and do not let it drift into (b) by accident.** The two share a registry and almost
+nothing else.
+
+**What (a) actually costs.** Less than it looks, because the pieces exist:
+
+- **Gating is already a solved pattern here.** `AI_CAPABILITIES` plus the policy engine is a working
+  model of "this surface is available, this one is not", including the important default: an absent
+  capability reads as denied rather than as permitted. A module registry can borrow that shape
+  directly, including `backfillCapabilities`'s rule that a new thing does not silently switch itself
+  on for existing installs.
+- **The UI already hides what does not apply.** The activity bar, the tab kinds and the viewbar all
+  branch on what a tab or workspace supports. A disabled module is one more branch, not a new
+  mechanism.
+- **Lazy loading is already how the risky thing loads.** `localPty.ts` imports `@lydell/node-pty`
+  inside `loadPty()`, on first use, so a machine where it cannot load still gets a working app. That
+  is exactly the pattern a module needs.
+
+**What is actually new, and it is the interesting half: weight that is not paid.** Toggling a
+feature off in the UI does not shrink the installer. Today's ~120 MB is mostly Electron, but the
+five database drivers — `pg`, `mysql2`, `mssql`, `mongodb`, `ioredis` — are bundled for everyone,
+and something like n8n or a Kubernetes client would dwarf all of them. Real modularity means heavy
+dependencies are **fetched on enable rather than bundled**, and that is a supply-chain decision, not
+a packaging one: a download at runtime needs a pinned version, a checksum and a signature, or it is
+a remote-code-execution feature with a friendly button. The good news is that the pattern already
+exists — `resources/bin/manifest.json` plus `resolveBundled()` verifies a SHA-256 before executing
+any engine binary, on every run. Extend that, do not invent something new beside it.
+
+**The rule that must hold whatever gets built.** A module may not read the vault, resolve
+credentials, register an MCP tool without a policy entry, or reach the local terminal. Those are the
+four things the security model is made of, and `tests/localTerminalNotExposed.test.ts` already shows
+how to enforce a boundary like that by walking the real import closure rather than trusting a
+convention.
+
+**Interaction with Tauri.** Doing (a) well *helps* item 10 — clean module boundaries with no
+Electron API bleeding into feature logic is exactly the precondition a port needs. Doing (b) first
+would harm it badly: a third-party extension API is a compatibility promise, and rewriting the host
+underneath one is how migrations die.
+
+**Size.** (a) is weeks for the registry and the UI, plus real time per module to actually separate
+it. (b) is quarters and should not be scheduled until (a) has shipped and someone has asked for it
+with a concrete use case.
+
+---
+
 ## The one that changes every estimate above
 
 ### 10. Migration to Tauri
@@ -259,19 +417,54 @@ year of work.
 
 ## Suggested order, and why
 
-1. **pm2-style monitoring (local)** — the machinery exists; it proves the general supervisor.
-2. **Alert channels, webhook first** — makes every monitoring feature useful when the app is closed.
-3. **ngrok-style frp UX** — pure UX over shipped transport; high visible value, low risk.
-4. **Cron, read-only** — proves the parsing before anything writes.
-5. **Docker** — the transport abstraction is already the right shape.
-6. **Backups to remote targets** — after cron, so it uses one scheduler.
-7. **Credential proxy** — strategically the most aligned; slot earlier if API-key handling becomes
-   the pressing problem.
-8. **Cron editing, Kubernetes, ghostty snapshot experiment** — each gated on what the item before it
-   taught us.
-9. **n8n** — after the "build or embed" question has an answer.
-10. **Tauri** — behind the port-one-subsystem gate, always.
+Ordered for the user this app is actually for: someone running a real estate from one machine —
+roughly fifteen hosts behind jump boxes, across prod, staging and database tiers. That user changes
+the ranking, and the biggest change is that **the three highest-value items were not on the original
+list at all.**
 
-Two dependencies worth stating plainly: **backups should follow cron** or the app grows two
-schedulers, and **alert channels should follow the credential proxy** if the proxy is going to own
-third-party API keys, or they will grow two credential stores.
+**First — stop making the operator go and look.**
+
+1. **Alert channels, generic webhook first.** Today you find out four units failed by opening the
+   app. Everything else here is worth less until the app can reach you when it is closed. Webhook
+   first because it cannot be wrong about anyone's API, and Slack is a webhook.
+2. **Run one command across many servers.** The defining problem of fifteen servers rather than
+   three, and the largest gap on this page. Settle the approval model before writing the executor.
+3. **Fleet-wide search.** The best value-to-effort ratio here: the monitor already collects every
+   listening port and unit on every host and discards it after rendering. Days, not weeks.
+
+**Then — answer the question the monitor raises but cannot.**
+
+4. **Live log tailing across hosts.** The monitor now says a unit failed. This is "why", which is
+   always the next question.
+5. **Cron, read-only.** "What is scheduled across the estate" is currently unanswerable without
+   visiting every box. Read-only proves the parsing before anything writes.
+
+**Then — reduce weight, and pick up the rest.**
+
+6. **Optional first-party modules (plugin system, part a).** Best done before Docker/k8s/n8n land
+   rather than after, so those arrive as modules instead of being retrofitted into them.
+7. **Docker** — the transport abstraction is already the right shape. Kubernetes later and
+   separately; contexts and RBAC are their own product.
+8. **Credential proxy** — move this up if API keys are already a live problem; it is the most
+   strategically aligned item on the list either way.
+9. **Backups to remote targets** — after cron, so there is one scheduler.
+10. **Human session audit, ngrok-style frp UX, cron editing** — real, none of them urgent for a
+    single operator.
+11. **pm2-style monitoring** — kept, but **deliberately demoted from where a generic ranking puts
+    it**. Remote processes are systemd units the Fleet Monitor already reads; supervising them
+    ourselves largely re-solves a solved problem. Its value here is as *plumbing* for other features
+    rather than as a feature. It rises sharply for a user whose workloads are local.
+12. **Ghostty snapshot experiment, n8n, third-party extension API, Tauri** — each behind a gate
+    stated in its own section, and none of them visible to a fleet operator's day.
+
+**Dependencies worth stating plainly.** Backups should follow cron, or the app grows two schedulers.
+Alert channels should follow the credential proxy if that is going to own third-party API keys, or
+they grow two credential stores. Modules should precede the heavy features, or they become a
+refactor instead of a shape. And the third-party extension API should never precede the Tauri
+decision, because an extension API is a compatibility promise and rewriting the host underneath one
+is how migrations die.
+
+**One caveat on all of the above.** This ordering assumes the reference operator: many hosts, mostly
+systemd, mixed prod and staging, one person. A team of five reorders it — human session audit and
+shared runbooks rise immediately. A containerized estate moves Docker and Kubernetes to the top. The
+ordering is a consequence of the user, not a property of the features.
