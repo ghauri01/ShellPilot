@@ -3,7 +3,13 @@ import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { AI_CAPABILITIES } from '../../shared/mcp'
-import type { AccessGroup, PolicyAssignment, PolicyState, ServerAiMeta } from '../../shared/mcp'
+import type {
+  AccessGroup,
+  PermissionValue,
+  PolicyAssignment,
+  PolicyState,
+  ServerAiMeta
+} from '../../shared/mcp'
 
 // Access groups, server/workspace assignments and AI aliases. Same
 // temp-then-rename write pattern as store.ts/vault.ts/knownhosts.ts. No
@@ -200,15 +206,29 @@ function backfillCapabilities(state: PolicyState): PolicyState {
   return state
 }
 
-// Seeded file-policy generations. Each entry is the set of patterns introduced
-// at that generation; a file records the highest one it has been brought up to.
+// Seeded file-policy generations. Each entry is what changed at that
+// generation; a file records the highest one it has been brought up to.
 //
 // Why a generation counter rather than "add any missing seed": the seeds are
 // ordinary data and the user is free to delete them. Re-adding every absent
 // default on load would silently resurrect a rule they removed on purpose.
-// Keying on a generation means each new rule is offered exactly once, to the
+// Keying on a generation means each change is offered exactly once, to the
 // installs that predate it, and a later deletion sticks.
-const FILE_POLICY_GENERATIONS: { generation: number; patterns: AccessGroup['filePolicies'] }[] = [
+//
+// `retire` is the counterpart, for a rule that shipped and then turned out to
+// be the wrong shape — the blanket AppData deny was one, before it was
+// corrected pre-release. A retired entry is removed ONLY where it still holds
+// the exact values it was seeded with. The moment a user has edited one, that
+// edit is intent on record and outranks anything here; the rule stays and they
+// can delete it themselves. Retiring is therefore never destructive of a
+// decision someone actually made.
+interface FilePolicyGeneration {
+  generation: number
+  patterns?: AccessGroup['filePolicies']
+  retire?: { pattern: string; read?: PermissionValue; write?: PermissionValue }[]
+}
+
+const FILE_POLICY_GENERATIONS: FilePolicyGeneration[] = [
   {
     // Home directories on macOS (/Users, not /home) and Windows. Until this
     // generation the only home-dir rule was /home/*/.ssh/**, so on a Mac or
@@ -250,26 +270,45 @@ const LATEST_FILE_POLICY_GENERATION = FILE_POLICY_GENERATIONS.at(-1)?.generation
 
 // Applies to BUILT-IN groups only. A custom group is the author's own list and
 // nothing here has standing to add to it.
-export function migrateForTests(state: PolicyState): PolicyState {
-  return backfillFilePolicies(state)
+// `generations` is injectable so a test can exercise the migration mechanism
+// itself — retire, replace, no-op-when-already-past — without inventing a fake
+// generation in the shipped list to do it.
+export function migrateForTests(
+  state: PolicyState,
+  generations: FilePolicyGeneration[] = FILE_POLICY_GENERATIONS
+): PolicyState {
+  return backfillFilePolicies(state, generations)
 }
 
-function backfillFilePolicies(state: PolicyState): PolicyState {
+function backfillFilePolicies(
+  state: PolicyState,
+  generations: FilePolicyGeneration[] = FILE_POLICY_GENERATIONS
+): PolicyState {
+  const latest = generations.at(-1)?.generation ?? 0
   const from = state.filePolicyGeneration ?? 0
-  if (from >= LATEST_FILE_POLICY_GENERATION) return state
+  if (from >= latest) return state
 
-  for (const { generation, patterns } of FILE_POLICY_GENERATIONS) {
+  for (const { generation, patterns, retire } of generations) {
     if (generation <= from) continue
     for (const group of state.groups) {
       if (!group.builtIn) continue
-      for (const rule of patterns) {
+
+      // Retire before adding, so a generation can replace a rule with a
+      // narrower one in a single step without the two fighting over ordering.
+      for (const dead of retire ?? []) {
+        group.filePolicies = group.filePolicies.filter(
+          (p) => !(p.pattern === dead.pattern && p.read === dead.read && p.write === dead.write)
+        )
+      }
+
+      for (const rule of patterns ?? []) {
         // A user who already wrote this exact pattern keeps their own values.
         if (group.filePolicies.some((p) => p.pattern === rule.pattern)) continue
         group.filePolicies.push({ ...rule, id: uid('fp') })
       }
     }
   }
-  state.filePolicyGeneration = LATEST_FILE_POLICY_GENERATION
+  state.filePolicyGeneration = latest
   return state
 }
 

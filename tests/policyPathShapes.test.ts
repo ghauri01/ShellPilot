@@ -283,6 +283,83 @@ describe('existing installs, not just fresh ones', () => {
   })
 })
 
+describe('retiring a seeded rule that already shipped', () => {
+  // The generation mechanism could only add, so a rule that shipped in the
+  // wrong shape was permanent on every install that had migrated. `retire`
+  // is the counterpart — and the property that makes it safe to run
+  // unattended is that it never overrides a decision the user made.
+  const withRule = (read: 'deny' | 'ask', write: 'deny' | 'ask') => ({
+    version: 1 as const,
+    assignments: [],
+    serverMeta: [],
+    filePolicyGeneration: 0,
+    groups: [
+      {
+        id: 'grp-read-only',
+        name: 'Read Only',
+        builtIn: true,
+        capabilities: {},
+        filePolicies: [{ id: 'fp-old', pattern: '?:/Users/*/AppData/**', read, write }]
+      }
+    ]
+  })
+
+  const retireAppDataBlanket = [
+    { pattern: '?:/Users/*/AppData/**', read: 'deny' as const, write: 'deny' as const }
+  ]
+
+  it('removes the rule when it still holds its seeded values', () => {
+    const out = migrateForTests(withRule('deny', 'deny') as never, [
+      { generation: 1, retire: retireAppDataBlanket }
+    ])
+    expect(out.groups[0].filePolicies.map((p) => p.pattern)).not.toContain('?:/Users/*/AppData/**')
+  })
+
+  it('keeps it when the user has changed it — an edit is intent on record', () => {
+    // Someone who softened this to ASK meant to keep the rule. Removing it
+    // would be undoing their decision on their behalf, silently.
+    const out = migrateForTests(withRule('ask', 'ask') as never, [
+      { generation: 1, retire: retireAppDataBlanket }
+    ])
+    expect(out.groups[0].filePolicies.map((p) => p.pattern)).toContain('?:/Users/*/AppData/**')
+  })
+
+  it('leaves custom groups alone', () => {
+    const state = withRule('deny', 'deny') as never as ReturnType<typeof withRule>
+    state.groups[0].builtIn = false
+    const out = migrateForTests(state as never, [{ generation: 1, retire: retireAppDataBlanket }])
+    expect(out.groups[0].filePolicies.map((p) => p.pattern)).toContain('?:/Users/*/AppData/**')
+  })
+
+  it('can retire and replace in one generation', () => {
+    const out = migrateForTests(withRule('deny', 'deny') as never, [
+      {
+        generation: 1,
+        retire: retireAppDataBlanket,
+        patterns: [
+          {
+            id: '',
+            pattern: '?:/Users/*/AppData/Roaming/Microsoft/Protect/**',
+            read: 'deny',
+            write: 'deny'
+          }
+        ]
+      }
+    ])
+    const patterns = out.groups[0].filePolicies.map((p) => p.pattern)
+    expect(patterns).not.toContain('?:/Users/*/AppData/**')
+    expect(patterns).toContain('?:/Users/*/AppData/Roaming/Microsoft/Protect/**')
+  })
+
+  it('does not run again once the install is past that generation', () => {
+    const state = withRule('deny', 'deny') as never as ReturnType<typeof withRule>
+    state.filePolicyGeneration = 1
+    const out = migrateForTests(state as never, [{ generation: 1, retire: retireAppDataBlanket }])
+    // Already migrated, so the rule is whatever the user has now — untouched.
+    expect(out.groups[0].filePolicies.map((p) => p.pattern)).toContain('?:/Users/*/AppData/**')
+  })
+})
+
 describe('what deliberately still gets through', () => {
   it('does not resolve a relative path against an unknown remote cwd', () => {
     // policyEngine documents this: `cd /root/.ssh && cat id_rsa` evades
