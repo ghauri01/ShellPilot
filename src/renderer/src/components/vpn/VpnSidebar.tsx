@@ -1,5 +1,6 @@
 import { Globe, Share2 } from 'lucide-react'
 import { useApp, useWorkspaceVpns } from '../../store/app'
+import { clsx } from '../../lib/format'
 import type { VpnProfile, VpnStatus } from '../../types'
 import { HealthDot, frpSummary, handshakeLabel, vpnHealth } from './VpnStatusCard'
 
@@ -27,6 +28,9 @@ function hover(profile: VpnProfile, status: VpnStatus | undefined): string {
 export function VpnSidebar(): React.JSX.Element {
   const profiles = useWorkspaceVpns()
   const vpnStatuses = useApp((s) => s.vpnStatuses)
+  // See TunnelSidebar: a marker, not a control. The tabs above the content do
+  // the navigating.
+  const tab = useApp((s) => s.tunnelsTab)
 
   const vpns = profiles.filter((p) => p.spec.kind !== 'frp')
   const frps = profiles.filter((p) => p.spec.kind === 'frp')
@@ -49,13 +53,13 @@ export function VpnSidebar(): React.JSX.Element {
   return (
     <>
       <div className="tree-section">
-        <div className="tree-section-label">
+        <div className={clsx('tree-section-label', tab === 'vpn' && 'active')}>
           <Globe size={11} /> VPN <span className="count">{vpns.length}</span>
         </div>
         {rows(vpns)}
       </div>
       <div className="tree-section">
-        <div className="tree-section-label">
+        <div className={clsx('tree-section-label', tab === 'frp' && 'active')}>
           <Share2 size={11} /> Reverse proxies <span className="count">{frps.length}</span>
         </div>
         {rows(frps)}

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Plus, Trash2, Save, ChevronDown, ChevronRight, TriangleAlert, X } from 'lucide-react'
+import { Plus, Trash2, Save, SlidersHorizontal, FolderTree, ChevronRight, TriangleAlert, X } from 'lucide-react'
 import { toast } from '../../store/toast'
 import { useNav } from '../../store/nav'
 import { AI_CAPABILITIES } from '../../../../shared/mcp'
+import { summariseAccessGroup, summariseFilePolicies } from './accessGroupSummary'
+import type { AccessGroupSummary } from './accessGroupSummary'
 import type { AccessGroup, AiCapability, FilePathRule, PermissionValue, PolicyAssignment } from '../../../../shared/mcp'
 
 const PERM_OPTIONS: PermissionValue[] = ['allow', 'ask', 'deny']
@@ -37,39 +39,49 @@ function PermSegment({
 // visible marker here rather than a silent row: a permission the user believes
 // they have set is worse than one that does not exist.
 
-// A dozen rows of ALLOW/ASK/DENY is the wrong first thing to read. Most groups
-// are describable in a sentence, and the person who genuinely needs
-// per-capability control will open the grid.
-function CapabilitySummary({ group }: { group: AccessGroup }): React.JSX.Element {
-  const named = (v: PermissionValue): string[] =>
-    AI_CAPABILITIES.filter(({ id }) => group.capabilities[id] === v).map(({ label }) => label.toLowerCase())
-  const allowed = named('allow')
-  const asked = named('ask')
-  const denied = named('deny')
-
-  const line = (title: string, items: string[], note: string): React.JSX.Element | null =>
-    items.length === 0 ? null : (
-      <div className="s-desc" style={{ marginTop: 4 }}>
-        <b>{title}</b> {note} — {items.join(', ')}.
-      </div>
-    )
-
+// A dozen rows of ALLOW/ASK/DENY is the wrong first thing to read. The card is
+// what a person meets first, and the sentence on it is generated from this
+// group's own capabilities — edit the grid and the card stops describing a
+// preset and starts describing what the group now actually does.
+function GroupCard({
+  group,
+  summary,
+  selected,
+  onSelect
+}: {
+  group: AccessGroup
+  summary: AccessGroupSummary
+  selected: boolean
+  onSelect: () => void
+}): React.JSX.Element {
   return (
-    <div>
-      {line('Without asking:', allowed, 'the agent just does these')}
-      {line('With your approval:', asked, 'you get a prompt each time')}
-      {line('Never:', denied, 'refused outright')}
-    </div>
+    <button type="button" className={`ag-card ${selected ? 'selected' : ''}`} aria-pressed={selected} onClick={onSelect}>
+      <div className="ag-card-head">
+        <span className="ag-card-name">{group.name}</span>
+        {group.builtIn && <span className="chip">Built-in</span>}
+        {summary.elevated.length > 0 && (
+          <span className="chip danger">
+            <TriangleAlert size={10} /> No prompt
+          </span>
+        )}
+      </div>
+      {summary.clauses.map((clause) => (
+        <span className="ag-card-line" key={clause}>
+          {clause}
+        </span>
+      ))}
+    </button>
   )
 }
 
-function GroupEditor({ group, onChange, onSave, onDelete }: {
+function GroupEditor({ group, summary, onChange, onSave, onDelete }: {
   group: AccessGroup
+  summary: AccessGroupSummary
   onChange: (g: AccessGroup) => void
   onSave: () => void
   onDelete: () => void
 }): React.JSX.Element {
-  const [showGrid, setShowGrid] = useState(false)
+  const files = summariseFilePolicies(group.filePolicies)
   const setCap = (cap: AiCapability, value: PermissionValue): void => {
     onChange({ ...group, capabilities: { ...group.capabilities, [cap]: value } })
   }
@@ -103,69 +115,108 @@ function GroupEditor({ group, onChange, onSave, onDelete }: {
         />
       </div>
 
-      <h3 style={{ marginTop: 18 }}>What this group allows</h3>
-      <CapabilitySummary group={group} />
-      <button className="btn sm" style={{ marginTop: 10 }} onClick={() => setShowGrid((v) => !v)}>
-        {showGrid ? <ChevronDown size={13} /> : <ChevronRight size={13} />} Per-capability settings
-      </button>
-
-      {showGrid &&
-        AI_CAPABILITIES.map(({ id, label }) => (
-          <div className="setting-row" key={id}>
-            <div className="s-info">
-              <div className="s-title">{label}</div>
+      {summary.elevated.length > 0 && (
+        // An elevated capability at ALLOW is the one setting on this screen
+        // that can be reached by accident and never announces itself again —
+        // there is no prompt to notice, only a command that silently succeeds.
+        <div className="setting-row" style={{ alignItems: 'flex-start' }}>
+          <div className="s-info">
+            <div className="s-title">
+              <TriangleAlert size={13} /> This group grants privileged access with no prompt
             </div>
-            <PermSegment value={group.capabilities[id]} onChange={(v) => setCap(id, v)} />
+            <div className="s-desc">
+              An agent can act on it without you seeing anything. Set it to ASK in Capabilities below if you
+              want to approve each use.
+            </div>
           </div>
-        ))}
+        </div>
+      )}
 
-      <h3 style={{ marginTop: 18 }}>File path rules</h3>
-      <div className="s-desc">
-        The most specific matching pattern wins; anything unmatched falls back to Read/Write Files above.
-        Sudo -i/su/bash-style unrestricted shells are always blocked and are not configurable here.
-      </div>
-      {group.filePolicies.map((rule) => (
-        <div className="setting-row" key={rule.id}>
-          <input
-            className="input mono"
-            style={{ flex: 1 }}
-            value={rule.pattern}
-            onChange={(e) => setRule(rule.id, { pattern: e.target.value })}
-          />
-          <select
-            className="input"
-            style={{ width: 110 }}
-            value={rule.read ?? ''}
-            onChange={(e) => setRule(rule.id, { read: (e.target.value || undefined) as PermissionValue | undefined })}
-          >
-            <option value="">read: —</option>
-            {PERM_OPTIONS.map((p) => (
-              <option key={p} value={p}>
-                read: {p}
-              </option>
-            ))}
-          </select>
-          <select
-            className="input"
-            style={{ width: 110 }}
-            value={rule.write ?? ''}
-            onChange={(e) => setRule(rule.id, { write: (e.target.value || undefined) as PermissionValue | undefined })}
-          >
-            <option value="">write: —</option>
-            {PERM_OPTIONS.map((p) => (
-              <option key={p} value={p}>
-                write: {p}
-              </option>
-            ))}
-          </select>
-          <button className="icon-btn" onClick={() => removeRule(rule.id)} aria-label="Remove rule">
-            <Trash2 size={14} />
+      <details className="disclosure" style={{ marginTop: 18 }}>
+        <summary className="disclosure-head">
+          <ChevronRight size={14} className="chev" />
+          <SlidersHorizontal size={13} />
+          Capabilities — set each of the {AI_CAPABILITIES.length} individually
+          <span className="ag-counts">
+            {/* A zero is noise here: "0 ask" makes the reader look for
+                something that is not there. */}
+            {summary.counts.allow > 0 && <span className="chip ok">{summary.counts.allow} allow</span>}
+            {summary.counts.ask > 0 && <span className="chip warn">{summary.counts.ask} ask</span>}
+            {summary.counts.deny > 0 && <span className="chip">{summary.counts.deny} deny</span>}
+          </span>
+        </summary>
+        <div className="disclosure-body" style={{ gap: 0 }}>
+          {AI_CAPABILITIES.map(({ id, label }) => (
+            <div className="setting-row" key={id}>
+              <div className="s-info">
+                <div className="s-title">{label}</div>
+              </div>
+              {/* Absent means denied to the policy engine, so show DENY rather
+                  than an empty segment on a group that predates a capability. */}
+              <PermSegment value={group.capabilities[id] ?? 'deny'} onChange={(v) => setCap(id, v)} />
+            </div>
+          ))}
+        </div>
+      </details>
+
+      <details className="disclosure" style={{ marginTop: 10 }}>
+        <summary className="disclosure-head">
+          <ChevronRight size={14} className="chev" />
+          <FolderTree size={13} />
+          File path rules — {files.sentence}
+        </summary>
+        <div className="disclosure-body" style={{ gap: 0 }}>
+          <div className="s-desc">
+            The most specific matching pattern wins; anything unmatched falls back to Read/Write Files above.
+            Sudo -i/su/bash-style unrestricted shells are always blocked and are not configurable here.
+          </div>
+          {group.filePolicies.map((rule) => (
+            <div className="setting-row" key={rule.id}>
+              <input
+                className="input mono"
+                style={{ flex: 1 }}
+                value={rule.pattern}
+                aria-label="Path pattern"
+                onChange={(e) => setRule(rule.id, { pattern: e.target.value })}
+              />
+              <select
+                className="input"
+                style={{ width: 110 }}
+                aria-label={`Read permission for ${rule.pattern}`}
+                value={rule.read ?? ''}
+                onChange={(e) => setRule(rule.id, { read: (e.target.value || undefined) as PermissionValue | undefined })}
+              >
+                <option value="">read: —</option>
+                {PERM_OPTIONS.map((p) => (
+                  <option key={p} value={p}>
+                    read: {p}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="input"
+                style={{ width: 110 }}
+                aria-label={`Write permission for ${rule.pattern}`}
+                value={rule.write ?? ''}
+                onChange={(e) => setRule(rule.id, { write: (e.target.value || undefined) as PermissionValue | undefined })}
+              >
+                <option value="">write: —</option>
+                {PERM_OPTIONS.map((p) => (
+                  <option key={p} value={p}>
+                    write: {p}
+                  </option>
+                ))}
+              </select>
+              <button className="icon-btn" onClick={() => removeRule(rule.id)} aria-label="Remove rule">
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+          <button className="btn sm" style={{ marginTop: 12, alignSelf: 'flex-start' }} onClick={addRule}>
+            <Plus size={13} /> Add path rule
           </button>
         </div>
-      ))}
-      <button className="btn sm" onClick={addRule}>
-        <Plus size={13} /> Add path rule
-      </button>
+      </details>
 
       <div className="setting-row" style={{ marginTop: 18 }}>
         <button className="btn sm primary" onClick={onSave}>
@@ -389,7 +440,7 @@ export function AiAccessGroups(): React.JSX.Element {
       load()
       // Deliberately not "created, you're done": a new group is not empty, it
       // arrives with defaults, and the summary showing them is right below.
-      toast(`Created ${g.name}. Check what it allows below before you assign it to anything.`, 'ok')
+      toast(`Created ${g.name}. Read what its card says it allows before you assign it to anything.`, 'ok')
     } catch (err) {
       toast(`${name} was not created: ${err instanceof Error ? err.message : String(err)}`, 'error', {
         label: 'Try again',
@@ -437,18 +488,30 @@ export function AiAccessGroups(): React.JSX.Element {
     <div className="settings-section">
       <h2>Access Groups</h2>
       <div className="sub">
-        Define what AI is allowed to do — per capability, not just a single yes/no. Four defaults are
-        provided; create as many custom groups as you need (Logs Only, Production Read Only, ...).
+        Define what AI is allowed to do — per capability, not just a single yes/no. Each card describes
+        itself from its own settings, so it stays accurate after you edit it. Pick one to change what it
+        permits, or create your own (Logs Only, Production Read Only, ...).
+      </div>
+
+      <div className="ag-grid">
+        {groups.map((g) => (
+          <GroupCard
+            key={g.id}
+            group={g}
+            // The card for the group being edited reads from the draft, so the
+            // sentence answers "what did that change actually do" while the
+            // grid below is still open — before anything is saved.
+            summary={summariseAccessGroup(draft?.id === g.id ? draft : g)}
+            selected={selectedId === g.id}
+            onSelect={() => setSelectedId(g.id)}
+          />
+        ))}
       </div>
 
       <div className="setting-row">
-        <select className="input" value={selectedId ?? ''} onChange={(e) => setSelectedId(e.target.value)}>
-          {groups.map((g) => (
-            <option key={g.id} value={g.id}>
-              {g.name}
-            </option>
-          ))}
-        </select>
+        <div className="s-info">
+          <div className="s-title">{draft ? `Editing ${draft.name}` : 'Pick a group to edit'}</div>
+        </div>
         <button className="btn sm" onClick={() => setNewName('')}>
           <Plus size={13} /> New group
         </button>
@@ -483,7 +546,15 @@ export function AiAccessGroups(): React.JSX.Element {
         </div>
       )}
 
-      {draft && <GroupEditor group={draft} onChange={setDraft} onSave={saveGroup} onDelete={deleteGroup} />}
+      {draft && (
+        <GroupEditor
+          group={draft}
+          summary={summariseAccessGroup(draft)}
+          onChange={setDraft}
+          onSave={saveGroup}
+          onDelete={deleteGroup}
+        />
+      )}
 
       <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid var(--border)' }} />
 

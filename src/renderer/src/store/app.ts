@@ -140,6 +140,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
 }
 export type ModalKind = 'add-server' | 'workspaces' | 'route-editor' | 'add-database' | 'import-ssh' | null
 
+/** Which of the three destinations the Tunnels & VPN view is showing. */
+export type TunnelsTab = 'tunnels' | 'vpn' | 'frp'
+
 // What openTab takes: a Tab minus the fields the store mints, with the
 // workspace optional.
 //
@@ -169,6 +172,10 @@ interface AppState {
   // navigation
   activeWorkspaceId: string
   activity: ActivityView
+  // Which destination the Tunnels & VPN view stands on. Session-only, like
+  // `activity` itself and for the same reason: persist.ts saves the data a
+  // backup needs, and where someone happened to be looking is not that.
+  tunnelsTab: TunnelsTab
   sidebarWidth: number
   sidebarCollapsed: boolean
 
@@ -234,6 +241,7 @@ interface AppState {
   // actions
   setWorkspace: (id: string) => void
   setActivity: (v: ActivityView) => void
+  setTunnelsTab: (v: TunnelsTab) => void
   setSidebarWidth: (w: number) => void
   toggleSidebar: () => void
   openServer: (serverId: string, view?: PanelView) => void
@@ -570,6 +578,7 @@ export const useApp = create<AppState>((set, get) => ({
   openDatabaseIds: [],
   activeWorkspaceId: DEFAULT_WORKSPACE.id,
   activity: 'connections',
+  tunnelsTab: 'tunnels',
   sidebarWidth: 280,
   sidebarCollapsed: false,
 
@@ -690,6 +699,7 @@ export const useApp = create<AppState>((set, get) => ({
       })
     })),
   setActivity: (v) => set({ activity: v }),
+  setTunnelsTab: (v) => set({ tunnelsTab: v }),
   setSidebarWidth: (w) => set({ sidebarWidth: Math.max(200, Math.min(480, w)) }),
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 

@@ -9,8 +9,7 @@ import { Sidebar } from './components/layout/Sidebar'
 import { StatusBar } from './components/layout/StatusBar'
 import { WorkspacePanel } from './components/panel/WorkspacePanel'
 import { FleetMonitor } from './components/monitor/FleetMonitor'
-import { TunnelManager } from './components/tunnels/TunnelManager'
-import { VpnManager } from './components/vpn/VpnManager'
+import { TunnelsView } from './components/tunnels/TunnelsView'
 import { DatabaseWorkspace } from './components/databases/DatabaseView'
 import { AddDatabaseModal } from './components/databases/AddDatabaseModal'
 import { Settings } from './components/settings/Settings'
@@ -45,16 +44,12 @@ function MainArea(): React.JSX.Element {
       </div>
       {activity === 'monitor' && <FleetMonitor />}
       {activity === 'databases' && <DatabaseWorkspace />}
-      {/* One view, three sections: SSH tunnels, VPN and frp reverse proxies.
-          They are all "make a remote thing reachable from here", and splitting
-          them across two activity icons would only make the user guess which
-          one holds the thing they set up yesterday. */}
-      {activity === 'tunnels' && (
-        <div className="main">
-          <TunnelManager />
-          <VpnManager />
-        </div>
-      )}
+      {/* One view, three tabs: SSH tunnels, VPN and frp reverse proxies. They
+          are all "make a remote thing reachable from here", and splitting them
+          across two activity icons would only make the user guess which one
+          holds the thing they set up yesterday — so TunnelsView keeps them
+          behind a single icon and switches between them in place. */}
+      {activity === 'tunnels' && <TunnelsView />}
       {activity === 'vault' && <VaultView />}
       {activity === 'ai' && <AiPanel />}
       {activity === 'settings' && <Settings />}

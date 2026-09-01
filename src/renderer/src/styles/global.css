@@ -366,6 +366,12 @@ button {
   font-weight: 600;
   color: var(--text-faint);
 }
+/* The section the main pane is currently showing. The sidebar lists all three
+   whatever the open tab is — its rows are the things themselves — so this is
+   how the two surfaces agree on where you are standing. */
+.tree-section-label.active {
+  color: var(--text-muted);
+}
 .tree-row {
   display: flex;
   align-items: center;
@@ -553,7 +559,10 @@ button {
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel);
 }
-.viewbar .segment {
+/* Not scoped to .viewbar: Settings, the AI capability grid and the database
+   modal all use a segment outside one, and without the flex box they rendered
+   as three stacked words. */
+.segment {
   display: flex;
   gap: 2px;
   padding: 3px;
@@ -579,6 +588,15 @@ button {
 .seg-btn.active {
   color: var(--text);
   background: var(--bg-active);
+}
+/* A segment that names three destinations can also say how much is behind each
+   one, which is what stops "Reverse proxies" reading as a place you never need
+   to look. */
+.seg-btn .count {
+  color: var(--text-faint);
+}
+.seg-btn.active .count {
+  color: var(--text-muted);
 }
 .viewbar .spacer {
   flex: 1;
@@ -964,6 +982,21 @@ button {
   color: var(--text-muted);
   font-size: var(--fs-sm);
   font-weight: 550;
+  /* <summary> is keyboard-operable but does not get the pointer cursor a
+     <button> disclosure head gets, and both spellings are used in the app. */
+  cursor: pointer;
+}
+/* display:flex above suppresses the native ::marker, so the open/closed state
+   needs a chevron of its own — otherwise the row looks like a static label. */
+.disclosure-head::-webkit-details-marker {
+  display: none;
+}
+.disclosure-head .chev {
+  flex: none;
+  transition: transform 0.12s;
+}
+details[open] > .disclosure-head .chev {
+  transform: rotate(90deg);
 }
 .disclosure-head:hover {
   background: var(--bg-hover);
@@ -1599,6 +1632,58 @@ button {
 .setting-row .s-desc {
   font-size: var(--fs-sm);
   color: var(--text-muted);
+}
+
+/* Access groups — the card list that leads the AI permissions screen. Each
+   card carries a sentence generated from the group's own capabilities, so the
+   twelve-row allow/ask/deny grid can stay folded away behind a disclosure. */
+.ag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--sp-3);
+  margin: var(--sp-3) 0 var(--sp-5);
+}
+.ag-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  text-align: left;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  transition: background 0.12s, border-color 0.12s;
+}
+.ag-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.ag-card.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+.ag-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+}
+.ag-card-name {
+  flex: 1;
+  font-weight: 600;
+}
+.ag-card-line {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.ag-card.selected .ag-card-line {
+  color: var(--text);
+}
+.ag-counts {
+  display: flex;
+  gap: var(--sp-2);
+  margin-left: auto;
 }
 
 /* Shortcut recorder */
