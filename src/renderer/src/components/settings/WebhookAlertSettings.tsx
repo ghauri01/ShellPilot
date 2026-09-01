@@ -82,7 +82,15 @@ export function WebhookAlertSettings(): React.JSX.Element {
       setDraft('')
       setTestMsg(null)
       const s = await window.shellpilot?.webhook?.status()
-      if (s) setCfg(s)
+      if (s) {
+        setCfg(s)
+        // Main turns the feature off when the URL is cleared, and settings has
+        // to learn that from main rather than from this component: FleetWatcher
+        // pushes the persisted value back on every launch, so leaving
+        // webhookAlertsEnabled true here would silently re-enable a webhook
+        // with no URL on the next start.
+        setSettings({ webhookAlertsEnabled: s.enabled })
+      }
     }
   }
 

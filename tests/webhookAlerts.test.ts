@@ -281,3 +281,47 @@ describe('delivery policy', () => {
     expect(seen).toEqual(['raised'])
   })
 })
+
+// Removing the URL from a webhook that is already switched on. The pane cannot
+// switch it on without a URL, so this is the only way into the state — and it
+// was reachable, silent, and reported as healthy: the switch still read ON, the
+// alerts went nowhere, and delivery() had nothing to say about it.
+describe('a webhook whose URL is taken away', () => {
+  beforeEach(async () => {
+    const m = await import('../src/main/services/webhookAlerts')
+    m.webhookResetForTests()
+    m.webhookSetUrl('https://example.com/hook')
+    m.webhookConfigure({ enabled: true, notifyOnResolved: true })
+  })
+
+  it('turns itself off rather than staying on with nowhere to send', async () => {
+    const m = await import('../src/main/services/webhookAlerts')
+    expect(m.webhookStatus().enabled).toBe(true)
+    m.webhookSetUrl('')
+    expect(m.webhookStatus()).toMatchObject({ enabled: false, hasUrl: false })
+  })
+
+  it('says why, if an alert ever reaches the send path without a URL', async () => {
+    const m = await import('../src/main/services/webhookAlerts')
+    m.webhookSetUrl('')
+    // Back on without a URL: only reachable if some future caller configures
+    // around the pane, which is exactly when a silent discard costs the most.
+    m.webhookConfigure({ enabled: true, notifyOnResolved: true })
+    const calls: string[] = []
+    globalThis.fetch = (async (u: string) => {
+      calls.push(String(u))
+      return new Response('', { status: 200 })
+    }) as unknown as typeof fetch
+    m.webhookNotify({
+      source: 'shellpilot',
+      version: '0.8.0',
+      event: 'raised',
+      kind: 'cpu',
+      server: 'box',
+      summary: 'box: CPU at 95%',
+      at: new Date().toISOString()
+    })
+    expect(calls).toEqual([])
+    expect(m.webhookDeliveryStatus().lastError).toMatch(/no webhook url/i)
+  })
+})

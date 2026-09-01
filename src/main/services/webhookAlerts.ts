@@ -61,6 +61,12 @@ export function webhookDeliveryStatus(): WebhookDeliveryStatus {
 export function webhookSetUrl(raw: string): { ok: boolean; error?: string } {
   if (raw.trim() === '') {
     deleteSecret(SECRET_ID)
+    // Clearing the URL turns the feature off, rather than leaving `enabled`
+    // true with nothing to send to. The settings pane cannot switch it on
+    // without a URL, so it had no way back to this state on its own — but
+    // removing a URL from an already-enabled webhook reached it, and the pane
+    // then showed the switch ON while every alert was dropped on the floor.
+    enabled = false
     return { ok: true }
   }
   const v = validateWebhookUrl(raw)
@@ -215,7 +221,15 @@ export function webhookNotify(raw: unknown): void {
   if (!payload) return
   if (payload.event === 'resolved' && !notifyOnResolved) return
   const url = getSecret(SECRET_ID)
-  if (!url) return
+  if (!url) {
+    // webhookSetUrl disables the feature when the URL is cleared, so this is
+    // unreachable through the UI. It is still recorded rather than returned
+    // silently: the one thing an alerting path must never do is discard
+    // without saying so, and if some path ever does reach here the settings
+    // pane says why instead of showing a healthy, empty panel.
+    status.lastError = 'No webhook URL is set, so the alert was not sent.'
+    return
+  }
   if (!allowedByRateLimit(Date.now())) return
 
   void post(url, payload).then((r) => {

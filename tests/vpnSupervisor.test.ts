@@ -205,13 +205,23 @@ describe('supervisor lifecycle', () => {
     // and not enough on a loaded CI runner — so this test failed intermittently
     // while testing nothing about the supervisor.
     let ready = 0
-    const spec = make({ onReady: () => { ready++ } })
+    // The exit handler unlinks the pid file — real fs — before it arms the
+    // backoff timer, and `flush()` counts microtask turns, which has no fixed
+    // relationship to how long that takes. Advancing the clock first meant the
+    // timer was armed at the already-advanced time and its delay was never
+    // consumed. onRestartScheduled fires on the line the timer is armed, so
+    // waiting on it removes the guess entirely.
+    const armed: number[] = []
+    const spec = make({
+      onReady: () => { ready++ },
+      onRestartScheduled: (_h, _a, delay) => armed.push(delay)
+    })
     await sup.spawn(spec)
     await waitFor(() => ready === 1)
 
     // One failure, so the next delay would be 2s if the exponent survived.
     spawns[0].child.exit(1)
-    await flush()
+    await waitFor(() => armed.length === 1)
     await vi.advanceTimersByTimeAsync(1_000)
     await waitFor(() => spawns.length === 2)
     // The relaunch must reach readiness before the clock moves, or the 60s
@@ -223,7 +233,10 @@ describe('supervisor lifecycle', () => {
 
     const before = Date.now()
     spawns[1].child.exit(1)
-    await flush()
+    // Same reason, and it matters more here: this test asserts the delay is
+    // exactly 1000ms by stepping 999 then 1, which only means anything if the
+    // timer already exists when the first step happens.
+    await waitFor(() => armed.length === 2)
     await vi.advanceTimersByTimeAsync(999)
     await flush()
     expect(spawns).toHaveLength(2)
@@ -333,11 +346,16 @@ describe('supervisor lifecycle', () => {
   })
 
   it('kills and retries when readiness never arrives', async () => {
+    const armed: number[] = []
     const spec = make({
       restart: 'on-failure',
       readiness: () => new Promise<void>(() => {}),
       readinessTimeoutMs: 30_000,
-      backoff: { baseMs: 1_000, maxMs: 1_000, jitter: 0 }
+      backoff: { baseMs: 1_000, maxMs: 1_000, jitter: 0 },
+      // See the backoff-window test: waiting a fixed number of turns for the
+      // pid-file unlink before advancing the clock is what made this the one
+      // test in the file that still failed under full-suite load.
+      onRestartScheduled: (_h, _a, delay) => armed.push(delay)
     })
     // Never resolves until a run is ready, so it is deliberately not awaited.
     void sup.spawn(spec).catch(() => {})
@@ -352,8 +370,8 @@ describe('supervisor lifecycle', () => {
     expect(signals.map((s) => s[1])).toEqual(['SIGKILL'])
 
     spawns[0].child.exit(null, 'SIGKILL')
-    await flush()
-    await vi.advanceTimersByTimeAsync(1_000)
+    await waitFor(() => armed.length === 1)
+    await vi.advanceTimersByTimeAsync(armed[0])
     await waitFor(() => spawns.length === 2)
   })
 

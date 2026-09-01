@@ -403,3 +403,28 @@ describe('status', () => {
     h.sampler.dispose()
   })
 })
+
+// Child effects run before parent effects in React, and FleetMonitor is a child
+// of the tree FleetWatcher sits at the root of. So on a cold start with the
+// monitor as the opening view, sampleNow() reaches main BEFORE configure() does
+// and finds no targets. What saves it is configure() scheduling at zero — but
+// that is a property of a different method, held by nothing, and the panel goes
+// blank for a whole interval if it ever stops being true.
+describe('the monitor asking for a sweep before it has been configured', () => {
+  it('still sweeps promptly, because configure schedules immediately', async () => {
+    const h = harness()
+    await h.sampler.sampleNow() // no targets yet: nothing to do
+    expect(h.calls).toEqual([])
+
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    // Not "eventually" — at zero delay. A first sweep an interval later is the
+    // failure this covers, and an interval can be an hour.
+    expect(h.calls).toEqual([fleetKey('a')])
+  })
+
+  it('reports no-targets rather than running while it waits', () => {
+    const h = harness()
+    expect(h.sampler.status()).toMatchObject({ running: false, idleReason: 'disabled' })
+  })
+})
