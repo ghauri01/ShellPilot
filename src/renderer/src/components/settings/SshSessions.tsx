@@ -3,6 +3,7 @@ import { Link2, Unlink } from 'lucide-react'
 import { useApp } from '../../store/app'
 import { toast } from '../../store/toast'
 import { clsx } from '../../lib/format'
+import { retentionOverrideNotice } from './connectionRetention'
 
 interface PoolEntry {
   key: string
@@ -26,6 +27,10 @@ export function SshSessions(): React.JSX.Element {
   const settings = useApp((s) => s.settings)
   const setSettings = useApp((s) => s.setSettings)
   const [pool, setPool] = useState<PoolEntry[]>([])
+  const override = retentionOverrideNotice(
+    settings.fleetSamplingEnabled,
+    settings.fleetSamplingIntervalMs
+  )
 
   const load = (): void => {
     void window.shellpilot?.ssh.poolList().then((p) => setPool(p ?? []))
@@ -47,6 +52,11 @@ export function SshSessions(): React.JSX.Element {
             instead of logging in again. On servers with two-factor authentication, a code is only
             requested when no connection is being reused — so this sets how often you are asked.
           </div>
+          {/* This row promises how often a two-factor code is requested.
+              Background checking keeps every watched server's connection alive
+              continuously, which makes the promise false — so the row that
+              makes it has to say so, not only the row that breaks it. */}
+          {override && <div className="s-desc warn">{override}</div>}
         </div>
         <div className="segment">
           {CHOICES.map((c) => (

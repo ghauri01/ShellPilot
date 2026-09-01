@@ -512,6 +512,16 @@ export function Settings(): React.JSX.Element {
                     Needs the vault unlocked; while it is locked, checking pauses rather than
                     failing.
                   </div>
+                  {/* Stated before the switch is touched rather than after,
+                      because this is the cost of turning it on and the whole
+                      point is that it used to happen invisibly. */}
+                  <div className="s-desc">
+                    While this is on, each checked server&rsquo;s connection is held open and never
+                    goes idle, so <strong>Keep authenticated connection</strong> under SSH sessions
+                    stops applying to them at any setting. On a server with two-factor
+                    authentication that means no new code is requested until you turn this off or
+                    quit.
+                  </div>
                   <FleetSamplerLine />
                 </div>
                 <span
