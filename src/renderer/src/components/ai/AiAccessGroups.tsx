@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Trash2, Save, SlidersHorizontal, FolderTree, ChevronRight, TriangleAlert, X } from 'lucide-react'
 import { toast } from '../../store/toast'
 import { useNav } from '../../store/nav'
@@ -436,9 +436,15 @@ export function AiAccessGroups(): React.JSX.Element {
 
   // Somebody sent the user here to look at one particular group — open it,
   // rather than dropping them on whichever group happened to be selected.
+  //
+  // Through selectGroup, not setSelectedId: a deep link is no more entitled to
+  // throw away unsaved edits than a card click is. If there are any, the same
+  // Save / Discard / Keep editing row appears and the link waits behind it.
+  // Held in a ref so this does not have to list selectGroup as a dependency
+  // and re-run on every render.
   useEffect(() => {
     if (!focusGroupId) return
-    setSelectedId(focusGroupId)
+    selectGroupRef.current(focusGroupId)
     clearAiGroup()
   }, [focusGroupId, clearAiGroup])
 
@@ -459,6 +465,11 @@ export function AiAccessGroups(): React.JSX.Element {
     setSelectedId(id)
   }
 
+  const selectGroupRef = useRef(selectGroup)
+  useEffect(() => {
+    selectGroupRef.current = selectGroup
+  })
+
   // Was window.prompt(), which Electron does not implement: the button threw
   // and nothing happened at all. Naming it in place also puts the new group's
   // settings on screen the moment it exists.
@@ -469,11 +480,22 @@ export function AiAccessGroups(): React.JSX.Element {
       const g = await window.shellpilot?.aiPolicy.createGroup(name)
       if (!g) throw new Error('No group came back')
       setNewName(null)
-      setSelectedId(g.id)
       load()
-      // Deliberately not "created, you're done": a new group is not empty, it
-      // arrives with defaults, and the summary showing them is right below.
-      toast(`Created ${g.name}. Read what its card says it allows before you assign it to anything.`, 'ok')
+      // The group exists either way — the IPC has already returned — so this is
+      // only about whether to jump to it now. Jumping unconditionally was the
+      // third way to lose unsaved edits, after the card click and the deep link.
+      if (dirty) {
+        setPendingId(g.id)
+        toast(`Created ${g.name}. It is not open yet — you have unsaved changes here.`, 'ok')
+      } else {
+        setSelectedId(g.id)
+        // Deliberately not "created, you're done": a new group is not empty, it
+        // arrives with defaults, and the summary showing them is right below.
+        toast(
+          `Created ${g.name}. Read what its card says it allows before you assign it to anything.`,
+          'ok'
+        )
+      }
     } catch (err) {
       toast(`${name} was not created: ${err instanceof Error ? err.message : String(err)}`, 'error', {
         label: 'Try again',

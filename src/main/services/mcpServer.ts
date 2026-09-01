@@ -37,6 +37,7 @@ import {
   type Decision
 } from './policyEngine'
 import { getGroup, listAssignments } from './policyStore'
+import { fleetCached } from './fleetSampler'
 import { requestApproval } from './approvals'
 import { recordAudit } from './auditLog'
 import { redactOutput } from './secretRedaction'
@@ -463,6 +464,17 @@ function tunnelConfigFor(t: CachedTunnel): Parameters<typeof tunnelStart>[1] {
 // "systemd ran and nothing is failing" are different answers, and collapsing
 // them into an empty list tells an agent the host is healthy when the truth is
 // that nobody looked.
+// How far past a sweep interval a cached sample is still worth answering from.
+// A sweep is due every interval, so a sample older than this means the sampler
+// is behind or stopped, and a fresh connection is the honest answer.
+const FLEET_STALE_FACTOR = 1.5
+
+function agePhrase(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s ago`
+  const mins = Math.round(ms / 60_000)
+  return mins === 1 ? '1 minute ago' : `${mins} minutes ago`
+}
+
 // Everything below here is text the remote host wrote about itself, and the host
 // an agent is asked to diagnose is exactly the host that may already be
 // compromised. A unit's Description= is whatever wrote the unit file, a process
@@ -919,14 +931,47 @@ function buildServer(): McpServer {
       const gated = await gate(ctx, check, 'low', extra)
       if (!gated.ok) return gated.result
 
-      const cfg = resolveChainSecrets(serverToSshConfig(s))
-      const result = await metricsSample(`mcp:${s.id}`, cfg)
-      if (!result.ok || !result.data) {
-        recordAudit({ ...auditBase(ctx), approval: 'not-required', result: 'error', error: result.error })
-        return errorText(`Could not sample metrics: ${result.error ?? 'unknown error'}`)
+      // Answer from the Fleet Monitor's own sample when it has a current one.
+      //
+      // This tool used to always open its own connection under an `mcp:` key,
+      // which meant a third authenticated session per server alongside the
+      // foreground monitor and the background sampler, and an agent reporting
+      // numbers that disagreed with the monitor the user was looking at. The
+      // sampler is already asking these exact questions on a schedule; the
+      // bridge just never read the answers.
+      //
+      // The age is always stated. An agent reasoning about "which units are
+      // failing right now" must be able to tell a 30-second-old answer from a
+      // 10-minute-old one, and silently presenting cached data as current is
+      // the failure this is supposed to remove, not introduce.
+      const cached = fleetCached(s.id)
+      const cachedAt = cached?.entry.at
+      const age = cachedAt === undefined ? Infinity : Date.now() - cachedAt
+      const errorIsNewer =
+        cached?.entry.errorAt !== undefined && cached.entry.errorAt >= (cachedAt ?? -Infinity)
+      // A more recent failure means the cache is describing a host that has
+      // since stopped answering. Sample instead: it either succeeds, which the
+      // cache could not have told us, or fails with a live reason.
+      const usable =
+        cached?.entry.host && !errorIsNewer && age <= cached.intervalMs * FLEET_STALE_FACTOR
+
+      let m: HostMetrics
+      let provenance: string
+      if (usable && cached?.entry.host) {
+        m = cached.entry.host
+        provenance = `Taken by background checking ${agePhrase(age)}, not sampled just now.`
+        auditSuccess(ctx, 'not-required')
+      } else {
+        const cfg = resolveChainSecrets(serverToSshConfig(s))
+        const result = await metricsSample(`mcp:${s.id}`, cfg)
+        if (!result.ok || !result.data) {
+          recordAudit({ ...auditBase(ctx), approval: 'not-required', result: 'error', error: result.error })
+          return errorText(`Could not sample metrics: ${result.error ?? 'unknown error'}`)
+        }
+        auditSuccess(ctx, 'not-required')
+        m = result.data
+        provenance = 'Sampled just now.'
       }
-      auditSuccess(ctx, 'not-required')
-      const m = result.data
       // The numbers come first and stay outside the marked block: they were
       // parsed into a shape, and a percentage cannot carry a sentence. Every
       // free-text field the host chose — its hostname, its kernel string, unit
@@ -937,6 +982,7 @@ function buildServer(): McpServer {
           `Memory: ${m.memPct.toFixed(1)}% (${m.memUsed}/${m.memTotal} bytes)`,
           `Disk: ${m.diskPct.toFixed(1)}% (${m.diskUsed}/${m.diskTotal} bytes)`,
           `Uptime: ${Math.round(m.uptime / 3600)}h`,
+          provenance,
           '',
           hostReportedBlock(
             [

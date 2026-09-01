@@ -23,6 +23,8 @@ interface Harness {
   calls: string[]
   released: string[]
   setUnlocked: (v: boolean) => void
+  /** Make the next sample (only the next) report a failure. */
+  failNext: (error: string) => void
   resolveAll: () => void
 }
 
@@ -31,12 +33,18 @@ function harness(over: { slow?: boolean } = {}): Harness {
   const calls: string[] = []
   const released: string[] = []
   let unlocked = true
+  let failWith: string | null = null
   const pending: (() => void)[] = []
 
   const sampler = new FleetSampler({
     sample: async (key) => {
       calls.push(key)
       if (over.slow) await new Promise<void>((r) => pending.push(r))
+      if (failWith !== null) {
+        const error = failWith
+        failWith = null
+        return { ok: false, error }
+      }
       return { ok: true, data: { hostname: key } }
     },
     release: (k) => released.push(k),
@@ -51,6 +59,9 @@ function harness(over: { slow?: boolean } = {}): Harness {
     released,
     setUnlocked: (v) => {
       unlocked = v
+    },
+    failNext: (error) => {
+      failWith = error
     },
     resolveAll: () => {
       while (pending.length) pending.shift()!()
@@ -426,5 +437,80 @@ describe('the monitor asking for a sweep before it has been configured', () => {
   it('reports no-targets rather than running while it waits', () => {
     const h = harness()
     expect(h.sampler.status()).toMatchObject({ running: false, idleReason: 'disabled' })
+  })
+})
+
+// The sampler is already asking every server these questions on a schedule.
+// get_server_metrics used to ignore that entirely and open its own connection
+// under an `mcp:` key — a third authenticated session per server, and an agent
+// quoting numbers that disagreed with the monitor on screen. What is pinned
+// here is the cache the bridge reads, because a cache is exactly where an
+// agent starts answering "what is failing right now" from stale data.
+describe('what the sampler remembers for the MCP bridge', () => {
+  it('knows nothing about a server it has never swept', () => {
+    const h = harness()
+    expect(h.sampler.lookup('a')).toBeUndefined()
+  })
+
+  it('remembers a successful sample, with when it was taken', async () => {
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    const found = h.sampler.lookup('a')
+    expect(found?.entry.host).toMatchObject({ hostname: fleetKey('a') })
+    expect(found?.entry.at).toBe(Date.now())
+    // The interval comes with it: "stale" means nothing without knowing how
+    // often this is supposed to refresh.
+    expect(found?.intervalMs).toBe(60_000)
+  })
+
+  it('keeps the last good sample when a later sweep fails', async () => {
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    const goodAt = h.sampler.lookup('a')?.entry.at
+
+    h.failNext('host unreachable')
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    const found = h.sampler.lookup('a')
+    // Both facts survive. "It was fine a minute ago" and "it is not answering
+    // now" are different answers and an agent needs each of them.
+    expect(found?.entry.host).toBeTruthy()
+    expect(found?.entry.at).toBe(goodAt)
+    expect(found?.entry.error).toBe('host unreachable')
+  })
+
+  it('clears the error once the host answers again', async () => {
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    h.failNext('boom')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.sampler.lookup('a')?.entry.error).toBe('boom')
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.sampler.lookup('a')?.entry.error).toBeUndefined()
+  })
+
+  it('forgets a server dropped from the workspace', async () => {
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a'), target('b')] })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.sampler.lookup('a')).toBeTruthy()
+
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('b')] })
+    // Otherwise a removed server keeps answering MCP questions from a sample
+    // nothing can ever refresh.
+    expect(h.sampler.lookup('a')).toBeUndefined()
+    expect(h.sampler.lookup('b')).toBeTruthy()
+  })
+
+  it('forgets everything on dispose', async () => {
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    h.sampler.dispose()
+    expect(h.sampler.lookup('a')).toBeUndefined()
   })
 })

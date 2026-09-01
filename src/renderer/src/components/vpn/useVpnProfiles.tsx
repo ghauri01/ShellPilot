@@ -14,10 +14,10 @@ import type {
   VpnEngineInfo,
   VpnErrorCode,
   VpnKind,
-  VpnProfile
+  VpnProfile,
+  VpnResult,
+  VpnStartResult
 } from '../../types'
-// Not re-exported by ../../types, and adding them there is not this change.
-import type { VpnResult, VpnStartResult } from '../../../../shared/vpn'
 import {
   HealthChip,
   HealthDot,

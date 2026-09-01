@@ -5,6 +5,7 @@ import type {
   FleetSamplerStatus,
   FleetTarget
 } from '../../shared/fleet'
+import type { HostMetrics } from '../../shared/ssh'
 import {
   FLEET_INTERVAL_DEFAULT_MS,
   FLEET_INTERVAL_MAX_MS,
@@ -87,6 +88,44 @@ export function clampInterval(ms: number): number {
 // cadences and either may be cancelled independently.
 export const fleetKey = (serverId: string): string => `fleet:${serverId}`
 
+/**
+ * What the sampler last learned about a server, kept so the MCP bridge can
+ * answer from it instead of opening a connection of its own.
+ *
+ * Shaped like the renderer's fleet store on purpose: a success clears the
+ * error, and an error KEEPS the last good sample. "This host was fine ten
+ * minutes ago and is unreachable now" is two facts and an agent needs both.
+ */
+export interface FleetCacheEntry {
+  /** Last successful sample, if there has ever been one. */
+  host?: HostMetrics
+  /** When `host` was taken. */
+  at?: number
+  /** Set when the most recent attempt failed; cleared by a success. */
+  error?: string
+  errorAt?: number
+}
+
+export interface FleetLookup {
+  entry: FleetCacheEntry
+  /** The configured sweep interval, so a caller can judge what "stale" means. */
+  intervalMs: number
+}
+
+// The MCP bridge reads the cache through this rather than being handed the
+// sampler: startMcpServer() takes no arguments and is called from four places,
+// none of which has one. main/index.ts owns the instance and registers it here.
+let active: FleetSampler | null = null
+
+export function setActiveFleetSampler(sampler: FleetSampler | null): void {
+  active = sampler
+}
+
+/** The sampler's own view of a server, or undefined if it has none. */
+export function fleetCached(serverId: string): FleetLookup | undefined {
+  return active?.lookup(serverId)
+}
+
 export class FleetSampler {
   private cfg: FleetSamplerConfig = { enabled: false, intervalMs: FLEET_INTERVAL_MIN_MS, targets: [] }
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -102,6 +141,10 @@ export class FleetSampler {
   // across a reconfigure checks this before scheduling the next one, so a
   // stale sweep cannot resurrect a loop the caller has just stopped.
   private generation = 0
+  // Last known state per server. Bounded by the target list: configure() drops
+  // entries for anything no longer watched, in the same pass that hands back
+  // its connection.
+  private samples = new Map<string, FleetCacheEntry>()
 
   constructor(private readonly deps: FleetSamplerDeps) {}
 
@@ -120,7 +163,13 @@ export class FleetSampler {
     // off. Otherwise the pool keeps an authenticated master alive for a host
     // nobody is asking about any more.
     const keep = new Set(next.enabled ? next.targets.map((t) => t.serverId) : [])
-    for (const id of previous) if (!keep.has(id)) this.deps.release(fleetKey(id))
+    for (const id of previous) {
+      if (keep.has(id)) continue
+      this.deps.release(fleetKey(id))
+      // Drop what we knew about it too. A server removed from the workspace
+      // must not keep answering MCP questions from a sample nobody can refresh.
+      this.samples.delete(id)
+    }
 
     this.stopTimer()
     if (this.shouldRun()) this.schedule(0)
@@ -128,6 +177,12 @@ export class FleetSampler {
 
   private shouldRun(): boolean {
     return this.cfg.enabled && this.cfg.targets.length > 0 && this.deps.vaultUnlocked()
+  }
+
+  /** What this sampler last learned about one server. */
+  lookup(serverId: string): FleetLookup | undefined {
+    const entry = this.samples.get(serverId)
+    return entry ? { entry, intervalMs: this.cfg.intervalMs } : undefined
   }
 
   status(): FleetSamplerStatus {
@@ -166,6 +221,17 @@ export class FleetSampler {
   async sampleNow(): Promise<void> {
     if (!this.cfg.enabled || this.cfg.targets.length === 0) return
     await this.sweep('requested')
+  }
+
+  // A success clears the recorded error; a failure keeps the last good sample.
+  private remember(serverId: string, next: FleetCacheEntry): void {
+    const previous = this.samples.get(serverId)
+    this.samples.set(
+      serverId,
+      next.host
+        ? { host: next.host, at: next.at }
+        : { host: previous?.host, at: previous?.at, error: next.error, errorAt: next.errorAt }
+    )
   }
 
   private async sweep(reason: FleetSampleReason): Promise<void> {
@@ -209,6 +275,11 @@ export class FleetSampler {
         try {
           const res = await this.deps.sample(fleetKey(t.serverId), t.cfg)
           if (gen !== this.generation || this.disposed) return
+          if (res.ok && res.data) {
+            this.remember(t.serverId, { host: res.data as HostMetrics, at: this.now })
+          } else {
+            this.remember(t.serverId, { error: res.error ?? 'unavailable', errorAt: this.now })
+          }
           this.deps.emit(
             res.ok && res.data
               ? { serverId: t.serverId, reason, at: this.now, host: res.data as FleetSampleEvent['host'] }
@@ -217,12 +288,9 @@ export class FleetSampler {
         } catch (err) {
           // One unreachable host must not end the sweep: the others are the
           // reason it is running.
-          this.deps.emit({
-            serverId: t.serverId,
-            reason,
-            at: this.now,
-            error: err instanceof Error ? err.message : String(err)
-          })
+          const message = err instanceof Error ? err.message : String(err)
+          this.remember(t.serverId, { error: message, errorAt: this.now })
+          this.deps.emit({ serverId: t.serverId, reason, at: this.now, error: message })
         }
       }
       this.lastSweepAt = this.now
@@ -251,5 +319,7 @@ export class FleetSampler {
     this.stopTimer()
     // Stopping the timer is not enough: the pooled connections outlive it.
     for (const t of this.cfg.targets) this.deps.release(fleetKey(t.serverId))
+    this.samples.clear()
+    if (active === this) active = null
   }
 }

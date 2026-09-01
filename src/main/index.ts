@@ -46,7 +46,7 @@ import {
   sftpDisposeAll
 } from './services/sftp'
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
-import { FleetSampler } from './services/fleetSampler'
+import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
   webhookConfigure,
@@ -576,6 +576,10 @@ const fleetSampler = new FleetSampler({
     return !s.exists || s.unlocked
   }
 })
+
+// So get_server_metrics can answer from what the monitor already sampled
+// instead of opening a third connection per server.
+setActiveFleetSampler(fleetSampler)
 
 ipcMain.handle('fleet:configure', (_e, cfg: FleetSamplerConfig) => {
   fleetSampler.configure(cfg)
