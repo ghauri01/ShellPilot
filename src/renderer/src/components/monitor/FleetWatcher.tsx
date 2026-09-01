@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import { useApp, useWorkspaceServers } from '../../store/app'
 import { useFleet } from '../../store/fleet'
-import { checkResourceAlerts } from '../../store/alerts'
+import { checkResourceAlerts, checkUnitAlerts } from '../../store/alerts'
 import { bridgeOn } from '../../lib/bridge'
 import { sshHopsFor } from '../../lib/ssh'
 import type { FleetTarget } from '../../../../shared/fleet'
@@ -69,6 +69,17 @@ export function FleetWatcher(): null {
       // was already looking at the screen that would have shown the problem.
       const name = servers.find((s) => s.id === e.serverId)?.name ?? e.serverId
       checkResourceAlerts(e.serverId, name, e.host.cpu, e.host.memPct)
+      // The reason the feature exists. A failed unit does not move a CPU or
+      // memory graph, so thresholds would never have caught the case this was
+      // built for. `null` stays null: "systemd was not visible" is not "nothing
+      // is failing", and flattening it would post a false all-clear.
+      checkUnitAlerts(
+        e.serverId,
+        name,
+        e.host.services === null
+          ? null
+          : e.host.services.filter((u) => u.active === 'failed' || u.sub === 'failed').map((u) => u.name)
+      )
     })
     return () => off?.()
     // `servers` is read only to name a server in an alert; re-subscribing on

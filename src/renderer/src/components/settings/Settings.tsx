@@ -26,6 +26,7 @@ import { BackupPanel } from './BackupPanel'
 import { UpdatePanel } from './UpdatePanel'
 import { useOnboarding } from '../../store/onboarding'
 import { SshSessions } from './SshSessions'
+import { WebhookAlertSettings } from './WebhookAlertSettings'
 import { toast } from '../../store/toast'
 
 // Keyed by the nav store's union rather than by a list that describes itself,
@@ -446,6 +447,7 @@ export function Settings(): React.JSX.Element {
                   ))}
                 </div>
               </div>
+              <WebhookAlertSettings />
               <SettingSwitch
                 label="Show monitor under the terminal"
                 desc="Live CPU, memory, disk and network docked below the session. Sampling only runs for the visible tab."

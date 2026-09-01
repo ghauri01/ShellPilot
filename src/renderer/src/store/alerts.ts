@@ -1,6 +1,14 @@
 import { create } from 'zustand'
 import { useApp } from './app'
 
+// Stamped into every outbound payload so a shared endpoint can tell which
+// version posted. Read once: app.getVersion() is an IPC round trip and this is
+// on the alert path.
+let APP_VERSION = '0.0.0'
+void window.shellpilot?.getVersion?.().then((v) => {
+  APP_VERSION = v
+})
+
 // Resource alerts.
 //
 // Deliberately unobtrusive: a native OS notification (which renders outside the
@@ -66,6 +74,21 @@ function evaluate(
         delete active[k]
         return { active }
       })
+      // Only on an actual transition, so a host sitting comfortably below the
+      // threshold does not post "resolved" on every sample. An alert with no
+      // resolution leaves the reader to work out whether it is still
+      // happening, which is why this is worth sending at all.
+      void window.shellpilot?.webhook?.notify({
+        source: 'shellpilot',
+        version: APP_VERSION,
+        event: 'resolved',
+        kind: kind === 'cpu' ? 'cpu' : 'memory',
+        server: serverName,
+        summary: `${serverName}: ${LABEL[kind]} back below ${threshold}%`,
+        at: new Date(now).toISOString(),
+        value: Math.round(value),
+        threshold
+      })
     }
     lastNotified.delete(k)
     return
@@ -89,6 +112,86 @@ function evaluate(
     `${serverName}: ${LABEL[kind]} at ${value.toFixed(0)}%`,
     `${LABEL[kind]} has been at or above ${threshold}%${forHow}.`
   )
+  // Same repeat window as the desktop notification, so the endpoint sees the
+  // same cadence a person does rather than one message per sample.
+  void window.shellpilot?.webhook?.notify({
+    source: 'shellpilot',
+    version: APP_VERSION,
+    event: 'raised',
+    kind: kind === 'cpu' ? 'cpu' : 'memory',
+    server: serverName,
+    summary: `${serverName}: ${LABEL[kind]} at ${value.toFixed(0)}% (threshold ${threshold}%)`,
+    at: new Date(now).toISOString(),
+    value: Math.round(value),
+    threshold,
+    ...(mins >= 1 ? { minutes: mins } : {})
+  })
+}
+
+// Failed systemd units, per server.
+//
+// The reason this feature exists: the reference case was four failed units
+// found by opening the app and looking. CPU and memory thresholds never would
+// have caught it — a failed unit does not move a graph.
+//
+// Alerts fire on a TRANSITION into failure, so a unit that has been down for a
+// week does not re-announce itself every sweep. Resolution fires when the set
+// empties, which is the "it is fixed" message that makes the first one worth
+// reading.
+const failedUnits = new Map<string, Set<string>>()
+
+export function checkUnitAlerts(serverId: string, serverName: string, units: string[] | null): void {
+  // null is "we could not see systemd", not "nothing is failing" — the same
+  // distinction HostMetrics is careful about. Treating it as an empty set
+  // would post a resolution for a host nobody could ask.
+  if (units === null) return
+  if (!useApp.getState().settings.resourceAlertsEnabled) return
+
+  const now = Date.now()
+  const previous = failedUnits.get(serverId) ?? new Set<string>()
+  const current = new Set(units)
+  const fresh = units.filter((u) => !previous.has(u))
+
+  if (current.size === 0) failedUnits.delete(serverId)
+  else failedUnits.set(serverId, current)
+
+  if (fresh.length > 0) {
+    const what = fresh.length === 1 ? fresh[0] : `${fresh.length} units`
+    void window.shellpilot?.notify.show(
+      `${serverName}: ${what} failed`,
+      fresh.join(', ')
+    )
+    void window.shellpilot?.webhook?.notify({
+      source: 'shellpilot',
+      version: APP_VERSION,
+      event: 'raised',
+      kind: 'unit-failed',
+      server: serverName,
+      summary: `${serverName}: ${what} failed`,
+      at: new Date(now).toISOString(),
+      units: fresh
+    })
+    return
+  }
+
+  if (previous.size > 0 && current.size === 0) {
+    void window.shellpilot?.webhook?.notify({
+      source: 'shellpilot',
+      version: APP_VERSION,
+      event: 'resolved',
+      kind: 'unit-failed',
+      server: serverName,
+      summary: `${serverName}: all previously failed units are running again`,
+      at: new Date(now).toISOString(),
+      units: [...previous]
+    })
+  }
+}
+
+/** Forgets a server's failure history, so removing and re-adding it does not
+ *  suppress the first alert. */
+export function clearUnitAlerts(serverId: string): void {
+  failedUnits.delete(serverId)
 }
 
 // Called from the metrics hook on each sample.

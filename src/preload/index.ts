@@ -12,6 +12,12 @@ import type {
 } from '../shared/ssh'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type {
+  AlertPayload,
+  WebhookConfig,
+  WebhookDeliveryStatus,
+  WebhookTestResult
+} from '../shared/webhook'
+import type {
   LocalCloseInfo,
   LocalConnectConfig,
   LocalShell,
@@ -218,6 +224,19 @@ const api = {
     sample: (key: string, cfg: SshConnectConfig & { serverId?: string }): Promise<MetricsResult> =>
       ipcRenderer.invoke('metrics:sample', key, cfg),
     disconnect: (key: string): Promise<void> => ipcRenderer.invoke('metrics:disconnect', key)
+  },
+  // Outbound alert delivery. The URL never comes back across this bridge —
+  // `status()` reports only whether one is set, because it is a bearer
+  // credential and the renderer has no use for its value.
+  webhook: {
+    status: (): Promise<WebhookConfig> => ipcRenderer.invoke('webhook:status'),
+    delivery: (): Promise<WebhookDeliveryStatus> => ipcRenderer.invoke('webhook:delivery'),
+    configure: (cfg: { enabled: boolean; notifyOnResolved: boolean }): Promise<WebhookConfig> =>
+      ipcRenderer.invoke('webhook:configure', cfg),
+    setUrl: (url: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('webhook:set-url', url),
+    test: (): Promise<WebhookTestResult> => ipcRenderer.invoke('webhook:test'),
+    notify: (payload: AlertPayload): Promise<void> => ipcRenderer.invoke('webhook:notify', payload)
   },
   // Background sampling of the whole estate, scheduled in main so it continues
   // when the monitor is not on screen. `metrics` above is the foreground path:

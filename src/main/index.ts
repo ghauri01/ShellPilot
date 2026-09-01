@@ -48,6 +48,15 @@ import {
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { FleetSampler } from './services/fleetSampler'
 import type { FleetSamplerConfig } from '../shared/fleet'
+import {
+  webhookConfigure,
+  webhookStatus,
+  webhookDeliveryStatus,
+  webhookSetUrl,
+  webhookTest,
+  webhookNotify
+} from './services/webhookAlerts'
+import type { AlertPayload } from '../shared/webhook'
 import { dbTest, dbQuery, dbInfo, dbClose, dbDisposeAll } from './services/db'
 import { dbShell } from './services/dbshell'
 import type { DbConnectConfig } from '../shared/db'
@@ -568,6 +577,29 @@ ipcMain.handle('fleet:configure', (_e, cfg: FleetSamplerConfig) => {
   return fleetSampler.status()
 })
 ipcMain.handle('fleet:status', () => fleetSampler.status())
+
+// ---- Webhook alerts ----
+//
+// Delivery lives in main because the renderer's CSP is `connect-src 'self'`
+// and cannot make this call — and should not. Keeping it here means the
+// webhook URL, which is a bearer credential, never crosses into the renderer,
+// so a compromised renderer can neither read it nor aim it somewhere else.
+//
+// Deliberately NOT reachable from the MCP bridge. An agent that can point a
+// webhook at an endpoint it controls has an exfiltration channel out of an app
+// whose whole claim is that credentials do not leave it. The tool whitelist in
+// tests/localTerminalNotExposed.test.ts fails if anything new is registered,
+// which is what keeps that true without anyone having to remember it.
+ipcMain.handle('webhook:status', () => webhookStatus())
+ipcMain.handle('webhook:delivery', () => webhookDeliveryStatus())
+ipcMain.handle('webhook:configure', (_e, cfg: { enabled: boolean; notifyOnResolved: boolean }) =>
+  webhookConfigure(cfg)
+)
+ipcMain.handle('webhook:set-url', (_e, url: string) => webhookSetUrl(url))
+ipcMain.handle('webhook:test', () => webhookTest())
+ipcMain.handle('webhook:notify', (_e, payload: AlertPayload) => {
+  webhookNotify(payload)
+})
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()
   return fleetSampler.status()
