@@ -19,8 +19,9 @@ import { useNav } from '../../store/nav'
 import type { SettingsSection } from '../../store/nav'
 import { useVault } from '../../store/vault'
 import { useVaultPrompt } from '../../store/vaultPrompt'
-import { clsx } from '../../lib/format'
+import { clsx, duration } from '../../lib/format'
 import { bridgeOn } from '../../lib/bridge'
+import type { FleetSamplerStatus } from '../../../../shared/fleet'
 import { ShortcutManager } from './ShortcutManager'
 import { BackupPanel } from './BackupPanel'
 import { UpdatePanel } from './UpdatePanel'
@@ -87,6 +88,82 @@ function SettingSwitch({
       <span className={clsx('switch', checked && 'on')} onClick={() => onChange(!checked)} />
     </div>
   )
+}
+
+// What the background sampler is actually doing.
+//
+// The switch above reports intent, and intent is not the interesting part: a
+// locked vault, a workspace with nothing to sample, and a loop that has stopped
+// all present as a switch in the "on" position and a screen that looks exactly
+// like a healthy one. fleet.status() is the only thing that can tell them
+// apart, and until this it was wired through IPC and read by nobody.
+function FleetSamplerLine(): React.JSX.Element | null {
+  const [status, setStatus] = useState<FleetSamplerStatus | null>(null)
+
+  // Polled rather than pushed: main emits an event per sample, not per status
+  // change, and these numbers move on the order of a sweep. Ten seconds is
+  // slow enough to be free and fast enough that a vault unlocked in another
+  // window is reflected before the user gives up on it. The interval is
+  // cleared with the pane, so nothing polls while Settings is closed.
+  useEffect(() => {
+    let live = true
+    const read = (): void => {
+      void window.shellpilot?.fleet?.status().then((s) => {
+        if (live && s) setStatus(s)
+      })
+    }
+    read()
+    const t = setInterval(read, 10_000)
+    return () => {
+      live = false
+      clearInterval(t)
+    }
+  }, [])
+
+  // 'disabled' is the one idle reason the switch already explains.
+  if (!status || status.idleReason === 'disabled') return null
+
+  if (status.idleReason === 'vault-locked') {
+    return (
+      <div className="s-desc warn">
+        Paused — the vault is locked. Unlock it to resume checking.
+      </div>
+    )
+  }
+  if (status.idleReason === 'no-targets') {
+    return (
+      <div className="s-desc warn">
+        Nothing to check — this workspace has no servers that can be sampled.
+      </div>
+    )
+  }
+  // Enabled, targets, vault open — and still not looping. Said plainly,
+  // because the alternative is a settings screen that affirms everything is
+  // fine while nothing has been sampled for hours.
+  if (!status.running) {
+    const since = status.lastSweepAt
+      ? `nothing has been checked for ${duration(status.lastSweepAt)}`
+      : 'no pass has ever run'
+    return (
+      <div className="s-desc danger">
+        {`Switched on, but nothing is scheduled — ${since}. Turn this off and on again to restart it.`}
+      </div>
+    )
+  }
+
+  const servers = `${status.targetCount} server${status.targetCount === 1 ? '' : 's'}`
+  return (
+    <div className="s-desc ok">
+      {status.lastSweepAt
+        ? `Running · ${servers} · last pass ${duration(status.lastSweepAt)} ago, took ${sweepDuration(status.lastSweepMs)}`
+        : `Running · ${servers} · first pass has not finished yet`}
+    </div>
+  )
+}
+
+function sweepDuration(ms: number | undefined): string {
+  if (ms === undefined) return '—'
+  return ms < 1000 ? `${ms} ms` : `${Math.round(ms / 1000)}s`
 }
 
 // Real data: the SSH host keys trusted on first use. Forgetting one is how a
@@ -385,10 +462,16 @@ export function Settings(): React.JSX.Element {
           {section === 'monitoring' && (
             <div className="settings-section">
               <h2>Monitoring</h2>
-              <div className="sub">Host metrics and resource alerts.</div>
+              <div className="sub">
+                Alerts, background checking, webhook delivery, and the monitor strip.
+              </div>
+              {/* The settings KEY stays `resourceAlertsEnabled` so saved settings
+                  still load, but the label was only ever half true: this switch
+                  gates checkUnitAlerts as well as checkResourceAlerts, and every
+                  webhook is posted from inside one of the two. */}
               <SettingSwitch
-                label="Resource alerts"
-                desc="Notify when a host's CPU or memory stays at or above the threshold. Repeats once a minute while it lasts, and clears itself on recovery."
+                label="Alerts"
+                desc="The master switch. Covers CPU and memory at or above the threshold, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. Alerts repeat once a minute while a condition lasts, and clear themselves on recovery."
                 checked={settings.resourceAlertsEnabled}
                 onChange={(v) => setSettings({ resourceAlertsEnabled: v })}
               />
@@ -396,7 +479,7 @@ export function Settings(): React.JSX.Element {
                 <div className="s-info">
                   <div className="s-title">Alert threshold</div>
                   <div className="s-desc">
-                    Alerts use metrics already being sampled, so they add no extra load.{' '}
+                    The same figure applies to CPU and to memory.{' '}
                     {settings.fleetSamplingEnabled
                       ? 'Background checks are on, so alerts fire wherever you are in the app.'
                       : 'Without background checks below, a host is only sampled while its monitor is on screen — so an alert can only fire while you are already looking at it.'}
@@ -415,12 +498,27 @@ export function Settings(): React.JSX.Element {
                   ))}
                 </div>
               </div>
-              <SettingSwitch
-                label="Check servers in the background"
-                desc="Sample every server in this workspace on a schedule, even when the monitor is not open, so failures and resource alerts are noticed while you are elsewhere. Keeps connections to the estate open and needs the vault unlocked; while it is locked, checking pauses rather than failing."
-                checked={settings.fleetSamplingEnabled}
-                onChange={(v) => setSettings({ fleetSamplingEnabled: v })}
-              />
+              {/* Not SettingSwitch: this row needs the sampler's real state
+                  under the description, and the switch component owns its own
+                  desc. Same markup, so it stays visually identical. */}
+              <div className="setting-row">
+                <div className="s-info">
+                  <div className="s-title">Check servers in the background</div>
+                  <div className="s-desc">
+                    Sample every server in this workspace on a schedule, even when the monitor is
+                    not open, so failures and resource alerts are noticed while you are elsewhere.
+                    Opens one SSH exec channel per server per pass, separately from the monitor, so
+                    it is real load on the estate rather than a reuse of what is already sampled.
+                    Needs the vault unlocked; while it is locked, checking pauses rather than
+                    failing.
+                  </div>
+                  <FleetSamplerLine />
+                </div>
+                <span
+                  className={clsx('switch', settings.fleetSamplingEnabled && 'on')}
+                  onClick={() => setSettings({ fleetSamplingEnabled: !settings.fleetSamplingEnabled })}
+                />
+              </div>
               <div className="setting-row">
                 <div className="s-info">
                   <div className="s-title">How often</div>

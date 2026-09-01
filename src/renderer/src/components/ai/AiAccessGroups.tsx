@@ -81,7 +81,11 @@ function GroupEditor({ group, summary, onChange, onSave, onDelete }: {
   onSave: () => void
   onDelete: () => void
 }): React.JSX.Element {
-  const files = summariseFilePolicies(group.filePolicies)
+  // Passing the capabilities in is what lets this header say which rules grant
+  // MORE than the grid above does. evaluateFilePath returns the most specific
+  // matching rule before it ever looks at the blanket capability, so that
+  // number is not a footnote — it is the set of rules that outrank the grid.
+  const files = summariseFilePolicies(group.filePolicies, group.capabilities)
   const setCap = (cap: AiCapability, value: PermissionValue): void => {
     onChange({ ...group, capabilities: { ...group.capabilities, [cap]: value } })
   }
@@ -93,7 +97,14 @@ function GroupEditor({ group, summary, onChange, onSave, onDelete }: {
   const addRule = (): void => {
     onChange({
       ...group,
-      filePolicies: [...group.filePolicies, { id: `fp-${Date.now()}`, pattern: '/path/**', write: 'ask' }]
+      // Not Date.now(): two rules added inside the same millisecond shared an
+      // id, and both setRule and removeRule match on it — so editing one
+      // pattern rewrote the other, and deleting one deleted both. React keyed
+      // the rows on it too, which is how it looked like a rendering glitch.
+      filePolicies: [
+        ...group.filePolicies,
+        { id: `fp-${crypto.randomUUID()}`, pattern: '/path/**', write: 'ask' }
+      ]
     })
   }
 
@@ -401,6 +412,9 @@ export function AiAccessGroups(): React.JSX.Element {
   const [groups, setGroups] = useState<AccessGroup[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [draft, setDraft] = useState<AccessGroup | null>(null)
+  // The group the user clicked while the current one had unsaved edits. Held
+  // here rather than applied, so the choice is theirs.
+  const [pendingId, setPendingId] = useState<string | null>(null)
   // null = not naming a new group. '' = the naming row is open and empty.
   const [newName, setNewName] = useState<string | null>(null)
   const focusGroupId = useNav((s) => s.aiGroupId)
@@ -426,6 +440,19 @@ export function AiAccessGroups(): React.JSX.Element {
     setDraft(groups.find((g) => g.id === selectedId) ?? null)
   }, [selectedId, groups])
 
+  const stored = useMemo(() => groups.find((g) => g.id === selectedId) ?? null, [groups, selectedId])
+  // The card for the group being edited renders from `draft`, so every keystroke
+  // in the grid below updates the sentence above — which reads as "applied".
+  // Nothing is, until Save. Comparing against what is stored is the only way to
+  // know whether clicking another card would throw work away.
+  const dirty = !!draft && !!stored && JSON.stringify(draft) !== JSON.stringify(stored)
+
+  const selectGroup = (id: string): void => {
+    if (id === selectedId) return
+    if (dirty) return setPendingId(id)
+    setSelectedId(id)
+  }
+
   // Was window.prompt(), which Electron does not implement: the button threw
   // and nothing happened at all. Naming it in place also puts the new group's
   // settings on screen the moment it exists.
@@ -449,12 +476,13 @@ export function AiAccessGroups(): React.JSX.Element {
     }
   }
 
-  const saveGroup = async (): Promise<void> => {
-    if (!draft) return
+  const saveGroup = async (): Promise<boolean> => {
+    if (!draft) return false
     try {
       await window.shellpilot?.aiPolicy.saveGroup(draft)
       toast(`Saved ${draft.name}`, 'ok')
       load()
+      return true
     } catch (err) {
       // Reload so the editor shows what is actually stored — leaving unsaved
       // edits on screen next to a failure reads as if they took effect.
@@ -463,25 +491,56 @@ export function AiAccessGroups(): React.JSX.Element {
         label: 'Try again',
         run: () => void saveGroup()
       })
+      return false
+    }
+  }
+
+  // Takes id and name rather than reading `draft`, because the retry runs after
+  // a reload that may already have dropped the group from the list — see the
+  // divergence the catch below describes.
+  const deleteGroupById = async (id: string, name: string): Promise<void> => {
+    try {
+      const result = await window.shellpilot?.aiPolicy.deleteGroup(id)
+      // No bridge means nothing was deleted. `result && !result.ok` read that
+      // as success and toasted "Deleted X" over a call that never happened.
+      if (!result) throw new Error('ShellPilot is not available in this window.')
+      if (!result.ok) {
+        toast(result.error ?? `${name} could not be deleted.`, 'error')
+        return
+      }
+      setSelectedId(null)
+      setPendingId(null)
+      load()
+      // Deleting a group is not neutral: everything assigned to it drops to No AI
+      // Access, which the user finds out about later as agents being refused.
+      toast(`Deleted ${name}. Anything assigned to it is now No AI Access.`, 'ok', {
+        label: 'Review assignments',
+        run: showAssignments
+      })
+    } catch (err) {
+      // The only mutation on this screen that had no catch. policyStore.deleteGroup
+      // removes the group from its cached state BEFORE write() throws, so an
+      // EACCES or ENOSPC leaves main's memory and the file on disk disagreeing:
+      // reloading now shows the group gone, and restarting brings it back. Say
+      // that, rather than letting the user discover it a week later.
+      load()
+      toast(
+        `${name} was not deleted: ${err instanceof Error ? err.message : String(err)}. It may reappear when ShellPilot restarts.`,
+        'error',
+        { label: 'Try again', run: () => void deleteGroupById(id, name) }
+      )
     }
   }
 
   const deleteGroup = async (): Promise<void> => {
     if (!draft) return
-    const name = draft.name
-    const result = await window.shellpilot?.aiPolicy.deleteGroup(draft.id)
-    if (result && !result.ok) {
-      toast(result.error ?? `${name} could not be deleted.`, 'error')
-      return
-    }
-    setSelectedId(null)
-    load()
-    // Deleting a group is not neutral: everything assigned to it drops to No AI
-    // Access, which the user finds out about later as agents being refused.
-    toast(`Deleted ${name}. Anything assigned to it is now No AI Access.`, 'ok', {
-      label: 'Review assignments',
-      run: showAssignments
-    })
+    await deleteGroupById(draft.id, draft.name)
+  }
+
+  const pendingName = groups.find((g) => g.id === pendingId)?.name ?? 'another group'
+  const switchTo = (id: string): void => {
+    setPendingId(null)
+    setSelectedId(id)
   }
 
   return (
@@ -503,10 +562,43 @@ export function AiAccessGroups(): React.JSX.Element {
             // grid below is still open — before anything is saved.
             summary={summariseAccessGroup(draft?.id === g.id ? draft : g)}
             selected={selectedId === g.id}
-            onSelect={() => setSelectedId(g.id)}
+            onSelect={() => selectGroup(g.id)}
           />
         ))}
       </div>
+
+      {pendingId && draft && (
+        // Switching used to reset the draft from `groups` with no check at all.
+        // The card above has been showing the edits the whole time, which reads
+        // as "saved" — so losing them silently on the next click is the one
+        // outcome this screen cannot afford.
+        <div className="setting-row" style={{ alignItems: 'flex-start' }}>
+          <div className="s-info">
+            <div className="s-title">
+              <TriangleAlert size={13} /> {draft.name} has unsaved changes
+            </div>
+            <div className="s-desc">
+              The card shows them, but nothing is stored until you save — the policy engine is still
+              enforcing the old settings. Opening {pendingName} now discards them.
+            </div>
+          </div>
+          <button
+            className="btn sm primary"
+            onClick={() => {
+              const to = pendingId
+              void saveGroup().then((ok) => ok && switchTo(to))
+            }}
+          >
+            <Save size={13} /> Save and switch
+          </button>
+          <button className="btn sm danger" onClick={() => switchTo(pendingId)}>
+            Discard changes
+          </button>
+          <button className="btn sm" onClick={() => setPendingId(null)}>
+            Keep editing
+          </button>
+        </div>
+      )}
 
       <div className="setting-row">
         <div className="s-info">

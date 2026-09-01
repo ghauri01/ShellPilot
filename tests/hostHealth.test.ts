@@ -7,7 +7,8 @@ import {
   isLoopback,
   level,
   splitListeners,
-  summariseFleetHealth
+  summariseFleetHealth,
+  unreachableLine
 } from '../src/renderer/src/components/monitor/hostHealth'
 import type { ServerRef } from '../src/renderer/src/components/monitor/hostHealth'
 import type { HostMetrics, PortListener, ServiceUnit } from '../src/shared/ssh'
@@ -176,6 +177,85 @@ describe('summariseFleetHealth', () => {
   })
 })
 
+describe('hosts that could not be checked', () => {
+  const failure = (error: string, at = 1_000): { error: string; at: number } => ({ error, at })
+
+  it('lists an unreachable host instead of counting it as silent', () => {
+    // Silent means "we have never heard anything". A refused connection is
+    // something heard, and it is the answer the user needs to see.
+    const h = summariseFleetHealth([server('a')], {}, { a: failure('Connection refused') })
+    expect(h.silent).toBe(0)
+    expect(h.unreachable.map((r) => r.id)).toEqual(['a'])
+    expect(h.unreachable[0].error).toBe('Connection refused')
+    expect(h.unreachable[0].at).toBe(1_000)
+  })
+
+  it('carries the last good sample alongside the failure', () => {
+    const h = summariseFleetHealth(
+      [server('a')],
+      { a: host({ services: [unit('nginx')], listeners: [listener(443, '*')] }) },
+      { a: failure('Timed out') }
+    )
+    expect(h.unreachable[0].last?.running).toBe(1)
+    expect(h.unreachable[0].last?.listeners).toEqual([listener(443, '*')])
+  })
+
+  it('has no last sample for a host that has never answered', () => {
+    const h = summariseFleetHealth([server('a')], {}, { a: failure('No route to host') })
+    expect(h.unreachable[0].last).toBeNull()
+  })
+
+  it('keeps a stale sample out of the healthy list', () => {
+    // The numbers are from before the host went quiet. Showing them as its
+    // current state is the exact confusion the error was recorded to prevent.
+    const h = summariseFleetHealth([server('a'), server('b')], { a: host(), b: host() }, {
+      a: failure('Connection refused')
+    })
+    expect(h.rest.map((r) => r.id)).toEqual(['b'])
+    expect(h.attention).toEqual([])
+  })
+
+  it('does not raise an alarm from a stale failure on an unreachable host', () => {
+    // The unit may well have been restarted in the meantime; we cannot say.
+    const h = summariseFleetHealth(
+      [server('a')],
+      { a: host({ services: [failedUnit('nginx')], diskPct: 99 }) },
+      { a: failure('Connection refused') }
+    )
+    expect(h.attention).toEqual([])
+    expect(h.failedUnits).toBe(0)
+    expect(h.diskHosts).toBe(0)
+    expect(failureLine(h)).toBeNull()
+    expect(diskLine(h)).toBeNull()
+  })
+
+  it('leaves an unreachable host out of the reporting count', () => {
+    const h = summariseFleetHealth([server('a'), server('b')], { b: host() }, {
+      a: failure('Connection refused')
+    })
+    expect(coverageLine(h)).toBe('1 of 2 servers reporting')
+  })
+
+  it('says how many hosts could not be checked, in the right number', () => {
+    const one = summariseFleetHealth([server('a')], {}, { a: failure('x') })
+    const two = summariseFleetHealth([server('a'), server('b')], {}, {
+      a: failure('x'),
+      b: failure('y')
+    })
+    expect(unreachableLine(one)).toBe('1 host could not be checked')
+    expect(unreachableLine(two)).toBe('2 hosts could not be checked')
+  })
+
+  it('says nothing when every host answered', () => {
+    expect(unreachableLine(summariseFleetHealth([server('a')], { a: host() }))).toBeNull()
+  })
+
+  it('treats no error map at all as no errors', () => {
+    const h = summariseFleetHealth([server('a')], { a: host() })
+    expect(h.unreachable).toEqual([])
+  })
+})
+
 describe('splitListeners', () => {
   it('separates loopback from anything reachable off the box', () => {
     const groups = splitListeners([
@@ -244,6 +324,35 @@ describe('summary copy', () => {
       b: host({ services: null })
     })
     expect(coverageLine(partial)).toBe('2 of 3 servers reporting · 1 cannot list services')
+  })
+
+  it('says when a host could not list its ports, which is not "no ports"', () => {
+    const h = summariseFleetHealth([server('a'), server('b')], {
+      a: host({ listeners: null, listenerSource: null }),
+      b: host({ listeners: [] })
+    })
+    expect(h.portBlind).toBe(1)
+    expect(coverageLine(h)).toBe('2 servers reporting · 1 cannot list ports')
+  })
+
+  it('names both blind spots separately, because either can happen alone', () => {
+    const h = summariseFleetHealth([server('a')], {
+      a: host({ services: null, listeners: null, listenerSource: null })
+    })
+    expect(coverageLine(h)).toBe(
+      '1 server reporting · 1 cannot list services · 1 cannot list ports'
+    )
+  })
+
+  it('counts an empty port list as a real answer, not a blind spot', () => {
+    const h = summariseFleetHealth([server('a')], { a: host({ listeners: [] }) })
+    expect(h.portBlind).toBe(0)
+    expect(coverageLine(h)).toBe('1 server reporting')
+  })
+
+  it('keeps "of N" singular when the estate is one server', () => {
+    const none = summariseFleetHealth([server('a')], {})
+    expect(coverageLine(none)).toBe('0 of 1 server reporting')
   })
 
   it('drops the "of N" when every server is reporting', () => {

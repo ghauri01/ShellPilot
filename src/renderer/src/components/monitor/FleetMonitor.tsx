@@ -13,6 +13,7 @@ import { useApp, useWorkspaceMonitorGroups, useWorkspaceServers } from '../../st
 import { EmptyState } from '../common/EmptyState'
 import { ServerMonitorCard } from './ServerMonitorCard'
 import { fleetTotals, useFleet } from '../../store/fleet'
+import { bridgeHas } from '../../lib/bridge'
 import { bytes, clsx } from '../../lib/format'
 import type { MonitorGroup, Server } from '../../types'
 import { FleetHealth } from './FleetHealth'
@@ -222,6 +223,18 @@ export function FleetMonitor(): React.JSX.Element {
   useEffect(() => {
     syncMonitorLayout()
   }, [serverIds, workspaceId, syncMonitorLayout])
+
+  // Sweep the estate now that somebody is looking at it, so the health panel
+  // is not showing whatever the last scheduled sweep found up to a couple of
+  // minutes ago. Once per mount: the background interval owns the cadence from
+  // here, and re-requesting on every server edit would be a full sweep per
+  // keystroke in the rename box.
+  useEffect(() => {
+    if (!bridgeHas(window.shellpilot?.fleet as Record<string, unknown> | undefined, 'sampleNow')) {
+      return
+    }
+    void window.shellpilot?.fleet?.sampleNow()
+  }, [])
 
   const online = servers.filter((s) => s.status === 'online').length
   const totals = fleetTotals(

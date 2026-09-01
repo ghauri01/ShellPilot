@@ -91,7 +91,9 @@ sends you to a second application the moment you need to query a table or look u
 | **Jump hosts / bastions** | Unlimited chained hops per server, each with its own credentials |
 | **Two-factor auth** | Answers keyboard-interactive challenges; connections are shared so you enter a code once, not per session |
 | **SFTP browser** | Browse, edit, upload, rename and delete files over the same connection |
-| **Server monitoring** | Live CPU, memory, disk and network docked under the terminal, with resource alerts |
+| **Server monitoring** | Live CPU, memory, disk and network docked under the terminal, with alerts on CPU, memory and failed systemd units |
+| **Background checking** | Sample every server on a schedule, so a host that runs hot or a unit that dies at 3am is noticed while you are looking at something else |
+| **Webhook alerts** | POST alerts to Slack, Discord, Teams or any HTTPS endpoint — friendly server name and what fired, never a host, an IP or a log line |
 | **SSH tunnels** | Local forwards, remote forwards and a SOCKS5 proxy |
 | **WireGuard** | Userspace WireGuard with **no administrator rights** — the tunnel appears as a local SOCKS5 proxy and forwards, and your routing table is never touched |
 | **OpenVPN** | Bundled on macOS and Linux, driven over its management interface, with one-time codes and split tunnelling |
@@ -617,19 +619,22 @@ lands. Single-line pastes go straight through.
 
 Control keys such as <kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>A</kbd> and <kbd>Ctrl</kbd>+<kbd>W</kbd> pass through to the remote shell, so `vim`, `nano` and bash line editing behave normally.
 
-**Monitoring** is docked under the terminal rather than hidden in a separate tab. Expand it for live CPU, memory, disk and network. It samples only for the tab you are looking at, and shares the terminal's SSH connection.
+**Monitoring** is docked under the terminal rather than hidden in a separate tab. Expand it for live CPU, memory, disk and network. The strip samples only the tab you are looking at, and shares that session's SSH connection. Watching the servers you are *not* looking at is a separate feature — see [Checking servers in the background](#checking-servers-in-the-background).
 
-### Resource alerts
+### Alerts
 
 When a host's CPU or memory reaches **80%** (configurable) you get a native OS
 notification, repeated once a minute while it lasts and cleared automatically on
-recovery. A count also appears in the status bar.
+recovery. A count also appears in the status bar. A **systemd unit that has
+failed** raises one too, on the transition into failure rather than every check,
+so a service that has been down for a week does not re-announce itself.
 
 **Turning alerts on or off.** Go to **Settings → Monitoring** and use the
-**Resource alerts** toggle. They are **on by default**; switching them off stops
-any further CPU or memory notification being raised for any server. The setting
-is global — it applies to all hosts, not one at a time — and it persists across
-restarts.
+**Alerts** toggle. It is the master switch: it is **on by default**, and
+switching it off stops every CPU, memory and failed-unit notification for every
+server — and, because webhooks are sent from inside an alert, all webhook
+delivery with them. The setting is global — it applies to all hosts, not one at
+a time — and it persists across restarts.
 
 Under it, **Alert threshold** sets how hard a host has to be working before it
 counts as high: **70%**, **80%** (default), **90%** or **95%**. The same
@@ -637,17 +642,83 @@ threshold applies to both CPU and RAM. Raise it if busy-but-healthy servers are
 noisy, lower it if you want earlier warning. The threshold buttons are greyed
 out while alerts are switched off.
 
-The third toggle, **Show monitor under the terminal**, is independent: it
-controls the live CPU/memory/disk/network strip docked below the session, not
-whether you get alerted.
+The last toggle in the section, **Show monitor under the terminal**, is
+independent: it controls the live CPU/memory/disk/network strip docked below the
+session, not whether you get alerted.
 
 They are designed not to interrupt you:
 - Notifications are handled by the operating system, so they render **outside
   the window and never cover the terminal**
 - The status-bar chip sits in the layout, not floating over your output
 - Nothing steals focus, and nothing must be dismissed before you carry on
-- Alerts are evaluated from metrics **already being sampled**, so switching them
-  on adds no extra SSH load
+- With the monitor open, alerts are evaluated from metrics **already being
+  sampled**, so they add no extra SSH load. Background checking, below, is the
+  part that costs something — that is the point of it being a separate switch
+
+### Checking servers in the background
+
+An alert is only worth having if it can reach you when you are not already
+looking at the problem. **Settings → Monitoring → Check servers in the
+background** samples **every server in the workspace** on a schedule, whether or
+not a monitor is open, so a host that runs hot or a unit that dies at 3am is
+noticed rather than discovered later.
+
+It is off by default, because it is not free: each pass opens **one SSH exec
+channel per server**, separately from the monitor strip's sampling. **How often**
+sets the gap — **1**, **2** (default), **5** or **15 minutes** — measured from
+the end of one pass to the start of the next, so a slow estate slows the cadence
+instead of stacking overlapping checks on top of each other.
+
+It needs the **vault unlocked**, since it has to resolve a credential per server.
+While the vault is locked, checking **pauses rather than failing** — retrying into
+a locked vault would produce an error loop and an audit entry per attempt.
+
+Because "switched on" and "actually running" are not the same thing, the setting
+shows what the sampler is really doing, refreshed while the pane is open:
+
+| Line | What it means |
+|---|---|
+| `Running · 12 servers · last pass 4s ago, took 8s` | Working. `took` is the number to watch: if a pass takes longer than your interval, the interval is not realistic for your estate |
+| `Paused — the vault is locked.` | Nothing is being checked until you unlock it |
+| `Nothing to check` | No server in this workspace can be sampled |
+| `Switched on, but nothing is scheduled` | The loop has stopped. Toggle it off and on to restart it |
+
+### Webhook alerts
+
+Alerts can also be **POSTed to an HTTPS endpoint** — Slack, Discord, Teams and
+most alerting systems accept an incoming webhook, so one generic JSON message
+covers them all. Set it up in **Settings → Monitoring → Send alerts to a
+webhook**.
+
+**What is sent is deliberately narrow.** Only the server's **friendly name** —
+the one you chose — plus what fired, when, and the value against the threshold.
+Never a host, an IP, a username, a log line or command output. The payload is
+rebuilt field by field from a whitelist rather than forwarded, so nothing a
+remote host says can travel through it to a third-party API.
+
+**The URL is treated as a credential**, because it is one: anyone holding your
+Slack webhook can post as you. It is **https only** (except to loopback), stored
+with your other secrets via the OS keychain rather than in settings or backups,
+and never read back into the app's UI — the settings screen knows only *that* one
+is set. Redirects are not followed, so a `308` cannot quietly move your alerts to
+an internal or cleartext host.
+
+**Send test** posts one sample alert immediately, so a wrong URL is found while
+you are looking at the settings rather than during an incident. It ignores the
+switches on purpose — and says so, if a switch would have stopped the real thing.
+
+**It depends on two other settings.** The **Alerts** master switch has to be on,
+because every webhook is sent from inside an alert; and unless servers are
+**checked in the background**, nothing is raised while you are elsewhere in the
+app — so the webhook stays silent in exactly the situation you set it up for.
+
+Under **Test delivery** the settings screen reports what the endpoint has
+actually received: when the last alert was delivered, the last failure if there
+was one, and how many alerts were **dropped**. Deliveries are capped at 30 a
+minute as a backstop against a flapping unit, and anything over that is discarded
+rather than queued — so the count is shown rather than hidden. An alerting path
+that silently discards is worse than one that does not exist, because it is
+trusted.
 
 ## Local terminal
 
@@ -714,8 +785,10 @@ group from the button in the top right; anything unplaced collects in **Ungroupe
 groups collapse when you want them out of the way.
 
 The header totals what you actually have: servers reporting, vCPU across the fleet, and
-RAM and disk as used-against-capacity. Every figure comes from the metrics already being
-sampled for open sessions, so opening this view adds no extra SSH load.
+RAM and disk as used-against-capacity. Every figure comes from metrics already being
+sampled — for open sessions, and for the whole workspace if **Check servers in the
+background** is on — so opening this view adds no extra SSH load. With neither, a server
+you have not opened has nothing to show.
 
 ## Command palette
 
@@ -932,7 +1005,7 @@ A red **Backup out of date** indicator appears whenever your connections change,
 | **SSH** | **How long an authenticated connection is kept** after its last session closes, and a live list of shared connections with a Disconnect button |
 | **Security** | Credential storage, workspace locking, and the list of **trusted SSH host keys** with a Forget button |
 | **SFTP** | File transfer preferences |
-| **Monitoring** | **Resource alerts** (on by default), the CPU/memory threshold, and the monitor strip |
+| **Monitoring** | **Alerts** (on by default — the master switch for CPU, memory, failed units and webhooks), the threshold, **checking servers in the background** and how often, **webhook delivery**, and the monitor strip |
 | **Editor** | Built-in file editor |
 | **Keyboard Shortcuts** | **Rebind any shortcut**, clear it, reset to defaults, export/import, and whether <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd> includes hidden workspaces |
 | **Backup & Restore** | Encrypted export and import |

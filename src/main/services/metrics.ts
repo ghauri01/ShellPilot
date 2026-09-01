@@ -165,10 +165,17 @@ export function parseListeners(lines: string[]): { listeners: PortListener[]; so
     if (!split) continue
     // With wildcards normalised, the v4 and v6 rows of a dual-stack listener
     // collapse to one — which is what a reader wants to see.
-    const dedupe = `${proto}|${split.address}|${split.port}`
+    //
+    // The key is built from the SAME proto that gets pushed. netstat prints
+    // the families as `tcp` and `tcp6`, so keying on the raw value let both
+    // rows through and then stored them as one identical `tcp` row twice:
+    // an inflated port count, and two React children under one key in a list
+    // that re-renders every couple of seconds.
+    const normalised = proto.replace(/6$/, '')
+    const dedupe = `${normalised}|${split.address}|${split.port}`
     if (seen.has(dedupe)) continue
     seen.add(dedupe)
-    out.push({ proto: proto.replace(/6$/, ''), ...split, ...owner })
+    out.push({ proto: normalised, ...split, ...owner })
   }
   out.sort((a, b) => a.port - b.port || a.proto.localeCompare(b.proto))
   return { listeners: out, source }

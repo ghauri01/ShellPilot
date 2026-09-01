@@ -1,4 +1,5 @@
 import type { HostMetrics, PortListener, ServiceUnit } from '../../../../shared/ssh'
+import type { FleetError } from '../../store/fleet'
 import type { Server } from '../../types'
 
 // Turning a fleet of raw metric samples into the answer to one question:
@@ -47,12 +48,44 @@ export interface HostRow {
   needsAttention: boolean
 }
 
+/**
+ * A host the sampler could not ask at all. Its own shape rather than a HostRow
+ * with a flag, because it answers a different question: not "is this host
+ * healthy" but "we do not know, and here is why".
+ */
+export interface UnreachableRow {
+  id: string
+  name: string
+  status: Server['status']
+  /** What the sampler reported, verbatim — e.g. "Connection refused". */
+  error: string
+  /** When the failure was recorded. */
+  at: number
+  /**
+   * The last sample taken before the host stopped answering, or null if it has
+   * never answered. Kept because a host that was fine ten minutes ago and is
+   * unreachable now is worth showing as both — the store deliberately does not
+   * discard the metrics when it records the error.
+   */
+  last: HostRow | null
+}
+
 export interface FleetHealth {
   /** Hosts carrying something that stays broken until a person acts on it. */
   attention: HostRow[]
   /** Everything else that reported, in the order the caller supplied. */
   rest: HostRow[]
-  /** Servers with no sample at all yet — offline, or not polled since launch. */
+  /**
+   * Hosts the sampler could not reach. They are not in `attention` or `rest`:
+   * a stale sample rendered as current is the failure mode this whole
+   * distinction exists to prevent.
+   */
+  unreachable: UnreachableRow[]
+  /**
+   * Servers we have neither a sample nor an error for — never polled since
+   * launch. A server that failed is not silent; it is unreachable, and it has
+   * told us something.
+   */
   silent: number
   totalServers: number
   failedUnits: number
@@ -60,6 +93,8 @@ export interface FleetHealth {
   diskHosts: number
   /** Reporting hosts whose services probe could not run. */
   blind: number
+  /** Reporting hosts whose port probe could not run — neither ss nor netstat. */
+  portBlind: number
 }
 
 function isFailed(u: ServiceUnit): boolean {
@@ -96,27 +131,48 @@ function toRow(server: ServerRef, host: HostMetrics): HostRow {
  * own, the cards below already colour them, and the resource-alert
  * notifications already chase them — putting them here would fill the section
  * with things that fix themselves, which is how an alert list stops being read.
+ *
+ * `errors` is what the sampler could not ask, and it wins over any sample we
+ * still hold for that host: the numbers are from before the host went quiet,
+ * so showing them as this host's current state would be a lie told in the
+ * shape of an answer.
  */
 export function summariseFleetHealth(
   servers: ServerRef[],
-  hosts: Record<string, HostMetrics>
+  hosts: Record<string, HostMetrics>,
+  errors: Record<string, FleetError> = {}
 ): FleetHealth {
   const attention: HostRow[] = []
   const rest: HostRow[] = []
+  const unreachable: UnreachableRow[] = []
   let silent = 0
   let failedUnits = 0
   let failingHosts = 0
   let diskHosts = 0
   let blind = 0
+  let portBlind = 0
 
   for (const server of servers) {
     const host = hosts[server.id]
+    const failure = errors[server.id]
+    if (failure) {
+      unreachable.push({
+        id: server.id,
+        name: server.name,
+        status: server.status,
+        error: failure.error,
+        at: failure.at,
+        last: host ? toRow(server, host) : null
+      })
+      continue
+    }
     if (!host) {
       silent++
       continue
     }
     const row = toRow(server, host)
     if (row.failed === null) blind++
+    if (row.listeners === null) portBlind++
     if (row.failed && row.failed.length > 0) {
       failedUnits += row.failed.length
       failingHosts++
@@ -139,12 +195,14 @@ export function summariseFleetHealth(
   return {
     attention,
     rest,
+    unreachable,
     silent,
     totalServers: servers.length,
     failedUnits,
     failingHosts,
     diskHosts,
-    blind
+    blind,
+    portBlind
   }
 }
 
@@ -196,16 +254,33 @@ export function diskLine(h: FleetHealth): string | null {
 }
 
 /**
+ * "2 hosts could not be checked", or null when every host answered. Its own
+ * line rather than a share of the failure count: these hosts are not known to
+ * be broken, and counting them as failures would be inventing an outage.
+ */
+export function unreachableLine(h: FleetHealth): string | null {
+  if (h.unreachable.length === 0) return null
+  const n = h.unreachable.length
+  return `${n} ${plural(n, 'host')} could not be checked`
+}
+
+/**
  * What the panel is speaking for. Says how much of the estate it can see, so a
  * clean bill of health is never mistaken for one that covers everything.
+ *
+ * Each probe gets its own clause because each can fail on its own: a host
+ * without systemd still lists its ports, and a host without ss still lists its
+ * units. "Cannot list ports" is not "no ports", for the same reason a null
+ * listener array is not an empty one.
  */
 export function coverageLine(h: FleetHealth): string {
   const reporting = h.attention.length + h.rest.length
   const parts = [
     reporting === h.totalServers
       ? `${reporting} ${plural(reporting, 'server')} reporting`
-      : `${reporting} of ${h.totalServers} servers reporting`
+      : `${reporting} of ${h.totalServers} ${plural(h.totalServers, 'server')} reporting`
   ]
   if (h.blind > 0) parts.push(`${h.blind} cannot list services`)
+  if (h.portBlind > 0) parts.push(`${h.portBlind} cannot list ports`)
   return parts.join(' · ')
 }

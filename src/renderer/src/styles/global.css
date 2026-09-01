@@ -1633,6 +1633,24 @@ details[open] > .disclosure-head .chev {
   font-size: var(--fs-sm);
   color: var(--text-muted);
 }
+/* A result under a setting — a rejected URL, a delivered test, a sampler that
+   has stopped — rather than more help text. Without these it inherits the
+   muted colour above, so "Use https. The webhook URL is a credential" rendered
+   in exactly the same grey as the sentence explaining what https is for, and
+   the one line a user had to read looked like the one they had just skipped.
+   Same three status tokens the chips use, so nothing new is being invented. */
+.setting-row .s-desc + .s-desc {
+  margin-top: var(--sp-1);
+}
+.setting-row .s-desc.ok {
+  color: var(--ok);
+}
+.setting-row .s-desc.warn {
+  color: var(--warn);
+}
+.setting-row .s-desc.danger {
+  color: var(--danger);
+}
 
 /* Access groups — the card list that leads the AI permissions screen. Each
    card carries a sentence generated from the group's own capabilities, so the

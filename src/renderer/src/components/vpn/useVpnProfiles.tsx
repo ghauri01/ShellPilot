@@ -16,6 +16,8 @@ import type {
   VpnKind,
   VpnProfile
 } from '../../types'
+// Not re-exported by ../../types, and adding them there is not this change.
+import type { VpnResult, VpnStartResult } from '../../../../shared/vpn'
 import {
   HealthChip,
   HealthDot,
@@ -308,10 +310,28 @@ export function useVpnProfiles(): VpnProfiles {
     // same one-shot prompt-and-retry every other surface in the app gets, from
     // one definition of what "locked" looks like. Declining hands back the
     // failed result rather than throwing, which is what the tail below expects.
-    const r = await withVaultUnlock(`Starting ${p.name}`, () =>
-      Promise.resolve(window.shellpilot?.vpn.start(p.id))
-    )
-    setBusy((b) => ({ ...b, [p.id]: false }))
+    //
+    // withVaultUnlock rethrows anything that is not a lock error, and the IPC
+    // itself can reject. Without the finally, setBusy(false) was skipped: the
+    // row kept its spinner forever, and because status.state was never
+    // 'starting' the Cancel button was not offered either — leaving a profile
+    // that could be neither started nor stopped until the component unmounted.
+    let r: VpnStartResult | undefined
+    try {
+      r = await withVaultUnlock(`Starting ${p.name}`, () =>
+        Promise.resolve(window.shellpilot?.vpn.start(p.id))
+      )
+    } catch (err) {
+      // Same suppression the resolved-failure tail below applies: Cancel and
+      // the status stream have each already said what happened.
+      const wasCancelled = cancelledStarts.current.delete(p.id)
+      if (!wasCancelled && !errorSpoken(p.id)) {
+        reportRef.current(p.id, err instanceof Error ? err.message : String(err))
+      }
+      return
+    } finally {
+      setBusy((b) => ({ ...b, [p.id]: false }))
+    }
     const cancelled = cancelledStarts.current.delete(p.id)
     if (r?.ok) {
       const first = r.listeners?.[0]
@@ -348,8 +368,19 @@ export function useVpnProfiles(): VpnProfiles {
 
   const stop = useCallback(async (p: VpnProfile, cancelling = false): Promise<void> => {
     setBusy((b) => ({ ...b, [p.id]: true }))
-    const r = await window.shellpilot?.vpn.stop(p.id)
-    setBusy((b) => ({ ...b, [p.id]: false }))
+    // Same reason as start: a rejected stop used to strand the row on its
+    // spinner with no way back.
+    let r: VpnResult | undefined
+    try {
+      r = await window.shellpilot?.vpn.stop(p.id)
+    } catch (err) {
+      if (!errorSpoken(p.id)) {
+        reportRef.current(p.id, err instanceof Error ? err.message : String(err))
+      }
+      return
+    } finally {
+      setBusy((b) => ({ ...b, [p.id]: false }))
+    }
     if (r?.ok) {
       toast(cancelling ? `${p.name} — connection attempt cancelled` : `${p.name} stopped`)
       return
@@ -428,7 +459,26 @@ export function useVpnProfiles(): VpnProfiles {
 
   const remove = useCallback(
     async (p: VpnProfile): Promise<void> => {
-      await window.shellpilot?.vpn.stop(p.id)
+      // The stop result was discarded, and it does report {ok: false} when the
+      // engine will not die. Deleting anyway dropped the profile, its status and
+      // its vault key material while the tunnel kept its routes — under a
+      // "deleted" toast, with nothing left on screen able to stop it. So a
+      // failed stop cancels the delete instead: the profile is still there, and
+      // so is the Stop button.
+      let r: VpnResult | undefined
+      try {
+        r = await window.shellpilot?.vpn.stop(p.id)
+      } catch (err) {
+        r = { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+      if (r && !r.ok) {
+        reportRef.current(
+          p.id,
+          r.error ?? `${p.name} is still running and could not be stopped, so it was not deleted.`,
+          r.errorCode
+        )
+        return
+      }
       removeVpnProfile(p.id)
       toast(`${p.name} deleted`)
     },

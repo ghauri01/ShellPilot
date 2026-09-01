@@ -27,17 +27,22 @@ export function StatusBar(): React.JSX.Element {
       {/* Rendered in the status bar rather than as a floating overlay, so an
           alert can never cover terminal output. */}
       {Object.values(alerts).length > 0 && (
-        <div
+        // A button, not a div. It sits beside the backup warning, which is the
+        // same shape and does navigate — one of the two being inert made the
+        // bar teach that a chip here may or may not be worth clicking. The
+        // tooltip names the hosts; the click takes you to where they are.
+        <button
           className="item resource-alert"
-          title={Object.values(alerts)
+          title={`${Object.values(alerts)
             .map((a) => `${a.serverName}: ${a.kind === 'cpu' ? 'CPU' : 'Memory'} ${a.value.toFixed(0)}%`)
-            .join('\n')}
+            .join('\n')}\n\nClick to open the Fleet Monitor.`}
+          onClick={() => setActivity('monitor')}
         >
           <AlertTriangle size={12} />
           <span>
             {Object.values(alerts).length} alert{Object.values(alerts).length === 1 ? '' : 's'}
           </span>
-        </div>
+        </button>
       )}
       {backupDirty && (
         <button

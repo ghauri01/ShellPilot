@@ -105,6 +105,56 @@ describe('listeners from netstat', () => {
     ])
     expect(listeners).toEqual([])
   })
+
+  it('collapses tcp and tcp6 rows of one dual-stack listener', () => {
+    // netstat names the families `tcp` and `tcp6` where ss says `tcp` twice.
+    // The rows are stored under the normalised proto, so keying the dedupe on
+    // the raw one let both through and produced two identical rows: an
+    // inflated port count, and a duplicate React key in a list that
+    // re-renders every couple of seconds.
+    const { listeners } = parseListeners([
+      'src:netstat',
+      'tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN 812/sshd',
+      'tcp6 0 0 :::22 :::* LISTEN 812/sshd'
+    ])
+    expect(listeners).toEqual([{ proto: 'tcp', address: '*', port: 22, process: 'sshd', pid: 812 }])
+  })
+
+  it('collapses a dual-stack udp listener the same way', () => {
+    const { listeners } = parseListeners([
+      'src:netstat',
+      'udp 0 0 0.0.0.0:53 0.0.0.0:* 900/systemd-resolve',
+      'udp6 0 0 :::53 :::* 900/systemd-resolve'
+    ])
+    expect(listeners).toMatchObject([{ proto: 'udp', address: '*', port: 53 }])
+  })
+
+  it('keeps two rows that differ by more than address family', () => {
+    // The collapse is only ever between the two families of one listener. A
+    // v6-only service on its own port is a separate thing and must survive.
+    const { listeners } = parseListeners([
+      'src:netstat',
+      'tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN 812/sshd',
+      'tcp6 0 0 :::8080 :::* LISTEN 913/node'
+    ])
+    expect(listeners.map((l) => `${l.proto}:${l.port}`)).toEqual(['tcp:22', 'tcp:8080'])
+  })
+
+  it('produces a unique proto/address/port key for every row it returns', () => {
+    // What the UI actually depends on: the port table keys its rows on exactly
+    // these three fields.
+    const { listeners } = parseListeners([
+      'src:netstat',
+      'tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN 812/sshd',
+      'tcp6 0 0 :::22 :::* LISTEN 812/sshd',
+      'tcp 0 0 127.0.0.1:5432 0.0.0.0:* LISTEN 700/postgres',
+      'udp 0 0 0.0.0.0:53 0.0.0.0:* 900/resolved',
+      'udp6 0 0 :::53 :::* 900/resolved'
+    ])
+    const keys = listeners.map((l) => `${l.proto}-${l.address}-${l.port}`)
+    expect(new Set(keys).size).toBe(keys.length)
+    expect(keys).toHaveLength(3)
+  })
 })
 
 describe('when neither probe exists', () => {
