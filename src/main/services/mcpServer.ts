@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import type { HostMetrics } from '../../shared/ssh'
 
 import { authenticate, getSession, getMcpConfig, type AuthFailureReason } from './mcpAuth'
 import { startCliPairing, confirmCliPairing } from './cliPairing'
@@ -449,6 +450,57 @@ function tunnelConfigFor(t: CachedTunnel): Parameters<typeof tunnelStart>[1] {
   }
 }
 
+// The Fleet Monitor already collects failed units and listening ports on every
+// sample, and until now get_server_metrics threw both away — it returned CPU,
+// memory, disk and uptime and nothing else. So an agent asked "which units have
+// failed on that host" had no tool that could answer, and did the only thing
+// left: `execute_command "systemctl --failed"`. That needs the `terminal`
+// capability rather than `serverMetrics`, runs a shell where none was required,
+// and re-derives something ShellPilot had already parsed a second earlier.
+//
+// Both helpers preserve the null-vs-empty distinction the snapshot is careful
+// about (see ServiceUnit in shared/ssh.ts): "systemd is not on this host" and
+// "systemd ran and nothing is failing" are different answers, and collapsing
+// them into an empty list tells an agent the host is healthy when the truth is
+// that nobody looked.
+export function describeServices(services: HostMetrics['services']): string {
+  if (services === null) return 'Failed units: unknown — systemd is not available on this host.'
+  const failed = services.filter((u) => u.active === 'failed' || u.sub === 'failed')
+  if (failed.length === 0) return `Failed units: none (${services.length} units loaded).`
+  return [
+    `Failed units (${failed.length} of ${services.length} loaded):`,
+    ...failed.map((u) => `  ${u.name} — ${u.description || u.active} [${u.active}/${u.sub}]`)
+  ].join('\n')
+}
+
+// Listening sockets, capped. A busy host reports 75+ and the whole table is
+// rarely what was asked for, but a silent truncation would let an agent
+// conclude a port is closed when it was simply cut off — so the cap is stated
+// and the remainder is counted.
+const LISTENER_CAP = 40
+
+export function describeListeners(
+  listeners: HostMetrics['listeners'],
+  source: HostMetrics['listenerSource']
+): string {
+  if (listeners === null) return 'Listening ports: unknown — neither ss nor netstat is available on this host.'
+  if (listeners.length === 0) return 'Listening ports: none.'
+
+  const shown = listeners.slice(0, LISTENER_CAP)
+  const lines = shown.map((l) => {
+    // An unprivileged probe sees the socket but not its owner. Say so, rather
+    // than leaving a blank an agent might read as "no process".
+    const who = l.process ? `${l.process}${l.pid ? ` (pid ${l.pid})` : ''}` : 'owner not visible at this privilege'
+    return `  ${l.proto}/${l.port} ${l.address} — ${who}`
+  })
+  const head = `Listening ports (${listeners.length}${source ? `, via ${source}` : ''}):`
+  const tail =
+    listeners.length > LISTENER_CAP
+      ? [`  … ${listeners.length - LISTENER_CAP} more not shown (capped at ${LISTENER_CAP}).`]
+      : []
+  return [head, ...lines, ...tail].join('\n')
+}
+
 // How a VPN profile is described to a human — in the approval dialog, and then
 // permanently in the audit log. It has to be enough to recognise which profile
 // is about to start without naming an endpoint, a key or a bind address: where
@@ -778,9 +830,14 @@ function buildServer(): McpServer {
     {
       title: 'Get server metrics',
       description:
-        'Samples live CPU, memory, disk and uptime for a server and returns them as structured values. ' +
-        'Prefer this over `top`, `free`, `df` or `uptime` through execute_command — it needs no shell access ' +
-        'and returns numbers rather than text to parse.',
+        'Samples a server and returns its health: CPU, memory, disk, uptime, any FAILED systemd units, ' +
+        'and every listening port with the process that owns it. This is the same data the Fleet Monitor ' +
+        'shows, so it is the tool to use for questions about failed services, what is running, or what is ' +
+        'listening on a host. ' +
+        'Prefer this over `systemctl --failed`, `systemctl list-units`, `ss`, `netstat`, `top`, `free`, `df` ' +
+        'or `uptime` through execute_command: it needs no shell access, returns parsed values rather than ' +
+        'text to scrape, and distinguishes "nothing is failing" from "systemd is not installed here" — ' +
+        'which a scraped command cannot.',
       inputSchema: { serverName: z.string().describe('Friendly name or alias exactly as returned by list_servers') },
       annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: false }
     },
@@ -817,7 +874,11 @@ function buildServer(): McpServer {
           `CPU: ${m.cpu.toFixed(1)}%`,
           `Memory: ${m.memPct.toFixed(1)}% (${m.memUsed}/${m.memTotal} bytes)`,
           `Disk: ${m.diskPct.toFixed(1)}% (${m.diskUsed}/${m.diskTotal} bytes)`,
-          `Uptime: ${Math.round(m.uptime / 3600)}h`
+          `Uptime: ${Math.round(m.uptime / 3600)}h`,
+          '',
+          describeServices(m.services),
+          '',
+          describeListeners(m.listeners, m.listenerSource)
         ].join('\n')
       )
     }
