@@ -77,27 +77,76 @@ function atCommandStart(verbs: string): RegExp {
   return new RegExp(String.raw`(^|[;&|(]|\n)\s*(?:\w+=\S+\s+)*(?:sudo\s+|doas\s+)?(?:${verbs})\b`)
 }
 
+// A flag argument, wherever it appears in a command's argument list rather than
+// only immediately after the verb. `chmod 777 -R /srv` is the same command as
+// `chmod -R 777 /srv`, and a guard that only reads the first token is a guard
+// that misses whichever order the person happened to type.
+function flagAnywhere(verb: string, flags: string): RegExp {
+  return new RegExp(
+    String.raw`(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(?:${verb})(?:\s+[^\s;|&]+)*\s+(?:${flags})\b`
+  )
+}
+
 const DESTRUCTIVE = [
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/, why: 'deletes files recursively or forcibly' },
+  // Long options count: `rm --recursive --force /` is the same command, and
+  // reading only the short flags made the most explicit spelling the one that
+  // ran with no confirmation at all.
+  {
+    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?rm\s+((-[a-zA-Z]*[rf][a-zA-Z]*|--recursive|--force|--no-preserve-root)\s+)+/,
+    why: 'deletes files recursively or forcibly'
+  },
+  // `find … -exec rm` and `… | xargs rm` are how a bulk delete is actually
+  // typed. Neither puts `rm` at a command start, so the anchored rule above
+  // reads both as ordinary.
+  { rx: /-exec\s+(?:sudo\s+|doas\s+)?rm\b/, why: 'deletes files through find -exec' },
+  { rx: /\bxargs\s+(?:-\S+\s+)*(?:sudo\s+|doas\s+)?rm\b/, why: 'deletes files through xargs' },
+  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?find\s[^;|&]*\s-delete\b/, why: 'deletes every file find matches' },
   { rx: atCommandStart('mkfs(\\.\\w+)?|fdisk|parted|wipefs'), why: 'writes to a partition table or filesystem' },
   { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?dd\s[^|;]*\bof=/, why: 'writes directly to a device or file with dd' },
   { rx: atCommandStart('shutdown|poweroff|halt|reboot'), why: 'stops or restarts the machine' },
+  // systemd's own spellings of the same thing. `systemctl poweroff` puts
+  // `systemctl` at the command start, so the verb rule above never sees it.
+  {
+    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?systemctl\s+(poweroff|reboot|halt|kexec)\b/,
+    why: 'stops or restarts the machine'
+  },
   { rx: atCommandStart('userdel|groupdel'), why: 'removes an account' },
   { rx: /\bdrop\s+(database|table)\b/i, why: 'drops a database or table' },
   { rx: atCommandStart('truncate|shred'), why: 'destroys file contents' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?chown\s+-[a-zA-Z]*R/, why: 'changes ownership recursively' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?chmod\s+-[a-zA-Z]*R/, why: 'changes permissions recursively' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?kill(all)?\s+(-9|-KILL)\b/, why: 'sends SIGKILL' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(iptables|nft|ufw)\b[^;|]*\b(flush|-F|reset)\b/, why: 'clears firewall rules' },
+  { rx: flagAnywhere('chown', '-[a-zA-Z]*R[a-zA-Z]*|--recursive'), why: 'changes ownership recursively' },
+  { rx: flagAnywhere('chmod', '-[a-zA-Z]*R[a-zA-Z]*|--recursive'), why: 'changes permissions recursively' },
+  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(kill|killall|pkill)\s+(-9|-KILL|-s\s*(9|KILL|SIGKILL))\b/, why: 'sends SIGKILL' },
+  // `\b-F\b` never matched ` -F`: there is no word boundary between a space and
+  // a dash, so the single most common way to flush a firewall read as ordinary.
+  {
+    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(iptables|ip6tables|nft|ufw)\b[^;|]*(\bflush\b|\s-F\b|\breset\b)/,
+    why: 'clears firewall rules'
+  },
   { rx: />\s*\/dev\/[sn][dv]/, why: 'redirects output onto a block device' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?systemctl\s+(stop|disable|mask)\b/, why: 'stops or disables a service' }
+  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?systemctl\s+(stop|disable|mask)\b/, why: 'stops or disables a service' },
+  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?service\s+\S+\s+stop\b/, why: 'stops a service' },
+  // One key away from `crontab -e`, and it takes the whole schedule with it.
+  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?crontab\s+-[a-z]*r[a-z]*\b/, why: 'removes the crontab' },
+  { rx: atCommandStart('lvremove|vgremove|pvremove'), why: 'removes a volume or volume group' },
+  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(zfs|zpool)\s+destroy\b/, why: 'destroys a dataset or pool' }
 ]
 
 const ELEVATED = [
-  { rx: /^\s*(sudo|doas)\b/, why: 'runs as root' },
+  // Anchored to a command start rather than to position zero: `curl … | sudo
+  // bash` is root, and reading only the first word said it was not.
+  { rx: atCommandStart('sudo|doas'), why: 'runs as root' },
   { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?systemctl\s+(restart|reload)\b/, why: 'restarts a service' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(apt|apt-get|yum|dnf|apk|pacman)\s+(install|remove|upgrade|update)\b/, why: 'changes installed packages' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(docker|podman)\s+(rm|rmi|stop|kill|prune)\b/, why: 'removes or stops containers' }
+  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?service\s+\S+\s+(restart|reload)\b/, why: 'restarts a service' },
+  {
+    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(apt|apt-get|yum|dnf|apk|pacman)\s+(install|remove|purge|autoremove|upgrade|dist-upgrade|full-upgrade|update)\b/,
+    why: 'changes installed packages'
+  },
+  // The noun-verb spellings (`docker system prune`, `docker volume rm`) are the
+  // common ones now, and the verb-only rule matched none of them.
+  {
+    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(docker|podman)\s+(?:(?:container|image|volume|network|system|compose)\s+)?(rm|rmi|stop|kill|prune|down)\b/,
+    why: 'removes or stops containers'
+  }
 ]
 
 export interface RiskAssessment {
@@ -197,5 +246,17 @@ export interface BroadcastRequest {
 /** Simultaneous exec channels. Small on purpose — see the header. */
 export const BROADCAST_CONCURRENCY = 3
 export const BROADCAST_TIMEOUT_MS = 60_000
+/**
+ * How long past the per-host timeout the runner waits before giving up on an
+ * executor that has not settled.
+ *
+ * `sshExec` starts its own timer only after the connection is acquired, so a
+ * host whose connect never completes — a bastion that accepts TCP and then says
+ * nothing, a trust prompt nobody answers — leaves the runner awaiting forever:
+ * no result, no terminal event, and a Stop button that cannot help because
+ * cancel deliberately leaves running hosts alone. The grace is generous because
+ * a slow multi-hop connect is normal; what it rules out is "never".
+ */
+export const BROADCAST_STALL_GRACE_MS = 30_000
 /** Per-host output kept, in characters. A fan-out can produce a lot. */
 export const BROADCAST_OUTPUT_CAP = 20_000

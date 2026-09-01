@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { searchFleet, coverageSentence, FLEET_SEARCH_CAP } from '../src/renderer/src/lib/fleetSearch'
+import { searchFleet, coverageSentence, matchKey, FLEET_SEARCH_CAP } from '../src/renderer/src/lib/fleetSearch'
 import type { FleetSearchInput } from '../src/renderer/src/lib/fleetSearch'
 import type { HostMetrics, ServiceUnit, PortListener } from '../src/shared/ssh'
 
@@ -130,6 +130,44 @@ describe('what the search admits it could not see', () => {
     expect(r.coverage.unreachable).toEqual(['web-01'])
   })
 
+  it('marks rows stale when the error and the sample share a timestamp', () => {
+    // A success DELETES the stored error (store/fleet.ts `report`), so an error
+    // being present at all means it was recorded after the last good sample.
+    // When the two tie — same sweep, or two events inside one millisecond — the
+    // error is still the later of the two, and `>` would quietly un-mark a host
+    // that is currently failing.
+    const r = searchFleet(input({
+      hosts: { a: { host: host({ services: [unit('pg.service')] }), at: 2_000 } },
+      errors: { a: { error: 'timed out', at: 2_000 } }
+    }), 'pg')
+    expect(r.matches[0].stale).toBe(true)
+    expect(r.coverage.unreachable).toEqual(['web-01'])
+  })
+
+  it('does not count a host with neither probe as searched', () => {
+    // Nothing on it was searchable but its own name. Counting it put a
+    // reassuring number on screen — "Searched 1 host" — that the results behind
+    // it did not support, and named the host twice under two separate gaps
+    // rather than once under the gap that actually applied.
+    const r = searchFleet(input({
+      hosts: { a: { host: host({ services: null, listeners: null }), at: 1 } }
+    }), 'nginx')
+    expect(r.coverage.searched).toEqual([])
+    expect(r.coverage.noProbes).toEqual(['web-01'])
+    expect(r.coverage.noServiceView).toEqual([])
+    expect(r.coverage.noPortView).toEqual([])
+    const sentence = coverageSentence(r.coverage)
+    expect(sentence).toBe('Units and ports searched on 0 hosts — neither systemd nor a port probe on web-01.')
+  })
+
+  it('still counts a host with one probe missing as searched', () => {
+    const r = searchFleet(input({
+      hosts: { a: { host: host({ services: null }), at: 1 } }
+    }), 'nginx')
+    expect(r.coverage.searched).toEqual(['web-01'])
+    expect(r.coverage.noProbes).toEqual([])
+  })
+
   it('does not mark rows stale when the error predates the sample', () => {
     // It failed, then answered. That is a recovered host, not a stale row.
     const r = searchFleet(input({
@@ -171,5 +209,129 @@ describe('result volume', () => {
       hosts: { a: { host: host({ services: [unit('my-nginx-helper.service'), unit('nginx')] }), at: 1 } }
     }), 'nginx')
     expect(r.matches[0].label).toBe('nginx')
+  })
+})
+
+describe('ranking what actually matched', () => {
+  // A match whose label the query never appears in used to score worst-possible
+  // and sort below every incidental substring hit — which is every host found by
+  // its hostname, every unit found by its description and every port found by
+  // its owning process. The label is what is DISPLAYED; it is not necessarily
+  // what was searched.
+
+  it('ranks a host found by an exact hostname above a unit that merely contains the query', () => {
+    const r = searchFleet(input({
+      hosts: {
+        a: {
+          host: host({ hostname: 'db-primary', services: [unit('my-db-primary-helper.service')] }),
+          at: 1
+        }
+      }
+    }), 'db-primary')
+    expect(r.matches.map((m) => m.kind)).toEqual(['host', 'unit'])
+  })
+
+  it('ranks a unit whose description is the query above one that merely contains it', () => {
+    const r = searchFleet(input({
+      hosts: {
+        a: {
+          host: host({
+            services: [unit('a-postgres-thing.service', 'nothing'), unit('pg.service', 'postgres')]
+          }),
+          at: 1
+        }
+      }
+    }), 'postgres')
+    expect(r.matches[0].label).toBe('pg.service')
+  })
+
+  it('ranks a port whose process is the query above one that merely contains it', () => {
+    const r = searchFleet(input({
+      hosts: {
+        a: {
+          host: host({
+            listeners: [port(6379, { process: 'redis' }), port(1, { process: 'x-redis-y' })]
+          }),
+          at: 1
+        }
+      }
+    }), 'redis')
+    expect(r.matches[0].label).toBe('tcp/6379')
+  })
+})
+
+describe('what counts as a port', () => {
+  it('does not treat five digits above 65535 as a port', () => {
+    // 99999 is not a port. Treating it as one compared it against every
+    // listener's port number, matched nothing, and reported "no results" for a
+    // query that plainly appears in the data.
+    const r = searchFleet(input({
+      hosts: { a: { host: host({ listeners: [port(8080, { process: 'app-99999' })] }), at: 1 } }
+    }), '99999')
+    expect(r.matches.map((m) => m.label)).toEqual(['tcp/8080'])
+  })
+
+  it('does not treat 0 as a port', () => {
+    // Nothing listens on port 0 — the kernel prints it for "any" — so an exact
+    // match on it can only ever return nothing. As a substring it finds every
+    // socket bound to 0.0.0.0, which is what someone typing it can plausibly
+    // have meant.
+    const r = searchFleet(input({
+      hosts: { a: { host: host({ listeners: [port(8080)] }), at: 1 } }
+    }), '0')
+    expect(r.matches.filter((m) => m.kind === 'port').map((m) => m.label)).toEqual(['tcp/8080'])
+  })
+
+  it('still matches a real port exactly', () => {
+    const r = searchFleet(input({
+      hosts: { a: { host: host({ listeners: [port(65535), port(6553)] }), at: 1 } }
+    }), '65535')
+    expect(r.matches.map((m) => m.label)).toEqual(['tcp/65535'])
+  })
+})
+
+describe('one row, one key', () => {
+  it('gives two sockets on the same port and different addresses distinct keys', () => {
+    // kind:serverId:label is the same string for both — same protocol, same
+    // port, same host — and duplicate React keys make rows drop or update as
+    // each other.
+    const r = searchFleet(input({
+      hosts: {
+        a: {
+          host: host({
+            listeners: [port(443, { address: '0.0.0.0' }), port(443, { address: '::1' })]
+          }),
+          at: 1
+        }
+      }
+    }), '443')
+    expect(r.matches).toHaveLength(2)
+    const naive = new Set(r.matches.map((m) => `${m.kind}:${m.serverId}:${m.label}`))
+    expect(naive.size).toBe(1)
+    const keys = new Set(r.matches.map((m, i) => matchKey(m, i)))
+    expect(keys.size).toBe(2)
+  })
+
+  it('keeps keys distinct even for two byte-identical rows', () => {
+    // netstat can print the same socket twice; a key that depends only on the
+    // row's content cannot separate them.
+    const r = searchFleet(input({
+      hosts: { a: { host: host({ listeners: [port(443), port(443)] }), at: 1 } }
+    }), '443')
+    const keys = new Set(r.matches.map((m, i) => matchKey(m, i)))
+    expect(keys.size).toBe(r.matches.length)
+  })
+})
+
+describe('a server listed twice', () => {
+  it('scans it once', () => {
+    // Otherwise every row is duplicated, the host is counted twice in the
+    // coverage sentence, and the two copies collide on a React key.
+    const r = searchFleet(input({
+      servers: [{ id: 'a', name: 'web-01' }, { id: 'a', name: 'web-01' }],
+      hosts: { a: { host: host({ services: [unit('nginx.service')] }), at: 1 } }
+    }), 'nginx')
+    expect(r.matches).toHaveLength(1)
+    expect(r.coverage.searched).toEqual(['web-01'])
   })
 })

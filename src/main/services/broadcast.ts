@@ -3,7 +3,12 @@ import type {
   BroadcastProgress,
   BroadcastRequest
 } from '../../shared/broadcast'
-import { BROADCAST_CONCURRENCY, BROADCAST_OUTPUT_CAP, BROADCAST_TIMEOUT_MS } from '../../shared/broadcast'
+import {
+  BROADCAST_CONCURRENCY,
+  BROADCAST_OUTPUT_CAP,
+  BROADCAST_STALL_GRACE_MS,
+  BROADCAST_TIMEOUT_MS
+} from '../../shared/broadcast'
 
 // Runs one command across many servers.
 //
@@ -31,6 +36,8 @@ export interface BroadcastDeps {
   exec: Executor
   emit: (progress: BroadcastProgress) => void
   now?: () => number
+  /** Overridable for tests; see BROADCAST_STALL_GRACE_MS. */
+  stallGraceMs?: number
 }
 
 function cap(text: string | undefined): { text: string; truncated: boolean } {
@@ -71,8 +78,39 @@ export class BroadcastRunner {
     return true
   }
 
+  /**
+   * Reject an executor that never settles.
+   *
+   * The per-host timeout belongs to `sshExec`, and its timer starts only once
+   * the connection is up — so connection setup is not covered by it at all. An
+   * exec that never resolves used to leave the worker awaiting forever: no
+   * result for that host, no terminal event for any of them, `active` never
+   * cleared, and a Stop button that cannot help because cancel deliberately
+   * leaves a running host alone. Whatever else is true, the run must end.
+   */
+  private stallGuard<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const guard = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms)
+      // The run is over as far as the user is concerned; do not hold the
+      // process open waiting to say so.
+      if (typeof timer.unref === 'function') timer.unref()
+    })
+    // Promise.race attaches its own handlers to `p`, so an exec that settles
+    // after the guard fired is not an unhandled rejection.
+    return Promise.race([p, guard]).finally(() => clearTimeout(timer))
+  }
+
   async run(req: BroadcastRequest): Promise<BroadcastHostResult[]> {
     const timeoutMs = req.timeoutMs ?? BROADCAST_TIMEOUT_MS
+    // Two runs under one id is not a second broadcast, it is one broadcast the
+    // user can no longer address: cancel names a single id, progress events
+    // carry a single id, and the first run to finish would delete the other's
+    // entry — leaving a live run that cannot be cancelled and a Stop button
+    // that silently does nothing.
+    if (this.active.has(req.runId)) {
+      throw new Error(`a broadcast with id ${req.runId} is already running`)
+    }
     const state = { cancelled: false }
     this.active.set(req.runId, state)
 
@@ -102,7 +140,11 @@ export class BroadcastRunner {
 
       let host: BroadcastHostResult
       try {
-        const r = await this.deps.exec(t.cfg, req.command, timeoutMs)
+        const r = await this.stallGuard(
+          this.deps.exec(t.cfg, req.command, timeoutMs),
+          timeoutMs + (this.deps.stallGraceMs ?? BROADCAST_STALL_GRACE_MS),
+          `${t.serverName} never answered — giving up so the rest of the run can finish`
+        )
         const out = cap(r.stdout)
         const err = cap(r.stderr)
         host = {
@@ -147,7 +189,10 @@ export class BroadcastRunner {
     try {
       await Promise.all(workers)
     } finally {
-      this.active.delete(req.runId)
+      // Only if this run still owns the entry. disposeAll clears the map, and a
+      // deletion that does not check identity would drop somebody else's live
+      // run out of reach of cancel.
+      if (this.active.get(req.runId) === state) this.active.delete(req.runId)
       // A terminal event always fires, including on cancel and on an empty
       // target list, so the renderer never waits forever for a run that has
       // already stopped.

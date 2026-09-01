@@ -36,25 +36,31 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
 
   const collect = async (): Promise<void> => {
     setLoading(true)
-    const res = await window.shellpilot?.cron?.collect(
-      eligible.map((s) => ({
-        serverId: s.id,
-        serverName: s.name,
-        cfg: {
-          sessionId: `cron-${s.id}`,
-          cols: 80,
-          rows: 24,
+    try {
+      const res = await window.shellpilot?.cron?.collect(
+        eligible.map((s) => ({
           serverId: s.id,
-          host: s.host,
-          port: s.port,
-          username: s.username,
-          auth: s.auth === 'password' || s.auth === 'agent' ? s.auth : 'key',
-          hops: sshHopsFor(s)
-        }
-      }))
-    )
-    setRows(res ?? [])
-    setLoading(false)
+          serverName: s.name,
+          cfg: {
+            sessionId: `cron-${s.id}`,
+            cols: 80,
+            rows: 24,
+            serverId: s.id,
+            host: s.host,
+            port: s.port,
+            username: s.username,
+            auth: s.auth === 'password' || s.auth === 'agent' ? s.auth : 'key',
+            hops: sshHopsFor(s)
+          }
+        }))
+      )
+      setRows(res ?? [])
+    } finally {
+      // The handler catches per host today, so nothing here throws — but one
+      // rejected invoke away, a button that never stops spinning is a UI that
+      // has silently stopped working.
+      setLoading(false)
+    }
   }
 
   const q = filter.trim().toLowerCase()
@@ -133,8 +139,16 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
                         A wrong sentence about when a job runs is worse than
                         none. */}
                     <span className="faint cron-desc">{e.description ?? ''}</span>
-                    <span className="mono grow cron-cmd" title={e.command}>
+                    {/* `e.input` is the text after an unescaped `%`, which
+                        cron pipes to the command on stdin rather than running.
+                        Showing it inside the command would be showing a command
+                        that is not the one that runs. */}
+                    <span
+                      className="mono grow cron-cmd"
+                      title={e.input === undefined ? e.command : `${e.command}\n\nstdin:\n${e.input}`}
+                    >
                       {e.command}
+                      {e.input !== undefined && <span className="faint"> · stdin</span>}
                     </span>
                     {e.user && <span className="faint">{e.user}</span>}
                   </div>

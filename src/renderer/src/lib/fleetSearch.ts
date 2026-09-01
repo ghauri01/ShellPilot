@@ -38,6 +38,18 @@ export interface FleetMatch {
    * unmarked row implying it is still there.
    */
   stale?: boolean
+  /**
+   * Sort position, 0 (exact) to 3 (other), computed against the text that
+   * actually matched rather than against `label`.
+   *
+   * Ranking on the label alone was wrong for every match whose label the query
+   * never appears in — a host found by its hostname, a unit found by its
+   * description, a port found by its owning process all scored worst-possible
+   * and sorted below every incidental substring hit. It is computed once here
+   * rather than inside the comparator, which also stops the sort recomputing it
+   * O(n log n) times per keystroke.
+   */
+  score: number
 }
 
 /**
@@ -45,9 +57,21 @@ export interface FleetMatch {
  *
  * Every field is a list of server names rather than a count, because "3 hosts
  * could not be searched" prompts the question this is supposed to answer.
+ *
+ * `noServiceView`, `noPortView` and `noProbes` are disjoint: a host that has
+ * neither probe appears once, under `noProbes`, rather than twice under the
+ * other two with nothing saying that between them they account for everything
+ * that host could have contributed.
  */
 export interface FleetCoverage {
-  /** Hosts with usable data behind this search. */
+  /**
+   * Hosts whose units and ports were actually searched.
+   *
+   * A host with a sample but neither probe is NOT here: its inventory was not
+   * searched at all, only its own name, hostname and kernel. Counting it would
+   * put a number on the screen that overstates what was looked at, which is the
+   * one thing this whole structure exists to prevent.
+   */
   searched: string[]
   /** Never sampled — background checking off, or not swept yet. */
   notChecked: string[]
@@ -55,6 +79,8 @@ export interface FleetCoverage {
   noServiceView: string[]
   /** Sampled, but neither ss nor netstat is present, so no port can match. */
   noPortView: string[]
+  /** Sampled, but neither probe ran: nothing on the host was searchable. */
+  noProbes: string[]
   /** Answered before and is failing now; its rows are marked stale. */
   unreachable: string[]
 }
@@ -80,17 +106,56 @@ export const FLEET_SEARCH_CAP = 200
 
 const norm = (s: string): string => s.toLowerCase()
 
-/** A query that is only digits is a port number, and should match ports exactly. */
+/** The highest port number there is. Above it, digits are not a port at all. */
+const MAX_PORT = 65535
+
+/**
+ * A query that is only digits is a port number, and should match ports exactly.
+ *
+ * Only a number that could actually be a listening port counts. `99999` is five
+ * digits and no port, and `0` is what a kernel prints for "any" rather than
+ * anything a process listens on; treating either as an exact port silently
+ * returned nothing at all. Both fall through to substring matching instead,
+ * where `0` still finds every socket bound to 0.0.0.0 and `99999` finds a
+ * process or address that contains it — an honest answer rather than an empty
+ * one.
+ */
 function portQuery(q: string): number | null {
-  return /^\d{1,5}$/.test(q) ? Number(q) : null
+  if (!/^\d{1,5}$/.test(q)) return null
+  const n = Number(q)
+  return n >= 1 && n <= MAX_PORT ? n : null
 }
 
-function rank(m: FleetMatch, q: string): number {
-  const label = norm(m.label)
-  if (label === q) return 0
-  if (label.startsWith(q)) return 1
-  if (label.includes(q)) return 2
+/** 0 exact, 1 prefix, 2 substring, 3 no match. `term` must already be lowercase. */
+function rank(term: string, q: string): number {
+  if (term === q) return 0
+  if (term.startsWith(q)) return 1
+  if (term.includes(q)) return 2
   return 3
+}
+
+/** The best rank across every field the row could have matched on. */
+function bestRank(terms: string[], q: string): number {
+  let best = 3
+  for (const t of terms) {
+    const r = rank(t, q)
+    if (r < best) best = r
+    if (best === 0) break
+  }
+  return best
+}
+
+/**
+ * A React key that is unique within one result list.
+ *
+ * `kind:serverId:label` was not: two sockets with the same protocol and port on
+ * different addresses (0.0.0.0:443 and ::1:443, or the same port bound per
+ * interface) share a label, and duplicate keys make React drop or mis-update
+ * rows. The index guarantees uniqueness even for two byte-identical rows, which
+ * `netstat` can genuinely produce.
+ */
+export function matchKey(m: FleetMatch, index: number): string {
+  return `${m.kind}:${m.serverId}:${m.label}:${m.badge ?? ''}:${index}`
 }
 
 export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSearchResult {
@@ -100,64 +165,116 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
     notChecked: [],
     noServiceView: [],
     noPortView: [],
+    noProbes: [],
     unreachable: []
   }
   const matches: FleetMatch[] = []
   if (q === '') return { matches, coverage, truncated: 0 }
 
   const exactPort = portQuery(q)
+  // The same server listed twice would be scanned twice: every row duplicated,
+  // its name counted twice in the coverage sentence, and two rows sharing a
+  // React key. Cheaper to refuse the duplicate than to reason about whether the
+  // store can ever produce one.
+  const seenServers = new Set<string>()
 
   for (const server of input.servers) {
+    if (seenServers.has(server.id)) continue
+    seenServers.add(server.id)
+
     const entry = input.hosts[server.id]
     if (!entry) {
       coverage.notChecked.push(server.name)
       continue
     }
     const { host, at } = entry
-    coverage.searched.push(server.name)
 
     // An error newer than the sample means the host has stopped answering
     // since. Rows still show, marked.
+    //
+    // `>=` rather than `>` on purpose: a success DELETES the stored error
+    // (store/fleet.ts `report`), so an error being present at all means it was
+    // recorded after the last good sample. When the two timestamps tie — same
+    // sweep, or two events inside one millisecond — the error is the later of
+    // the two and the rows are stale. `>` would silently un-mark exactly that
+    // case. The comparison still earns its keep for an error that arrives out
+    // of order carrying a timestamp older than a sample already stored.
     const err = input.errors[server.id]
     const stale = err !== undefined && err.at >= at
     if (stale) coverage.unreachable.push(server.name)
 
-    const base = { serverId: server.id, serverName: server.name, at, stale: stale || undefined }
+    const base = {
+      serverId: server.id,
+      serverName: server.name,
+      at,
+      stale: stale || undefined
+    }
 
     // The host itself — so "ubuntu" or a hostname finds the box, not just
     // things on it.
-    const hostHay = `${server.name} ${host.hostname} ${host.kernel}`
-    if (norm(hostHay).includes(q)) {
+    const nameTerm = norm(server.name)
+    const hostTerm = norm(host.hostname || '')
+    const kernelTerm = norm(host.kernel || '')
+    if (nameTerm.includes(q) || hostTerm.includes(q) || kernelTerm.includes(q)) {
       matches.push({
         ...base,
         kind: 'host',
         label: server.name,
         detail: `${host.hostname} · ${host.kernel} · ${host.cores} vCPU`,
-        badge: stale ? 'unreachable' : undefined
+        badge: stale ? 'unreachable' : undefined,
+        // Ranked on whichever of the three the query hit, so a host found by an
+        // exact hostname sorts above a unit that merely contains the query.
+        score: bestRank([nameTerm, hostTerm, kernelTerm], q)
       })
     }
 
-    if (host.services === null) coverage.noServiceView.push(server.name)
-    else {
+    // A host with neither probe had nothing but its own identity to search.
+    // Reported as one gap rather than counted as a searched host with two
+    // separate holes in it.
+    if (host.services === null && host.listeners === null) {
+      coverage.noProbes.push(server.name)
+    } else {
+      coverage.searched.push(server.name)
+      if (host.services === null) coverage.noServiceView.push(server.name)
+      if (host.listeners === null) coverage.noPortView.push(server.name)
+    }
+
+    if (host.services !== null) {
       for (const u of host.services) {
-        if (!norm(`${u.name} ${u.description}`).includes(q)) continue
+        const name = norm(u.name)
+        const desc = norm(u.description || '')
+        if (!name.includes(q) && !desc.includes(q)) continue
         const failed = u.active === 'failed' || u.sub === 'failed'
         matches.push({
           ...base,
           kind: 'unit',
           label: u.name,
           detail: u.description || `${u.active}/${u.sub}`,
-          badge: failed ? 'failed' : u.active
+          badge: failed ? 'failed' : u.active,
+          score: bestRank([name, desc], q)
         })
       }
     }
 
-    if (host.listeners === null) coverage.noPortView.push(server.name)
-    else {
+    if (host.listeners !== null) {
       for (const l of host.listeners) {
-        const hay = `${l.proto} ${l.port} ${l.address} ${l.process ?? ''}`
-        const hit = exactPort !== null ? l.port === exactPort : norm(hay).includes(q)
-        if (!hit) continue
+        let score: number
+        if (exactPort !== null) {
+          // The numeric path touches no strings at all. It runs over every
+          // socket on every host on every keystroke, and building a haystack
+          // it then ignores was the bulk of the work a port query did.
+          if (l.port !== exactPort) continue
+          score = 0
+        } else {
+          const proto = norm(l.proto || '')
+          const addr = norm(l.address || '')
+          const proc = norm(l.process || '')
+          const portStr = String(l.port)
+          if (!proto.includes(q) && !portStr.includes(q) && !addr.includes(q) && !proc.includes(q)) {
+            continue
+          }
+          score = bestRank([`${proto}/${portStr}`, portStr, proc, addr, proto], q)
+        }
         matches.push({
           ...base,
           kind: 'port',
@@ -167,17 +284,15 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
           detail: l.process
             ? `${l.process}${l.pid ? ` (pid ${l.pid})` : ''}`
             : 'owner not visible at this privilege',
-          badge: l.address
+          badge: l.address,
+          score
         })
       }
     }
   }
 
   matches.sort(
-    (a, b) =>
-      rank(a, q) - rank(b, q) ||
-      a.serverName.localeCompare(b.serverName) ||
-      a.label.localeCompare(b.label)
+    (a, b) => a.score - b.score || a.serverName.localeCompare(b.serverName) || a.label.localeCompare(b.label)
   )
 
   const truncated = Math.max(0, matches.length - FLEET_SEARCH_CAP)
@@ -186,6 +301,11 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
 
 /**
  * One sentence describing what the search could and could not see.
+ *
+ * The count leads with units and ports rather than with hosts, because that is
+ * what the number is true of: a host with no probes contributed nothing but its
+ * own name, and calling it "searched" put a reassuring number on screen that
+ * the results behind it did not support.
  *
  * Returns null only when every server in the workspace was searched with both
  * probes working — the one case where silence is accurate.
@@ -197,10 +317,11 @@ export function coverageSentence(c: FleetCoverage): string | null {
 
   if (c.notChecked.length) parts.push(`${list(c.notChecked)} have not been checked yet`)
   if (c.unreachable.length) parts.push(`${list(c.unreachable)} stopped answering since the last sample`)
+  if (c.noProbes.length) parts.push(`neither systemd nor a port probe on ${list(c.noProbes)}`)
   if (c.noServiceView.length) parts.push(`no systemd on ${list(c.noServiceView)}`)
   if (c.noPortView.length) parts.push(`no port probe on ${list(c.noPortView)}`)
   if (parts.length === 0) return null
 
   const n = c.searched.length
-  return `Searched ${n} host${n === 1 ? '' : 's'} — ${parts.join('; ')}.`
+  return `Units and ports searched on ${n} host${n === 1 ? '' : 's'} — ${parts.join('; ')}.`
 }

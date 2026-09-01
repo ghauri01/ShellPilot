@@ -131,3 +131,104 @@ describe('the plan handed to the dialog', () => {
     expect(planBroadcast('uptime', []).confirmation.kind).toBe('confirm')
   })
 })
+
+// Real commands, typed the way people actually type them. Each of these read as
+// `ordinary` — no confirmation at all on a single host — because the pattern
+// matched one spelling of the command and not the one in front of it.
+describe('spellings the classifier used to miss', () => {
+  it('flags a recursive delete written with long options', () => {
+    expect(assessCommand('rm --recursive --force /var/log/old').risk).toBe('destructive')
+  })
+
+  it('flags a bulk delete reached through find or xargs', () => {
+    // Neither puts `rm` at a command start, which is where the anchored rule
+    // looks — and these are how a bulk delete is actually written.
+    expect(assessCommand("find /srv -name '*.bak' -exec rm -rf {} +").risk).toBe('destructive')
+    expect(assessCommand('find /srv -name "*.bak" | xargs rm -f').risk).toBe('destructive')
+    expect(assessCommand("find /var/log -name '*.gz' -delete").risk).toBe('destructive')
+  })
+
+  it("flags systemd's own spelling of stopping the machine", () => {
+    // `systemctl` sits at the command start, so the reboot rule never saw it.
+    expect(assessCommand('systemctl poweroff').risk).toBe('destructive')
+    expect(assessCommand('sudo systemctl reboot').risk).toBe('destructive')
+  })
+
+  it('flags a firewall flush written with the short flag', () => {
+    // `\b-F\b` never matched ` -F`: there is no word boundary between a space
+    // and a dash, so the most common spelling was the unguarded one.
+    expect(assessCommand('iptables -F').risk).toBe('destructive')
+    expect(assessCommand('sudo iptables -F INPUT').risk).toBe('destructive')
+  })
+
+  it('flags a recursive chmod or chown whose flag comes after the mode', () => {
+    expect(assessCommand('chmod 777 -R /srv').risk).toBe('destructive')
+    expect(assessCommand('chown --recursive deploy /srv').risk).toBe('destructive')
+    expect(assessCommand('chmod -Rv 755 /srv').risk).toBe('destructive')
+  })
+
+  it('flags SIGKILL sent with pkill or -s', () => {
+    expect(assessCommand('pkill -9 nginx').risk).toBe('destructive')
+    expect(assessCommand('kill -s KILL 4211').risk).toBe('destructive')
+  })
+
+  it('flags wiping the crontab, which is one key from editing it', () => {
+    expect(assessCommand('crontab -r').risk).toBe('destructive')
+    expect(assessCommand('crontab -l').risk).toBe('ordinary')
+  })
+
+  it('flags stopping a service the SysV way', () => {
+    expect(assessCommand('service nginx stop').risk).toBe('destructive')
+    expect(assessCommand('service nginx restart').risk).toBe('elevated')
+  })
+
+  it('flags destroying a volume or a pool', () => {
+    expect(assessCommand('lvremove /dev/vg0/data').risk).toBe('destructive')
+    expect(assessCommand('zfs destroy tank/backups').risk).toBe('destructive')
+  })
+
+  it('sees root reached through a pipe, not only at the start of the line', () => {
+    expect(assessCommand('curl -sL https://example.test/i.sh | sudo bash').risk).toBe('elevated')
+  })
+
+  it("sees docker's noun-verb spellings", () => {
+    // `docker system prune` and `docker volume rm` are how these are written
+    // now; the verb-only rule matched neither.
+    expect(assessCommand('docker system prune -af --volumes').risk).toBe('elevated')
+    expect(assessCommand('docker volume rm pgdata').risk).toBe('elevated')
+    expect(assessCommand('docker compose down').risk).toBe('elevated')
+  })
+
+  it('flags package removals spelled purge or autoremove', () => {
+    expect(assessCommand('apt-get purge nginx').risk).toBe('elevated')
+    expect(assessCommand('apt autoremove').risk).toBe('elevated')
+  })
+})
+
+describe('and still not crying wolf', () => {
+  it('leaves everyday read-only commands alone', () => {
+    // The half of the model that matters most: a guard that fires on `df -h`
+    // is a guard people learn to click through, and it is then not there for
+    // the one that meant it.
+    for (const c of [
+      'uptime',
+      'df -h',
+      'ps aux | grep nginx',
+      'ls -la /var/log',
+      'journalctl -u nginx -n 50',
+      'systemctl status nginx',
+      'grep -r timeout /etc/nginx',
+      "find /var/log -name '*.log' -mtime +7",
+      'docker ps -a',
+      'apt list --installed',
+      'tail -f /var/log/syslog',
+      'cat /etc/hostname',
+      'echo charming',
+      'grep reboot /var/log/syslog',
+      // A filename that happens to end in a capital R is not a recursive flag.
+      'chmod 644 /srv/foo-baR'
+    ]) {
+      expect(assessCommand(c).risk, c).toBe('ordinary')
+    }
+  })
+})

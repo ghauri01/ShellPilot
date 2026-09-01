@@ -129,3 +129,20 @@ export const MODULE_FORBIDDEN_IMPORTS = [
   'services/localPty',
   'services/secrets'
 ] as const
+
+/**
+ * The same four things, named the way the RENDERER reaches them.
+ *
+ * Every path above lives under src/main. Three of the five modules are renderer
+ * components, and a renderer file does not import the vault — it calls
+ * `window.shellpilot.vault.list()`, which returns every entry with its password
+ * in it, from a file whose import closure is spotless. An import-closure guard
+ * cannot see a global, so the closure walk alone was checking the modules least
+ * able to violate it and saying nothing about the ones most able to.
+ *
+ * These are `window.shellpilot` namespaces (src/preload/index.ts): `vault` is
+ * the vault, `secrets` is the OS keychain, `local` is a shell on the user's own
+ * machine. A module needing any of them is not a module — it is part (b), and
+ * needs the sandbox and the capability-scoped API that part (b) means.
+ */
+export const MODULE_FORBIDDEN_BRIDGE = ['vault', 'secrets', 'local'] as const

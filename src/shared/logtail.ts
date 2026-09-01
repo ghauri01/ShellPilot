@@ -48,11 +48,32 @@ export interface LogTailState {
 export const LOG_RING = 2_000
 /** Lines from a single host per second before we start dropping, with a notice. */
 export const LOG_RATE_PER_SEC = 500
+/**
+ * Longest single line kept, in characters.
+ *
+ * A "line" is whatever arrives before a newline, and nothing guarantees one
+ * ever does: a log file that turns out to be binary, a process writing a
+ * progress bar with carriage returns, a JSON blob per event. Without a cap the
+ * partial-line buffer is an unbounded allocation in main driven entirely by
+ * what a remote host chooses to send, and a single line big enough to matter is
+ * an IPC message big enough to stall the renderer. Anything longer is split
+ * across several lines rather than dropped — a truncated log is a log that lies
+ * about what the host said.
+ */
+export const LOG_LINE_CAP = 16_384
 
-// systemd unit names: alphanumerics and `-_.\@:` plus an optional suffix. This
+// systemd unit names: alphanumerics and `-_.@:` plus an optional suffix. This
 // is deliberately the permissive-but-bounded set rather than a full grammar —
 // what matters is that nothing here can end a shell word.
-const UNIT_RE = /^[A-Za-z0-9@._:\\-]{1,128}$/
+//
+// No backslash. It used to be in the class (as `\\`, which reads like an escape
+// of the trailing `-` but is a literal backslash) and it was the one character
+// here that the shell does not pass through: `-u a\-b` reaches journalctl as
+// `a-b`, so the host would follow a unit the user did not name. systemd does
+// escape `-` as `\x2d` in device and mount unit names, but those are not things
+// anyone follows, and the honest answer for them would be to quote the word
+// rather than to let a shell rewrite it silently.
+const UNIT_RE = /^[A-Za-z0-9@._:-]{1,128}$/
 // Absolute paths only, no shell metacharacters, no traversal. A relative path
 // would resolve against whatever directory the exec channel happens to start
 // in, which is not a thing the user can reason about.

@@ -2,7 +2,12 @@ import { useMemo, useState } from 'react'
 import { Container, RefreshCw, ScrollText, TriangleAlert } from 'lucide-react'
 import { sshHopsFor } from '../../lib/ssh'
 import { clsx } from '../../lib/format'
-import { DOCKER_FAILURE_HELP, type DockerContainer, type DockerProbe } from '../../../../shared/docker'
+import {
+  DOCKER_FAILURE_HELP,
+  validateContainerRef,
+  type DockerContainer,
+  type DockerProbe
+} from '../../../../shared/docker'
 import type { Server } from '../../types'
 
 // Containers on a server.
@@ -42,16 +47,35 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
     if (!server) return
     setLoading(true)
     setLogs(null)
-    const r = await window.shellpilot?.docker?.list(cfgFor(server))
-    setProbe(r ?? null)
-    setLoading(false)
+    try {
+      const r = await window.shellpilot?.docker?.list(cfgFor(server))
+      setProbe(r ?? null)
+    } catch (e) {
+      setProbe({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
+    } finally {
+      // In a finally, so a rejected invoke leaves a button the user can press
+      // again rather than one that spins forever.
+      setLoading(false)
+    }
   }
 
   const openLogs = async (c: DockerContainer): Promise<void> => {
     if (!server) return
+    // `docker:logs` is the one handler that can reject: buildDockerLogsCommand
+    // refuses a reference it cannot prove safe rather than escaping it. Asking
+    // first turns an unhandled rejection and a pane stuck on "Loading…" into a
+    // sentence saying what happened.
+    if (!validateContainerRef(c.name)) {
+      setLogs({ ref: c.name, output: 'This container has a name logs cannot be requested for safely.' })
+      return
+    }
     setLogs({ ref: c.name, output: 'Loading…' })
-    const r = await window.shellpilot?.docker?.logs(cfgFor(server), c.name, 200)
-    setLogs({ ref: c.name, output: r?.output || r?.error || 'No output.' })
+    try {
+      const r = await window.shellpilot?.docker?.logs(cfgFor(server), c.name, 200)
+      setLogs({ ref: c.name, output: r?.output || r?.error || 'No output.' })
+    } catch (e) {
+      setLogs({ ref: c.name, output: e instanceof Error ? e.message : String(e) })
+    }
   }
 
   return (
@@ -103,7 +127,10 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
       {probe?.ok && (
         <>
           <div className="row muted" style={{ fontSize: 11, marginTop: 8, gap: 12 }}>
-            <span>docker {probe.version}</span>
+            {/* null when the host answered with something that was not a
+                version — podman's docker shim, most often. Saying nothing
+                beats printing "docker null". */}
+            <span>{probe.version ? `docker ${probe.version}` : 'docker'}</span>
             <span>
               {probe.containers.length} container{probe.containers.length === 1 ? '' : 's'}
             </span>

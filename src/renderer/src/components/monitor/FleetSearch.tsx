@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Search, X, Server as ServerIcon, Boxes, Network } from 'lucide-react'
 import { useFleet } from '../../store/fleet'
-import { searchFleet, coverageSentence, type FleetMatch } from '../../lib/fleetSearch'
+import { searchFleet, coverageSentence, matchKey, type FleetMatch } from '../../lib/fleetSearch'
 import { duration } from '../../lib/format'
 import type { Server } from '../../types'
 
@@ -57,6 +57,10 @@ export function FleetSearch({
   )
   const coverage = coverageSentence(result.coverage)
   const active = query.trim() !== ''
+  // `searched` deliberately excludes a host that has a sample but neither
+  // probe, so it is no longer the test for "has anything been sampled at all".
+  const nothingSampled =
+    result.coverage.searched.length === 0 && result.coverage.noProbes.length === 0
 
   return (
     <div className="fleet-search">
@@ -91,14 +95,21 @@ export function FleetSearch({
 
           {result.matches.length === 0 && (
             <div className="faint" style={{ padding: '10px 0' }}>
-              {result.coverage.searched.length === 0
+              {/* "Nothing was sampled" and "nothing matched" are different
+                  answers, and so is "the hosts were sampled but neither probe
+                  ran on them" — that last one has a sample and would otherwise
+                  be told to turn on background checking it already has on. */}
+              {nothingSampled
                 ? 'No host has been sampled yet, so there is nothing to search. Turn on background checking, or open a server.'
                 : 'Nothing matched on the hosts that could be searched.'}
             </div>
           )}
 
-          {result.matches.map((m) => (
-            <Row key={`${m.kind}:${m.serverId}:${m.label}`} m={m} onOpen={onOpen} />
+          {/* The key must be unique per row, not merely descriptive: two sockets
+              with the same protocol and port on different addresses share
+              kind, server and label. */}
+          {result.matches.map((m, i) => (
+            <Row key={matchKey(m, i)} m={m} onOpen={onOpen} />
           ))}
         </div>
       )}

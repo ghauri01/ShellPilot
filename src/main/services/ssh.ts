@@ -675,14 +675,43 @@ const EXEC_OUTPUT_CAP = 200_000 // bytes per stream, enough for inspection outpu
 // interactive terminal uses (ssh2's exec channel rather than shell), for the
 // MCP bridge's execute_command tool. A single command in, buffered result
 // out — never a persistent shell.
+// Rejects if `p` has not settled in time.
+//
+// Used to bring connection setup inside the caller's timeout. `unref` so a
+// pending guard never holds the process open — the answer is already decided by
+// the time it fires.
+function withDeadline<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const guard = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms)
+    if (typeof timer.unref === 'function') timer.unref()
+  })
+  // race attaches handlers to `p`, so a late settle is not an unhandled
+  // rejection.
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer))
+}
+
 export async function sshExec(
   cfg: SshHop & { serverId?: string; hops?: SshHop[] },
   command: string,
-  timeoutMs = 30_000
+  timeoutMs = 30_000,
+  // False for anything that fans out. See the note on sshExecStream: N unknown
+  // hosts must not become N stacked trust dialogs.
+  allowPrompt = true
 ): Promise<ExecResult> {
   let conn: PooledConnection | null = null
   try {
-    conn = await acquire(cfg)
+    // Inside the timeout, not before it. The timer used to be armed only after
+    // this resolved, so TCP connect, every hop's forward, and an unknown-host
+    // trust prompt were all outside the timeout the caller asked for — a
+    // "30 second" exec could wait indefinitely on a host that accepted the
+    // connection and then said nothing. The guarantee the signature offers is
+    // now the one it gives.
+    conn = await withDeadline(
+      acquire(cfg, undefined, allowPrompt),
+      timeoutMs,
+      `Timed out after ${timeoutMs}ms connecting`
+    )
     const client = conn.client
     return await new Promise<ExecResult>((resolve) => {
       let settled = false
@@ -762,9 +791,20 @@ export async function sshExecStream(
     onStderr: (chunk: string) => void
     onClose: (code: number | null) => void
     onError: (message: string) => void
-  }
+  },
+  // False for anything that fans out across several hosts at once.
+  //
+  // `metrics.ts` threads this through for the background sweep precisely so an
+  // unattended sample cannot raise a trust-on-first-use dialog. Log tailing and
+  // broadcast have the same problem for a different reason: the user IS present,
+  // but a batch across fifteen hosts with unknown keys would raise fifteen
+  // stacked modals, and a stack of identical dialogs is not a decision anyone
+  // can reason about — it is the click-through this app's host verification
+  // exists to avoid. An unknown host fails that host with a reason instead, and
+  // the fix is to connect to it once directly.
+  allowPrompt = true
 ): Promise<() => void> {
-  const conn = await acquire(cfg)
+  const conn = await acquire(cfg, undefined, allowPrompt)
   let released = false
   const releaseOnce = (): void => {
     if (released) return

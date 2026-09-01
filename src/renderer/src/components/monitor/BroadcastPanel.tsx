@@ -45,35 +45,50 @@ function HostResult({ r }: { r: BroadcastHostResult }): React.JSX.Element {
   )
 }
 
+// A run outlives this panel. Switching activity unmounts it while main is still
+// working through the hosts, and with the run id held only in component state
+// the remounted panel could neither show the run nor stop it: N hosts still
+// executing and no way to say stop. Module scope rather than the app store
+// because nothing outside this file has any use for it.
+let liveRun: { runId: string; results: Record<string, BroadcastHostResult> } | null = null
+
 export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.Element {
   const [command, setCommand] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [phrase, setPhrase] = useState('')
   const [confirming, setConfirming] = useState(false)
-  const [running, setRunning] = useState(false)
-  const [results, setResults] = useState<Record<string, BroadcastHostResult>>({})
-  const runId = useRef<string>('')
+  const [running, setRunning] = useState(liveRun !== null)
+  const [results, setResults] = useState<Record<string, BroadcastHostResult>>(() => liveRun?.results ?? {})
+  const [error, setError] = useState<string | null>(null)
+  const runId = useRef<string>(liveRun?.runId ?? '')
   const setActivity = useApp((s) => s.setActivity)
 
   // Only servers that are actually reachable can be targets. Offering an
   // offline host is offering a guaranteed failure row.
   const eligible = useMemo(() => servers.filter((s) => s.status !== 'offline'), [servers])
-  const targets = useMemo(
-    () => eligible.filter((s) => selected.has(s.id)).map((s) => ({ serverId: s.id, serverName: s.name })),
-    [eligible, selected]
-  )
+  // The chosen servers, not just their ids: the cfg handed to main is built
+  // from these rows, and looking each one up again by id afterwards is how a
+  // lookup ends up with a `!` on it that nobody can prove.
+  const chosen = useMemo(() => eligible.filter((s) => selected.has(s.id)), [eligible, selected])
+  const targets = useMemo(() => chosen.map((s) => ({ serverId: s.id, serverName: s.name })), [chosen])
   const plan = useMemo(() => planBroadcast(command, targets), [command, targets])
 
   useEffect(() => {
     return bridgeOn('broadcast.onProgress', window.shellpilot?.broadcast?.onProgress, (p: BroadcastProgress) => {
       if (p.runId !== runId.current) return
       if (p.done) {
+        liveRun = null
         setRunning(false)
         return
       }
       setResults((prev) => ({ ...prev, [p.host.serverId]: p.host }))
     })
   }, [])
+
+  // Mirrored so a remount can show what has arrived so far.
+  useEffect(() => {
+    if (liveRun) liveRun.results = results
+  }, [results])
 
   const toggle = (id: string): void =>
     setSelected((prev) => {
@@ -87,28 +102,27 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
     if (targets.length === 0 || command.trim() === '') return
     setConfirming(false)
     setPhrase('')
+    setError(null)
     setRunning(true)
     // Seeded pending so every selected host has a row from the first frame.
     // A list that fills in as results arrive hides which hosts are still to
     // come, which is the thing you want to know while it is running.
-    setResults(
-      Object.fromEntries(
-        targets.map((t) => [t.serverId, { ...t, state: 'pending' as const }])
-      )
+    const seeded = Object.fromEntries(
+      targets.map((t) => [t.serverId, { ...t, state: 'pending' as const }])
     )
+    setResults(seeded)
     const id = crypto.randomUUID()
     runId.current = id
-    const byId = new Map(eligible.map((s) => [s.id, s]))
-    await window.shellpilot?.broadcast?.run({
-      runId: id,
-      command,
-      targets: targets.map((t) => {
-        const s = byId.get(t.serverId)!
-        return {
-          serverId: t.serverId,
-          serverName: t.serverName,
+    liveRun = { runId: id, results: seeded }
+    try {
+      await window.shellpilot?.broadcast?.run({
+        runId: id,
+        command,
+        targets: chosen.map((s) => ({
+          serverId: s.id,
+          serverName: s.name,
           cfg: {
-            sessionId: `broadcast-${t.serverId}`,
+            sessionId: `broadcast-${s.id}`,
             cols: 80,
             rows: 24,
             serverId: s.id,
@@ -118,10 +132,19 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
             auth: s.auth === 'password' || s.auth === 'agent' ? s.auth : 'key',
             hops: sshHopsFor(s)
           }
-        }
+        }))
       })
-    })
-    setRunning(false)
+    } catch (e) {
+      // Without this the panel is wedged: `running` stays true, so the only
+      // control on screen is a Stop button for a run that never started, and
+      // the reason it did not start is never said out loud.
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      // Also clears a run whose `done` event arrived while this panel was
+      // unmounted — otherwise a remount would show a finished run as live.
+      liveRun = null
+      setRunning(false)
+    }
   }
 
   const attempt = (): void => {
@@ -189,6 +212,8 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
       {/* The reasons are shown before the run, not inside the dialog only:
           someone reading the command should see how it was read without
           having to press Run to find out. */}
+      {error && <div className="s-desc danger">{error}</div>}
+
       {plan.risk !== 'ordinary' && command.trim() !== '' && (
         <div className={clsx('s-desc', plan.risk === 'destructive' ? 'danger' : 'warn')}>
           <TriangleAlert size={12} /> This {plan.risk === 'destructive' ? 'destroys state' : 'changes state'} —{' '}
@@ -231,9 +256,14 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
             <span>
               {finished} of {rows.length} finished
             </span>
-            <button className="btn ghost sm" onClick={() => setActivity('connections')}>
-              Open a terminal
-            </button>
+            {/* Not while it is running: this navigates away, which unmounts
+                the panel and takes the results with it — including the Stop
+                button for hosts that are still executing. */}
+            {!running && (
+              <button className="btn ghost sm" onClick={() => setActivity('connections')}>
+                Open a terminal
+              </button>
+            )}
           </div>
           {rows.map((r) => (
             <HostResult key={r.serverId} r={r} />

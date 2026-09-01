@@ -17,13 +17,22 @@ export interface CronEntry {
   kind: CronSourceKind
   /** The file or unit this came from. */
   origin: string
-  /** The schedule exactly as written. */
+  /** The schedule as written, with runs of whitespace collapsed to one space. */
   schedule: string
   /** Plain English, or null when we decline to guess. */
   description: string | null
   /** Who it runs as. null when the format does not say. */
   user: string | null
+  /**
+   * What cron actually runs, byte for byte: internal spacing preserved and
+   * `\%` unescaped to `%`, which is what the shell will see.
+   */
   command: string
+  /**
+   * Text after the first unescaped `%`, which cron feeds to the command on
+   * stdin rather than running. Absent when the command has none.
+   */
+  input?: string
   /** systemd timers only. */
   nextRun?: string
   lastRun?: string
@@ -37,6 +46,12 @@ export interface CronParseResult {
 
 const DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+// The three-letter names cron accepts, in the two fields that accept them.
+// Cron compares them case-insensitively, so `JAN`, `Jan` and `jan` are one
+// thing, as are `MON`, `Mon` and `mon`.
+const MONTH_ABBR = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const DOW_ABBR = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
 const SPECIALS: Record<string, string> = {
   '@reboot': 'at boot',
@@ -60,32 +75,95 @@ function isAssignment(line: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line)
 }
 
-// Minute, hour and day-of-month are numeric only. Month and day-of-week also
-// accept the three-letter names cron allows. The looser "letters anywhere"
-// version of this parsed `this is not a crontab line` as a job with the
-// schedule "this is not a crontab" — six words is all it takes.
-const NUMERIC_FIELD = /^(\*|\d+)([-,/]\d+)*(,\d+([-/]\d+)?)*$|^\*\/\d+$/
-const NAMED_FIELD = /^(\*|\d+|[A-Za-z]{3})([-,/](\d+|[A-Za-z]{3}))*$|^\*\/\d+$/
+// ---- Field validation --------------------------------------------------
+//
+// A field is a comma-separated list of items, each `*`, a number, a range or a
+// name, optionally followed by `/step`. Minute, hour and day-of-month are
+// numeric only; month and day-of-week also take names.
+//
+// Deliberately a split-and-test rather than one regex over the whole field.
+// The regex this replaces —
+//   /^(\*|\d+)([-,\/]\d+)*(,\d+([-\/]\d+)?)*$/
+// — had two adjacent stars that could both match `,N`, so a *failing* field
+// cost O(n²) backtracking: a 20k-character first word took 6.5 seconds on this
+// machine. The parser runs that against the first five words of every line of
+// every file it reads, most of which are not cron at all. Splitting on `,`
+// first makes the work linear and each item's regex unambiguous.
+const NUMERIC_ITEM = /^(?:\*|\d{1,4}(?:-\d{1,4})?)(?:\/\d{1,4})?$/
+const NAMED_ITEM = /^(?:\*|(?:\d{1,4}|[A-Za-z]{3})(?:-(?:\d{1,4}|[A-Za-z]{3}))?)(?:\/\d{1,4})?$/
 
-const isNumericFieldSet = (f: string[]): boolean =>
+const namesValid = (item: string, abbr: string[]): boolean =>
+  item
+    .split('/')[0]
+    .split('-')
+    .every((part) => part === '*' || /^\d+$/.test(part) || abbr.includes(part.toLowerCase()))
+
+const isNumericField = (field: string): boolean =>
+  field !== '' && field.split(',').every((i) => NUMERIC_ITEM.test(i))
+
+const isNamedField = (field: string, abbr: string[]): boolean =>
+  field !== '' && field.split(',').every((i) => NAMED_ITEM.test(i) && namesValid(i, abbr))
+
+const isCronFieldSet = (f: string[]): boolean =>
   f.length === 5 &&
-  NUMERIC_FIELD.test(f[0]) &&
-  NUMERIC_FIELD.test(f[1]) &&
-  NUMERIC_FIELD.test(f[2]) &&
-  NAMED_FIELD.test(f[3]) &&
-  NAMED_FIELD.test(f[4])
+  isNumericField(f[0]) &&
+  isNumericField(f[1]) &&
+  isNumericField(f[2]) &&
+  isNamedField(f[3], MONTH_ABBR) &&
+  isNamedField(f[4], DOW_ABBR)
 
-function describeField(value: string, unit: string, names?: string[]): string | null {
-  if (value === '*') return null
-  const named = (v: string): string => {
-    const n = Number(v)
-    return names && Number.isInteger(n) && names[n % names.length] ? names[n % names.length] : v
+// ---- Describing a schedule --------------------------------------------
+
+interface Unit {
+  /** How a single value reads: "minute 5", "on Monday". */
+  one: string
+  /** How a step reads: "every 5 minutes". */
+  many: string
+  names?: string[]
+  abbr?: string[]
+}
+
+function label(v: string, u: Unit): string {
+  if (!u.names) return v
+  if (u.abbr) {
+    const i = u.abbr.indexOf(v.toLowerCase())
+    if (i !== -1) return u.names[i] ?? v
   }
-  if (/^\*\/(\d+)$/.test(value)) return `every ${RegExp.$1} ${unit}`
-  if (/^\d+$/.test(value)) return `${unit} ${named(value)}`
-  if (/^[\d,]+$/.test(value)) return `${unit} ${value.split(',').map(named).join(', ')}`
-  if (/^(\d+)-(\d+)$/.test(value)) return `${unit} ${named(RegExp.$1)} to ${named(RegExp.$2)}`
-  return null
+  const n = Number(v)
+  if (!Number.isInteger(n)) return v
+  // Cron months are 1-based (1 = January); days of the week are 0-based on
+  // Sunday, with 7 accepted as Sunday too.
+  return u.names === MONTHS ? (MONTHS[n - 1] ?? v) : (u.names[n % u.names.length] ?? v)
+}
+
+/** One comma-separated item, or null if we will not describe it. */
+function describeItem(item: string, u: Unit): string | null {
+  const [range, step, ...extraSteps] = item.split('/')
+  if (extraSteps.length > 0) return null
+  const known = (v: string): boolean => /^\d+$/.test(v) || (u.abbr?.includes(v.toLowerCase()) ?? false)
+
+  if (range === '*') return step ? `every ${step} ${u.many}` : null
+  const [from, to, ...extra] = range.split('-')
+  if (extra.length > 0) return null
+  if (!known(from) || (to !== undefined && !known(to))) return null
+  if (to === undefined) {
+    // `N/S` means "from N to the end of the field, every S", and the end of the
+    // field depends which field it is. Declining beats guessing.
+    return step ? null : `${u.one} ${label(from, u)}`
+  }
+  return step
+    ? `every ${step} ${u.many} from ${label(from, u)} to ${label(to, u)}`
+    : `${u.one} ${label(from, u)} to ${label(to, u)}`
+}
+
+function describeField(value: string, u: Unit): string | null {
+  const parts: string[] = []
+  for (const item of value.split(',')) {
+    const d = describeItem(item, u)
+    if (d === null) return null
+    parts.push(d)
+  }
+  return parts.join(', ')
 }
 
 /**
@@ -104,15 +182,16 @@ export function describeSchedule(schedule: string): string | null {
   const [min, hour, dom, mon, dow] = f
 
   // The common, unambiguous shapes get a real sentence; anything else falls
-  // through to null rather than being approximated.
+  // through to the field-by-field walk, and then to null.
   if (/^\d+$/.test(min) && /^\d+$/.test(hour) && dom === '*' && mon === '*' && dow === '*') {
     return `at ${hour.padStart(2, '0')}:${min.padStart(2, '0')} every day`
   }
   if (/^\d+$/.test(min) && /^\d+$/.test(hour) && dom === '*' && mon === '*' && /^\d$/.test(dow)) {
     return `at ${hour.padStart(2, '0')}:${min.padStart(2, '0')} every ${DOW[Number(dow) % 7]}`
   }
-  if (/^\*\/(\d+)$/.test(min) && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
-    return `every ${RegExp.$1} minutes`
+  const everyMin = min.match(/^\*\/(\d+)$/)
+  if (everyMin && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
+    return `every ${everyMin[1]} minutes`
   }
   if (min === '*' && hour === '*' && dom === '*' && mon === '*' && dow === '*') return 'every minute'
   if (/^\d+$/.test(min) && hour === '*' && dom === '*' && mon === '*' && dow === '*') {
@@ -126,21 +205,72 @@ export function describeSchedule(schedule: string): string | null {
   // fields it understood and silently skipped the one it did not, so
   // `0 0 1-7 * 1#2` came back as "minute 0, hour 0, day 1 to 7" — a confident
   // sentence omitting the part that decides when it actually runs.
-  const fields: [string, string, string[]?][] = [
-    [min, 'minute'],
-    [hour, 'hour'],
-    [dom, 'day'],
-    [mon, 'month', ['', ...MONTHS]],
-    [dow, 'on', DOW]
+  const fields: [string, Unit][] = [
+    [min, { one: 'minute', many: 'minutes' }],
+    [hour, { one: 'hour', many: 'hours' }],
+    [dom, { one: 'day', many: 'days' }],
+    [mon, { one: 'month', many: 'months', names: MONTHS, abbr: MONTH_ABBR }],
+    [dow, { one: 'on', many: 'days of the week', names: DOW, abbr: DOW_ABBR }]
   ]
   const parts: string[] = []
-  for (const [value, unit, names] of fields) {
+  for (const [value, u] of fields) {
     if (value === '*') continue
-    const d = describeField(value, unit, names)
+    const d = describeField(value, u)
     if (d === null) return null
     parts.push(d)
   }
   return parts.length ? parts.join(', ') : null
+}
+
+// ---- Commands, and the percent rule -----------------------------------
+
+/**
+ * Split a crontab command at the percent sign.
+ *
+ * This is the trap nobody remembers. In a crontab an unescaped `%` is *not*
+ * part of the command: cron replaces it with a newline, and everything from the
+ * first one onwards is fed to the command on stdin instead of being run. `\%`
+ * is a literal percent.
+ *
+ * `date +\%Y\%m\%d` is in a large fraction of real crontabs, and reporting it
+ * verbatim shows a command that is not the one that runs. It is worse the other
+ * way round: `mail -s nightly root%Subject: x%body` reads as one long command,
+ * when cron runs only `mail -s nightly root`.
+ */
+export function splitCronCommand(raw: string): { command: string; input?: string } {
+  const unescapeInto = (from: number, newlines: boolean): { text: string; stoppedAt: number } => {
+    let text = ''
+    let i = from
+    for (; i < raw.length; i++) {
+      if (raw[i] === '\\' && raw[i + 1] === '%') {
+        text += '%'
+        i++
+        continue
+      }
+      if (raw[i] === '%') {
+        if (!newlines) break
+        text += '\n'
+        continue
+      }
+      text += raw[i]
+    }
+    return { text, stoppedAt: i }
+  }
+
+  const head = unescapeInto(0, false)
+  if (head.stoppedAt >= raw.length) return { command: head.text }
+  return { command: head.text, input: unescapeInto(head.stoppedAt + 1, true).text }
+}
+
+/** Tokens plus their offsets, so the command can be sliced out of the original
+ *  line with its own spacing intact rather than rebuilt from a join. */
+function tokenize(line: string): { text: string; start: number }[] {
+  const out: { text: string; start: number }[] = []
+  const re = /\S+/g
+  for (let m = re.exec(line); m !== null; m = re.exec(line)) {
+    out.push({ text: m[0], start: m.index })
+  }
+  return out
 }
 
 /**
@@ -162,32 +292,49 @@ export function parseCrontab(
   const unparsed: { origin: string; line: string }[] = []
 
   for (const raw of text.split('\n')) {
-    const line = raw.trim()
+    // `\r` is stripped explicitly rather than left to trim(), because the
+    // command is sliced out of this string afterwards and a carriage return
+    // sitting inside it would ride along into the reported command.
+    const line = raw.replace(/\r/g, '').trim()
     if (line === '' || line.startsWith('#')) continue
     if (isAssignment(line)) continue
 
+    // cronie lets a job be prefixed with `-` to suppress its syslog line. It is
+    // a logging flag, not part of the schedule, and cronie is the cron on every
+    // Red Hat derivative — so a `-` line is a real job, not a broken one.
+    const body = line.startsWith('-') ? line.slice(1) : line
+
     let schedule: string
     let rest: string
-    if (line.startsWith('@')) {
-      const m = line.match(/^(@\S+)\s+(.*)$/)
-      if (!m) {
+    if (body.startsWith('@')) {
+      const m = body.match(/^(@\S+)\s+(.*)$/)
+      // An unknown `@word` is not a schedule any cron accepts — vixie and
+      // cronie implement exactly the eight in SPECIALS — so the job never runs.
+      // Listing `@every_minute` as scheduled is the same lie as dropping it.
+      if (!m || !(m[1].toLowerCase() in SPECIALS)) {
         unparsed.push({ origin, line })
         continue
       }
       schedule = m[1]
       rest = m[2]
     } else {
-      const f = line.split(/\s+/)
-      if (f.length < (hasUserField ? 7 : 6) || !isNumericFieldSet(f.slice(0, 5))) {
+      const tok = tokenize(body)
+      if (tok.length < (hasUserField ? 7 : 6) || !isCronFieldSet(tok.slice(0, 5).map((t) => t.text))) {
         unparsed.push({ origin, line })
         continue
       }
-      schedule = f.slice(0, 5).join(' ')
-      rest = f.slice(5).join(' ')
+      schedule = tok
+        .slice(0, 5)
+        .map((t) => t.text)
+        .join(' ')
+      // Sliced, not joined. Debian's /etc/crontab separates its fields with
+      // tabs and real commands contain runs of whitespace — `run-parts` lines,
+      // quoted arguments, aligned `&&` chains. `f.slice(5).join(' ')` collapsed
+      // all of it and printed a command that is not the one on disk.
+      rest = body.slice(tok[5].start)
     }
 
     let user: string | null = null
-    let command = rest
     if (hasUserField) {
       const m = rest.match(/^(\S+)\s+(.*)$/)
       if (!m) {
@@ -195,53 +342,119 @@ export function parseCrontab(
         continue
       }
       user = m[1]
-      command = m[2]
+      rest = m[2]
     }
+
+    // Note what is *not* done here: a trailing `# comment` is left in the
+    // command, because cron leaves it there too. `#` starts a comment only at
+    // the beginning of a line, so `0 3 * * * /x # nightly` runs a shell command
+    // ending in `# nightly` — stripping it would show a command that is not the
+    // one that runs.
+    const { command, input } = splitCronCommand(rest)
     if (command.trim() === '') {
       unparsed.push({ origin, line })
       continue
     }
-    entries.push({ kind, origin, schedule, description: describeSchedule(schedule), user, command })
+    entries.push({
+      kind,
+      origin,
+      schedule,
+      description: describeSchedule(schedule),
+      user,
+      command,
+      ...(input === undefined ? {} : { input })
+    })
   }
   return { entries, unparsed }
+}
+
+// ---- systemd timers ----------------------------------------------------
+
+const TIMER_DAY = /^[A-Za-z]{3}$/
+const TIMER_DATE = /^\d{4}-\d{2}-\d{2}$/
+const TIMER_TIME = /^\d{2}:\d{2}:\d{2}$/
+// `UTC`, `CEST`, `+0530`. Deliberately upper-case-only and never digit-led, so
+// it cannot swallow the first token of the LEFT column, which is always lower
+// case (`5h`, `week`, `left`) or a placeholder.
+const TIMER_ZONE = /^([A-Z]{2,5}|[+-]\d{2}:?\d{0,2})$/
+const TIMER_ABSENT = /^(n\/a|-|\*)$/
+
+/** The NEXT and LAST columns, read out of the tokens before the unit name. */
+function timerDates(prefix: string[]): { next?: string; last?: string } {
+  const found: string[] = []
+  for (let i = 0; i < prefix.length; i++) {
+    if (!TIMER_DATE.test(prefix[i])) continue
+    const parts: string[] = []
+    if (i > 0 && TIMER_DAY.test(prefix[i - 1])) parts.push(prefix[i - 1])
+    parts.push(prefix[i])
+    if (TIMER_TIME.test(prefix[i + 1] ?? '')) {
+      parts.push(prefix[i + 1])
+      if (TIMER_ZONE.test(prefix[i + 2] ?? '')) parts.push(prefix[i + 2])
+    }
+    found.push(parts.join(' '))
+  }
+  if (found.length >= 2) return { next: found[0], last: found[1] }
+  if (found.length === 1) {
+    // One date, two columns that could hold it. A row whose first token is a
+    // placeholder has no next elapse, so the date must be LAST; otherwise the
+    // date is NEXT and it is LAST that is missing.
+    return TIMER_ABSENT.test(prefix[0] ?? '') ? { last: found[0] } : { next: found[0] }
+  }
+  return {}
 }
 
 /**
  * Parse `systemctl list-timers --all --no-pager`.
  *
- * Columns are whitespace-aligned and the date fields themselves contain
- * spaces, so this anchors on the UNIT column (which always ends in `.timer`)
- * rather than counting fields — counting breaks the moment a locale writes a
- * date differently.
+ * The columns are NEXT, LEFT, LAST, PASSED, UNIT, ACTIVATES, and both the dates
+ * and the durations contain spaces, so neither counting fields nor splitting on
+ * runs of whitespace works.
+ *
+ * Splitting on `\s{2,}` — which is what this used to do — looks right, because
+ * systemd pads its columns. It isn't: the *widest* cell in a column is followed
+ * by exactly one space. So the moment any timer on the host is a week out,
+ *
+ *     Tue 2026-09-08 06:00:00 UTC  1 week 2 days left Mon 2026-09-01 ...
+ *
+ * LEFT runs straight into LAST on a single space, the columns shift by one, and
+ * `lastRun` comes back as `18h ago` — the PASSED column. A plausible looking
+ * string in the wrong field is the worst kind of wrong.
+ *
+ * So this anchors on shapes instead: the unit token ends in `.timer`, and a
+ * date is recognisable as `Day YYYY-MM-DD HH:MM:SS TZ` wherever it happens to
+ * sit. Absent values are `n/a` on older systemd and `-` since v250, which is
+ * most of what `--all` adds.
  */
 export function parseSystemdTimers(text: string): CronParseResult {
   const entries: CronEntry[] = []
   const unparsed: { origin: string; line: string }[] = []
 
   for (const raw of text.split('\n')) {
-    const line = raw.trim()
-    if (line === '' || /^(NEXT|UNIT)\b/.test(line) || /timers listed/.test(line)) continue
+    const line = raw.replace(/\r/g, '').trim()
+    if (line === '') continue
+    if (/^(NEXT|UNIT|LEFT)\b/.test(line)) continue
+    if (/timers listed/.test(line) || /^Pass --all/.test(line)) continue
 
-    const m = line.match(/^(.*?)\s+(\S+\.timer)\s+(\S+\.\w+)\s*$/)
-    if (!m) {
+    const tokens = line.split(/\s+/)
+    const ti = tokens.findIndex((t) => t.endsWith('.timer'))
+    const activates = ti === -1 ? '' : tokens.slice(ti + 1).join(' ')
+    if (ti === -1 || activates === '') {
       // A timer line we cannot split is reported rather than dropped: a
       // silently missing timer is a scheduled job nobody knows about.
       if (line.includes('.timer')) unparsed.push({ origin: 'systemd', line })
       continue
     }
-    const [, dates, timer, activates] = m
-    // NEXT and LEFT, then LAST and PASSED. "n/a" appears for a timer that has
-    // never run or has no next elapse.
-    const cols = dates.split(/\s{2,}/).map((c) => c.trim()).filter(Boolean)
+
+    const { next, last } = timerDates(tokens.slice(0, ti))
     entries.push({
       kind: 'systemd-timer',
-      origin: timer,
+      origin: tokens[ti],
       schedule: 'systemd timer',
       description: null,
       user: null,
       command: activates,
-      nextRun: cols[0] && cols[0] !== 'n/a' ? cols[0] : undefined,
-      lastRun: cols[2] && cols[2] !== 'n/a' ? cols[2] : undefined
+      nextRun: next,
+      lastRun: last
     })
   }
   return { entries, unparsed }
@@ -262,7 +475,12 @@ export const CRON_COLLECT_COMMAND = [
   'echo "===SHELLPILOT-SYSTEM==="',
   'cat /etc/crontab 2>/dev/null || true',
   'echo "===SHELLPILOT-CROND==="',
-  '{ for f in /etc/cron.d/*; do [ -f "$f" ] && echo "#FILE:$f" && cat "$f"; done; } 2>/dev/null || true',
+  // The trailing `printf` is load-bearing. Plenty of /etc/cron.d files ship
+  // without a final newline, and `cat a` followed by the marker for b then
+  // glues them together: a's last job grows a `#FILE:/etc/cron.d/b` tail on its
+  // command, and every job in b gets filed under a. Both are silent, and the
+  // second makes a job unfindable by the file it actually lives in.
+  '{ for f in /etc/cron.d/*; do [ -f "$f" ] || continue; printf "#FILE:%s\\n" "$f"; cat "$f"; printf "\\n"; done; } 2>/dev/null || true',
   'echo "===SHELLPILOT-TIMERS==="',
   'systemctl list-timers --all --no-pager 2>/dev/null || true'
 ].join('; ')
@@ -270,7 +488,10 @@ export const CRON_COLLECT_COMMAND = [
 /** Split the collector's output and parse each section with the right rules. */
 export function parseCronCollection(output: string): CronParseResult {
   const section = (name: string): string => {
-    const m = output.match(new RegExp(`===SHELLPILOT-${name}===\\n([\\s\\S]*?)(?====SHELLPILOT-|$)`))
+    // `\r?` because a transport that hands back CRLF would otherwise miss every
+    // marker and report an entirely empty estate — a host with nothing
+    // scheduled and a host we failed to read look identical from here.
+    const m = output.match(new RegExp(`===SHELLPILOT-${name}===\\r?\\n([\\s\\S]*?)(?====SHELLPILOT-|$)`))
     return m ? m[1] : ''
   }
 
@@ -294,7 +515,7 @@ export function parseCronCollection(output: string): CronParseResult {
     buffer = []
   }
   for (const line of crond.split('\n')) {
-    const m = line.match(/^#FILE:(.*)$/)
+    const m = line.replace(/\r/g, '').match(/^#FILE:(.*)$/)
     if (m) {
       flush()
       current = m[1].trim()

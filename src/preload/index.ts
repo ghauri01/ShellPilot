@@ -242,9 +242,6 @@ const api = {
     test: (): Promise<WebhookTestResult> => ipcRenderer.invoke('webhook:test'),
     notify: (payload: AlertPayload): Promise<void> => ipcRenderer.invoke('webhook:notify', payload)
   },
-  // Background sampling of the whole estate, scheduled in main so it continues
-  // when the monitor is not on screen. `metrics` above is the foreground path:
-  // one server, fast cadence, driven by a mounted card.
   docker: {
     list: (cfg: unknown): Promise<DockerProbe> => ipcRenderer.invoke('docker:list', cfg),
     logs: (
@@ -287,6 +284,9 @@ const api = {
       return () => ipcRenderer.removeListener('broadcast:progress', h)
     }
   },
+  // Background sampling of the whole estate, scheduled in main so it continues
+  // when the monitor is not on screen. `metrics` above is the foreground path:
+  // one server, fast cadence, driven by a mounted card.
   fleet: {
     configure: (cfg: FleetSamplerConfig): Promise<FleetSamplerStatus> =>
       ipcRenderer.invoke('fleet:configure', cfg),

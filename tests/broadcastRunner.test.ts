@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { BroadcastRunner } from '../src/main/services/broadcast'
 import type { BroadcastProgress, BroadcastRequest } from '../src/shared/broadcast'
 import { BROADCAST_CONCURRENCY, BROADCAST_OUTPUT_CAP } from '../src/shared/broadcast'
@@ -158,5 +160,105 @@ describe('cancelling', () => {
     runner.cancel('b')
     const out = await a
     expect(out.every((r) => r.state === 'ok')).toBe(true)
+  })
+})
+
+describe('two runs under one id', () => {
+  it('refuses the second rather than losing the first', async () => {
+    // The map is keyed by id, so a second run overwrote the first's entry and
+    // then the first to finish deleted the second's — leaving a live broadcast
+    // that `cancel` could not name and a Stop button that silently did nothing.
+    const runner = new BroadcastRunner({
+      exec: async () => {
+        await new Promise((r) => setTimeout(r, 5))
+        return { ok: true, code: 0, stdout: '' }
+      },
+      emit: () => {}
+    })
+    const first = runner.run({ runId: 'r', command: 'uptime', targets: targets(2) })
+    await expect(runner.run({ runId: 'r', command: 'uptime', targets: targets(2) })).rejects.toThrow(/already running/)
+    await first
+    expect(runner.isRunning('r')).toBe(false)
+  })
+
+  it('leaves a live run cancellable after another run finishes', async () => {
+    const runner = new BroadcastRunner({
+      exec: async () => {
+        await new Promise((r) => setTimeout(r, 10))
+        return { ok: true, code: 0, stdout: '' }
+      },
+      emit: () => {}
+    })
+    const slow = runner.run({ runId: 'slow', command: 'uptime', targets: targets(4) })
+    await runner.run({ runId: 'quick', command: 'uptime', targets: [] })
+    expect(runner.cancel('slow')).toBe(true)
+    await slow
+  })
+})
+
+describe('a host that never answers', () => {
+  it('ends the run anyway, and says which host it gave up on', async () => {
+    // sshExec starts its own timer only after the connection is up, so a
+    // connect that never completes is not covered by the per-host timeout at
+    // all. Without a guard here the worker awaits forever: no result, no
+    // terminal event, and cancel cannot help because it deliberately leaves a
+    // running host alone.
+    const events: BroadcastProgress[] = []
+    const runner = new BroadcastRunner({
+      stallGraceMs: 5,
+      exec: async (_cfg, _cmd) => new Promise(() => {}),
+      emit: (e) => events.push(e)
+    })
+    const out = await runner.run({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(2) })
+    expect(out).toHaveLength(2)
+    expect(out.every((r) => r.state === 'failed')).toBe(true)
+    expect(out[0].error).toMatch(/never answered/)
+    expect(events.filter((e) => e.done)).toHaveLength(1)
+    expect(runner.isRunning('r')).toBe(false)
+  })
+
+  it('does not give up on a host that answers within the grace', async () => {
+    const runner = new BroadcastRunner({
+      stallGraceMs: 200,
+      exec: async () => {
+        await new Promise((r) => setTimeout(r, 5))
+        return { ok: true, code: 0, stdout: 'fine' }
+      },
+      emit: () => {}
+    })
+    const out = await runner.run({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(2) })
+    expect(out.every((r) => r.state === 'ok')).toBe(true)
+  })
+})
+
+describe('the panel that drives it', () => {
+  const panel = readFileSync(resolve(__dirname, '../src/renderer/src/components/monitor/BroadcastPanel.tsx'), 'utf8')
+
+  it('cannot be left showing Stop for a run that never started', () => {
+    // `running` was set true before the call and false only after it resolved,
+    // so a rejected IPC wedged the panel: the only control on screen was a
+    // Stop button for a run main knew nothing about.
+    expect(panel).toMatch(/} finally \{[\s\S]{0,200}setRunning\(false\)/)
+    expect(panel).toMatch(/catch \(e\)[\s\S]{0,400}setError\(/)
+  })
+
+  it('keeps the run id where an unmount cannot take it', () => {
+    // Switching activity unmounts this panel while main is still working
+    // through the hosts. With the id in component state alone, the remounted
+    // panel could neither show the run nor stop it.
+    expect(panel).toMatch(/^let liveRun/m)
+    expect(panel).toMatch(/useRef<string>\(liveRun\?\.runId \?\? ''\)/)
+  })
+
+  it('does not navigate away from a live run', () => {
+    // The "Open a terminal" button unmounts the results it is rendered beside,
+    // taking the Stop button with them.
+    expect(panel).toMatch(/\{!running && \([\s\S]{0,200}setActivity\('connections'\)/)
+  })
+
+  it('builds each host cfg from the server row it already has', () => {
+    // `byId.get(t.serverId)!` was an assertion nobody could prove from the
+    // call site; the rows are right there.
+    expect(panel).not.toMatch(/\.get\([^)]*\)!/)
   })
 })

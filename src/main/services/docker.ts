@@ -29,7 +29,15 @@ export class DockerReader {
         // fix the wrong machine.
         return { ok: false, reason: 'unknown', detail: r.error ?? 'could not reach the host' }
       }
-      return parseDockerOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`, r.code ?? null)
+      // Both streams, joined on a newline rather than glued. The collector
+      // redirects docker's own stderr into stdout, so anything left on stderr
+      // came from the shell or the transport — and concatenating it directly
+      // welded it onto the last `docker ps` row, turning a real container into
+      // a row the parser could not read.
+      const stdout = r.stdout ?? ''
+      const stderr = r.stderr ?? ''
+      const merged = stderr === '' ? stdout : `${stdout}\n${stderr}`
+      return parseDockerOutput(merged, r.code ?? null)
     } catch (e) {
       return { ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) }
     }

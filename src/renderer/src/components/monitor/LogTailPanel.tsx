@@ -23,6 +23,10 @@ export function LogTailPanel({ servers }: { servers: Server[] }): React.JSX.Elem
   const [error, setError] = useState<string | null>(null)
   const [follow, setFollow] = useState(true)
   const tailId = useRef('')
+  // The hosts this tail was started on. A tail is over when all of them have
+  // ended, and "all of them" cannot be read off the state map alone: the first
+  // host to fail would otherwise look like every host having finished.
+  const startedOn = useRef<string[]>([])
   const scroller = useRef<HTMLDivElement | null>(null)
 
   const eligible = useMemo(() => servers.filter((s) => s.status !== 'offline'), [servers])
@@ -62,6 +66,19 @@ export function LogTailPanel({ servers }: { servers: Server[] }): React.JSX.Elem
     scroller.current.scrollTop = scroller.current.scrollHeight
   }, [lines, follow])
 
+  // A tail can end without anyone pressing Stop: `tail -F` on a path that never
+  // appears exits, journalctl dies with the connection. Without this the panel
+  // still shows Stop, the inputs stay disabled, and the only way to tail
+  // anything again is to press Stop on something that already stopped.
+  useEffect(() => {
+    if (!running || startedOn.current.length === 0) return
+    const over = startedOn.current.every((id) => {
+      const s = states[id]
+      return s !== undefined && (s.state === 'ended' || s.state === 'failed')
+    })
+    if (over) setRunning(false)
+  }, [states, running])
+
   const start = async (): Promise<void> => {
     const source: LogSource = { kind, target }
     const v = validateLogSource(source)
@@ -79,35 +96,49 @@ export function LogTailPanel({ servers }: { servers: Server[] }): React.JSX.Elem
     setStates({})
     const id = crypto.randomUUID()
     tailId.current = id
+    startedOn.current = targets.map((s) => s.id)
     setRunning(true)
-    const res = await window.shellpilot?.logtail?.start(
-      id,
-      source,
-      targets.map((s) => ({
-        serverId: s.id,
-        serverName: s.name,
-        cfg: {
-          sessionId: `logtail-${s.id}`,
-          cols: 80,
-          rows: 24,
+    try {
+      const res = await window.shellpilot?.logtail?.start(
+        id,
+        source,
+        targets.map((s) => ({
           serverId: s.id,
-          host: s.host,
-          port: s.port,
-          username: s.username,
-          auth: s.auth === 'password' || s.auth === 'agent' ? s.auth : 'key',
-          hops: sshHopsFor(s)
-        }
-      }))
-    )
-    if (res && !res.ok) {
-      setError(res.error ?? 'Could not start the tail.')
+          serverName: s.name,
+          cfg: {
+            sessionId: `logtail-${s.id}`,
+            cols: 80,
+            rows: 24,
+            serverId: s.id,
+            host: s.host,
+            port: s.port,
+            username: s.username,
+            auth: s.auth === 'password' || s.auth === 'agent' ? s.auth : 'key',
+            hops: sshHopsFor(s)
+          }
+        }))
+      )
+      // `undefined` means the bridge is not there at all, which is a tail that
+      // will never produce a line. Treating only `{ok:false}` as failure left
+      // the panel showing Stop over a stream that was never going to start.
+      if (!res || !res.ok) {
+        setError(res?.error ?? 'Could not start the tail.')
+        setRunning(false)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
       setRunning(false)
     }
   }
 
   const stop = async (): Promise<void> => {
-    await window.shellpilot?.logtail?.stop(tailId.current)
-    setRunning(false)
+    try {
+      await window.shellpilot?.logtail?.stop(tailId.current)
+    } finally {
+      // Stop must always leave the panel usable, even if the call itself threw:
+      // a Stop button that stays a Stop button is a pane you cannot get out of.
+      setRunning(false)
+    }
   }
 
   const toggle = (id: string): void =>
