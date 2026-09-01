@@ -141,6 +141,38 @@ describe('bug 2 — UNC paths', () => {
   })
 })
 
+describe('AppData is scoped to the credential stores', () => {
+  // A blanket ?:/Users/*/AppData/** would deny reading an application log or a
+  // settings file, which is a refusal the user cannot explain and cannot act
+  // on. Over-broad denies do not fail safe in practice — they get deleted,
+  // taking the rules that mattered with them.
+  it.each([
+    'C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Crypto\\RSA\\S-1-5-21\\abc',
+    'C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Protect\\S-1-5-21\\masterkey',
+    'C:\\Users\\me\\AppData\\Local\\Microsoft\\Credentials\\DFBE70A7',
+    'C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Credentials\\DFBE70A7',
+    'C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt'
+  ])('denies %s', (path) => {
+    expect(evaluateFilePath(readOnly(), path, 'read').decision).toBe('deny')
+  })
+
+  it.each([
+    'C:\\Users\\me\\AppData\\Local\\MyApp\\logs\\today.log',
+    'C:\\Users\\me\\AppData\\Roaming\\MyApp\\settings.json',
+    'C:\\Users\\me\\AppData\\Local\\Temp\\build.txt',
+    // Adjacent to a denied path but not under it.
+    'C:\\Users\\me\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\x.lnk'
+  ])('still allows %s', (path) => {
+    expect(evaluateFilePath(readOnly(), path, 'read').decision).toBe('allow')
+  })
+
+  it('denies the credential stores on any drive and in any casing', () => {
+    expect(
+      evaluateFilePath(readOnly(), 'd:/users/me/appdata/roaming/microsoft/protect/key', 'read').decision
+    ).toBe('deny')
+  })
+})
+
 describe('existing installs, not just fresh ones', () => {
   // The fix is worth nothing if it only reaches new installs: everyone who
   // already runs ShellPilot is the population that is currently exposed.

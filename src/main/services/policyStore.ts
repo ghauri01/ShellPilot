@@ -60,7 +60,28 @@ function defaultFilePolicies(): AccessGroup['filePolicies'] {
     // evaluateFilePath), so one entry per shape covers `C:\Users\me\.ssh`,
     // `c:/users/me/.ssh` and everything between. Any drive, not just C:.
     { id: uid('fp'), pattern: '?:/Users/*/.ssh/**', read: 'deny', write: 'deny' },
-    { id: uid('fp'), pattern: '?:/Users/*/AppData/**', read: 'deny', write: 'deny' },
+    // The Windows analogue of /etc/shadow: the OS credential stores, not the
+    // whole of AppData. AppData is mostly ordinary application state — logs,
+    // caches, settings an agent may legitimately need — and a blanket deny
+    // there produces refusals a user cannot explain, which is how a rule ends
+    // up deleted along with the ones that mattered.
+    //
+    // Crypto and Protect hold DPAPI master keys and RSA private keys; take
+    // those and every safeStorage secret on the machine decrypts. Credentials
+    // is the Credential Manager blob store.
+    { id: uid('fp'), pattern: '?:/Users/*/AppData/Roaming/Microsoft/Crypto/**', read: 'deny', write: 'deny' },
+    { id: uid('fp'), pattern: '?:/Users/*/AppData/Roaming/Microsoft/Protect/**', read: 'deny', write: 'deny' },
+    { id: uid('fp'), pattern: '?:/Users/*/AppData/Local/Microsoft/Credentials/**', read: 'deny', write: 'deny' },
+    { id: uid('fp'), pattern: '?:/Users/*/AppData/Roaming/Microsoft/Credentials/**', read: 'deny', write: 'deny' },
+    // Shell history is a credential store in practice — tokens pasted into a
+    // command line live here in plaintext. Same reasoning would apply to
+    // ~/.bash_history on POSIX; that is a separate rule, not this one.
+    {
+      id: uid('fp'),
+      pattern: '?:/Users/*/AppData/Roaming/Microsoft/Windows/PowerShell/PSReadLine/**',
+      read: 'deny',
+      write: 'deny'
+    },
     { id: uid('fp'), pattern: '/etc/nginx/**', write: 'ask' },
     { id: uid('fp'), pattern: '/var/www/**', write: 'ask' }
   ]
@@ -176,7 +197,18 @@ const FILE_POLICY_GENERATIONS: { generation: number; patterns: AccessGroup['file
     patterns: [
       { id: '', pattern: '/Users/*/.ssh/**', read: 'deny', write: 'deny' },
       { id: '', pattern: '?:/Users/*/.ssh/**', read: 'deny', write: 'deny' },
-      { id: '', pattern: '?:/Users/*/AppData/**', read: 'deny', write: 'deny' }
+      // Windows credential stores specifically, not all of AppData. See
+      // defaultFilePolicies for why the blanket was the wrong shape.
+      { id: '', pattern: '?:/Users/*/AppData/Roaming/Microsoft/Crypto/**', read: 'deny', write: 'deny' },
+      { id: '', pattern: '?:/Users/*/AppData/Roaming/Microsoft/Protect/**', read: 'deny', write: 'deny' },
+      { id: '', pattern: '?:/Users/*/AppData/Local/Microsoft/Credentials/**', read: 'deny', write: 'deny' },
+      { id: '', pattern: '?:/Users/*/AppData/Roaming/Microsoft/Credentials/**', read: 'deny', write: 'deny' },
+      {
+        id: '',
+        pattern: '?:/Users/*/AppData/Roaming/Microsoft/Windows/PowerShell/PSReadLine/**',
+        read: 'deny',
+        write: 'deny'
+      }
     ]
   }
 ]
