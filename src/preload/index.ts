@@ -11,6 +11,7 @@ import type {
   SshCloseInfo
 } from '../shared/ssh'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
+import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type {
   AlertPayload,
   WebhookConfig,
@@ -241,6 +242,15 @@ const api = {
   // Background sampling of the whole estate, scheduled in main so it continues
   // when the monitor is not on screen. `metrics` above is the foreground path:
   // one server, fast cadence, driven by a mounted card.
+  broadcast: {
+    run: (req: BroadcastRequest): Promise<BroadcastHostResult[]> => ipcRenderer.invoke('broadcast:run', req),
+    cancel: (runId: string): Promise<boolean> => ipcRenderer.invoke('broadcast:cancel', runId),
+    onProgress: (fn: (p: BroadcastProgress) => void): (() => void) => {
+      const h = (_e: unknown, p: BroadcastProgress): void => fn(p)
+      ipcRenderer.on('broadcast:progress', h)
+      return () => ipcRenderer.removeListener('broadcast:progress', h)
+    }
+  },
   fleet: {
     configure: (cfg: FleetSamplerConfig): Promise<FleetSamplerStatus> =>
       ipcRenderer.invoke('fleet:configure', cfg),

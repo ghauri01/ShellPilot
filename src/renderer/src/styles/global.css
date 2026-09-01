@@ -2705,3 +2705,69 @@ details[open] > .disclosure-head .chev {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* `.row` does not wrap, and a fleet of fifteen puts fifteen server chips on
+   one line. Added here rather than inlined so the next row of chips gets it. */
+.row.wrap {
+  flex-wrap: wrap;
+}
+
+/* Run one command across many servers. */
+.bc-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.bc-panel .chip.on {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.bc-confirm {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-hover);
+}
+.bc-results {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bc-host-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.bc-host-head:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.bc-host-head .chev {
+  transition: transform 0.12s ease;
+}
+.bc-host-head .chev.open {
+  transform: rotate(90deg);
+}
+.bc-out {
+  margin: 2px 0 8px 26px;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--bg-code, var(--bg-hover));
+  border-radius: 5px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

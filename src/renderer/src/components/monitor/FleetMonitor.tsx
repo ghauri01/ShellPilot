@@ -18,6 +18,7 @@ import { bytes, clsx } from '../../lib/format'
 import type { MonitorGroup, Server } from '../../types'
 import { FleetHealth } from './FleetHealth'
 import { FleetSearch } from './FleetSearch'
+import { BroadcastPanel } from './BroadcastPanel'
 
 function pct(used: number, total: number): number {
   return total > 0 ? (used / total) * 100 : 0
@@ -285,6 +286,8 @@ export function FleetMonitor(): React.JSX.Element {
           for one thing, and should not have to scroll past the estate
           summary to see whether it was found. */}
       <FleetSearch servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+
+      <BroadcastPanel servers={servers} />
 
       <FleetHealth servers={servers} />
 

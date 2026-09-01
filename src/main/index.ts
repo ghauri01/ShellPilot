@@ -14,7 +14,8 @@ import {
   setSshPrompter,
   setPoolIdle,
   poolList,
-  poolClose
+  poolClose,
+  sshExec
 } from './services/ssh'
 import type { KeyboardRequest } from './services/ssh'
 import {
@@ -47,6 +48,8 @@ import {
 } from './services/sftp'
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
+import { BroadcastRunner } from './services/broadcast'
+import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
   webhookConfigure,
@@ -587,6 +590,38 @@ ipcMain.handle('fleet:configure', (_e, cfg: FleetSamplerConfig) => {
 })
 ipcMain.handle('fleet:status', () => fleetSampler.status())
 
+// ---- Run one command across many servers ----
+//
+// The approval model is in shared/broadcast.ts and is enforced in the renderer,
+// where the user is. Main deliberately does not re-derive it: a second copy of
+// a safety rule is a second thing to drift, and the renderer is not a trust
+// boundary here — anyone driving it already has a terminal on these hosts.
+//
+// What main owns is the part the renderer cannot do safely: bounded
+// concurrency, cancellation that actually stops queued hosts, and per-host
+// results.
+//
+// Not exposed to the MCP bridge. An agent gets `execute_command` gated per
+// server against an access group; a fan-out primitive is a different risk with
+// a different consent story, and handing one to an agent because the UI grew
+// one would be an accident rather than a decision.
+const broadcast = new BroadcastRunner({
+  exec: async (cfg, command, timeoutMs) => {
+    const r = await sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs)
+    return { ok: r.ok, code: r.code, stdout: r.stdout, stderr: r.stderr, error: r.error, truncated: r.truncated }
+  },
+  emit: (progress: BroadcastProgress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('broadcast:progress', progress)
+  }
+})
+
+ipcMain.handle('broadcast:run', async (_e, req: BroadcastRequest) => {
+  // Secrets are resolved per host inside exec, not carried in the request, for
+  // the same reason the fleet targets do not carry them.
+  return broadcast.run(req)
+})
+ipcMain.handle('broadcast:cancel', (_e, runId: string) => broadcast.cancel(runId))
+
 // ---- Webhook alerts ----
 //
 // Delivery lives in main because the renderer's CSP is `connect-src 'self'`
@@ -1048,6 +1083,8 @@ app.on('before-quit', (e) => {
   sshDisposeAll()
   localDisposeAll()
   sftpDisposeAll()
+  // Queued hosts must not start after the window is gone.
+  broadcast.disposeAll()
   fleetSampler.dispose()
   metricsDisposeAll()
   dbDisposeAll()
