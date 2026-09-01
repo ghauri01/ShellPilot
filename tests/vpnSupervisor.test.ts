@@ -71,6 +71,25 @@ const waitFor = async (fn: () => boolean, budgetMs = WAIT_BUDGET_MS): Promise<vo
   throw new Error('condition never became true')
 }
 
+// Advancing a fake clock only does something if the timer already exists, and
+// several timers here are armed after a real `fs` callback. A single jump bets
+// that the callback won that race; when it lost, the delay was consumed against
+// nothing, no relaunch came, and the next `waitFor` died ten seconds later
+// having proved nothing. This steps the clock and re-checks instead, so a timer
+// armed slightly late is still caught.
+const advanceUntil = async (
+  fn: () => boolean,
+  stepMs: number,
+  steps = 20
+): Promise<void> => {
+  for (let i = 0; i < steps; i++) {
+    if (fn()) return
+    await vi.advanceTimersByTimeAsync(stepMs)
+    await flush()
+  }
+  if (!fn()) throw new Error('condition never became true while advancing the clock')
+}
+
 let root: string
 
 function baseSpec(over: Partial<SupervisedSpec> = {}): SupervisedSpec {
@@ -246,9 +265,11 @@ describe('supervisor lifecycle', () => {
   })
 
   it('goes terminal after more than maxRestarts exits inside the window', async () => {
+    const armed: number[] = []
     const spec = make({
       backoff: { baseMs: 10, maxMs: 10, jitter: 0 },
-      crashLoop: { windowMs: 120_000, maxRestarts: 5 }
+      crashLoop: { windowMs: 120_000, maxRestarts: 5 },
+      onRestartScheduled: (_h, _a, delay) => armed.push(delay)
     })
     const handle = await sup.spawn(spec)
 
@@ -267,7 +288,16 @@ describe('supervisor lifecycle', () => {
       // test died on a property access instead of testing the crash loop.
       await waitFor(() => spawns.length > i)
       spawns[i].child.exit(2)
-      await flush()
+      // Advancing the clock before the retry timer exists means its 20ms is
+      // never consumed, so no relaunch comes and the next pass dies on the
+      // waitFor budget ten seconds later. The exit handler unlinks the pid
+      // file — real fs — before arming that timer, and flush() counts a fixed
+      // number of microtask turns, which is not a measure of how long that
+      // takes. This is what failed CI on the 0.8.1 tag.
+      //
+      // The sixth exit is the terminal one and arms nothing, so waiting on
+      // `armed` alone would hang on the last pass.
+      await waitFor(() => armed.length > i || exits.some((e) => !e.restarting))
       await vi.advanceTimersByTimeAsync(20)
       await flush()
     }
@@ -365,8 +395,9 @@ describe('supervisor lifecycle', () => {
     await flush()
     expect(spawns).toHaveLength(1)
 
-    await vi.advanceTimersByTimeAsync(30_000)
-    await waitFor(() => signals.length > 0)
+    // Nothing observable marks the instant the readiness clock is armed, so the
+    // clock is stepped rather than jumped once and hoped over.
+    await advanceUntil(() => signals.length > 0, 30_000)
     expect(signals.map((s) => s[1])).toEqual(['SIGKILL'])
 
     spawns[0].child.exit(null, 'SIGKILL')
