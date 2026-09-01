@@ -13,6 +13,7 @@ import type {
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
+import type { CronEntry } from '../shared/cron'
 import type {
   AlertPayload,
   WebhookConfig,
@@ -243,6 +244,12 @@ const api = {
   // Background sampling of the whole estate, scheduled in main so it continues
   // when the monitor is not on screen. `metrics` above is the foreground path:
   // one server, fast cadence, driven by a mounted card.
+  cron: {
+    collect: (
+      targets: { serverId: string; serverName: string; cfg: unknown }[]
+    ): Promise<{ serverId: string; serverName: string; entries: CronEntry[]; unparsed: number; error?: string }[]> =>
+      ipcRenderer.invoke('cron:collect', targets)
+  },
   logtail: {
     start: (
       tailId: string,

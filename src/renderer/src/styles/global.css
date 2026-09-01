@@ -2793,3 +2793,34 @@ details[open] > .disclosure-head .chev {
   font-weight: 600;
   opacity: 0.85;
 }
+
+/* Scheduled jobs across the estate. */
+.cron-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.cron-when {
+  flex: 0 0 auto;
+  min-width: 120px;
+}
+.cron-desc {
+  flex: 0 0 auto;
+  min-width: 150px;
+}
+.cron-cmd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spin {
+  animation: sp-spin 0.9s linear infinite;
+}
+@keyframes sp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

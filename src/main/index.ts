@@ -52,6 +52,7 @@ import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
 import { BroadcastRunner } from './services/broadcast'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
+import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry } from '../shared/cron'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
@@ -651,6 +652,47 @@ ipcMain.handle('logtail:stop', (_e, tailId: string) => {
   logTailer.stop(tailId)
   return true
 })
+
+// ---- What is scheduled across the estate ----
+//
+// Read-only. The command is a constant in shared/cron.ts, not built from any
+// input, and every section carries its own `|| true` so a host with no
+// /etc/cron.d — or a user with no crontab — still returns the other sections
+// rather than failing the collection.
+//
+// Sequential across hosts, like the fleet sweep, for the same bastion reason.
+ipcMain.handle(
+  'cron:collect',
+  async (_e, targets: { serverId: string; serverName: string; cfg: unknown }[]) => {
+    const out: { serverId: string; serverName: string; entries: CronEntry[]; unparsed: number; error?: string }[] = []
+    for (const t of targets) {
+      try {
+        const r = await sshExec(resolveChainSecrets(t.cfg as SshConnectConfig), CRON_COLLECT_COMMAND, 20_000)
+        if (!r.ok) {
+          out.push({ serverId: t.serverId, serverName: t.serverName, entries: [], unparsed: 0, error: r.error })
+          continue
+        }
+        const parsed = parseCronCollection(r.stdout ?? '')
+        out.push({
+          serverId: t.serverId,
+          serverName: t.serverName,
+          entries: parsed.entries,
+          unparsed: parsed.unparsed.length
+        })
+      } catch (e) {
+        // One host refusing must not lose the others' schedules.
+        out.push({
+          serverId: t.serverId,
+          serverName: t.serverName,
+          entries: [],
+          unparsed: 0,
+          error: e instanceof Error ? e.message : String(e)
+        })
+      }
+    }
+    return out
+  }
+)
 
 // ---- Webhook alerts ----
 //

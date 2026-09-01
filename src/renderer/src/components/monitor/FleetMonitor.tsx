@@ -20,6 +20,7 @@ import { FleetHealth } from './FleetHealth'
 import { FleetSearch } from './FleetSearch'
 import { BroadcastPanel } from './BroadcastPanel'
 import { LogTailPanel } from './LogTailPanel'
+import { CronPanel } from './CronPanel'
 
 function pct(used: number, total: number): number {
   return total > 0 ? (used / total) * 100 : 0
@@ -293,6 +294,8 @@ export function FleetMonitor(): React.JSX.Element {
       {/* Directly under broadcast: the monitor says a unit failed, broadcast
           lets you act on it, and this is the "why" that belongs between them. */}
       <LogTailPanel servers={servers} />
+
+      <CronPanel servers={servers} />
 
       <FleetHealth servers={servers} />
 
