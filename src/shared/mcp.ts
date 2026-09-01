@@ -155,6 +155,11 @@ export interface PolicyState {
   groups: AccessGroup[]
   assignments: PolicyAssignment[]
   serverMeta: ServerAiMeta[]
+  // Highest seeded-file-policy generation this file has been brought up to.
+  // Absent on every file written before the generation counter existed, which
+  // is what lets a new deny rule reach existing installs exactly once without
+  // resurrecting rules the user deliberately deleted. See policyStore.
+  filePolicyGeneration?: number
 }
 
 export const DEFAULT_MCP_PORT = 5177

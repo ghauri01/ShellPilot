@@ -51,6 +51,16 @@ function defaultFilePolicies(): AccessGroup['filePolicies'] {
     { id: uid('fp'), pattern: '/etc/gshadow', read: 'deny', write: 'deny' },
     { id: uid('fp'), pattern: '/root/.ssh/**', read: 'deny', write: 'deny' },
     { id: uid('fp'), pattern: '/home/*/.ssh/**', read: 'deny', write: 'deny' },
+    // macOS puts home directories under /Users, not /home, so the rule above
+    // matched nothing at all on a Mac target — while the UI listed it as
+    // configured. Three of the four built-in groups allow readFiles outright,
+    // so this was the whole of the protection on SSH keys there.
+    { id: uid('fp'), pattern: '/Users/*/.ssh/**', read: 'deny', write: 'deny' },
+    // Windows. Patterns are matched separator- and case-insensitively (see
+    // evaluateFilePath), so one entry per shape covers `C:\Users\me\.ssh`,
+    // `c:/users/me/.ssh` and everything between. Any drive, not just C:.
+    { id: uid('fp'), pattern: '?:/Users/*/.ssh/**', read: 'deny', write: 'deny' },
+    { id: uid('fp'), pattern: '?:/Users/*/AppData/**', read: 'deny', write: 'deny' },
     { id: uid('fp'), pattern: '/etc/nginx/**', write: 'ask' },
     { id: uid('fp'), pattern: '/var/www/**', write: 'ask' }
   ]
@@ -113,7 +123,15 @@ function defaultGroups(): AccessGroup[] {
 }
 
 function seed(): PolicyState {
-  return { version: 1, groups: defaultGroups(), assignments: [], serverMeta: [] }
+  // Stamped at the latest generation: defaultFilePolicies() already contains
+  // every seeded pattern, so a fresh install has nothing to backfill.
+  return {
+    version: 1,
+    groups: defaultGroups(),
+    assignments: [],
+    serverMeta: [],
+    filePolicyGeneration: LATEST_FILE_POLICY_GENERATION
+  }
 }
 
 // A capability added in a later version is simply absent from a policy file
@@ -139,11 +157,64 @@ function backfillCapabilities(state: PolicyState): PolicyState {
   return state
 }
 
+// Seeded file-policy generations. Each entry is the set of patterns introduced
+// at that generation; a file records the highest one it has been brought up to.
+//
+// Why a generation counter rather than "add any missing seed": the seeds are
+// ordinary data and the user is free to delete them. Re-adding every absent
+// default on load would silently resurrect a rule they removed on purpose.
+// Keying on a generation means each new rule is offered exactly once, to the
+// installs that predate it, and a later deletion sticks.
+const FILE_POLICY_GENERATIONS: { generation: number; patterns: AccessGroup['filePolicies'] }[] = [
+  {
+    // Home directories on macOS (/Users, not /home) and Windows. Until this
+    // generation the only home-dir rule was /home/*/.ssh/**, so on a Mac or
+    // Windows target it matched nothing and three of the four built-in groups
+    // allow readFiles outright — private keys were readable through the policy
+    // layer on every install made before this shipped, not only new ones.
+    generation: 1,
+    patterns: [
+      { id: '', pattern: '/Users/*/.ssh/**', read: 'deny', write: 'deny' },
+      { id: '', pattern: '?:/Users/*/.ssh/**', read: 'deny', write: 'deny' },
+      { id: '', pattern: '?:/Users/*/AppData/**', read: 'deny', write: 'deny' }
+    ]
+  }
+]
+
+const LATEST_FILE_POLICY_GENERATION = FILE_POLICY_GENERATIONS.at(-1)?.generation ?? 0
+
+// Applies to BUILT-IN groups only. A custom group is the author's own list and
+// nothing here has standing to add to it.
+export function migrateForTests(state: PolicyState): PolicyState {
+  return backfillFilePolicies(state)
+}
+
+function backfillFilePolicies(state: PolicyState): PolicyState {
+  const from = state.filePolicyGeneration ?? 0
+  if (from >= LATEST_FILE_POLICY_GENERATION) return state
+
+  for (const { generation, patterns } of FILE_POLICY_GENERATIONS) {
+    if (generation <= from) continue
+    for (const group of state.groups) {
+      if (!group.builtIn) continue
+      for (const rule of patterns) {
+        // A user who already wrote this exact pattern keeps their own values.
+        if (group.filePolicies.some((p) => p.pattern === rule.pattern)) continue
+        group.filePolicies.push({ ...rule, id: uid('fp') })
+      }
+    }
+  }
+  state.filePolicyGeneration = LATEST_FILE_POLICY_GENERATION
+  return state
+}
+
 function read(): PolicyState {
   try {
     if (existsSync(FILE)) {
       const parsed = JSON.parse(readFileSync(FILE, 'utf8')) as PolicyState
-      if (parsed && Array.isArray(parsed.groups)) return backfillCapabilities(parsed)
+      if (parsed && Array.isArray(parsed.groups)) {
+        return backfillFilePolicies(backfillCapabilities(parsed))
+      }
     }
   } catch {
     /* fall through to a fresh seed rather than crash on a corrupt file */

@@ -92,10 +92,26 @@ export function classifyCommand(command: string): CommandClassification {
 // commands are strings. It closes the direct, obvious form — which is the form
 // a model actually emits — and it never widens anything: the result is folded
 // in with mostRestrictive.
+// Compared against commandName(), which lowercases nothing — so POSIX stays
+// case-sensitive. The Windows and PowerShell names below are additionally
+// matched case-insensitively, because `TYPE` and `Get-Content` are the same
+// command as `type` and `get-content` on a shell that does not care.
 const READ_COMMANDS = new Set([
   'cat', 'bat', 'head', 'tail', 'less', 'more', 'nl', 'tac', 'rev', 'strings', 'xxd', 'od', 'hexdump',
   'base64', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'cksum', 'wc', 'cut', 'sort', 'uniq',
   'grep', 'egrep', 'fgrep', 'rgrep', 'awk', 'diff', 'cmp', 'file', 'stat', 'readlink', 'realpath'
+])
+
+// cmd.exe and PowerShell. Without these, fixing the path shapes alone would
+// still have missed `type C:\Users\me\.ssh\id_rsa` — the path is recognised but
+// nothing marks the command as one that reads a file.
+const WINDOWS_READ_COMMANDS = new Set([
+  'type', 'get-content', 'gc', 'select-string', 'get-filehash', 'format-hex', 'import-csv'
+])
+
+const WINDOWS_WRITE_COMMANDS = new Set([
+  'del', 'erase', 'rd', 'rmdir', 'ren', 'rename', 'move', 'copy', 'xcopy', 'robocopy',
+  'set-content', 'add-content', 'out-file', 'remove-item', 'ri', 'new-item', 'set-acl'
 ])
 
 const WRITE_COMMANDS = new Set([
@@ -186,7 +202,42 @@ function tokenize(segment: string): string[] {
   return tokens
 }
 
-const isAbsolute = (t: string): boolean => t.startsWith('/')
+// Three absolute-path shapes, not one.
+//
+// This used to be `t.startsWith('/')`, which is every absolute path on Linux
+// and none on Windows. The failure was silent and total: a Windows target's
+// commands yielded zero PathAccess entries, so the reduce in evaluateCommand
+// folded over an empty array and every file rule in the group was skipped —
+// while the UI went on showing them as configured. Blanket `readFiles: allow`
+// in three of the four built-in groups then let `type C:\Users\me\.ssh\id_rsa`
+// straight through.
+//
+//   POSIX         /etc/shadow
+//   drive-letter  C:\Users\me\.ssh   and   C:/Users/me/.ssh
+//   UNC           \\server\share\x   and   //server/share/x
+//
+// Relative paths stay out, for the reason documented at the top of this file:
+// we cannot resolve them without knowing the remote working directory.
+const DRIVE_LETTER = /^[A-Za-z]:[\\/]/
+const UNC = /^[\\/]{2}[^\\/]/
+
+export const isAbsolute = (t: string): boolean =>
+  t.startsWith('/') || DRIVE_LETTER.test(t) || UNC.test(t)
+
+export const isWindowsPath = (t: string): boolean =>
+  DRIVE_LETTER.test(t) || (UNC.test(t) && t.includes('\\'))
+
+// Both separators mean the same thing on Windows, and a rule written one way
+// must match a command written the other. Everything is compared in forward
+// slashes; a UNC path keeps its leading pair so `//server/share` cannot be
+// confused with an absolute POSIX path.
+export const toMatchPath = (t: string): string => t.replace(/\\/g, '/')
+
+// `cat`, `/bin/cat`, `C:\Windows\System32\more.com` and `MORE.COM` are all the
+// same command for our purposes. Splitting on `/` alone left every
+// backslash-qualified Windows invocation unrecognised.
+const commandName = (token: string): string =>
+  (token.split(/[\\/]/).pop() ?? '').replace(/\.(exe|com|cmd|bat|ps1)$/i, '')
 
 export function extractPathAccesses(command: string): PathAccess[] {
   const found: PathAccess[] = []
@@ -200,8 +251,8 @@ export function extractPathAccesses(command: string): PathAccess[] {
     }
 
     let tokens = tokenize(segment.replace(/(\d?>>?|<)\s*("[^"]*"|'[^']*'|\S+)/g, ' '))
-    while (tokens.length && PREFIXES.has(tokens[0].split('/').pop() ?? '')) {
-      const wrapper = tokens[0].split('/').pop() ?? ''
+    while (tokens.length && PREFIXES.has(commandName(tokens[0]))) {
+      const wrapper = commandName(tokens[0])
       const valueFlags = PREFIX_VALUE_FLAGS[wrapper] ?? new Set<string>()
       tokens = tokens.slice(1)
       while (tokens.length && tokens[0].startsWith('-')) {
@@ -213,8 +264,17 @@ export function extractPathAccesses(command: string): PathAccess[] {
     }
     if (tokens.length === 0) continue
 
-    const name = tokens[0].split('/').pop() ?? ''
-    const operands = tokens.slice(1).filter((t) => !t.startsWith('-'))
+    const name = commandName(tokens[0])
+    const lower = name.toLowerCase()
+    // PowerShell and cmd flags are `/Q`, `/S`, `-Path` — a `/`-prefixed token
+    // is a flag there, not the absolute path it would be on POSIX. Only drop
+    // slash-flags when the command is a Windows one, or `cat /etc/shadow`
+    // would lose its operand.
+    const isWindowsCmd = WINDOWS_READ_COMMANDS.has(lower) || WINDOWS_WRITE_COMMANDS.has(lower)
+    const operands = tokens
+      .slice(1)
+      .filter((t) => !t.startsWith('-'))
+      .filter((t) => !(isWindowsCmd && /^\/[A-Za-z?]$/.test(t)))
 
     if (COPY_COMMANDS.has(name)) {
       // Last operand is the destination; everything before it is a source.
@@ -231,9 +291,9 @@ export function extractPathAccesses(command: string): PathAccess[] {
         ? tokens.some((t) => /^-\w*i/.test(t))
           ? 'write'
           : 'read'
-        : READ_COMMANDS.has(name)
+        : READ_COMMANDS.has(name) || WINDOWS_READ_COMMANDS.has(lower)
           ? 'read'
-          : WRITE_COMMANDS.has(name)
+          : WRITE_COMMANDS.has(name) || WINDOWS_WRITE_COMMANDS.has(lower)
             ? 'write'
             : null
     if (!mode) continue
@@ -293,7 +353,10 @@ export function evaluateCommand(group: AccessGroup | null, command: string): Dec
 // Minimal glob support: `**` crosses path segments, `*` stays within one,
 // `?` matches a single character. Good enough for policy patterns like
 // "/etc/nginx/**" without pulling in a dependency.
-export function globToRegExp(glob: string): RegExp {
+//
+// `insensitive` is for Windows paths, where casing carries no meaning. Off by
+// default so POSIX targets keep the case-sensitive matching they need.
+export function globToRegExp(glob: string, insensitive = false): RegExp {
   let pattern = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&')
   const DOUBLESTAR = ' DOUBLESTAR '
   pattern = pattern.replace(/\*\*/g, DOUBLESTAR)
@@ -301,7 +364,7 @@ export function globToRegExp(glob: string): RegExp {
   pattern = pattern.split(`${DOUBLESTAR}/`).join('(?:.*/)?')
   pattern = pattern.split(DOUBLESTAR).join('.*')
   pattern = pattern.replace(/\?/g, '[^/]')
-  return new RegExp(`^${pattern}$`)
+  return new RegExp(`^${pattern}$`, insensitive ? 'i' : undefined)
 }
 
 export function evaluateFilePath(
@@ -314,8 +377,18 @@ export function evaluateFilePath(
   const capability: AiCapability = mode === 'read' ? 'readFiles' : 'writeFiles'
   const blanket = evaluateCapability(group, capability)
 
+  // Compare in forward slashes so a rule written `C:\Users\*\.ssh\**` matches a
+  // command written `C:/Users/me/.ssh/id_rsa` and vice versa, and match
+  // case-insensitively when either side is a Windows path — `c:\users\me` and
+  // `C:\Users\me` are the same file, and a case-sensitive rule there is a rule
+  // that does not hold.
+  const target = toMatchPath(path)
   const matches = group.filePolicies
-    .filter((rule) => globToRegExp(rule.pattern).test(path))
+    .filter((rule) => {
+      const pattern = toMatchPath(rule.pattern)
+      const insensitive = isWindowsPath(rule.pattern) || isWindowsPath(path)
+      return globToRegExp(pattern, insensitive).test(target)
+    })
     .filter((rule) => (mode === 'read' ? rule.read : rule.write) !== undefined)
     .sort((a, b) => b.pattern.length - a.pattern.length)
 
