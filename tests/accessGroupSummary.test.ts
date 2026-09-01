@@ -553,3 +553,36 @@ describe('the precedence the summary is built on', () => {
     expect(decision.decision).not.toBe('ask')
   })
 })
+
+// The grid is where a user consents. They consent to the row they read, so the
+// row has to describe the grant and not a narrower version of it. Server
+// metrics is the case that went wrong: it meant CPU and memory when people set
+// it, and get_server_metrics later began returning the host's failed units and
+// its full listening-port table under the same unchanged label.
+describe('the capability grid describes what it grants', () => {
+  it('gives every capability a detail line', () => {
+    for (const c of AI_CAPABILITIES) {
+      expect(c.detail, c.id).toBeTruthy()
+    }
+  })
+
+  it('never lets a detail just restate its own label', () => {
+    // A detail that echoes the label adds nothing and reads as if the row were
+    // documented when it is not.
+    const norm = (s: string): string => s.toLowerCase().replace(/[^a-z]/g, '')
+    for (const c of AI_CAPABILITIES) {
+      expect(norm(c.detail), c.id).not.toBe(norm(c.label))
+      expect(c.detail.length, c.id).toBeGreaterThan(c.label.length)
+    }
+  })
+
+  it('says that server metrics includes the port and service inventory', () => {
+    const cap = AI_CAPABILITIES.find((c) => c.id === 'serverMetrics')
+    const text = `${cap?.label} ${cap?.detail}`.toLowerCase()
+    // Both halves matter: a reader who skims only the label still has to learn
+    // that this is more than capacity.
+    expect(cap?.label.toLowerCase()).toMatch(/port/)
+    expect(text).toMatch(/listening port/)
+    expect(text).toMatch(/systemd|unit|service/)
+  })
+})

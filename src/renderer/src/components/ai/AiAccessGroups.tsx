@@ -157,10 +157,16 @@ function GroupEditor({ group, summary, onChange, onSave, onDelete }: {
           </span>
         </summary>
         <div className="disclosure-body" style={{ gap: 0 }}>
-          {AI_CAPABILITIES.map(({ id, label }) => (
+          {AI_CAPABILITIES.map(({ id, label, detail }) => (
             <div className="setting-row" key={id}>
               <div className="s-info">
                 <div className="s-title">{label}</div>
+                {/* The label alone is not enough to consent to. "Server metrics"
+                    read as CPU and memory while the tool behind it also returned
+                    the host's failed units and its whole listening-port table —
+                    a grant nobody was asked about a second time, because the row
+                    still said what it had always said. */}
+                <div className="s-desc">{detail}</div>
               </div>
               {/* Absent means denied to the policy engine, so show DENY rather
                   than an empty segment on a group that predates a capability. */}

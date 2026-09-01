@@ -21,19 +21,82 @@ export type AiCapability =
   | 'manageServers'
   | 'vpnControl'
 
-export const AI_CAPABILITIES: { id: AiCapability; label: string }[] = [
-  { id: 'viewServer', label: 'View server' },
-  { id: 'terminal', label: 'Execute terminal commands' },
-  { id: 'readFiles', label: 'Read files' },
-  { id: 'writeFiles', label: 'Write files' },
-  { id: 'sftpDownload', label: 'SFTP download' },
-  { id: 'sftpUpload', label: 'SFTP upload' },
-  { id: 'sshTunnel', label: 'SSH tunnels' },
-  { id: 'databaseAccess', label: 'Database access' },
-  { id: 'sudo', label: 'Sudo / privilege escalation' },
-  { id: 'serverMetrics', label: 'Server metrics' },
-  { id: 'manageServers', label: 'Add servers to the workspace' },
-  { id: 'vpnControl', label: 'VPN & reverse proxies' }
+// `detail` is the consent surface, and it is not decoration. A user reading this
+// grid is deciding what an agent may do, and the only thing they have to decide
+// on is the label. When a label understates its grant, consent was given for
+// something narrower than what was taken — which is what happened to Server
+// metrics: it meant CPU and memory when the user granted it, and it now also
+// returns a service and port inventory of the host. Nobody was asked again.
+//
+// So a `detail` that merely restates its label is a bug. Each one below names
+// what an agent can actually obtain, and any tool added under an existing
+// capability has to be reflected here in the same change.
+export const AI_CAPABILITIES: { id: AiCapability; label: string; detail: string }[] = [
+  {
+    id: 'viewServer',
+    label: 'View server',
+    detail:
+      'Lets an agent see that this server exists and read the permissions it has on it. Hostnames, usernames and keys are never disclosed.'
+  },
+  {
+    id: 'terminal',
+    label: 'Execute terminal commands',
+    detail:
+      'Runs shell commands over SSH. Unrestricted privilege-escalation shells (sudo -i, su, sudo bash) are refused whatever this is set to.'
+  },
+  {
+    id: 'readFiles',
+    label: 'Read files',
+    detail: 'Reads file contents and lists directories. The path rules below can widen or narrow this per path.'
+  },
+  {
+    id: 'writeFiles',
+    label: 'Write files',
+    detail: 'Creates and overwrites files. The path rules below can widen or narrow this per path.'
+  },
+  {
+    id: 'sftpDownload',
+    label: 'SFTP download',
+    detail:
+      'The transport underneath reading. Applied on top of the path rules, so denying it blocks every path regardless of what they say.'
+  },
+  {
+    id: 'sftpUpload',
+    label: 'SFTP upload',
+    detail: 'The transport underneath writing. Denying it blocks every path regardless of what the rules say.'
+  },
+  {
+    id: 'sshTunnel',
+    label: 'SSH tunnels',
+    detail: 'Lists tunnels, and opens or closes a forward between this machine and a port on the server.'
+  },
+  {
+    id: 'databaseAccess',
+    label: 'Database access',
+    detail: 'Lists databases and runs queries against them through the server.'
+  },
+  {
+    id: 'sudo',
+    label: 'Sudo / privilege escalation',
+    detail:
+      'Commands beginning with sudo, checked on top of Execute terminal commands. Path rules still apply — sudo does not waive them.'
+  },
+  {
+    id: 'serverMetrics',
+    label: 'Server metrics, services & ports',
+    detail:
+      'CPU, memory, disk and uptime — and also every failed systemd unit and every listening port with the process that owns it. That is a service and port inventory of the host, not only its capacity.'
+  },
+  {
+    id: 'manageServers',
+    label: 'Add servers to the workspace',
+    detail: 'Adds a new server to the workspace. It does not grant any access to the server it adds.'
+  },
+  {
+    id: 'vpnControl',
+    label: 'VPN & reverse proxies',
+    detail: 'Lists VPN profiles and reverse proxies, and starts or stops them.'
+  }
 ]
 
 export type AiCapabilityPolicy = Record<AiCapability, PermissionValue>
