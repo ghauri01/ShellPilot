@@ -407,7 +407,8 @@ export function summariseFrpProxies(
 export function stripAnsi(text: string): string {
   // CSI sequences: ESC [ params intermediates final. Enough for frp's SGR
   // colours without pulling in a dependency.
-  return text.replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+  // eslint-disable-next-line no-control-regex -- stripping ANSI is the point
+  return text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
 }
 
 /** Map a line of frpc output to a code. frp's login failures are the version

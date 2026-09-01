@@ -45,7 +45,9 @@ export function RouteHops({ hops, onChange, excludeServerId }: Props): React.JSX
 
   // Linking a hop to a saved server is what lets main reuse that server's
   // stored credentials for the hop.
-  const useSaved = (id: string, pickedId: string): void => {
+  // Not `useSaved`: a `use` prefix declares a hook to every React reader and
+  // to rules-of-hooks, and this is an ordinary change handler.
+  const selectSavedServer = (id: string, pickedId: string): void => {
     const src = servers.find((s) => s.id === pickedId)
     onChange(
       hops.map((h) =>
@@ -112,7 +114,7 @@ export function RouteHops({ hops, onChange, excludeServerId }: Props): React.JSX
           <select
             className="input"
             value={h.serverId ?? ''}
-            onChange={(e) => useSaved(h.id, e.target.value)}
+            onChange={(e) => selectSavedServer(h.id, e.target.value)}
             title="Reuse a saved server, including its stored credentials"
           >
             <option value="">Custom host — set details below</option>

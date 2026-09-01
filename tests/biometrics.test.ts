@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 // Biometric unlock is a GATE, not a key: Electron's promptTouchID
@@ -9,7 +8,6 @@ import { join } from 'node:path'
 // safeStorage, behind that prompt. These pin the properties that trade buys
 // and the ones it must not cost.
 
-let dir: string
 let canTouchID = true
 let promptResult: 'ok' | 'cancel' = 'ok'
 let encryptionAvailable = true
@@ -51,7 +49,6 @@ vi.mock('../src/main/services/vault', () => ({
 const bio = await import('../src/main/services/biometrics')
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'x-'))
   canTouchID = true
   promptResult = 'ok'
   encryptionAvailable = true

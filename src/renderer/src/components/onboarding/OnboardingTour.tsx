@@ -38,7 +38,10 @@ export function OnboardingTour(): React.JSX.Element | null {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') finish()
-      if (e.key === 'ArrowRight') step < TOUR_STEPS.length - 1 ? next() : finish()
+      if (e.key === 'ArrowRight') {
+        if (step < TOUR_STEPS.length - 1) next()
+        else finish()
+      }
       if (e.key === 'ArrowLeft') back()
     }
     window.addEventListener('keydown', onKey)

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import type { DbConnectConfig, DbKind } from '../../shared/db'
 import type { DbShellResult } from '../../shared/dbshell'
 import { dbClose, dbQuery, ensure, mongoDbName } from './db'

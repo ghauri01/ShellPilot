@@ -407,6 +407,9 @@ export class Supervisor {
   // ------------------------------------------------------------- internals
 
   private makeHandle(run: Run): SupervisorHandle {
+    // Object-literal getters below are not arrow functions, so they get their
+    // own `this`. The alias is how they reach the supervisor.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this
     return {
       get id(): string {

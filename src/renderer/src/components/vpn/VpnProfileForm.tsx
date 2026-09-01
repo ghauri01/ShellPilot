@@ -112,6 +112,9 @@ export function VpnProfileForm({ profile, onClose, focus }: VpnProfileFormProps)
   // used to disappear, leaving a greyed Save and "2 problems to fix" with
   // nothing indicating where. Collecting what was shown lets the footer list
   // whatever was not.
+  // `issues` is a reset trigger, not an input: the factory ignores it and the
+  // dependency exists so a new render's issues start from an empty set.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const shown = useMemo(() => new Set<string>(), [issues])
 
   // A keypair the user generated or pasted, held here until Save.

@@ -314,7 +314,8 @@ ipcMain.handle('window:control', (_e, action: unknown) => {
       mainWindow.minimize()
       break
     case 'toggle-maximize':
-      mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize()
+      if (mainWindow.isMaximized()) mainWindow.unmaximize()
+      else mainWindow.maximize()
       break
     case 'close':
       mainWindow.close()

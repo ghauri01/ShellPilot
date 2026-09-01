@@ -318,6 +318,7 @@ function unsupported(lineNo: number, raw: string, why: string): never {
  *  break out of a `"`-quoted management-interface command. No directive in the
  *  allowed set has a legitimate use for one, so a value carrying any of them
  *  fails the import rather than being quietly escaped away. */
+// eslint-disable-next-line no-control-regex -- rejecting them is the point
 const DANGEROUS = /["\\\r\n\x00-\x1f\x7f]/
 
 function checkSafe(ctx: Ctx, tokens: string[], lineNo: number, raw: string): void {
@@ -429,6 +430,7 @@ function readContained(ctx: Ctx, p: string, lineNo: number, raw: string, directi
   return readFileSync(target)
 }
 
+// eslint-disable-next-line no-control-regex -- rejecting them is the point
 const MATERIAL_CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/
 
 /** Certificate and key blocks are PEM or base64. Neither contains `<` or `>`,

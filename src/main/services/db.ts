@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import type { DbConnectConfig, DbInfo, DbKind, DbQueryResult, DbTestResult } from '../../shared/db'
 
 export interface Conn {

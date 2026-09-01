@@ -485,8 +485,8 @@ function tunnelConfigFor(t: CachedTunnel): Parameters<typeof tunnelStart>[1] {
 const MAX_REMOTE_TEXT = 200
 
 // C0, DEL, C1, zero-width joiners and marks, and the bidi overrides.
-// eslint-disable-next-line no-control-regex
 const UNSAFE_REMOTE =
+  // eslint-disable-next-line no-control-regex -- matching them is the point
   /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g
 
 export function remoteText(value: string | undefined | null, max = MAX_REMOTE_TEXT): string {

@@ -416,6 +416,10 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
       // vault is storage rather than a trust boundary.
       const config = emitOvpnConfig(spec, body)
 
+      // Assigned below, but captured by the callbacks constructed above it,
+      // so the declaration has to come first. Not const: there is nothing to
+      // initialise it with at this point.
+      // eslint-disable-next-line prefer-const
       let session!: Session
       const management = new OpenVpnManagement(
         {

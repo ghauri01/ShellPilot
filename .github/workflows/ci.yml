@@ -21,6 +21,7 @@ jobs:
           cache-dependency-path: sidecar/netd/go.sum
       - run: npm ci
       - run: npm audit
+      - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
       # The WireGuard sidecar is a Go program in this repo, so it is covered by
