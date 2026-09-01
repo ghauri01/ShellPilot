@@ -34,6 +34,8 @@ was built and that reasoning outlives the ticket.
 | **11. Run one command across many servers** | **Built.** Approval model settled and tested first: confirmation scales with blast radius, nothing is safe by omission, cancel means queued hosts never start. Three at a time. Not exposed to the MCP bridge. |
 | **12. Live log tailing across hosts** | **Built.** journalctl or tail -F, several hosts interleaved and colour-keyed. The remote command is built from a validated source and never from user text. |
 | **6. Cron, read-only** | **Built.** Crontabs, /etc/cron.d and systemd timers across the estate. Read-only until the parser is proven — the user-field trap is a silent misread, not an error. |
+| **15a. Optional first-party modules** | **Built.** Registry borrows the AI_CAPABILITIES shape: absent reads as OFF, and an upgrade never switches a new module on for an existing install. The four forbidden reaches — vault, credentials, secrets, local terminal — are enforced by walking the real import closure, not by convention. Part (b) is not started and a test guards against drifting into it. |
+| **4. Docker** | **Built** as the first module behind that gate, off by default. Shells out to the host's own binary. The work was in telling the three failures apart: missing binary, stopped daemon, and permission denied have three different fixes. |
 
 Two things those unlocked, now unblocked rather than done: **fleet-wide search** (item 13) can now
 index a complete estate rather than whatever was last looked at, and any future scheduled work has
@@ -580,8 +582,19 @@ list at all.**
 **Next, and now the front of the list.** Cron *editing* is the natural follow-on and is deliberately
 not automatic: the read-only parser has been proven against fixtures, not against a real estate, and
 the whole argument for shipping it read-first is that it should be run against real crontabs before
-anything writes. After that, the plugin system (item 15) is still best done before Docker/k8s/n8n so
-those arrive as modules rather than being retrofitted.
+anything writes.
+
+**The weight half of modularity is still unpaid.** Toggling a module off hides its UI; it does not
+shrink the installer. Nothing added so far is heavy enough for that to matter — the panels are all
+code we already ship — but the five database drivers still bundle for everyone, and Kubernetes or
+n8n would dwarf them. `fetchesOnEnable` exists on the module definition and nothing sets it, which
+is the point: the first module that needs a runtime download cannot be added without someone
+deciding how it is pinned, checksummed and verified. Extend `resources/bin/manifest.json` and
+`resolveBundled()`; do not invent something beside them.
+
+**Kubernetes stays separate and later**, as this page has said throughout: contexts, namespaces and
+RBAC are a product in themselves, and the Docker module deliberately does not pretend to be a step
+toward it.
 
 **Then — reduce weight, and pick up the rest.**
 
