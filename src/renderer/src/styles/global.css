@@ -2371,24 +2371,142 @@ details[open] > .disclosure-head .chev {
   font-weight: 600;
 }
 
-/* Services and ports panel on the Fleet Monitor. Deliberately quiet: a failed
-   unit is the only thing here that should catch the eye. */
-.fleet-services {
-  margin: 18px 0 8px;
+/* Fleet health panel. Leads the Fleet Monitor because "is anything broken" is
+   the question the screen is opened to answer, and the capacity totals below
+   it are not an answer to it.
+
+   Deliberately quiet everywhere except the attention rows: those carry the
+   only colour on the panel, so the eye lands on them without being aimed. */
+.fleet-health {
+  margin: 0 0 var(--sp-4);
 }
-.fleet-services .badge.danger {
-  display: inline-flex;
+.fh-head {
+  display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 11px;
-  color: var(--danger, #f87171);
-  border: 1px solid var(--danger, #f87171);
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
 }
-.fleet-services .server-meta.danger,
-.fleet-services .s-desc.danger {
-  color: var(--danger, #f87171);
+.fh-head .spacer {
+  flex: 1;
+}
+/* Secondary text inside the panel. Its own class rather than .server-meta,
+   which is scoped to .viewbar and so left every count here at full body
+   weight — which is why three unrelated numbers used to read as equals. */
+.fh-meta {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.fh-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+/* The list spaces itself with `gap`; the global stacking margin on adjacent
+   rows would double it. */
+.fh-list .list-row + .list-row {
+  margin-top: 0;
+}
+.fh-rest-toggle + .fh-list {
+  margin-top: var(--sp-2);
+}
+.fh-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-2);
+}
+/* Same left-edge marker the toasts use, so "this one is shouting" is already
+   a familiar shape in the app rather than a new idiom. */
+.fh-row.attention {
+  border-left: 3px solid var(--danger);
+}
+.fh-line {
+  min-width: 0;
+}
+.fh-line .spacer {
+  flex: 1;
+}
+.fh-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The failed units themselves, on the row rather than behind a disclosure:
+   naming what broke is the whole point of the section. Only the unit name is
+   red — the description beside it is prose, and colouring it too would spend
+   the alarm on the half of the line that is not the alarm. */
+.fh-units {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.fh-units b {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--danger);
+}
+.fh-pressure {
+  font-size: var(--fs-sm);
+  color: var(--warn);
+}
+.fh-ports-toggle,
+.fh-rest-toggle {
+  flex: none;
+  color: var(--text-muted);
+}
+.fh-ports {
+  /* A busy host listens on well over a hundred sockets. Scroll the table
+     rather than letting it push the card wall off the screen. */
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: var(--sp-2);
+}
+/* Grouped by whether anything off-box can reach the port, which is the
+   question a port list is actually opened to answer. */
+.fh-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+/* Fixed layout so the exposed and loopback tables share one set of column
+   edges. Two independently-sized tables under two headings read as two
+   unrelated things, which is the opposite of the point of grouping them. */
+.fh-ports-table {
+  width: 100%;
+  table-layout: fixed;
+}
+.fh-ports-table th:nth-child(1),
+.fh-ports-table td:nth-child(1) {
+  width: 9ch;
+}
+.fh-ports-table th:nth-child(2),
+.fh-ports-table td:nth-child(2) {
+  width: 8ch;
+}
+.fh-ports-table th:nth-child(3),
+.fh-ports-table td:nth-child(3) {
+  width: 26ch;
+}
+.fh-ports-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fh-note {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  padding-top: var(--sp-2);
+  max-width: 68ch;
 }
 
 /* One-time offer to enable biometric unlock, shown after a password unlock.

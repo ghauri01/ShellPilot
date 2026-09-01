@@ -1,0 +1,267 @@
+import { describe, it, expect } from 'vitest'
+import {
+  DISK_DANGER,
+  coverageLine,
+  diskLine,
+  failureLine,
+  isLoopback,
+  level,
+  splitListeners,
+  summariseFleetHealth
+} from '../src/renderer/src/components/monitor/hostHealth'
+import type { ServerRef } from '../src/renderer/src/components/monitor/hostHealth'
+import type { HostMetrics, PortListener, ServiceUnit } from '../src/shared/ssh'
+
+function server(id: string, name = id): ServerRef {
+  return { id, name, status: 'online' }
+}
+
+function unit(name: string, over: Partial<ServiceUnit> = {}): ServiceUnit {
+  return { name, active: 'active', sub: 'running', description: '', ...over }
+}
+
+const failedUnit = (name: string): ServiceUnit =>
+  unit(name, { active: 'failed', sub: 'failed', description: 'broke' })
+
+function host(over: Partial<HostMetrics> = {}): HostMetrics {
+  return {
+    cpu: 5,
+    memPct: 40,
+    memUsed: 4_000_000_000,
+    memTotal: 10_000_000_000,
+    diskPct: 20,
+    diskUsed: 20_000_000_000,
+    diskTotal: 100_000_000_000,
+    netRx: 0,
+    netTx: 0,
+    uptime: 1000,
+    hostname: 'h',
+    kernel: '6.1',
+    cores: 4,
+    services: [],
+    listeners: [],
+    listenerSource: 'ss',
+    ...over
+  }
+}
+
+function listener(port: number, address: string, over: Partial<PortListener> = {}): PortListener {
+  return { proto: 'tcp', address, port, ...over }
+}
+
+describe('level', () => {
+  it('matches the disk threshold the attention list uses', () => {
+    expect(level(DISK_DANGER)).toBe('warn')
+    expect(level(DISK_DANGER + 0.1)).toBe('danger')
+  })
+
+  it('grades the middle band as a warning', () => {
+    expect(level(0)).toBe('ok')
+    expect(level(65)).toBe('ok')
+    expect(level(65.1)).toBe('warn')
+  })
+})
+
+describe('summariseFleetHealth', () => {
+  it('separates hosts needing attention from the rest', () => {
+    const h = summariseFleetHealth([server('a'), server('b')], {
+      a: host({ services: [failedUnit('nginx')] }),
+      b: host()
+    })
+    expect(h.attention.map((r) => r.id)).toEqual(['a'])
+    expect(h.rest.map((r) => r.id)).toEqual(['b'])
+    expect(h.failedUnits).toBe(1)
+    expect(h.failingHosts).toBe(1)
+  })
+
+  it('treats a unit failed on either field as failed', () => {
+    const h = summariseFleetHealth([server('a')], {
+      a: host({
+        services: [unit('x', { active: 'failed' }), unit('y', { sub: 'failed' }), unit('z')]
+      })
+    })
+    expect(h.attention[0].failed?.map((u) => u.name)).toEqual(['x', 'y'])
+  })
+
+  it('never reads a host without systemd as a host with nothing failed', () => {
+    const h = summariseFleetHealth([server('a')], { a: host({ services: null }) })
+    expect(h.attention).toHaveLength(0)
+    expect(h.rest[0].failed).toBeNull()
+    expect(h.rest[0].running).toBeNull()
+    expect(h.blind).toBe(1)
+  })
+
+  it('reads an empty unit list as a real answer, not a missing one', () => {
+    const h = summariseFleetHealth([server('a')], { a: host({ services: [] }) })
+    expect(h.rest[0].failed).toEqual([])
+    expect(h.rest[0].running).toBe(0)
+    expect(h.blind).toBe(0)
+  })
+
+  it('keeps the null listener case distinct from an empty one', () => {
+    const h = summariseFleetHealth([server('a'), server('b')], {
+      a: host({ listeners: null, listenerSource: null }),
+      b: host({ listeners: [] })
+    })
+    expect(h.rest[0].listeners).toBeNull()
+    expect(h.rest[1].listeners).toEqual([])
+  })
+
+  it('still lists a host whose service and port probes both failed', () => {
+    // It reported CPU, memory and disk perfectly well; dropping it entirely
+    // would understate how much of the estate is covered.
+    const h = summariseFleetHealth([server('a')], {
+      a: host({ services: null, listeners: null, listenerSource: null })
+    })
+    expect(h.rest.map((r) => r.id)).toEqual(['a'])
+  })
+
+  it('flags a disk past the danger mark and not one at it', () => {
+    const h = summariseFleetHealth([server('a'), server('b')], {
+      a: host({ diskPct: DISK_DANGER + 1 }),
+      b: host({ diskPct: DISK_DANGER })
+    })
+    expect(h.attention.map((r) => r.id)).toEqual(['a'])
+    expect(h.diskHosts).toBe(1)
+  })
+
+  it('does not alarm on a host that reported no filesystem at all', () => {
+    const h = summariseFleetHealth([server('a')], {
+      a: host({ diskPct: 100, diskTotal: 0, diskUsed: 0 })
+    })
+    expect(h.attention).toHaveLength(0)
+  })
+
+  it('leaves CPU and memory pressure out of the attention list', () => {
+    // Both recover on their own; a list that fills with things that fix
+    // themselves stops being read.
+    const h = summariseFleetHealth([server('a')], { a: host({ cpu: 99, memPct: 99 }) })
+    expect(h.attention).toHaveLength(0)
+  })
+
+  it('counts servers that have not reported instead of hiding them', () => {
+    const h = summariseFleetHealth([server('a'), server('b'), server('c')], { a: host() })
+    expect(h.silent).toBe(2)
+    expect(h.totalServers).toBe(3)
+  })
+
+  it('puts failed units ahead of disk pressure', () => {
+    const h = summariseFleetHealth([server('a', 'aaa'), server('b', 'bbb')], {
+      a: host({ diskPct: 99 }),
+      b: host({ services: [failedUnit('nginx')] })
+    })
+    expect(h.attention.map((r) => r.name)).toEqual(['bbb', 'aaa'])
+  })
+
+  it('does not reorder attention rows when a failure count changes', () => {
+    const two = summariseFleetHealth([server('a', 'aaa'), server('b', 'bbb')], {
+      a: host({ services: [failedUnit('one')] }),
+      b: host({ services: [failedUnit('two'), failedUnit('three')] })
+    })
+    const one = summariseFleetHealth([server('a', 'aaa'), server('b', 'bbb')], {
+      a: host({ services: [failedUnit('one')] }),
+      b: host({ services: [failedUnit('two')] })
+    })
+    expect(two.attention.map((r) => r.name)).toEqual(['aaa', 'bbb'])
+    expect(one.attention.map((r) => r.name)).toEqual(['aaa', 'bbb'])
+  })
+
+  it('leaves the healthy hosts in the order they were given', () => {
+    const h = summariseFleetHealth([server('c', 'ccc'), server('a', 'aaa'), server('b', 'bbb')], {
+      a: host(),
+      b: host(),
+      c: host()
+    })
+    expect(h.rest.map((r) => r.name)).toEqual(['ccc', 'aaa', 'bbb'])
+  })
+})
+
+describe('splitListeners', () => {
+  it('separates loopback from anything reachable off the box', () => {
+    const groups = splitListeners([
+      listener(5432, '127.0.0.1'),
+      listener(443, '*'),
+      listener(6379, '::1'),
+      listener(22, '10.0.0.4')
+    ])
+    expect(groups.exposed.map((l) => l.port)).toEqual([22, 443])
+    expect(groups.loopback.map((l) => l.port)).toEqual([5432, 6379])
+  })
+
+  it('sorts each group by port rather than trusting the probe order', () => {
+    const groups = splitListeners([listener(8080, '*'), listener(80, '*'), listener(443, '*')])
+    expect(groups.exposed.map((l) => l.port)).toEqual([80, 443, 8080])
+  })
+
+  it('orders same-port rows by protocol so the list is stable', () => {
+    const groups = splitListeners([
+      listener(53, '*', { proto: 'udp' }),
+      listener(53, '*', { proto: 'tcp' })
+    ])
+    expect(groups.exposed.map((l) => l.proto)).toEqual(['tcp', 'udp'])
+  })
+
+  it('treats a wildcard bind as exposed, because it is', () => {
+    expect(isLoopback('*')).toBe(false)
+    expect(isLoopback('127.0.0.1')).toBe(true)
+    expect(isLoopback('127.53.0.1')).toBe(true)
+    expect(isLoopback('::1')).toBe(true)
+    expect(isLoopback('10.0.0.1')).toBe(false)
+    // Not loopback: an address that merely starts with the same digits.
+    expect(isLoopback('1270.0.0.1')).toBe(false)
+  })
+})
+
+describe('summary copy', () => {
+  const withFailures = (units: number, hostsFailing: number): ReturnType<typeof summariseFleetHealth> =>
+    summariseFleetHealth(
+      Array.from({ length: hostsFailing }, (_, i) => server(`s${i}`)),
+      Object.fromEntries(
+        Array.from({ length: hostsFailing }, (_, i) => [
+          `s${i}`,
+          host({
+            services: Array.from({ length: Math.ceil(units / hostsFailing) }, (_, j) =>
+              failedUnit(`u${i}${j}`)
+            )
+          })
+        ])
+      )
+    )
+
+  it('says nothing when nothing has failed', () => {
+    expect(failureLine(summariseFleetHealth([server('a')], { a: host() }))).toBeNull()
+    expect(diskLine(summariseFleetHealth([server('a')], { a: host() }))).toBeNull()
+  })
+
+  it('agrees with itself about singular and plural', () => {
+    expect(failureLine(withFailures(1, 1))).toBe('1 failed service on 1 host')
+    expect(failureLine(withFailures(4, 2))).toBe('4 failed services on 2 hosts')
+  })
+
+  it('names how much of the estate the panel actually covers', () => {
+    const partial = summariseFleetHealth([server('a'), server('b'), server('c')], {
+      a: host(),
+      b: host({ services: null })
+    })
+    expect(coverageLine(partial)).toBe('2 of 3 servers reporting · 1 cannot list services')
+  })
+
+  it('drops the "of N" when every server is reporting', () => {
+    const all = summariseFleetHealth([server('a'), server('b')], { a: host(), b: host() })
+    expect(coverageLine(all)).toBe('2 servers reporting')
+  })
+
+  it('reports a single reporting server in the singular', () => {
+    expect(coverageLine(summariseFleetHealth([server('a')], { a: host() }))).toBe(
+      '1 server reporting'
+    )
+  })
+
+  it('counts hosts low on disk', () => {
+    const h = summariseFleetHealth([server('a'), server('b')], {
+      a: host({ diskPct: 99 }),
+      b: host({ diskPct: 92 })
+    })
+    expect(diskLine(h)).toBe('2 hosts low on disk')
+  })
+})

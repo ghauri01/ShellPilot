@@ -3,10 +3,9 @@ import { useServerMetrics } from '../../hooks/useServerMetrics'
 import { Sparkline } from '../common/Sparkline'
 import { bytes, rate, clsx } from '../../lib/format'
 import type { Server } from '../../types'
-
-function level(v: number): string {
-  return v > 85 ? 'danger' : v > 65 ? 'warn' : 'ok'
-}
+// Shared with the fleet health panel above, so a host listed there as low on
+// disk is exactly a host whose bar here is red.
+import { level } from './hostHealth'
 
 export function ServerMonitorCard({
   server,
