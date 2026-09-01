@@ -2771,3 +2771,25 @@ details[open] > .disclosure-head .chev {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Live log tailing. Host name is colour-keyed to its chip so an interleaved
+   stream stays readable — which host said what is the whole question. */
+.log-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.log-line {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.log-line.danger {
+  color: var(--danger);
+}
+.log-host {
+  flex: 0 0 auto;
+  min-width: 92px;
+  font-weight: 600;
+  opacity: 0.85;
+}

@@ -15,7 +15,8 @@ import {
   setPoolIdle,
   poolList,
   poolClose,
-  sshExec
+  sshExec,
+  sshExecStream
 } from './services/ssh'
 import type { KeyboardRequest } from './services/ssh'
 import {
@@ -49,6 +50,8 @@ import {
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
 import { BroadcastRunner } from './services/broadcast'
+import { LogTailer } from './services/logTail'
+import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
@@ -622,6 +625,33 @@ ipcMain.handle('broadcast:run', async (_e, req: BroadcastRequest) => {
 })
 ipcMain.handle('broadcast:cancel', (_e, runId: string) => broadcast.cancel(runId))
 
+// ---- Live log tailing across hosts ----
+//
+// The remote command is built in shared/logtail.ts from a validated source and
+// is never taken from the caller: a tail is a read, and a caller that can pass
+// arbitrary text turns this into "run anything on N hosts" without any of the
+// confirmation broadcast requires.
+const logTailer = new LogTailer({
+  execStream: (cfg, command, handlers) =>
+    sshExecStream(resolveChainSecrets(cfg as SshConnectConfig), command, handlers),
+  emitLine: (line: LogLine) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('logtail:line', line)
+  },
+  emitState: (state: LogTailState) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('logtail:state', state)
+  }
+})
+
+ipcMain.handle(
+  'logtail:start',
+  (_e, tailId: string, source: LogSource, targets: { serverId: string; serverName: string; cfg: unknown }[]) =>
+    logTailer.start(tailId, source, targets)
+)
+ipcMain.handle('logtail:stop', (_e, tailId: string) => {
+  logTailer.stop(tailId)
+  return true
+})
+
 // ---- Webhook alerts ----
 //
 // Delivery lives in main because the renderer's CSP is `connect-src 'self'`
@@ -1084,6 +1114,8 @@ app.on('before-quit', (e) => {
   localDisposeAll()
   sftpDisposeAll()
   // Queued hosts must not start after the window is gone.
+  // Otherwise a following journalctl keeps a channel open past the window.
+  logTailer.disposeAll()
   broadcast.disposeAll()
   fleetSampler.dispose()
   metricsDisposeAll()

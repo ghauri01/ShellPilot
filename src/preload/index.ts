@@ -12,6 +12,7 @@ import type {
 } from '../shared/ssh'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
+import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import type {
   AlertPayload,
   WebhookConfig,
@@ -242,6 +243,24 @@ const api = {
   // Background sampling of the whole estate, scheduled in main so it continues
   // when the monitor is not on screen. `metrics` above is the foreground path:
   // one server, fast cadence, driven by a mounted card.
+  logtail: {
+    start: (
+      tailId: string,
+      source: LogSource,
+      targets: { serverId: string; serverName: string; cfg: unknown }[]
+    ): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('logtail:start', tailId, source, targets),
+    stop: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:stop', tailId),
+    onLine: (fn: (l: LogLine) => void): (() => void) => {
+      const h = (_e: unknown, l: LogLine): void => fn(l)
+      ipcRenderer.on('logtail:line', h)
+      return () => ipcRenderer.removeListener('logtail:line', h)
+    },
+    onState: (fn: (s: LogTailState) => void): (() => void) => {
+      const h = (_e: unknown, s: LogTailState): void => fn(s)
+      ipcRenderer.on('logtail:state', h)
+      return () => ipcRenderer.removeListener('logtail:state', h)
+    }
+  },
   broadcast: {
     run: (req: BroadcastRequest): Promise<BroadcastHostResult[]> => ipcRenderer.invoke('broadcast:run', req),
     cancel: (runId: string): Promise<boolean> => ipcRenderer.invoke('broadcast:cancel', runId),

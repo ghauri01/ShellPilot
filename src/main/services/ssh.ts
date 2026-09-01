@@ -745,6 +745,70 @@ export async function sshExec(
   }
 }
 
+/**
+ * Run a command and stream its output until it is stopped.
+ *
+ * `sshExec` buffers and resolves; a following log never resolves, so this
+ * hands back a stop function instead. The connection is acquired from the pool
+ * like everything else, and released exactly once — a tail that leaks its
+ * reference keeps an authenticated master alive for a pane the user closed,
+ * which is invisible until an estate wonders why its sshd is busy.
+ */
+export async function sshExecStream(
+  cfg: SshHop & { serverId?: string; hops?: SshHop[] },
+  command: string,
+  handlers: {
+    onStdout: (chunk: string) => void
+    onStderr: (chunk: string) => void
+    onClose: (code: number | null) => void
+    onError: (message: string) => void
+  }
+): Promise<() => void> {
+  const conn = await acquire(cfg)
+  let released = false
+  const releaseOnce = (): void => {
+    if (released) return
+    released = true
+    release(conn)
+  }
+
+  return await new Promise<() => void>((resolve, reject) => {
+    conn.client.exec(command, (err, stream) => {
+      if (err) {
+        releaseOnce()
+        reject(err)
+        return
+      }
+      stream.on('data', (c: Buffer) => handlers.onStdout(c.toString('utf8')))
+      stream.stderr.on('data', (c: Buffer) => handlers.onStderr(c.toString('utf8')))
+      stream.on('close', (code: number | null) => {
+        releaseOnce()
+        handlers.onClose(code ?? null)
+      })
+      stream.on('error', (e: Error) => {
+        releaseOnce()
+        handlers.onError(e.message)
+      })
+      resolve(() => {
+        // Signal first so the remote process actually dies rather than being
+        // orphaned holding the file open; then close the channel regardless of
+        // whether the server honoured the signal, and release either way.
+        try {
+          stream.signal('TERM')
+        } catch {
+          /* server may not support signals; close still ends the channel */
+        }
+        try {
+          stream.close()
+        } catch {
+          /* already gone */
+        }
+        releaseOnce()
+      })
+    })
+  })
+}
+
 export function sshDisposeAll(): void {
   for (const id of [...sessions.keys()]) cleanup(id)
   poolDisposeAll()
