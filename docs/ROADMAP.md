@@ -61,6 +61,35 @@ no approval — an injection channel from any host under an attacker's control. 
 grid still said "Server metrics" after that tool began returning a full service and port inventory,
 so consent had been given for something narrower than what was taken.
 
+### Measured against a real estate, 2 Sep
+
+Run on the author's own machine against two live hosts, background checking on at a 2-minute
+cadence. 174 samples over ~45 minutes, counting ShellPilot's own sockets by PID.
+
+| | |
+|---|---|
+| Additional connections from background checking | **none** |
+| Steady state | 1 connection per server, shared with the foreground monitor |
+| Held with zero foreground sessions | yes, indefinitely |
+| `sshMasterIdleMinutes` (set to 15 min) applied | **no** — as the settings rows now disclose |
+| Main-process RSS | 125–151 MB |
+
+The pool keys on `srv:${serverId}` (`hopKey` in ssh.ts), so the monitor, the sampler and the MCP
+bridge share one connection per server rather than opening three. Sessions were closed at 00:52 and
+the connections were still up at 01:08, past the 15-minute idle setting — the refcount never reaches
+zero, so the idle timer is never armed. That is now measured rather than argued.
+
+**What this does NOT answer.** Two hosts, direct, no bastion. The open question was fifteen hosts
+behind jump boxes, and a chained hop pools *per hop* — so bastion load scales differently and none of
+this measures it. Treat the zero-additional-connections result as true for direct estates and
+unproven for chained ones.
+
+**Two findings came out of running it, both shipped.** Background checking was silently paused on a
+locked vault, with the only indication one line in a Settings pane nobody opens — now a status-bar
+chip. And the alert-threshold row claimed "alerts fire wherever you are in the app" while the
+sampler sat paused, because it read the setting rather than the running state. Neither was findable
+by reading the code.
+
 **Not verified against a real estate.** The sampler has unit tests and the webhook has been proved
 against a live local endpoint, but nobody has yet turned background checking on with fifteen hosts
 behind bastions and watched what happens to connection count, bastion load or battery. That is the
