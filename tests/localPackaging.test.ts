@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { load } from 'js-yaml'
+// The same matcher electron-builder uses, so a pattern that passes here is a
+// pattern that behaves the same way during a real pack.
+import { minimatch } from 'minimatch'
 
 // Packaging is the part of the local terminal that CI cannot otherwise check:
 // nothing on a pull request runs electron-builder to completion, and the one
@@ -94,21 +97,36 @@ describe('the installers carry no redistributable-ConPTY payload', () => {
     expect(conpty).toHaveLength(1)
   })
 
+  // Run the glob rather than compare its text.
+  //
+  // The previous version of these tests asserted the pattern STRING, and passed
+  // against a pattern that matched nothing: with a leading `**/` already
+  // present, a second `**/` in the middle makes minimatch match no path at all.
+  // conpty.dll and OpenConsole.exe shipped into the first 0.8.0 Windows build
+  // and only the pack verifier caught it, in CI, after the tag was pushed.
+  // A test that reads a pattern cannot tell you the pattern works.
+  const WIN = 'node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/'
+  const excludes = (path: string): boolean =>
+    minimatch(path, conpty[0].slice(1), { dot: true })
+
   it('scopes the exclusion to node-pty rather than to every prebuilds/ directory', () => {
     // `prebuilds/` is a prebuildify convention, not a node-pty invention. An
-    // unscoped '!**/prebuilds/**/conpty/**' would silently strip files out of
-    // any future dependency that happens to use the same layout.
-    expect(conpty[0]).toBe('!**/node_modules/@lydell/node-pty-*/prebuilds/**/conpty/**')
+    // unscoped pattern would silently strip files out of any future dependency
+    // that happens to use the same layout.
+    expect(conpty[0]).toContain('node_modules/@lydell/node-pty-')
+    expect(excludes('node_modules/other-dep/prebuilds/win32-x64/conpty/thing.dll')).toBe(false)
   })
 
-  it('strips the directory only, leaving the ConPTY bindings in place', () => {
-    // prebuilds/win32-x64/conpty/ holds conpty.dll and OpenConsole.exe and
-    // nothing else. conpty.node and conpty_console_list.node sit one level UP,
-    // as files — so a pattern ending in `/conpty/**` cannot reach them, and a
-    // pattern like `conpty*` would take them both out and break Windows
-    // entirely.
-    expect(conpty[0].endsWith('/conpty/**')).toBe(true)
-    expect(conpty[0]).not.toMatch(/conpty\*/)
+  it('actually matches the redistributable it is meant to exclude', () => {
+    expect(excludes(`${WIN}conpty/conpty.dll`)).toBe(true)
+    expect(excludes(`${WIN}conpty/OpenConsole.exe`)).toBe(true)
+  })
+
+  it('leaves the ConPTY bindings one level up in place', () => {
+    // conpty.node and conpty_console_list.node are the bindings the app loads.
+    // A `conpty*` pattern would take them out and break Windows entirely.
+    expect(excludes(`${WIN}conpty.node`)).toBe(false)
+    expect(excludes(`${WIN}conpty_console_list.node`)).toBe(false)
   })
 
   it('does not re-add the dead .pdb negation', () => {

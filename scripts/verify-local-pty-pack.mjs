@@ -175,7 +175,14 @@ async function main() {
         if (!rel.some((f) => f === `${prebuilds}conpty_console_list.node`)) {
           problems.push(`${label}: ${prebuilds}conpty_console_list.node is missing`)
         }
-      } else {
+      } else if (platform === 'darwin') {
+        // spawn-helper is macOS-only, and this check used to run on Linux too,
+        // which failed the first 0.8.0 build. It exists to avoid fork() in a
+        // hardened-runtime process, where Big Sur and later charge roughly
+        // 300ms per spawn (microsoft/node-pty#476) — a macOS problem with a
+        // macOS fix. The Linux sibling ships prebuilds/linux-x64/pty.node and
+        // nothing else, and forks directly.
+        //
         // Not just present: executable. asar's runtime extraction does not
         // preserve the mode bit, which is why the directory is unpacked at
         // build time instead.

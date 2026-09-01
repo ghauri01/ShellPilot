@@ -43,7 +43,13 @@ files:
   # set (appFileCopier.js:128-132), so that pattern is a no-op that reads like a
   # protection. tests/localPackaging.test.ts asserts the flag stays unset
   # instead.
-  - '!**/node_modules/@lydell/node-pty-*/prebuilds/**/conpty/**'
+  #   * The middle segment is `*/`, not `**/`, and that is load-bearing. With a
+  #     leading `**/` already in the pattern, a second `**/` in the middle makes
+  #     minimatch match nothing at all — the scoped form written with `**/`
+  #     silently excluded no files and shipped conpty.dll and OpenConsole.exe
+  #     into the first 0.8.0 Windows build. `prebuilds/*/conpty/` is one
+  #     platform-arch directory, which is exactly the shape here.
+  - '!**/node_modules/@lydell/node-pty-*/prebuilds/*/conpty/**'
   - package.json
 
 # Tunnel engines: shellpilot-netd (our WireGuard sidecar, MIT), frpc
