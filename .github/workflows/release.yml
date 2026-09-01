@@ -367,6 +367,37 @@ jobs:
             | xargs -r sha256sum \
             | awk '{ name = $2; sub(/.*\//, "", name); printf "| `%s` | `%s` |\n", name, $1 }')
           {
+            # FIRST, above the download links, and there is a test that keeps it
+            # there. Buried at the bottom it was worse than absent: macOS tells
+            # people the app is DAMAGED and offers them a Move to Trash button,
+            # so a reader who has to scroll past every checksum table to learn
+            # otherwise has already trashed it.
+            echo "## First run"
+            echo
+            echo "These builds are not signed with a paid Apple or Microsoft certificate, so"
+            echo "both systems stop you the first time. Neither message is a finding about"
+            echo "this file — every installer's SHA-256 is under [Checksums](#checksums)."
+            echo
+            echo "**macOS — you will be told the app is \"damaged\".** It is not. macOS shows"
+            echo "that exact wording for any app it cannot trace to a paid Apple Developer ID,"
+            echo "and the dialog's only obvious button moves it to the Trash. Do not use it."
+            echo "On macOS 15 (Sequoia) and later there is no right-click → Open bypass; Apple"
+            echo "removed it. Drag the app to Applications, then either open"
+            echo "**System Settings → Privacy & Security** and click **Open Anyway**, or run:"
+            echo
+            echo '```bash'
+            echo "/usr/bin/xattr -dr com.apple.quarantine /Applications/ShellPilot.app"
+            echo '```'
+            echo
+            echo "That clears the download flag and nothing else — the app's signature stays"
+            echo "intact and verifiable with \`codesign --verify --strict --deep\`. The full"
+            echo "path is deliberate: a Homebrew or pip \`xattr\` earlier on your PATH may not"
+            echo "support \`-r\`."
+            echo
+            echo "**Windows — SmartScreen will warn.** Choose *More info → Run anyway*."
+            echo
+            echo "---"
+            echo
             echo "## Downloads"
             echo
             echo "### Windows"
@@ -456,16 +487,6 @@ jobs:
             echo "The \`.blockmap\` files are build metadata, not downloads — they describe"
             echo "binary deltas between versions and are only read by an updater. The source"
             echo "archives are a snapshot of the repository, not a build."
-            echo
-            echo "Builds are **not notarized** — the macOS apps are ad-hoc signed, the Windows"
-            echo "ones unsigned. SmartScreen will warn on first run — choose *More info → Run"
-            echo "anyway*. On macOS, first run only: right-click the app → **Open**, or go to"
-            echo "**System Settings → Privacy & Security** and click **Open Anyway**. If you would"
-            echo "rather use the Terminal, \`/usr/bin/xattr -cr /Applications/ShellPilot.app\` clears"
-            echo "the quarantine flag (spelt with the full path, because a Homebrew or pip \`xattr\`"
-            echo "earlier on your PATH may not support \`-r\`). Every installer's SHA-256 is"
-            echo "listed under Checksums above, which is the strongest integrity check available"
-            echo "here."
             echo
           } > release-notes.md
           cat release-notes.md

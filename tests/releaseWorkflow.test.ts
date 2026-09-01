@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { load } from 'js-yaml'
 
 // The release workflow only ever runs on a version tag, so every bug in it has
@@ -207,9 +210,18 @@ describe('inline shell in the release job does not keep growing', () => {
   // why, because the cost of the branch being wrong is every stable user being
   // offered a beta. Reviewing that reasoning at the point of change is worth
   // more than the lines it costs.
+  // Raised again, from 120, when the Gatekeeper note moved to the top of the
+  // page. macOS reports this app as "damaged" and offers Move to Trash as the
+  // obvious button; the explanation was previously the last paragraph, under
+  // every checksum table, which for that particular message is close to not
+  // having written it. Moving it up also meant correcting it — the old copy
+  // told people to right-click → Open, a bypass Apple removed in macOS 15, so
+  // following it returned them to the same dialog. Net +20 lines after deleting
+  // the paragraph it replaced, and the notes now open with the one thing a
+  // first-time downloader has to read before they act on a Trash button.
   const CEILING: Record<string, number> = {
     'Scan installers with ClamAV': 25,
-    'Build release notes': 120,
+    'Build release notes': 145,
     'Publish release notes': 75
   }
 
@@ -286,5 +298,75 @@ describe('GPL-2.0 §3: the OpenVPN source is published with the binaries', () =>
     const notes = steps(wf.jobs.release).find((s) => s.name === 'Build release notes')?.run ?? ''
     const checksumBlock = notes.slice(notes.indexOf('CHECKSUMS='), notes.indexOf('sha256sum'))
     expect(checksumBlock).toContain('openvpn-*-source.tar.gz')
+  })
+})
+
+// The Gatekeeper note, and where it sits.
+//
+// macOS tells people this app is DAMAGED and offers a Move to Trash button as
+// the obvious action. That wording is what an unnotarized, ad-hoc signed app
+// gets — the signature is valid and `codesign --verify --strict --deep` passes
+// — but a reader cannot know that from the dialog. The explanation used to be
+// the last paragraph of the notes, below every checksum table, which for this
+// particular message is close to not having written it.
+//
+// These run the generator and assert on the markdown it actually produces,
+// rather than on the YAML that produces it: the property that matters is what
+// a person sees at the top of the page.
+describe('the first-run note', () => {
+  const notes = ((): string => {
+    const step = (wf.jobs.release.steps ?? []).find(
+      (s) => s.name === 'Build release notes'
+    )
+    if (!step?.run) throw new Error('the Build release notes step is gone')
+    const dir = mkdtempSync(join(tmpdir(), 'notes-'))
+    mkdirSync(join(dir, 'artifacts'))
+    writeFileSync(join(dir, 'gen.sh'), step.run)
+    execFileSync('bash', ['gen.sh'], {
+      cwd: dir,
+      env: { ...process.env, TAG: 'v9.9.9', VT_RESULTS: '', CLAMAV_STATUS: '', CLAMAV_VERSION: '' }
+    })
+    return readFileSync(join(dir, 'release-notes.md'), 'utf8')
+  })()
+
+  it('is the first thing on the page', () => {
+    // Not "appears somewhere": the whole defect was that it appeared, at the
+    // bottom, after the reader had already met the Trash button.
+    expect(notes.trimStart().startsWith('## First run')).toBe(true)
+  })
+
+  it('comes before the download links', () => {
+    const headings = [...notes.matchAll(/^## (.+)$/gm)].map((m) => m[1])
+    expect(headings.indexOf('First run')).toBeLessThan(headings.indexOf('Downloads'))
+    expect(headings.indexOf('First run')).toBe(0)
+  })
+
+  it('uses the word macOS actually shows, so the note is findable', () => {
+    // A reader searching the page for the word in their dialog has to land on
+    // it. "not notarized" is the cause, not the symptom, and nobody searches
+    // for it.
+    expect(notes).toMatch(/damaged/i)
+  })
+
+  it('does not send Sequoia users to a bypass Apple removed', () => {
+    // The old copy said right-click → Open. That has not worked since macOS 15,
+    // and following it leaves the reader back at the same dialog concluding the
+    // download really is corrupt.
+    const firstRun = notes.slice(0, notes.indexOf('## Downloads'))
+    expect(firstRun).not.toMatch(/right-click[^.]*→\s*\*\*Open\*\*/i)
+    // Paired with the positive, so this cannot pass by the section vanishing.
+    expect(firstRun).toMatch(/Open Anyway/)
+    expect(firstRun).toMatch(/xattr -dr com\.apple\.quarantine/)
+  })
+
+  it('spells xattr with its full path', () => {
+    // A Homebrew or pip `xattr` earlier on PATH may not support -r, and the
+    // failure looks like the workaround itself being wrong.
+    expect(notes).toMatch(/\/usr\/bin\/xattr -dr/)
+  })
+
+  it('still tells Windows users about SmartScreen', () => {
+    // Moving the macOS half up must not strand the Windows half behind.
+    expect(notes.slice(0, notes.indexOf('## Downloads'))).toMatch(/SmartScreen/)
   })
 })
