@@ -53,7 +53,16 @@ export function knownHostForget(id: string): void {
 // SFTP and a terminal can all connect at once on first use.
 const pending = new Map<string, Promise<boolean>>()
 
-export function verifyHostKey(host: string, port: number, key: Buffer): Promise<boolean> {
+export function verifyHostKey(
+  host: string,
+  port: number,
+  key: Buffer,
+  // Whether this caller may raise a dialog. A known-good key never prompts, and
+  // a CHANGED key still refuses loudly regardless — an unattended caller only
+  // loses the ability to establish trust for the first time, which is exactly
+  // the decision that needs a person present.
+  allowPrompt = true
+): Promise<boolean> {
   const id = `${host}:${port || 22}`
   const fp = fingerprint(key)
   const map = read()
@@ -77,6 +86,22 @@ export function verifyHostKey(host: string, port: number, key: Buffer): Promise<
       })
       .then(() => false)
   }
+
+  // An unattended caller never prompts. It refuses and lets its own layer
+  // report why.
+  //
+  // A trust-on-first-use dialog is only worth anything if it arrives at a
+  // moment the person can reason about — "I am connecting to this host right
+  // now, is that its fingerprint?" A background sweep raising one spontaneously,
+  // with no action to correlate it to, teaches click-through on the single
+  // dialog where click-through is how a machine-in-the-middle succeeds. Worse,
+  // nothing cancels the pending promise, so five never-connected servers meant
+  // five stacked modals nobody asked for.
+  //
+  // Deliberately decided in main and never taken from the renderer: a
+  // renderer-settable "do not prompt" would let a compromised renderer suppress
+  // host verification for real connections, which is the opposite of the point.
+  if (!allowPrompt) return Promise.resolve(false)
 
   const inFlight = pending.get(id)
   if (inFlight) return inFlight

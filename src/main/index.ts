@@ -559,7 +559,10 @@ const fleetSampler = new FleetSampler({
   // A config resolved at configure time would be stale the moment the vault
   // is unlocked or a credential is edited, and the sampler would go on using
   // it until something happened to reconfigure.
-  sample: (key, cfg) => metricsSample(key, resolveChainSecrets(cfg as SshConnectConfig)),
+  // allowPrompt: false — this is the unattended caller. A never-connected
+  // server is refused with an error the fleet UI can show, rather than raising
+  // a host-key trust dialog the user cannot connect to any action they took.
+  sample: (key, cfg) => metricsSample(key, resolveChainSecrets(cfg as SshConnectConfig), false),
   release: (key) => metricsDisconnect(key),
   emit: (event) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet:sample', event)

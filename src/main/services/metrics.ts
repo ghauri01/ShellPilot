@@ -10,10 +10,10 @@ interface Conn {
 // One metrics connection per server id, opened lazily and reused for polling.
 const conns = new Map<string, Conn>()
 
-async function ensure(key: string, cfg: SshConnectConfig): Promise<Client> {
+async function ensure(key: string, cfg: SshConnectConfig, allowPrompt = true): Promise<Client> {
   const existing = conns.get(key)
   if (existing) return existing.client
-  const conn = await acquire(cfg)
+  const conn = await acquire(cfg, undefined, allowPrompt)
   const client = conn.client
   client.on('close', () => conns.delete(key))
   conns.set(key, { conn, client })
@@ -274,9 +274,9 @@ const recent = new Map<string, { at: number; result: MetricsResult }>()
 // extra traffic on the connection the terminal is typing over.
 const MIN_AGE_MS = 1500
 
-async function sample(key: string, cfg: SshConnectConfig): Promise<MetricsResult> {
+async function sample(key: string, cfg: SshConnectConfig, allowPrompt = true): Promise<MetricsResult> {
   try {
-    const client = await ensure(key, cfg)
+    const client = await ensure(key, cfg, allowPrompt)
     const prev = cpuState.get(key) ?? null
     const out = await exec(client, prev ? CMD : CMD_FIRST)
     const { data, snap } = parse(out, prev)
@@ -289,12 +289,20 @@ async function sample(key: string, cfg: SshConnectConfig): Promise<MetricsResult
   }
 }
 
-export function metricsSample(key: string, cfg: SshConnectConfig): Promise<MetricsResult> {
+export function metricsSample(
+  key: string,
+  cfg: SshConnectConfig,
+  // False for the background fleet sweep. An unknown host is refused instead of
+  // raising a trust-on-first-use dialog with nobody at the keyboard — see
+  // verifyHostKey for why that dialog is only worth anything when the person
+  // can connect it to something they just did.
+  allowPrompt = true
+): Promise<MetricsResult> {
   const hit = recent.get(key)
   if (hit && Date.now() - hit.at < MIN_AGE_MS) return Promise.resolve(hit.result)
   const running = inflight.get(key)
   if (running) return running
-  const p = sample(key, cfg).finally(() => inflight.delete(key))
+  const p = sample(key, cfg, allowPrompt).finally(() => inflight.delete(key))
   inflight.set(key, p)
   return p
 }

@@ -118,7 +118,11 @@ function tcpSocket(host: string, port: number): Promise<net.Socket> {
   })
 }
 
-async function connectClient(hop: SshHop, sock?: NodeJS.ReadableStream): Promise<Client> {
+async function connectClient(
+  hop: SshHop,
+  sock?: NodeJS.ReadableStream,
+  allowPrompt = true
+): Promise<Client> {
   // Hops ride an SSH channel, which has no TCP options of its own; only the
   // first, real socket needs the flag.
   const transport = sock ?? (await tcpSocket(hop.host, hop.port || 22))
@@ -134,7 +138,7 @@ async function connectClient(hop: SshHop, sock?: NodeJS.ReadableStream): Promise
       tryKeyboard: true,
       // Trust-on-first-use: unknown hosts prompt, changed keys are refused.
       hostVerifier: ((key: Buffer, cb: (ok: boolean) => void) => {
-        void verifyHostKey(hop.host, hop.port || 22, key).then(cb)
+        void verifyHostKey(hop.host, hop.port || 22, key, allowPrompt).then(cb)
       }) as never,
       ...authFor(hop),
       // A pre-established socket: our own TCP connection, or the channel
@@ -354,7 +358,8 @@ function destroy(conn: PooledConnection): void {
 // connection, or is released when an existing one is reused instead.
 async function acquireOne(
   hop: SshHop & { serverId?: string },
-  parent: PooledConnection | null
+  parent: PooledConnection | null,
+  allowPrompt = true
 ): Promise<PooledConnection> {
   const key = hopKey(hop, parent?.key)
 
@@ -380,7 +385,7 @@ async function acquireOne(
   const promise = (async () => {
     // Reached through the bastion when there is one.
     const sock = parent ? await hopForward(parent.client, hop) : undefined
-    const client = await connectClient(hop, sock)
+    const client = await connectClient(hop, sock, allowPrompt)
     const conn: PooledConnection = {
       key,
       host: hop.host,
@@ -424,7 +429,11 @@ async function acquireOne(
 // once, not once per destination.
 export async function acquire(
   cfg: SshHop & { serverId?: string; hops?: SshHop[]; vpnProfileId?: string; serverName?: string },
-  onHop?: (index: number, count: number) => void
+  onHop?: (index: number, count: number) => void,
+  // False for unattended callers. An unknown host is then refused rather than
+  // raising a trust dialog nobody is present to reason about. Set in main only
+  // — never taken from the renderer. See verifyHostKey.
+  allowPrompt = true
 ): Promise<PooledConnection> {
   // Behind a VPN, the first hop is dialled through a loopback forward into the
   // tunnel. The forward is attached to the pooled connection rather than
@@ -438,9 +447,9 @@ export async function acquire(
   try {
     for (let i = 0; i < hops.length; i++) {
       onHop?.(i, hops.length)
-      parent = await acquireOne(hops[i], parent)
+      parent = await acquireOne(hops[i], parent, allowPrompt)
     }
-    const conn = await acquireOne(effective, parent)
+    const conn = await acquireOne(effective, parent, allowPrompt)
     if (dial) {
       // Attach to whichever connection actually owns the socket. On a pool hit
       // the forward is redundant — the existing connection already has its own
