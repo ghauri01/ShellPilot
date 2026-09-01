@@ -14,7 +14,10 @@ import type { HostMetrics, SshConnectConfig } from './ssh'
 export interface FleetTarget {
   serverId: string
   serverName: string
-  cfg: SshConnectConfig
+  // `serverId` rides along inside the config too, because that is how
+  // credentialResolver finds the vault entry for a host — the same shape
+  // `metrics:sample` already accepts.
+  cfg: SshConnectConfig & { serverId?: string }
 }
 
 export interface FleetSamplerConfig {

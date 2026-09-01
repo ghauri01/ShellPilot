@@ -46,6 +46,8 @@ import {
   sftpDisposeAll
 } from './services/sftp'
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
+import { FleetSampler } from './services/fleetSampler'
+import type { FleetSamplerConfig } from '../shared/fleet'
 import { dbTest, dbQuery, dbInfo, dbClose, dbDisposeAll } from './services/db'
 import { dbShell } from './services/dbshell'
 import type { DbConnectConfig } from '../shared/db'
@@ -534,6 +536,43 @@ ipcMain.handle('metrics:sample', (_e, key: string, cfg: SshConnectConfig & { ser
 )
 ipcMain.handle('metrics:disconnect', (_e, key: string) => metricsDisconnect(key))
 
+// ---- Fleet sampling ----
+//
+// Runs in main so the estate is sampled whether or not the monitor is on
+// screen. Previously every sample came from a mounted ServerMonitorCard, so
+// leaving that tab stopped sampling entirely and nothing could notice a
+// failure while the user was doing something else.
+//
+// The renderer supplies targets because it owns the server list and the
+// workspace scoping; main owns the schedule and the credentials.
+const fleetSampler = new FleetSampler({
+  // Secrets are resolved HERE, per sweep, not when targets are configured.
+  // A config resolved at configure time would be stale the moment the vault
+  // is unlocked or a credential is edited, and the sampler would go on using
+  // it until something happened to reconfigure.
+  sample: (key, cfg) => metricsSample(key, resolveChainSecrets(cfg as SshConnectConfig)),
+  emit: (event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet:sample', event)
+  },
+  // A vault that does not exist is not a locked vault: those installs keep
+  // their credentials in the OS keychain or inline, and sampling works fine.
+  // Only an existing-but-locked vault means every resolve would throw.
+  vaultUnlocked: () => {
+    const s = vaultStatus()
+    return !s.exists || s.unlocked
+  }
+})
+
+ipcMain.handle('fleet:configure', (_e, cfg: FleetSamplerConfig) => {
+  fleetSampler.configure(cfg)
+  return fleetSampler.status()
+})
+ipcMain.handle('fleet:status', () => fleetSampler.status())
+ipcMain.handle('fleet:sample-now', async () => {
+  await fleetSampler.sampleNow()
+  return fleetSampler.status()
+})
+
 // ---- Databases ----
 // withVpnTransportDb resolves the profile from the saved record, so a
 // connection cannot skip its VPN just because one call site predates the
@@ -942,6 +981,7 @@ app.on('before-quit', (e) => {
   sshDisposeAll()
   localDisposeAll()
   sftpDisposeAll()
+  fleetSampler.dispose()
   metricsDisposeAll()
   dbDisposeAll()
   tunnelDisposeAll()

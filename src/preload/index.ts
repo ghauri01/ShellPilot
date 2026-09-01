@@ -10,6 +10,7 @@ import type {
   MetricsResult,
   SshCloseInfo
 } from '../shared/ssh'
+import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type {
   LocalCloseInfo,
   LocalConnectConfig,
@@ -217,6 +218,20 @@ const api = {
     sample: (key: string, cfg: SshConnectConfig & { serverId?: string }): Promise<MetricsResult> =>
       ipcRenderer.invoke('metrics:sample', key, cfg),
     disconnect: (key: string): Promise<void> => ipcRenderer.invoke('metrics:disconnect', key)
+  },
+  // Background sampling of the whole estate, scheduled in main so it continues
+  // when the monitor is not on screen. `metrics` above is the foreground path:
+  // one server, fast cadence, driven by a mounted card.
+  fleet: {
+    configure: (cfg: FleetSamplerConfig): Promise<FleetSamplerStatus> =>
+      ipcRenderer.invoke('fleet:configure', cfg),
+    status: (): Promise<FleetSamplerStatus> => ipcRenderer.invoke('fleet:status'),
+    sampleNow: (): Promise<FleetSamplerStatus> => ipcRenderer.invoke('fleet:sample-now'),
+    onSample: (cb: (event: FleetSampleEvent) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, event: FleetSampleEvent): void => cb(event)
+      ipcRenderer.on('fleet:sample', h)
+      return () => ipcRenderer.removeListener('fleet:sample', h)
+    }
   },
   db: {
     test: (cfg: DbConnectConfig): Promise<DbTestResult> => ipcRenderer.invoke('db:test', cfg),

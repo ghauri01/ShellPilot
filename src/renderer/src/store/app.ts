@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
+import { FLEET_INTERVAL_DEFAULT_MS } from '../../../shared/fleet'
 import type {
   ActivityView,
   MonitorGroup,
@@ -97,6 +98,13 @@ export interface AppSettings {
   // Warn when a host's CPU or memory stays at or above the threshold.
   resourceAlertsEnabled: boolean
   resourceAlertThreshold: number
+  // Sample every server in the workspace on a schedule from the main process,
+  // so the estate is watched when the monitor is not on screen. Off by default:
+  // it maintains connections to the whole estate whether or not anyone is
+  // looking, which is a reasonable thing to want and not a reasonable thing to
+  // start doing to someone without asking.
+  fleetSamplingEnabled: boolean
+  fleetSamplingIntervalMs: number
   // Tightens row heights and paddings across the app.
   compactDensity: boolean
   // Command used to open remote files. Empty means the OS default handler.
@@ -132,6 +140,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showMonitorStrip: true,
   resourceAlertsEnabled: true,
   resourceAlertThreshold: 80,
+  fleetSamplingEnabled: false,
+  fleetSamplingIntervalMs: FLEET_INTERVAL_DEFAULT_MS,
   compactDensity: false,
   externalEditorCommand: 'code',
   openFilesExternally: false,

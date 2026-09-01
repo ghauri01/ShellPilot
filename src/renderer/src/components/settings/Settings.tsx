@@ -395,8 +395,10 @@ export function Settings(): React.JSX.Element {
                 <div className="s-info">
                   <div className="s-title">Alert threshold</div>
                   <div className="s-desc">
-                    Alerts use metrics already being sampled, so they add no extra load. A host is
-                    only sampled while its monitor is on screen.
+                    Alerts use metrics already being sampled, so they add no extra load.{' '}
+                    {settings.fleetSamplingEnabled
+                      ? 'Background checks are on, so alerts fire wherever you are in the app.'
+                      : 'Without background checks below, a host is only sampled while its monitor is on screen — so an alert can only fire while you are already looking at it.'}
                   </div>
                 </div>
                 <div className="segment">
@@ -408,6 +410,38 @@ export function Settings(): React.JSX.Element {
                       onClick={() => setSettings({ resourceAlertThreshold: t })}
                     >
                       {t}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <SettingSwitch
+                label="Check servers in the background"
+                desc="Sample every server in this workspace on a schedule, even when the monitor is not open, so failures and resource alerts are noticed while you are elsewhere. Keeps connections to the estate open and needs the vault unlocked; while it is locked, checking pauses rather than failing."
+                checked={settings.fleetSamplingEnabled}
+                onChange={(v) => setSettings({ fleetSamplingEnabled: v })}
+              />
+              <div className="setting-row">
+                <div className="s-info">
+                  <div className="s-title">How often</div>
+                  <div className="s-desc">
+                    Measured from the end of one pass to the start of the next, so a slow estate
+                    slows the cadence instead of overlapping checks.
+                  </div>
+                </div>
+                <div className="segment">
+                  {[
+                    { ms: 60_000, label: '1 min' },
+                    { ms: 120_000, label: '2 min' },
+                    { ms: 300_000, label: '5 min' },
+                    { ms: 900_000, label: '15 min' }
+                  ].map((o) => (
+                    <button
+                      key={o.ms}
+                      className={clsx('seg-btn', settings.fleetSamplingIntervalMs === o.ms && 'active')}
+                      disabled={!settings.fleetSamplingEnabled}
+                      onClick={() => setSettings({ fleetSamplingIntervalMs: o.ms })}
+                    >
+                      {o.label}
                     </button>
                   ))}
                 </div>
