@@ -30,6 +30,10 @@ was built and that reasoning outlives the ticket.
 | **16. Background metrics sampling** | **Built.** `fleetSampler.ts` in main, scheduled, survives the monitor being closed. Off by default. |
 | **3. Alert channels** | **Webhook built** — generic HTTPS JSON POST, which is what Slack, Discord and Teams all accept. Named integrations for WhatsApp and Twilio are not built and may never need to be. |
 | — | **Failed-unit alerts**, which were not on this list and are the case that prompted it: four failed units found by opening the app and looking. A failed unit does not move a CPU graph, so no threshold would have caught it. |
+| **13. Fleet-wide search** | **Built.** Searches units, ports and hosts across the workspace from data the sampler already had and discarded. Reports what it could NOT search — never sampled, no systemd, no port probe, gone unreachable — because results without that gap are a lie by omission. |
+| **11. Run one command across many servers** | **Built.** Approval model settled and tested first: confirmation scales with blast radius, nothing is safe by omission, cancel means queued hosts never start. Three at a time. Not exposed to the MCP bridge. |
+| **12. Live log tailing across hosts** | **Built.** journalctl or tail -F, several hosts interleaved and colour-keyed. The remote command is built from a validated source and never from user text. |
+| **6. Cron, read-only** | **Built.** Crontabs, /etc/cron.d and systemd timers across the estate. Read-only until the parser is proven — the user-field trap is a silent misread, not an error. |
 
 Two things those unlocked, now unblocked rather than done: **fleet-wide search** (item 13) can now
 index a complete estate rather than whatever was last looked at, and any future scheduled work has
@@ -557,18 +561,27 @@ list at all.**
 2. ~~**Alert channels, generic webhook first.**~~ **Built**, along with failed-unit alerts, which
    were not on this list and are the case that actually prompted it. Named Slack/WhatsApp/Twilio
    integrations remain unbuilt and may stay that way: they all accept a webhook.
-3. **Run one command across many servers.** The defining problem of fifteen servers rather than
-   three, and the largest gap on this page. Settle the approval model before writing the executor.
-4. **Fleet-wide search.** The best value-to-effort ratio here: the monitor already collects every
-   listening port and unit on every host and discards it after rendering. Days, not weeks. Ships
-   before 1 as an honest "last seen" view; gets complete for free after it.
+3. ~~**Run one command across many servers.**~~ **Built.** The approval model was settled and
+   tested before the executor, as this said to do. Both inputs count: a destructive command on one
+   host needs typed confirmation because the command is the danger; an ordinary command on twelve
+   hosts needs it because the count is.
+4. ~~**Fleet-wide search.**~~ **Built**, and it did ship before 3 as this predicted. The value was
+   where this said it would be — the data was already in memory — but the work was not in matching,
+   it was in reporting honestly what could not be searched.
 
 **Then — answer the question the monitor raises but cannot.**
 
-5. **Live log tailing across hosts.** The monitor now says a unit failed. This is "why", which is
-   always the next question.
-6. **Cron, read-only.** "What is scheduled across the estate" is currently unanswerable without
-   visiting every box. Read-only proves the parsing before anything writes.
+5. ~~**Live log tailing across hosts.**~~ **Built.**
+6. ~~**Cron, read-only.**~~ **Built.** Read-only did prove the parsing: two silent misreads were
+   found by writing the tests, and both would have been invisible in a UI — a six-word sentence
+   parsed as a job, and a schedule described by the fields it understood while skipping the one that
+   decided when the job actually ran.
+
+**Next, and now the front of the list.** Cron *editing* is the natural follow-on and is deliberately
+not automatic: the read-only parser has been proven against fixtures, not against a real estate, and
+the whole argument for shipping it read-first is that it should be run against real crontabs before
+anything writes. After that, the plugin system (item 15) is still best done before Docker/k8s/n8n so
+those arrive as modules rather than being retrofitted.
 
 **Then — reduce weight, and pick up the rest.**
 
