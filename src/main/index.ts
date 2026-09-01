@@ -78,7 +78,19 @@ import { withVpnTransport, withVpnTransportDb } from './services/vpn/transport'
 import type { VpnKeygenResult, VpnKind, VpnMintResult, VpnPublicKeyResult, VpnSpec } from '../shared/vpn'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
 import { backupExport, backupImport, backupInspect, deleteAllData, relaunchApp } from './services/backup'
-import { checkForUpdates, getUpdaterStatus, onUpdaterStatus, installUpdate, openReleasePage } from './services/updater'
+import {
+  checkForUpdates,
+  getUpdaterStatus,
+  onUpdaterStatus,
+  installUpdate,
+  openReleasePage,
+  getCapabilities as getUpdaterCapabilities,
+  getPrefs as getUpdaterPrefs,
+  setPrefs as setUpdaterPrefs,
+  downloadUpdate,
+  startAutoCheck
+} from './services/updater'
+import type { UpdatePrefs } from '../shared/updater'
 import { parseSshConfig } from '../shared/sshconfig'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
@@ -537,6 +549,10 @@ ipcMain.handle('updater:check', () => checkForUpdates())
 ipcMain.handle('updater:status', () => getUpdaterStatus())
 ipcMain.handle('updater:install', () => installUpdate())
 ipcMain.handle('updater:openReleasePage', () => openReleasePage())
+ipcMain.handle('updater:download', () => downloadUpdate())
+ipcMain.handle('updater:getPrefs', () => getUpdaterPrefs())
+ipcMain.handle('updater:setPrefs', (_e, patch: Partial<UpdatePrefs>) => setUpdaterPrefs(patch))
+ipcMain.handle('updater:capabilities', () => getUpdaterCapabilities())
 onUpdaterStatus((s) => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status-event', s)
 })
@@ -951,7 +967,10 @@ app.whenReady().then(() => {
     })
   // Quiet by design: this only ever pushes a status event the renderer can
   // choose to surface (or not) — it never interrupts anything on its own.
-  void checkForUpdates()
+  // The launch check and the recurring one are the same decision, made from
+  // the stored prefs, so both live behind startAutoCheck rather than a bare
+  // check here plus a timer somewhere else.
+  startAutoCheck()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

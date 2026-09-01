@@ -44,7 +44,7 @@ import type {
 import type { KnownHost } from '../main/services/knownhosts'
 import type { SshConfigHost } from '../shared/sshconfig'
 import type { BackupResult } from '../shared/backup'
-import type { UpdaterStatus } from '../shared/updater'
+import type { UpdatePrefs, UpdaterCapabilities, UpdaterStatus } from '../shared/updater'
 import type {
   AccessGroup,
   PolicyAssignment,
@@ -200,6 +200,11 @@ const api = {
     status: (): Promise<UpdaterStatus> => ipcRenderer.invoke('updater:status'),
     install: (): Promise<void> => ipcRenderer.invoke('updater:install'),
     openReleasePage: (): Promise<void> => ipcRenderer.invoke('updater:openReleasePage'),
+    download: (): Promise<void> => ipcRenderer.invoke('updater:download'),
+    getPrefs: (): Promise<UpdatePrefs> => ipcRenderer.invoke('updater:getPrefs'),
+    setPrefs: (patch: Partial<UpdatePrefs>): Promise<UpdatePrefs> =>
+      ipcRenderer.invoke('updater:setPrefs', patch),
+    capabilities: (): Promise<UpdaterCapabilities> => ipcRenderer.invoke('updater:capabilities'),
     onStatus: (cb: (s: UpdaterStatus) => void): (() => void) => {
       const h = (_e: IpcRendererEvent, s: UpdaterStatus): void => cb(s)
       ipcRenderer.on('updater:status-event', h)

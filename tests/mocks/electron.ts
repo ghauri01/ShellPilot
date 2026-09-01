@@ -14,7 +14,15 @@ export const app = {
   // clientConfig.ts derives the bridge script path from this; outside a
   // packaged build it is the project root, exactly as in `electron-vite dev`.
   getAppPath: (): string => process.cwd(),
+  // updatePrefs.ts and the updater report the running version; outside a
+  // packaged build Electron reports package.json's, so do the same here.
+  getVersion: (): string => '0.6.2',
   isPackaged: false
+}
+
+// The updater opens the releases page here when a platform cannot self-install.
+export const shell = {
+  openExternal: async (_url: string): Promise<void> => undefined
 }
 
 // A no-op "encryption" so secrets.ts can be exercised without a real OS

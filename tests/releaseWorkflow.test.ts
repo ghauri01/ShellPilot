@@ -83,6 +83,93 @@ describe('nothing becomes public before it has been verified', () => {
   })
 })
 
+describe('a prerelease tag must not be published on the stable channel', () => {
+  // electron-updater's stable clients resolve updates through
+  // /repos/:o/:r/releases/latest, which GitHub defines as the newest release
+  // that is NOT marked prerelease. So publishing a v0.7.0-beta.1 tag with
+  // --latest is not a mislabelled release page: it is an immediate offer of a
+  // beta build to every stable user on their next update check, and it cannot
+  // be withdrawn from the ones who have already taken it. The final line of
+  // the publish step used to do exactly that for every tag, and because this
+  // workflow only ever runs on a tag, the first beta push would have been the
+  // discovery.
+  const publish = steps(wf.jobs.release).find((s) => /--draft=false/.test(s.run ?? ''))?.run ?? ''
+  const editLines = publish
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('gh release edit') && l.includes('--draft=false'))
+
+  it('decides the channel from the tag', () => {
+    // v0.7.0-beta.1 carries a semver prerelease component and v0.7.0 does not.
+    // The tag-matches-package.json step guarantees the tag is "v" plus the
+    // package.json version, so there is nothing else in the string a dash
+    // could mean.
+    expect(publish).toMatch(/\{TAG#v\}/)
+    expect(publish).toMatch(/case\s+"?\$\{?VERSION/)
+  })
+
+  it('does not publish every tag the same way', () => {
+    // A single unconditional edit is the bug itself, whatever flags it carries.
+    expect(editLines.length).toBeGreaterThan(1)
+  })
+
+  it('marks a prerelease tag as a prerelease, and not as latest', () => {
+    const pre = editLines.find((l) => l.includes('--prerelease'))
+    expect(pre, 'no branch publishes a tag with --prerelease').toBeTruthy()
+    // Omitting --latest only leaves the flag at whatever is already on the
+    // release, which is not the same thing as saying it is not the latest.
+    expect(pre).toContain('--latest=false')
+  })
+
+  it('still marks a stable tag as latest', () => {
+    const stable = editLines.find((l) => /--latest(?!=)/.test(l))
+    expect(stable, 'no branch publishes a stable tag with --latest').toBeTruthy()
+    expect(stable).not.toContain('--prerelease')
+  })
+})
+
+describe('the update manifests ship as deliberately as the installers', () => {
+  const upload = steps(wf.jobs.build).find(
+    (s) =>
+      (s.uses ?? '').includes('upload-artifact') &&
+      String(s.with?.name ?? '').startsWith('shellpilot-')
+  )
+  const path = String(upload?.with?.path ?? '')
+
+  it('uploads the channel yml for both channels', () => {
+    // electron-updater reads exactly one file to decide whether an update
+    // exists at all: latest*.yml on the stable channel, beta*.yml on a
+    // prerelease tag, named by electron-builder from the version's semver
+    // prerelease component. Until they were listed here they reached the
+    // release only as a side effect of electron-builder's own default publish
+    // policy, so anything that turned that off — a config change, a token
+    // scope, a version bump of the builder — would have left every installer
+    // in place, every step green, and over-the-air updates silently dead.
+    expect(path).toContain('release/latest*.yml')
+    expect(path).toContain('release/beta*.yml')
+  })
+
+  it('carries them through to the release', () => {
+    // Listing them above is only worth anything if the release job uploads
+    // everything it downloaded.
+    const ghRelease = steps(wf.jobs.release).find((s) => (s.uses ?? '').includes('action-gh-release'))
+    expect(String(ghRelease?.with?.files ?? '')).toContain('artifacts/**')
+  })
+
+  it('keeps them out of the checksum table', () => {
+    // The table lists what a human downloads and verifies by hand. The find
+    // that builds it selects installer extensions rather than excluding
+    // metadata ones, so adding the yml above adds no rows to it — asserted
+    // here because "it happens to filter the right way" is the kind of thing
+    // that stops being true without anyone noticing.
+    const notes = steps(wf.jobs.release).find((s) => s.name === 'Build release notes')?.run ?? ''
+    const checksumBlock = notes.slice(notes.indexOf('CHECKSUMS='), notes.indexOf('sha256sum'))
+    expect(checksumBlock).toBeTruthy()
+    expect(checksumBlock).not.toMatch(/\.yml/)
+    expect(checksumBlock).not.toMatch(/blockmap/)
+  })
+})
+
 describe('a build that produced nothing must not publish', () => {
   it('treats missing artifacts as an error, not a warning', () => {
     const upload = steps(wf.jobs.build).find((s) => (s.uses ?? '').includes('upload-artifact'))
@@ -112,10 +199,18 @@ describe('inline shell in the release job does not keep growing', () => {
   // release asset nobody is told about is not an offer. That is a section and
   // a fallback line for when the archive is missing, and it is the kind of
   // growth the ratchet exists to make deliberate rather than to prevent.
+  //
+  // "Publish release notes" was raised once too, from 50, when the beta
+  // channel arrived. The final line of that step used to publish every tag the
+  // same way, so it now branches on whether the tag carries a semver
+  // prerelease component — a few lines of shell, and rather more explaining
+  // why, because the cost of the branch being wrong is every stable user being
+  // offered a beta. Reviewing that reasoning at the point of change is worth
+  // more than the lines it costs.
   const CEILING: Record<string, number> = {
     'Scan installers with ClamAV': 25,
     'Build release notes': 120,
-    'Publish release notes': 50
+    'Publish release notes': 75
   }
 
   it.each(Object.entries(CEILING))('%s stays within its ceiling', (name, max) => {
