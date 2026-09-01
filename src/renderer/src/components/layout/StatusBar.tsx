@@ -2,6 +2,7 @@ import { GitBranch, Wifi, Bell, Cpu, AlertTriangle } from 'lucide-react'
 import { useApp } from '../../store/app'
 import { useAlerts } from '../../store/alerts'
 import { colorVar } from './WorkspaceSwitcher'
+import { UpdateIndicator } from './UpdateIndicator'
 
 export function StatusBar(): React.JSX.Element {
   const ws = useApp((s) => s.activeWorkspace())
@@ -48,6 +49,7 @@ export function StatusBar(): React.JSX.Element {
           <span>Backup out of date</span>
         </button>
       )}
+      <UpdateIndicator />
       <div className="item metric">
         <Cpu size={12} />
         <span>

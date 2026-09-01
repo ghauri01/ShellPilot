@@ -14,11 +14,21 @@ export const app = {
   // clientConfig.ts derives the bridge script path from this; outside a
   // packaged build it is the project root, exactly as in `electron-vite dev`.
   getAppPath: (): string => process.cwd(),
-  // shellDiscovery.ts stamps this into TERM_PROGRAM_VERSION for every local
-  // shell. A fixed string rather than the real package version so a release
-  // bump does not have to touch a test assertion.
-  getVersion: (): string => '0.0.0-test',
+  // Two consumers, neither of which asserts on the value: the updater reports
+  // the running version, and shellDiscovery.ts stamps it into
+  // TERM_PROGRAM_VERSION for every local shell. Any well-formed semver does.
+  //
+  // It is deliberately a literal and not package.json's version, so a release
+  // bump never has to touch a test. That does mean it drifts from the real
+  // version — it already has — which is harmless precisely because nothing
+  // compares the two.
+  getVersion: (): string => '0.6.2',
   isPackaged: false
+}
+
+// The updater opens the releases page here when a platform cannot self-install.
+export const shell = {
+  openExternal: async (_url: string): Promise<void> => undefined
 }
 
 // A no-op "encryption" so secrets.ts can be exercised without a real OS

@@ -199,8 +199,10 @@ describe('sanitised environment', () => {
     expect(env.TERM).toBe('xterm-256color')
     expect(env.COLORTERM).toBe('truecolor')
     expect(env.TERM_PROGRAM).toBe('ShellPilot')
-    // Comes from app.getVersion(); the electron mock returns 0.0.0-test.
-    expect(env.TERM_PROGRAM_VERSION).toBe('0.0.0-test')
+    // Comes from app.getVersion(). Asserting the shape rather than the mock's
+    // literal: what matters is that a version reaches the shell, not which one,
+    // and pinning the value would make a release bump break this test.
+    expect(env.TERM_PROGRAM_VERSION).toMatch(/^\d+\.\d+\.\d+/)
   })
 
   it('defaults the locale only when the user has none', () => {

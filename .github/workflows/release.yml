@@ -257,12 +257,23 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: shellpilot-${{ matrix.os }}
+          # The latest*.yml / beta*.yml entries are the channel manifests
+          # electron-updater reads to decide whether an update exists at all —
+          # one per platform, named by electron-builder from the version's
+          # semver prerelease component. Until they were listed here they
+          # reached the release only as a side effect of electron-builder's own
+          # default publish policy, which is a great deal of trust to place in
+          # a default for the one file the entire update mechanism depends on.
+          # Listing them puts them through the same upload, download and
+          # verified release step every installer already goes through.
           path: |
             release/*.exe
             release/*.dmg
             release/*.AppImage
             release/*.deb
             release/*.blockmap
+            release/latest*.yml
+            release/beta*.yml
             release/_defender.txt
           # A silent no-op here would publish a release whose notes link to
           # files that were never built.
@@ -347,8 +358,8 @@ jobs:
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
           # download-artifact nests one directory per build job, so find rather
           # than a flat glob. The four installer types plus the OpenVPN source
-          # tarball — .blockmap and latest*.yml are updater metadata nobody
-          # downloads by hand.
+          # tarball — .blockmap and the channel yml files are updater metadata
+          # nobody downloads by hand.
           CHECKSUMS=$(cd artifacts && find . -type f \
               \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
                  -o -name 'openvpn-*-source.tar.gz' \) \
@@ -527,4 +538,30 @@ jobs:
           echo "Verified $(wc -l < expected.txt) checksums and links on the published page."
 
           # Confirmed on the page. Only now does anyone see it.
-          gh release edit "$TAG" --draft=false --latest
+          #
+          # Which update channel this release belongs to is decided here, and
+          # getting it wrong is not cosmetic. Stable clients resolve updates
+          # through /repos/:o/:r/releases/latest, which GitHub defines as the
+          # newest release NOT marked prerelease — so a beta tag published as
+          # latest is offered to every stable user on their next update check,
+          # and there is no taking it back once they have downloaded it.
+          #
+          # The "Check tag matches package.json" step guarantees $TAG is "v"
+          # plus the package.json version, so what follows the "v" is a semver
+          # version and the only dash it can contain is the prerelease
+          # separator: v0.7.0-beta.1 has one, v0.7.0 does not. That is the same
+          # component electron-builder reads to name the channel file, so the
+          # yml on the release and the flag on the release cannot disagree.
+          VERSION="${TAG#v}"
+          case "$VERSION" in
+            *-*)
+              # --latest=false is stated rather than merely omitted. Omitting
+              # it leaves the flag at whatever GitHub or an earlier edit of
+              # this release left there, and a prerelease still pinned as
+              # latest is precisely the failure this branch exists to prevent.
+              gh release edit "$TAG" --draft=false --prerelease --latest=false
+              ;;
+            *)
+              gh release edit "$TAG" --draft=false --latest
+              ;;
+          esac
