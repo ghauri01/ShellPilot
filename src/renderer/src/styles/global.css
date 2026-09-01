@@ -2372,3 +2372,74 @@ button {
   background: var(--accent);
   width: 16px;
 }
+
+/* ============================ Update indicator ===========================
+   The running version, on screen at all times, with a chip beside it when an
+   update is waiting. Deliberately quieter than .resource-alert and
+   .backup-warn: an available update is news, a host at 98% CPU is a problem,
+   and the two must not read as equally urgent. Hence a dot and normal weight
+   rather than an icon and 600. */
+.statusbar .update-indicator {
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  transition: background 0.12s, color 0.12s;
+}
+.statusbar .update-indicator:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+/* Only the states that need an answer from the user lift out of the muted
+   status-bar grey. */
+.statusbar .update-indicator.pending {
+  color: var(--text);
+}
+.statusbar .update-indicator.manual {
+  color: var(--warn);
+}
+.update-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent);
+}
+/* A download in flight is the one pending state with nothing to decide yet, so
+   its dot is present but faded. */
+.update-indicator.busy .update-dot {
+  opacity: 0.55;
+}
+.update-indicator.ready .update-dot {
+  background: var(--ok);
+}
+.update-indicator.manual .update-dot {
+  background: var(--warn);
+}
+/* Marks a prerelease build wherever its version is printed. Small, but never
+   absent: running a beta unknowingly is how a known bug gets reported twice. */
+.build-tag {
+  padding: 0 5px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.s-title .build-tag {
+  margin-left: var(--sp-2);
+  vertical-align: 1px;
+}
+/* A toggle this platform cannot honour: dimmed and inert, but still readable —
+   the description under it is where the reason lives. */
+.switch.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+:root[data-compact] .statusbar .update-indicator {
+  padding: 0 var(--sp-1);
+  gap: var(--sp-1);
+}

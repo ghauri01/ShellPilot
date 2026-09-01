@@ -181,6 +181,21 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
           />
         )}
 
+        {/* Said here because the create screen is where people look for it and
+            do not find it: a fingerprint cannot open a vault that does not
+            exist yet — enableBiometricUnlock stores the key already in memory,
+            and until a master password derives one there is nothing to store.
+            Without this line the absence reads as the feature being missing.
+            Gated on bioAvailable so it is never a promise this machine cannot
+            keep, which is the whole point of biometricSupport() reporting a
+            reason instead of a boolean. */}
+        {creating && bioAvailable && (
+          <div className="s-desc" style={{ marginTop: 6 }}>
+            You can turn on {BIO_LABEL[bioKind] ?? 'biometric'} unlock as soon as the vault is set
+            up, so this is the last time you type this password today.
+          </div>
+        )}
+
         {mismatch && <div className="vault-error">Passwords do not match.</div>}
         {error && <div className="vault-error">{error}</div>}
         {/* There is no reset link to offer, so say that plainly instead of
