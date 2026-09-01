@@ -1,12 +1,16 @@
 # ShellPilot roadmap
 
-Fifteen things we intend to build, what each one actually rests on in the code today, and what is
+Sixteen things we intend to build, what each one actually rests on in the code today, and what is
 genuinely hard about it. Written after 0.8.0.
 
-Items 1–10 were the original list. **Items 11–15 were not, and four of the five outrank most of what
+Items 1–10 were the original list. **Items 11–16 were not, and five of the six outrank most of what
 was** — they came out of asking what changes when one person runs fifteen servers instead of three,
-which is the actual user. The ordering at the end is the useful part of this document; the write-ups
-exist so that ordering can be argued with.
+which is the actual user, and then reading the code to check the answers.
+
+Item 16 is the one to read first. It is not a feature; it is the reason two of the highest-ranked
+features cannot currently be built at all, which the first version of this document did not notice.
+The ordering at the end is the useful part of this document; the write-ups exist so that ordering
+can be argued with.
 
 This is a statement of direction, not a schedule. Sizes are rough and relative — "weeks" means a
 focused person, not a calendar quarter. Where something is a real unknown it says so rather than
@@ -88,6 +92,48 @@ is easy to get wrong.
 
 **Size.** Weeks for one channel, then days each. Start with a generic webhook: it is the one that
 cannot be wrong about anyone's API, and Slack is a webhook.
+
+---
+
+## Blocked, and the roadmap did not say so
+
+### 16. Background metrics sampling — the prerequisite
+
+Sample the estate on a schedule from the main process, independently of what the renderer is
+rendering.
+
+**This is not a feature. It is why two features above cannot currently be built**, which the first
+version of this document ranked without noticing.
+
+**The problem.** `App.tsx` renders the Fleet Monitor as `{activity === 'monitor' && <FleetMonitor />}`.
+Leave that tab and every `ServerMonitorCard` unmounts, `useServerMetrics` stops, and sampling ends.
+The `useFleet` store says so in its own comment: *"Every value here came from a sample some other
+component already paid for."* Fleet data exists only while someone is looking at it.
+
+So **alerts are not unbuilt, they are impossible**: you cannot notify a person about a failure you
+only detect while they are staring at the screen that would have shown it. `checkResourceAlerts`
+already exists in `store/alerts.ts` and is called from that same renderer loop — the alerting logic
+is written and just as trapped as the sampling. And **fleet-wide search** would index whatever
+happened to be sampled recently rather than the estate.
+
+**What exists.** More than half of it, in the right place. `metricsSample()` lives in main, is
+already called from the MCP path under its own `mcp:${id}` key, dedupes in-flight calls, caches
+briefly, and returns a full `HostMetrics`. The connection pool is already shared with SSH sessions.
+The renderer's chained-not-interval polling — wait for one sample to land before scheduling the
+next, so a slow link cannot queue polls faster than they finish — is the right design and should
+move rather than be rewritten.
+
+**What is actually new.** A scheduler in main, a per-server opt-in, and pushing results to the
+renderer instead of the renderer pulling them.
+
+**The decision this forces, and it should be made deliberately.** Sampling fifteen servers on a
+timer means the app maintains connections to the whole estate whether or not anyone is looking.
+That changes battery use, bastion load and audit noise, and it needs the vault unlocked to resolve
+credentials at all — so a locked vault has to degrade to "not sampling" rather than to an error
+loop. Background cadence should be far slower than the 2s a focused view uses; the interesting
+number is minutes, not seconds.
+
+**Size.** 1–2 weeks. Unblocks items 3 and 13, and gives items 6 and 12 a scheduler to live in.
 
 ---
 
@@ -424,19 +470,24 @@ list at all.**
 
 **First — stop making the operator go and look.**
 
-1. **Alert channels, generic webhook first.** Today you find out four units failed by opening the
-   app. Everything else here is worth less until the app can reach you when it is closed. Webhook
-   first because it cannot be wrong about anyone's API, and Slack is a webhook.
-2. **Run one command across many servers.** The defining problem of fifteen servers rather than
+1. **Background metrics sampling (item 16).** Not a feature; the prerequisite. Alerts cannot be
+   built at all until the app samples when nobody is watching, and search cannot be complete. This
+   moved to the front only after reading the code — the first version of this list ranked alerts
+   first without noticing they were blocked.
+2. **Alert channels, generic webhook first.** Immediately after, and small once 1 exists: the
+   threshold logic is already written in `store/alerts.ts`. Webhook first because it cannot be wrong
+   about anyone's API, and Slack is a webhook.
+3. **Run one command across many servers.** The defining problem of fifteen servers rather than
    three, and the largest gap on this page. Settle the approval model before writing the executor.
-3. **Fleet-wide search.** The best value-to-effort ratio here: the monitor already collects every
-   listening port and unit on every host and discards it after rendering. Days, not weeks.
+4. **Fleet-wide search.** The best value-to-effort ratio here: the monitor already collects every
+   listening port and unit on every host and discards it after rendering. Days, not weeks. Ships
+   before 1 as an honest "last seen" view; gets complete for free after it.
 
 **Then — answer the question the monitor raises but cannot.**
 
-4. **Live log tailing across hosts.** The monitor now says a unit failed. This is "why", which is
+5. **Live log tailing across hosts.** The monitor now says a unit failed. This is "why", which is
    always the next question.
-5. **Cron, read-only.** "What is scheduled across the estate" is currently unanswerable without
+6. **Cron, read-only.** "What is scheduled across the estate" is currently unanswerable without
    visiting every box. Read-only proves the parsing before anything writes.
 
 **Then — reduce weight, and pick up the rest.**
