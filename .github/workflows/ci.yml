@@ -95,3 +95,36 @@ jobs:
       # transferable to Electron; a NAN/V8 module could not be checked this way
       # at all.
       - run: npx vitest run tests/localPtySmoke.test.ts
+
+      # Q3, and the only place it can honestly be answered.
+      #
+      # The shipped Windows build excludes node-pty's redistributable ConPTY --
+      # conpty.dll and OpenConsole.exe -- on the assumption that the system
+      # ConPTY in conhost.exe is used instead (localPty.ts sets
+      # useConptyDll: false). Nothing proved that. The smoke test above runs
+      # against node_modules, where the directory is still present, so it
+      # exercises the opposite of the condition that ships.
+      #
+      # So: delete the directory and spawn again. This is the packed app's
+      # situation reproduced in a place where a failure is cheap.
+      #
+      # It fails hard when the directory is absent rather than shrugging. A step
+      # that silently passes because it found nothing to remove is how the
+      # conpty exclusion pattern shipped broken in the first place -- the test
+      # that was meant to catch it asserted a pattern string and never ran the
+      # glob.
+      - name: Verify ConPTY works without the bundled redistributable (Q3)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $dirs = @(Get-ChildItem -Path node_modules/@lydell -Recurse -Directory -Filter conpty -ErrorAction SilentlyContinue)
+          if ($dirs.Count -eq 0) {
+            Write-Host "::error::No conpty/ directory found under node_modules/@lydell. Either the package layout changed or an earlier step removed it -- either way this step is no longer testing what it claims."
+            exit 1
+          }
+          foreach ($d in $dirs) {
+            Write-Host "Removing $($d.FullName)"
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force
+          }
+          Write-Host "Spawning through ConPTY with no redistributable present..."
+          npx vitest run tests/localPtySmoke.test.ts
