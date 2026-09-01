@@ -82,6 +82,28 @@ function defaultFilePolicies(): AccessGroup['filePolicies'] {
       read: 'deny',
       write: 'deny'
     },
+    // POSIX shell and REPL history, the counterpart to the PSReadLine rule
+    // above. Same reasoning: a token pasted onto a command line is in the
+    // history file in plaintext, and `.psql_history` / `.mysql_history` hold
+    // connection strings with passwords in them — which matters here more than
+    // most places, because ShellPilot is also a database client.
+    //
+    // `.*_history` is one rule per home root instead of a dozen literals: the
+    // leading dot is matched literally and `*` stays inside the filename, so it
+    // covers .bash_history, .zsh_history, .sh_history, .python_history,
+    // .node_repl_history, .psql_history, .mysql_history, .rediscli_history and
+    // .sqlite_history without listing each one and without reaching outside the
+    // home directory.
+    ...['/root', '/home/*', '/Users/*', '?:/Users/*'].flatMap((home) => [
+      { id: uid('fp'), pattern: `${home}/.*_history`, read: 'deny' as const, write: 'deny' as const },
+      // fish keeps its history somewhere else entirely.
+      {
+        id: uid('fp'),
+        pattern: `${home}/.local/share/fish/fish_history`,
+        read: 'deny' as const,
+        write: 'deny' as const
+      }
+    ]),
     { id: uid('fp'), pattern: '/etc/nginx/**', write: 'ask' },
     { id: uid('fp'), pattern: '/var/www/**', write: 'ask' }
   ]
@@ -208,7 +230,18 @@ const FILE_POLICY_GENERATIONS: { generation: number; patterns: AccessGroup['file
         pattern: '?:/Users/*/AppData/Roaming/Microsoft/Windows/PowerShell/PSReadLine/**',
         read: 'deny',
         write: 'deny'
-      }
+      },
+      // POSIX shell and REPL history — see defaultFilePolicies for why one
+      // `.*_history` pattern per home root rather than a list of literals.
+      ...['/root', '/home/*', '/Users/*', '?:/Users/*'].flatMap((home) => [
+        { id: '', pattern: `${home}/.*_history`, read: 'deny' as const, write: 'deny' as const },
+        {
+          id: '',
+          pattern: `${home}/.local/share/fish/fish_history`,
+          read: 'deny' as const,
+          write: 'deny' as const
+        }
+      ])
     ]
   }
 ]

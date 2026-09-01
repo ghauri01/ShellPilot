@@ -173,6 +173,52 @@ describe('AppData is scoped to the credential stores', () => {
   })
 })
 
+describe('shell and REPL history', () => {
+  // A token pasted onto a command line is in the history file in plaintext,
+  // and the database CLIs store connection strings with passwords in theirs —
+  // which counts double here, because ShellPilot is also a database client.
+  it.each([
+    '/root/.bash_history',
+    '/home/ubuntu/.bash_history',
+    '/home/ubuntu/.zsh_history',
+    '/home/ubuntu/.sh_history',
+    '/Users/me/.zsh_history',
+    '/Users/me/.python_history',
+    '/Users/me/.node_repl_history',
+    '/home/ubuntu/.psql_history',
+    '/home/ubuntu/.mysql_history',
+    '/home/ubuntu/.rediscli_history',
+    '/home/ubuntu/.sqlite_history',
+    'C:\\Users\\me\\.bash_history',
+    '/home/ubuntu/.local/share/fish/fish_history',
+    '/Users/me/.local/share/fish/fish_history'
+  ])('denies %s', (path) => {
+    expect(evaluateFilePath(readOnly(), path, 'read').decision).toBe('deny')
+  })
+
+  it('denies writing it too — clearing history is not a read-only operation', () => {
+    expect(evaluateFilePath(readOnly(), '/home/ubuntu/.bash_history', 'write').decision).toBe('deny')
+  })
+
+  it('extracts and denies it from a real command', () => {
+    expect(extractPathAccesses('cat /home/ubuntu/.bash_history')).toEqual([
+      { path: '/home/ubuntu/.bash_history', mode: 'read' }
+    ])
+  })
+
+  it.each([
+    // The pattern must stay inside the home directory and inside the filename.
+    '/home/ubuntu/notes_history.txt',
+    '/home/ubuntu/projects/.bash_history_backup',
+    '/var/log/.bash_history',
+    '/home/ubuntu/history',
+    // `*` does not cross a separator, so a nested path is not swept up.
+    '/home/ubuntu/sub/.bash_history'
+  ])('does not deny %s', (path) => {
+    expect(evaluateFilePath(readOnly(), path, 'read').decision).toBe('allow')
+  })
+})
+
 describe('existing installs, not just fresh ones', () => {
   // The fix is worth nothing if it only reaches new installs: everyone who
   // already runs ShellPilot is the population that is currently exposed.
