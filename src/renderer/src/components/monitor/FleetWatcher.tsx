@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { useApp, useWorkspaceServers } from '../../store/app'
 import { useFleet } from '../../store/fleet'
+import { useFleetStatus } from '../../store/fleetStatus'
 import { checkResourceAlerts, checkUnitAlerts } from '../../store/alerts'
-import { bridgeOn } from '../../lib/bridge'
+import { bridgeHas, bridgeOn } from '../../lib/bridge'
 import { sshHopsFor } from '../../lib/ssh'
 import type { FleetTarget } from '../../../../shared/fleet'
 import type { Server } from '../../types'
@@ -117,6 +118,32 @@ export function FleetWatcher(): null {
       notifyOnResolved: webhookOnResolved
     })
   }, [webhookEnabled, webhookOnResolved])
+
+  // Poll the sampler's real state app-wide, not only while Settings is open.
+  //
+  // This is what makes the status-bar chip possible. Before it, `fleet.status()`
+  // was called from exactly one file — the Settings pane — so background
+  // checking could be paused for hours and the only place that said so was a
+  // screen nobody had reason to open.
+  //
+  // Ten seconds because these numbers move on the order of a sweep, and a vault
+  // unlocked in another window should clear the warning without the user
+  // wondering whether it is stuck. Cheap: one IPC call to main, no connection.
+  useEffect(() => {
+    if (!bridgeHas(window.shellpilot?.fleet as Record<string, unknown> | undefined, 'status')) return
+    let live = true
+    const read = (): void => {
+      void window.shellpilot?.fleet?.status().then((s) => {
+        if (live && s) useFleetStatus.getState().setStatus(s)
+      })
+    }
+    read()
+    const t = setInterval(read, 10_000)
+    return () => {
+      live = false
+      clearInterval(t)
+    }
+  }, [])
 
   return null
 }

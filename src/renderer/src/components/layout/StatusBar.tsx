@@ -1,6 +1,8 @@
 import { GitBranch, Wifi, Bell, Cpu, AlertTriangle } from 'lucide-react'
 import { useApp } from '../../store/app'
 import { useAlerts } from '../../store/alerts'
+import { useFleetStatus, samplerWarning } from '../../store/fleetStatus'
+import { openSettings } from '../../store/nav'
 import { colorVar } from './WorkspaceSwitcher'
 import { UpdateIndicator } from './UpdateIndicator'
 
@@ -10,6 +12,11 @@ export function StatusBar(): React.JSX.Element {
   const backupDirty = useApp((s) => s.settings.backupDirty)
   const alerts = useAlerts((s) => s.active)
   const setActivity = useApp((s) => s.setActivity)
+  // Whether the thing that raises those alerts is actually running. An alert
+  // count of zero means nothing if nobody is checking.
+  const samplerStatus = useFleetStatus((s) => s.status)
+  const samplingEnabled = useApp((s) => s.settings.fleetSamplingEnabled)
+  const warning = samplerWarning(samplerStatus, samplingEnabled)
 
   return (
     <div className="statusbar">
@@ -42,6 +49,17 @@ export function StatusBar(): React.JSX.Element {
           <span>
             {Object.values(alerts).length} alert{Object.values(alerts).length === 1 ? '' : 's'}
           </span>
+        </button>
+      )}
+      {/* Sits before the backup warning because it is worse: a stale export
+          costs you a restore, background checking being silently stopped costs
+          you the incident. Deliberately shown even when the alert count is
+          zero — that zero is precisely what is not trustworthy while this is
+          up. */}
+      {warning && (
+        <button className="item resource-alert" title={warning.detail} onClick={() => openSettings('monitoring')}>
+          <AlertTriangle size={12} />
+          <span>{warning.label}</span>
         </button>
       )}
       {backupDirty && (

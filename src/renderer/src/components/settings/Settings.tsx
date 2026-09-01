@@ -21,7 +21,6 @@ import { useVault } from '../../store/vault'
 import { useVaultPrompt } from '../../store/vaultPrompt'
 import { clsx, duration } from '../../lib/format'
 import { bridgeOn } from '../../lib/bridge'
-import type { FleetSamplerStatus } from '../../../../shared/fleet'
 import { ShortcutManager } from './ShortcutManager'
 import { BackupPanel } from './BackupPanel'
 import { UpdatePanel } from './UpdatePanel'
@@ -29,6 +28,7 @@ import { useOnboarding } from '../../store/onboarding'
 import { SshSessions } from './SshSessions'
 import { WebhookAlertSettings } from './WebhookAlertSettings'
 import { alertCoverageText } from './alertCoverage'
+import { useFleetStatus } from '../../store/fleetStatus'
 import { toast } from '../../store/toast'
 
 // Keyed by the nav store's union rather than by a list that describes itself,
@@ -98,42 +98,8 @@ function SettingSwitch({
 // all present as a switch in the "on" position and a screen that looks exactly
 // like a healthy one. fleet.status() is the only thing that can tell them
 // apart, and until this it was wired through IPC and read by nobody.
-// The sampler's real state, shared by every row that describes it.
-//
-// Shared deliberately. The threshold row used to read `fleetSamplingEnabled`
-// — the switch position — and tell the user "background checks are on, so
-// alerts fire wherever you are in the app" while the sampler sat paused on a
-// locked vault. Two rows a centimetre apart, one claiming alerts were covered
-// and the other saying nothing was being checked. A settings screen may not
-// describe a capability from the setting that requests it; only from whether
-// it is actually running.
-//
-// Polled rather than pushed: main emits an event per sample, not per status
-// change, and these numbers move on the order of a sweep. Ten seconds is
-// slow enough to be free and fast enough that a vault unlocked in another
-// window is reflected before the user gives up on it. The interval is
-// cleared with the pane, so nothing polls while Settings is closed.
-function useFleetStatus(): FleetSamplerStatus | null {
-  const [status, setStatus] = useState<FleetSamplerStatus | null>(null)
-  useEffect(() => {
-    let live = true
-    const read = (): void => {
-      void window.shellpilot?.fleet?.status().then((s) => {
-        if (live && s) setStatus(s)
-      })
-    }
-    read()
-    const t = setInterval(read, 10_000)
-    return () => {
-      live = false
-      clearInterval(t)
-    }
-  }, [])
-  return status
-}
-
 function FleetSamplerLine(): React.JSX.Element | null {
-  const status = useFleetStatus()
+  const status = useFleetStatus((s) => s.status)
 
   // 'disabled' is the one idle reason the switch already explains.
   if (!status || status.idleReason === 'disabled') return null
@@ -308,9 +274,11 @@ export function Settings(): React.JSX.Element {
   const section = useNav((s) => s.settingsSection)
   const setSection = useNav((s) => s.setSettingsSection)
   const startTour = useOnboarding((s) => s.start)
-  // Same source the sampler line below reads, so the two rows cannot disagree
-  // about whether background checking is actually happening.
-  const fleetStatus = useFleetStatus()
+  // Same source the sampler line below and the status-bar chip read, so none
+  // of the three can disagree about whether background checking is happening.
+  // The poll itself lives in FleetWatcher at the app root: it has to run
+  // whether or not this pane is open, since the chip is the whole point.
+  const fleetStatus = useFleetStatus((s) => s.status)
   const theme = useApp((s) => s.theme)
   const setTheme = useApp((s) => s.setTheme)
   const settings = useApp((s) => s.settings)
