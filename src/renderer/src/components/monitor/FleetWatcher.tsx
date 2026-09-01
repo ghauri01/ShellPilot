@@ -78,7 +78,9 @@ export function FleetWatcher(): null {
         if (e.error) reportError(e.serverId, e.error, e.at)
         return
       }
-      report(e.serverId, e.host)
+      // The sampler's own timestamp, not arrival time: a sweep that took 40s
+        // to reach this host was taken 40s ago, and search reports the age.
+        report(e.serverId, e.host, e.at)
       // Thresholds live in the renderer because that is where the settings
       // and the toast surface are. Before this, they were evaluated inside
       // the monitor's own poll — so an alert could only fire while the user

@@ -2664,3 +2664,44 @@ details[open] > .disclosure-head .chev {
   padding: 0 var(--sp-1);
   gap: var(--sp-1);
 }
+
+/* Fleet-wide search. Sits above the health panel in the Fleet Monitor and
+   takes the panel over only while there is a query. */
+.fleet-search {
+  margin: 10px 0 14px;
+}
+.fleet-search .input-group {
+  align-items: center;
+  gap: 8px;
+  padding-left: 10px;
+}
+.fleet-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+}
+.fleet-hit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.fleet-hit:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+.fleet-hit .grow {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
