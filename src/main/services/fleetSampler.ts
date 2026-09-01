@@ -41,13 +41,22 @@ export interface FleetSamplerDeps {
   // metricsDisconnect. Called for every target the sampler stops watching.
   //
   // metricsSample holds a pooled connection per key and only releases it when
-  // this is called; release() starts the SSH master's idle timer only once its
-  // refcount reaches zero. Without this, background sampling pinned an
-  // authenticated master to every server forever and silently made
-  // `sshMasterIdleMinutes` inert — a setting whose documented purpose is
-  // deciding how often a two-factor code has to be re-entered. Overriding a
-  // security control the user set, invisibly, is worse than the feature is
-  // worth.
+  // this is called, so without it a server dropped from the workspace kept an
+  // authenticated master open for good.
+  //
+  // What this does NOT do, which an earlier version of this comment claimed it
+  // did: a server that is still being watched is never released, so its
+  // refcount never reaches zero, so release() never arms the idle timer, and
+  // `sshMasterIdleMinutes` does not apply to it — a setting whose documented
+  // purpose is deciding how often a two-factor code has to be re-entered.
+  //
+  // That is inherent rather than an oversight. Every interval offered for
+  // background checking is shorter than every non-zero retention choice, so
+  // releasing after each pass would only have the next pass re-acquire before
+  // the timer could fire; and holding the connection is the better behaviour,
+  // since reconnecting to fifteen hosts through a bastion every couple of
+  // minutes is worse. What was wrong was doing it silently. It is disclosed in
+  // both settings rows now — see settings/connectionRetention.ts.
   release: (key: string) => void
   emit: (event: FleetSampleEvent) => void
   // Reports whether credentials can currently be resolved at all. When they
