@@ -154,37 +154,48 @@ describe('supervisor lifecycle', () => {
   })
 
   it('backs off exponentially between restarts', async () => {
-    const spec = make()
+    // Wait for the supervisor to say it armed the timer; never count turns to
+    // guess that it has.
+    //
+    // handleExit does `await unlink(run.pidFile)` — real fs I/O — before it
+    // arms the backoff timer, and how many event-loop turns that takes is a
+    // property of the machine, not of the supervisor. This test used to
+    // `flush()` a fixed 30 turns and then advance the clock. On a loaded runner
+    // the unlink had not landed yet, so the clock moved to 999 BEFORE the timer
+    // existed; the timer was then armed at ~999 and fired ~1000ms after that,
+    // and `spawns[1].at - start` came out near 2000 instead of 1000. Roughly
+    // one full-suite run in two, and never in isolation — the shape of every
+    // timing flake, and the same one the sibling test below already documents.
+    //
+    // onRestartScheduled fires on the line above the setTimeout, so it is the
+    // exact moment the timer is armed, and it carries the delay. That makes the
+    // backoff curve assertable directly instead of inferred from Date
+    // arithmetic across an await that may or may not have completed.
+    const scheduled: number[] = []
+    const spec = make({
+      onRestartScheduled: (_handle, _attempt, delay) => {
+        scheduled.push(delay)
+      }
+    })
     const handle = await sup.spawn(spec)
     expect(handle.pid).toBe(spawns[0].child.pid)
 
-    const start = Date.now()
-    spawns[0].child.exit(1)
-    await flush()
-    expect(spawns).toHaveLength(1)
+    // random() is pinned to 0.5 in make(), so the jitter factor is exactly 1
+    // and these are the raw curve: 1s, 2s, 4s.
+    for (const [attempt, delay] of [1_000, 2_000, 4_000].entries()) {
+      spawns[attempt].child.exit(1)
+      await waitFor(() => scheduled.length === attempt + 1)
+      expect(scheduled[attempt]).toBe(delay)
 
-    await vi.advanceTimersByTimeAsync(999)
-    await flush()
-    expect(spawns).toHaveLength(1)
-    await vi.advanceTimersByTimeAsync(1)
-    await waitFor(() => spawns.length === 2)
-    expect(spawns[1].at - start).toBe(1_000)
+      // Nothing relaunches before the delay is up...
+      await vi.advanceTimersByTimeAsync(delay - 1)
+      await flush()
+      expect(spawns).toHaveLength(attempt + 1)
 
-    spawns[1].child.exit(1)
-    await flush()
-    await vi.advanceTimersByTimeAsync(1_999)
-    await flush()
-    expect(spawns).toHaveLength(2)
-    await vi.advanceTimersByTimeAsync(1)
-    await waitFor(() => spawns.length === 3)
-
-    spawns[2].child.exit(1)
-    await flush()
-    await vi.advanceTimersByTimeAsync(3_999)
-    await flush()
-    expect(spawns).toHaveLength(3)
-    await vi.advanceTimersByTimeAsync(1)
-    await waitFor(() => spawns.length === 4)
+      // ...and something does once it is.
+      await vi.advanceTimersByTimeAsync(1)
+      await waitFor(() => spawns.length === attempt + 2)
+    }
   })
 
   it('forgets the exponent once readiness has held for 60s', async () => {
