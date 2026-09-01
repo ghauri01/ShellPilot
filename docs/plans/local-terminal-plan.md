@@ -31,10 +31,20 @@ be resolved before the phase they name is started.
   with no prebuilds; `index.js` resolves `@lydell/node-pty-${process.platform}-${process.arch}` at
   runtime. Both `asarUnpack` patterns are correct and disjoint (verified against minimatch with
   electron-builder's own `{dot:true}` config). The sibling pattern is the load-bearing one.
-- **Q3 — partially answered.** `prebuilds/win32-x64/conpty/` contains only `conpty.dll` and
+- **Q3 — CLOSED. The bundled ConPTY is optional; the exclusion is safe.** Verified on a real Windows
+  machine (`windows-latest`, CI run 33494240165): the `conpty/` directory was deleted from the
+  installed package and `cmd.exe` then spawned and echoed through ConPTY with `conpty.dll` and
+  `OpenConsole.exe` absent — the exact condition the shipped build creates, since `localPty.ts`
+  asks for `useConptyDll: false`.
+
+  Structure, also confirmed: `prebuilds/win32-x64/conpty/` holds only `conpty.dll` and
   `OpenConsole.exe`; `conpty.node` and `conpty_console_list.node` sit one level up as files, so the
-  `conpty/**` negation does not strip the bindings. Whether the app runs without the redistributable
-  still needs the Phase 0 Step 5 test on real Windows.
+  `conpty/**` negation cannot reach the bindings.
+
+  There is now a permanent guard — a `windows-latest` step in `ci.yml` that removes the directory
+  and respawns on every push and PR. It **fails when the directory is absent** rather than passing
+  for having found nothing to do, which is the failure mode that let the broken exclusion pattern
+  ship in the first place (see the correction to finding #9 below).
 - **Q6 — closed.** `ALLOWED_TOOLS` matches all 15 `registerTool` calls in `mcpServer.ts` exactly, and
   `(^|_)exec($|_)` correctly does not match `execute_command` (`execu` is not the token `exec`).
 
@@ -71,8 +81,21 @@ produces `app.asar.unpacked.unpacked` and every spawn dies with
 resolution, i.e. via `app.asar`. **Never require node-pty by an explicit
 `app.asar.unpacked/...` path**, in product code, in a test, or in a diagnostic script.
 
-Still unverified, and only a human on that hardware can close them: the packaged load on **Windows**
-and **Linux**; the AppImage `noexec /tmp` case for `spawn-helper` (finding #19); and Q3.
+**Since shipped in 0.8.0, and no longer open:**
+
+- **Windows and Linux PTY** — both spawn and echo on their own CI runners, so the binding loads and
+  a shell starts on all three platforms, not only macOS.
+- **Q3** — closed, see above.
+- **The AppImage `noexec /tmp` case (finding #19) is void**, and for a reason worth recording: the
+  Linux sibling package ships `prebuilds/linux-x64/pty.node` and nothing else. There is no
+  `spawn-helper` on Linux at all — it is a macOS-only workaround for the hardened-runtime `fork()`
+  penalty. `pty.node` is `dlopen`'d, which `noexec` does not block. The pack verifier originally
+  demanded `spawn-helper` on every non-Windows platform and failed the first 0.8.0 Linux build for
+  a file that is not supposed to exist.
+
+Still unverified: nobody has **opened the app** on Windows or Linux and used a local terminal. The
+PTY layer is proven on all three; the UI around it — shell discovery populating the picker, panes,
+the tabs — is proven only on macOS.
 
 ### BLOCKING — correctness
 
@@ -272,7 +295,9 @@ and **Linux**; the AppImage `noexec /tmp` case for `spawn-helper` (finding #19);
   defines two close-reason functions, contradicting the type's own comment.
 - **Phase 7 test counts are wrong** — 8 tests, not 7, and `hardenedRuntime` already passes
   (`electron-builder.yml:130`) and is already asserted in `tests/releaseWorkflow.test.ts:143-147`.
-- **Scope the conpty negation** to `'!**/node_modules/@lydell/node-pty-*/prebuilds/**/conpty/**'` —
+- **Scope the conpty negation** — but note the correction below; the pattern as written here is
+  wrong. Use `prebuilds/*/conpty/**`, not `prebuilds/**/conpty/**`:
+  `'!**/node_modules/@lydell/node-pty-*/prebuilds/*/conpty/**'` —
   `prebuilds/` is a `prebuildify` convention, not a node-pty invention.
 - **`localDisposeAll()` on the `quitAndInstall` path**, not only `before-quit`: Windows NSIS
   self-replace fails if a lingering grandchild holds a handle under the install directory.
@@ -380,10 +405,17 @@ Expected: a non-zero `napi_` count and `0` for the V8 count. This is the propert
 
 ```bash
 find node_modules/@lydell -name 'spawn-helper' -exec stat -f '%p %N' {} \;   # macOS
-find node_modules/@lydell -name 'spawn-helper' -exec stat -c '%a %n' {} \;   # Linux
 file $(find node_modules/@lydell -name 'spawn-helper' | head -1)
 ```
-Expected: mode `755` (not `644` — that is why `node-pty@1.1.0` was rejected) and `Mach-O executable` / `ELF executable`. Record the exact relative path; Phase 7 asserts on it.
+Expected on **macOS**: mode `755` (not `644` — that is why `node-pty@1.1.0` was rejected) and
+`Mach-O executable`. Record the exact relative path; Phase 7 asserts on it.
+
+**ANSWERED, and the platform list here was wrong.** `spawn-helper` is **macOS-only**. It exists to
+avoid `fork()` in a hardened-runtime process, where Big Sur and later charge roughly 300 ms per
+spawn (microsoft/node-pty#476) — a macOS problem with a macOS fix. The Linux sibling ships
+`prebuilds/linux-x64/pty.node` and nothing else, and forks directly. Do not look for it there: the
+pack verifier demanded it on every non-Windows platform and failed the first 0.8.0 Linux build over
+a file that is not supposed to exist.
 
 - [ ] **Step 4: Answer the flow-control question**
 
@@ -399,7 +431,16 @@ Expected: `handleFlowControl`, `flowControlPause`, `flowControlResume` appear in
 Get-ChildItem -Recurse node_modules\@lydell | Where-Object { $_.Name -match 'conpty|OpenConsole|winpty|\.pdb$' }
 node -e "const p=require('@lydell/node-pty');const t=p.spawn(process.env.ComSpec,[],{cols:80,rows:24});t.onData(d=>process.stdout.write(d));setTimeout(()=>t.kill(),2000)"
 ```
-Then **rename the `conpty` directory away** and re-run the spawn. Expected: it still works, using the system ConPTY in `conhost.exe`. **If it fails**, the `'!**/prebuilds/**/conpty/**'` negation in Phase 7 must be dropped and the AV risk re-assessed against the Defender gate instead. Record the answer.
+Then **rename the `conpty` directory away** and re-run the spawn. Expected: it still works, using the system ConPTY in `conhost.exe`.
+
+**ANSWERED: it works.** Confirmed on `windows-latest` (CI run 33494240165) — `conpty/` deleted,
+`cmd.exe` spawned and echoed through ConPTY. The exclusion is safe, and this step no longer needs
+doing by hand: it is a permanent job in `ci.yml` (`Verify ConPTY works without the bundled
+redistributable (Q3)`) that runs on every push and PR and fails if the directory is missing rather
+than passing for having found nothing to remove.
+
+Note the pattern that ships is `prebuilds/*/conpty/**`, not `prebuilds/**/conpty/**` — the latter
+matches nothing (see R3b).
 
 - [ ] **Step 6: Load the module inside a packaged Electron main process, on all three platforms**
 
@@ -2072,10 +2113,22 @@ describe('the installers carry no debug or redistributable-ConPTY payload', () =
     expect(cfg.files).toContain('!**/prebuilds/**/*.pdb')
   })
   it('excludes the bundled conpty redistributable', () => {
-    // The system ConPTY in conhost.exe is used instead (useConptyDll: false in
-    // localPty.ts). Shipping unsigned Microsoft binaries we do not need is
-    // exactly what the Defender and ClamAV hard-fail gates exist to catch.
-    expect(cfg.files).toContain('!**/prebuilds/**/conpty/**')
+    // NOTE — this drafted assertion is what actually shipped broken. It compares
+    // the pattern's TEXT, so it passed against a pattern that matched no file,
+    // and conpty.dll and OpenConsole.exe went into the first 0.8.0 Windows
+    // installer. Run the glob instead, through the same matcher electron-builder
+    // uses, against real paths from the published tarball. See R3b.
+    //
+    // The shipped version of this test is in tests/localPackaging.test.ts.
+    const rule = cfg.files.find((p) => p.includes('conpty'))!
+    const excludes = (path: string): boolean => minimatch(path, rule.slice(1), { dot: true })
+    const WIN = 'node_modules/@lydell/node-pty-win32-x64/prebuilds/win32-x64/'
+
+    expect(excludes(`${WIN}conpty/conpty.dll`)).toBe(true)
+    expect(excludes(`${WIN}conpty/OpenConsole.exe`)).toBe(true)
+    // The bindings one level up are what the app loads; they must survive.
+    expect(excludes(`${WIN}conpty.node`)).toBe(false)
+    expect(excludes(`${WIN}conpty_console_list.node`)).toBe(false)
   })
 })
 
@@ -2120,8 +2173,15 @@ Under `files:` (currently `:14-24`), after the `'!resources/bin/**'` line:
   # precisely what the Defender and ClamAV hard-fail gates in the release
   # workflow are there to catch.
   - '!**/prebuilds/**/*.pdb'
-  - '!**/prebuilds/**/conpty/**'
+  # `prebuilds/*/conpty/**`, NOT `prebuilds/**/conpty/**`. With a leading `**/`
+  # already in the pattern, a second `**/` in the middle makes minimatch match
+  # nothing at all, and the redistributable ships. That segment is one
+  # platform-arch directory, so a single `*` is also the accurate shape. See R3b.
+  - '!**/node_modules/@lydell/node-pty-*/prebuilds/*/conpty/**'
 ```
+
+Note the `.pdb` line above is a **no-op** and did not ship: electron-builder already strips `.pdb`
+from node_modules unless `includePdb: true` (`appFileCopier.js:128-132`). See finding #16.
 
 Under `asarUnpack:` (currently `:52-56`), after `'**/node_modules/ssh2/**'`:
 
@@ -2520,7 +2580,8 @@ Phases 4 and 5 are the two with no flag, because neither ships a feature — the
 |---|---|---|---|---|
 | R1 | The `.node` loads in dev but not in a packaged macOS build under `hardenedRuntime: true` — exactly what already happens to `cpu-features` (`electron-builder.yml:124-129`) | Low (Node-API + `disable-library-validation` in `build/entitlements.mac.plist`) | High — feature dead on macOS | Phase 0 Step 6 tests this configuration specifically, before any product code. `loadPty()` degrades to a named error instead of crashing. |
 | R2 | `spawn-helper` ships non-executable or unsigned, so every spawn fails with ENOENT in the installed app | Medium — this is the defect that disqualified `node-pty@1.1.0` | High | `asarUnpack` names the whole directory; `scripts/verify-local-pty-pack.mjs` asserts the mode bit on every pack; the release signature loop names it. |
-| R3 | Excluding `prebuilds/**/conpty/**` breaks Windows because the redistributable ConPTY was actually required | Low–Medium — **unverified**, see Q3 | High — Windows feature dead | Phase 0 Step 5 tests with the directory renamed away, on real Windows, before the negation is committed. If it fails, drop the negation and accept the AV risk. |
+| R3 | ~~Excluding the redistributable ConPTY breaks Windows~~ | **Retired** — Q3 closed on real Windows | — | A `windows-latest` CI step deletes `conpty/` and respawns on every push, and fails if the directory is missing rather than passing vacuously. |
+| R3b | The exclusion pattern matches nothing, so the redistributable ships anyway | **Happened**, in the first 0.8.0 build | Medium — two unsigned Microsoft binaries into an installer that AV-gates on | With a leading `**/` already present, a second `**/` mid-pattern makes minimatch match no path. Use `prebuilds/*/conpty/**`. The packaging test now runs the glob through electron-builder's own matcher instead of asserting the pattern's text, which is why the original slipped through. |
 | R4 | macOS TCC re-prompts for folder access on **every release**, because an ad-hoc signature has no Team ID and the cdhash changes each build | **Certain** | Medium — recurring user friction, looks like the app forgot its permissions | Cannot be fixed without a Developer ID. Document it in the README. `mac.extendInfo` at least makes each prompt explain itself. *(An earlier draft claimed a missing usage description would TERMINATE the app — that is the hardware/data classes, not Files-and-Folders. Corrected; severity dropped from High.)* |
 | R5 | Defender or ClamAV flags an installer once a PTY binary is inside, hard-failing the release (`release.yml`, both gates `exit 1`) | Low–Medium | High — no release can be cut | Ship no `winpty-agent.exe` (that is why `node-pty@1.1.0` was rejected), no `.pdb`, no redistributable ConPTY. If a false positive happens anyway, the fallback is a VirusTotal-corroborated allowance recorded in the release notes — **not** loosening the gate. |
 | R6 | The pane refactor regresses SSH split panes, which work today | Medium — `tabSession`/`tabCwd` re-key from `tabId` to `paneId`, and `SftpView.tsx:147-149` reads both | Medium | A named `activePaneSession(tabId)` selector so `SftpView` has one call site; step 4 of the Phase 6 matrix tests remote splits explicitly. |
@@ -2539,7 +2600,12 @@ Answer these in Phase 0. Do not invent answers; a wrong guess here invalidates a
 
 - **Q1 — Does `@lydell/node-pty@1.2.0-beta.15` expose `handleFlowControl` / `flowControlPause` / `flowControlResume`?** Upstream `node-pty` has had them since 0.10, and this is a fork, but the beta's option surface has not been read. *If not:* fall back to `pty.pause()` / `pty.resume()` on the underlying socket if exposed; if neither is available, drop the ack scheme, keep the coalescer, and add a hard per-session cap (drop-oldest above 2 MB in flight with a `[output truncated]` marker) — worse, but bounded.
 - **Q2 — Exact on-disk layout of the prebuilds.** Is the binding inside `@lydell/node-pty/prebuilds/<platform>-<arch>/`, or in sibling optional packages `@lydell/node-pty-<platform>-<arch>/`? The `asarUnpack` patterns and `scripts/verify-local-pty-pack.mjs` both depend on the answer. Phase 0 Step 1 settles it; correct both patterns before Phase 7 is committed.
-- **Q3 — Is the bundled `conpty` directory optional on Windows?** The `'!**/prebuilds/**/conpty/**'` negation assumes the system ConPTY in `conhost.exe` is used and the redistributable is dead weight. **Unverified.** Phase 0 Step 5 tests it by renaming the directory away on a real Windows machine. If the spawn fails, drop the negation.
+- **Q3 — Is the bundled `conpty` directory optional on Windows? — ANSWERED: yes.** The negation
+  assumed the system ConPTY in `conhost.exe` is used and the redistributable is dead weight. Proven
+  on `windows-latest` (CI run 33494240165): with `conpty/` deleted, `cmd.exe` spawns and echoes
+  through ConPTY. The check is now a permanent CI step rather than a one-off, and it hard-fails if
+  the directory is not there to delete. **Do not re-open this by inspection; it is settled by
+  execution on the platform in question.**
 - **Q4 — Does the AppImage build need anything extra?** AppImage relocates the app root at runtime; a `.node` under `app.asar.unpacked` normally resolves fine, but ShellPilot has never shipped a native module it actually loads (`cpu-features` does not load — `electron-builder.yml:124-129`), so this has never been exercised. Phase 0 Step 6 must include the AppImage, not just the `--dir` pack.
 - **Q5 — Is `bash -i` without `-l` the right default on Linux?** The plan argues yes (a login bash reads `~/.bash_profile` and skips `~/.bashrc`, where Linux users keep everything, and the GUI session already inherits `~/.profile`). But a Wayland session started by a display manager that does not source `~/.profile` would leave PATH short. Test on both a GNOME/Wayland and a bare i3/X11 session before committing to it. If PATH is short, switch to `['-l', '-i']` and accept that `~/.bash_profile` then also runs.
 - **Q6 — Is `execute_command` the only tool name in `ALLOWED_TOOLS` that legitimately matches an "execution" pattern?** The whitelist in `tests/localTerminalNotExposed.test.ts` must be built by reading the `registerTool` calls in `src/main/services/mcpServer.ts`, not from this document. Do that before committing Phase 8.
