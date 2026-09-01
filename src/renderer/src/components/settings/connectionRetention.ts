@@ -5,9 +5,20 @@
 // zero (see release() in main/services/ssh.ts). The metrics layer acquires one
 // connection per server and holds it until that server stops being watched, so
 // a server being sampled never reaches zero and its idle timer is never armed.
-// Every interval offered for background checking is shorter than every non-zero
-// retention choice anyway, so even releasing after each pass would not change
-// it: the next pass re-acquires before the timer could fire.
+// Releasing after each pass would not help, though not for the reason an
+// earlier version of this comment gave. That version said every interval is
+// shorter than every non-zero retention choice, which is simply false — the
+// 15-minute interval is longer than the 5-minute retention. The actual reason
+// is that both cases are bad:
+//
+//   interval < retention  the next pass re-acquires before the timer fires, so
+//                         nothing changes.
+//   interval >= retention the connection really is torn down between passes, so
+//                         the next background pass has to authenticate again —
+//                         unattended. On a server with two-factor auth that is
+//                         a prompt with nobody present to answer it, which is
+//                         the failure mode verifyHostKey's allowPrompt exists
+//                         to avoid.
 //
 // That is defensible as behaviour — reconnecting to fifteen hosts through a
 // bastion every couple of minutes is worse — and indefensible as a silence.

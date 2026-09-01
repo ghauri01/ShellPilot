@@ -50,13 +50,17 @@ export interface FleetSamplerDeps {
   // `sshMasterIdleMinutes` does not apply to it — a setting whose documented
   // purpose is deciding how often a two-factor code has to be re-entered.
   //
-  // That is inherent rather than an oversight. Every interval offered for
-  // background checking is shorter than every non-zero retention choice, so
-  // releasing after each pass would only have the next pass re-acquire before
-  // the timer could fire; and holding the connection is the better behaviour,
-  // since reconnecting to fifteen hosts through a bastion every couple of
-  // minutes is worse. What was wrong was doing it silently. It is disclosed in
-  // both settings rows now — see settings/connectionRetention.ts.
+  // Releasing after each pass is not the fix. When the interval is shorter than
+  // the retention the next pass re-acquires before the timer fires and nothing
+  // changes; when it is longer or equal — a 15-minute interval against the
+  // 5-minute retention, say — the connection really is torn down, and the next
+  // background pass has to authenticate again with nobody present. On a
+  // two-factor server that is an unattended prompt, which is the failure mode
+  // allowPrompt exists to avoid. Holding the connection is also better for the
+  // estate than reconnecting to fifteen hosts through a bastion on a timer.
+  //
+  // So the behaviour stays and the silence goes: both settings rows now state
+  // it — see settings/connectionRetention.ts.
   release: (key: string) => void
   emit: (event: FleetSampleEvent) => void
   // Reports whether credentials can currently be resolved at all. When they
