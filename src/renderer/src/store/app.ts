@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { FLEET_INTERVAL_DEFAULT_MS } from '../../../shared/fleet'
+import { forgetServer } from './serverCleanup'
 import type {
   ActivityView,
   MonitorGroup,
@@ -1181,7 +1182,17 @@ export const useApp = create<AppState>((set, get) => ({
   updateServer: (id, patch) =>
     set((s) => ({ servers: s.servers.map((sv) => (sv.id === id ? { ...sv, ...patch } : sv)) })),
 
-  deleteServer: (id) =>
+  deleteServer: (id) => {
+    // Forget everything keyed by this server before dropping it.
+    //
+    // All three of these were written with docstrings describing exactly this
+    // and then never called. The consequences were real: an active CPU alert
+    // kept counting in the status bar under the name of a server that no longer
+    // existed, its last metrics stayed in the fleet totals, and its failed-unit
+    // set persisted — so deleting and re-adding a server suppressed the first
+    // genuine failure as "not fresh", which is the precise thing
+    // clearUnitAlerts promised to prevent.
+    forgetServer(id)
     set((s) => {
       // Close any tabs pointing at the server that no longer exists. Local tabs
       // are not among them: they have no server, so deleting one cannot orphan
@@ -1194,7 +1205,8 @@ export const useApp = create<AppState>((set, get) => ({
         tabs: keptTabs,
         activeTabId: keptTabs.some((t) => t.id === s.activeTabId) ? s.activeTabId : null
       }
-    }),
+    })
+  },
 
   setServerStatus: (serverId, status) =>
     set((s) => ({

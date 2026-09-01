@@ -309,6 +309,60 @@ describe('reconfiguration and teardown', () => {
     expect(h.sampler.status().running).toBe(false)
   })
 
+  it('keeps running when a reconfigure lands mid-sweep', async () => {
+    // The defect this exists for: configure() bumps the generation and
+    // schedules immediately; that run is refused because a sweep is in flight
+    // and has already consumed the timer; the old sweep's finally then declines
+    // to reschedule because the generation moved. Net: no timer, not sweeping,
+    // dead forever -- while status() still said `running`.
+    //
+    // The trigger is ordinary. Connecting to one server fires setServerStatus
+    // 'connecting' then 'online', rebuilding the target list twice seconds
+    // apart, so opening a single SSH session killed background monitoring for
+    // the rest of the session.
+    //
+    // The sibling test below asserts only that the superseded sweep emits
+    // nothing, which a permanently dead sampler also satisfies. This one
+    // asserts the loop survives.
+    const h = harness({ slow: true })
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.calls).toEqual(['fleet:a'])
+
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('b')] })
+    // Order is the whole reproduction. The reconfigure's immediate run must
+    // fire while the first sweep is STILL in flight, so it is refused and
+    // consumes the timer. Resolving the sample first lets the old sweep finish
+    // and reschedule normally, which is why an earlier version of this test
+    // passed against the bug.
+    await vi.advanceTimersByTimeAsync(0)
+    h.resolveAll()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The new configuration is sampled promptly -- the user just asked for it.
+    expect(h.calls).toContain('fleet:b')
+    expect(h.sampler.status().running).toBe(true)
+
+    // And the loop keeps going rather than stopping after that one run.
+    h.resolveAll()
+    await vi.advanceTimersByTimeAsync(60_000)
+    h.resolveAll()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.calls.filter((c) => c === 'fleet:b').length).toBeGreaterThanOrEqual(2)
+    h.sampler.dispose()
+  })
+
+  it('reports not-running when the loop has actually stopped', async () => {
+    // status() derived `running` from the config, so a stalled sampler was
+    // reported healthy and the settings screen affirmed it.
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.sampler.status().running).toBe(true)
+    h.sampler.dispose()
+    expect(h.sampler.status().running).toBe(false)
+  })
+
   it('emits nothing for a sweep superseded by a reconfigure', async () => {
     const h = harness({ slow: true })
     h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })

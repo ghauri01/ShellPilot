@@ -78,6 +78,10 @@ export class FleetSampler {
   private cfg: FleetSamplerConfig = { enabled: false, intervalMs: FLEET_INTERVAL_MIN_MS, targets: [] }
   private timer: ReturnType<typeof setTimeout> | null = null
   private sweeping = false
+  // Set when a scheduled run was refused because a sweep was already going.
+  // Without it, that refusal loses the obligation to reschedule and the loop
+  // stops for good. See sweep().
+  private restartPending = false
   private disposed = false
   private lastSweepAt: number | undefined
   private lastSweepMs: number | undefined
@@ -122,7 +126,11 @@ export class FleetSampler {
     if (!this.cfg.enabled) return { running: false, idleReason: 'disabled', ...base }
     if (this.cfg.targets.length === 0) return { running: false, idleReason: 'no-targets', ...base }
     if (!this.deps.vaultUnlocked()) return { running: false, idleReason: 'vault-locked', ...base }
-    return { running: true, ...base }
+    // Derived from the loop, not from the config. status() used to say
+    // `running: true` whenever the settings said so, which is exactly what let
+    // a stalled sampler go unnoticed -- the settings screen affirmed it was
+    // fine while nothing had been sampled for hours.
+    return { running: this.timer !== null || this.sweeping, ...base }
   }
 
   private stopTimer(): void {
@@ -151,7 +159,24 @@ export class FleetSampler {
     // One sweep at a time. A requested sweep arriving mid-sweep is dropped
     // rather than queued: it would double the load to answer a question the
     // in-flight sweep is already answering.
-    if (this.sweeping || this.disposed) return
+    //
+    // But a DROPPED sweep must hand back the obligation to reschedule, or the
+    // loop dies silently. The sequence that killed it: configure() bumps the
+    // generation and schedules immediately; that timer fires while the old
+    // sweep is still running, is refused here, and has already consumed
+    // this.timer; the old sweep then reaches its finally, sees a generation
+    // mismatch, and declines to reschedule. No timer armed, not sweeping,
+    // nothing ever runs again — while status() went on reporting `running`
+    // because it reads the config rather than the loop.
+    //
+    // It took two configure() calls seconds apart, which is what connecting to
+    // a single server produces: setServerStatus fires 'connecting' then
+    // 'online', each rebuilding the target list.
+    if (this.sweeping || this.disposed) {
+      if (!this.disposed) this.restartPending = true
+      return
+    }
+    this.restartPending = false
     const gen = this.generation
     this.sweeping = true
     const started = this.now
@@ -191,10 +216,18 @@ export class FleetSampler {
       this.lastSweepMs = this.lastSweepAt - started
     } finally {
       this.sweeping = false
-      // Measured from the end of the sweep, so a sweep that takes longer than
-      // the interval slows the cadence rather than overlapping with itself.
-      if (gen === this.generation && !this.disposed && this.shouldRun()) {
-        this.schedule(this.cfg.intervalMs)
+      if (!this.disposed && this.shouldRun()) {
+        if (gen === this.generation) {
+          // Measured from the end of the sweep, so a sweep that takes longer
+          // than the interval slows the cadence rather than overlapping.
+          this.schedule(this.cfg.intervalMs)
+        } else if (this.restartPending) {
+          // A reconfigure landed mid-sweep and its immediate run was refused
+          // above. Honour it now: the config changed, so start promptly rather
+          // than waiting a full interval for state the user just asked for.
+          this.restartPending = false
+          this.schedule(0)
+        }
       }
     }
   }

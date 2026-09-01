@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { useApp } from './app'
+import { onServerForgotten } from './serverCleanup'
 
 // Stamped into every outbound payload so a shared endpoint can tell which
 // version posted. Read once: app.getVersion() is an IPC round trip and this is
@@ -49,6 +50,11 @@ export const useAlerts = create<AlertState>((set, get) => ({
 // Repeat interval while a host stays over the threshold.
 const REPEAT_MS = 60_000
 
+// How far below the threshold a value must fall to count as recovered. Without
+// it, a host sitting at the line flaps between raised and resolved on every
+// sample. See evaluate().
+const RECOVER_MARGIN = 5
+
 // Last notification time per server+metric, so a sustained problem repeats once
 // a minute instead of on every 2s sample.
 const lastNotified = new Map<string, number>()
@@ -65,7 +71,16 @@ function evaluate(
 ): void {
   const k = key(serverId, kind)
 
-  if (value < threshold) {
+  // Hysteresis. Clearing at exactly the threshold means a host hovering around
+  // it crosses repeatedly, and each crossing used to reset the repeat window —
+  // so at the foreground 2s cadence that is a desktop notification every few
+  // seconds and roughly thirty webhooks a minute, which is exactly the delivery
+  // rate limit. The alerting path then starts dropping real alerts to keep up
+  // with its own noise. A value has to fall meaningfully below the line before
+  // it counts as recovered.
+  const clearAt = Math.max(0, threshold - RECOVER_MARGIN)
+
+  if (value < clearAt) {
     // Recovered: drop the alert and allow an immediate notification if it
     // crosses again later.
     if (useAlerts.getState().active[k]) {
@@ -90,7 +105,10 @@ function evaluate(
         threshold
       })
     }
-    lastNotified.delete(k)
+    // NOT cleared. Deleting it here let the next crossing notify immediately,
+    // which is the other half of the flapping problem: hysteresis stops the
+    // oscillation, and keeping the window stops a genuine re-cross seconds
+    // later from arriving as if nothing had been said. It expires on its own.
     return
   }
 
@@ -148,9 +166,18 @@ export function checkUnitAlerts(serverId: string, serverName: string, units: str
   if (!useApp.getState().settings.resourceAlertsEnabled) return
 
   const now = Date.now()
+  // Scrub at the source, not just in the outbound payload.
+  //
+  // The main-process sanitiser strips `units`, but `summary` and the desktop
+  // notification title are BUILT from a unit name — and Slack renders
+  // `summary`. So a unit named `<!channel>` on a compromised host still pinged
+  // an entire workspace, on a loop, through the one field nobody had filtered.
+  // One scrubbed value feeding all three is the only version of this that
+  // cannot drift apart again.
+  const clean = (u: string): string => u.slice(0, 128).replace(/[^A-Za-z0-9._@:\-\\]/g, '')
   const previous = failedUnits.get(serverId) ?? new Set<string>()
-  const current = new Set(units)
-  const fresh = units.filter((u) => !previous.has(u))
+  const current = new Set(units.map(clean).filter(Boolean))
+  const fresh = [...current].filter((u) => !previous.has(u))
 
   if (current.size === 0) failedUnits.delete(serverId)
   else failedUnits.set(serverId, current)
@@ -193,6 +220,18 @@ export function checkUnitAlerts(serverId: string, serverName: string, units: str
 export function clearUnitAlerts(serverId: string): void {
   failedUnits.delete(serverId)
 }
+
+// Registered rather than called from deleteServer, to keep app.ts from having
+// to import this module back and make init order matter.
+onServerForgotten((serverId) => {
+  clearUnitAlerts(serverId)
+  useAlerts.getState().clearServer(serverId)
+  // The repeat window too: otherwise a re-added server inherits a suppression
+  // it never earned.
+  for (const k of [...lastNotified.keys()]) {
+    if (k.startsWith(`${serverId}:`)) lastNotified.delete(k)
+  }
+})
 
 // Called from the metrics hook on each sample.
 export function checkResourceAlerts(

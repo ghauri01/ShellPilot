@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { HostMetrics } from '../../../shared/ssh'
+import { onServerForgotten } from './serverCleanup'
 
 // Latest reported capacity per server. Published by the foreground metrics hook
 // and by the background fleet sampler, so the Fleet Monitor can total the
@@ -81,3 +82,5 @@ export function fleetTotals(serverIds: string[], hosts: Record<string, HostMetri
   }
   return t
 }
+
+onServerForgotten((serverId) => useFleet.getState().forget(serverId))
