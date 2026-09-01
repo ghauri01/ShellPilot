@@ -7,14 +7,38 @@ Items 1–10 were the original list. **Items 11–16 were not, and five of the s
 was** — they came out of asking what changes when one person runs fifteen servers instead of three,
 which is the actual user, and then reading the code to check the answers.
 
-Item 16 is the one to read first. It is not a feature; it is the reason two of the highest-ranked
-features cannot currently be built at all, which the first version of this document did not notice.
+Item 16 was the one to read first: not a feature, but the reason two of the highest-ranked features
+could not be built at all — which the first version of this document ranked around without noticing.
+It has since been built, and this document keeps the finding rather than quietly deleting it,
+because "we ranked a blocked item first" is the kind of thing worth remembering the next time an
+ordering looks obvious.
+
 The ordering at the end is the useful part of this document; the write-ups exist so that ordering
 can be argued with.
 
 This is a statement of direction, not a schedule. Sizes are rough and relative — "weeks" means a
 focused person, not a calendar quarter. Where something is a real unknown it says so rather than
 guessing, because the cost of a wrong estimate here is a commitment nobody can keep.
+
+## Built since this was written
+
+On `main`, not yet released. Kept here rather than deleted, because the write-ups say why each
+was built and that reasoning outlives the ticket.
+
+| Item | State |
+|---|---|
+| **16. Background metrics sampling** | **Built.** `fleetSampler.ts` in main, scheduled, survives the monitor being closed. Off by default. |
+| **3. Alert channels** | **Webhook built** — generic HTTPS JSON POST, which is what Slack, Discord and Teams all accept. Named integrations for WhatsApp and Twilio are not built and may never need to be. |
+| — | **Failed-unit alerts**, which were not on this list and are the case that prompted it: four failed units found by opening the app and looking. A failed unit does not move a CPU graph, so no threshold would have caught it. |
+
+Two things those unlocked, now unblocked rather than done: **fleet-wide search** (item 13) can now
+index a complete estate rather than whatever was last looked at, and any future scheduled work has
+a scheduler to live in.
+
+**Not verified against a real estate.** The sampler has unit tests and the webhook has been proved
+against a live local endpoint, but nobody has yet turned background checking on with fifteen hosts
+behind bastions and watched what happens to connection count, bastion load or battery. That is the
+decision item 16 flagged and it needs a real fleet to answer.
 
 ## The through-line
 
@@ -95,15 +119,16 @@ cannot be wrong about anyone's API, and Slack is a webhook.
 
 ---
 
-## Blocked, and the roadmap did not say so
+## The prerequisite the roadmap was ranking around without seeing — now built
 
-### 16. Background metrics sampling — the prerequisite
+### 16. Background metrics sampling — BUILT
 
 Sample the estate on a schedule from the main process, independently of what the renderer is
 rendering.
 
-**This is not a feature. It is why two features above cannot currently be built**, which the first
-version of this document ranked without noticing.
+**This was not a feature. It was why two features above could not be built at all**, which the
+first version of this document ranked without noticing. Built; the write-up below is kept as the
+reasoning, in the past tense where it describes what was wrong.
 
 **The problem.** `App.tsx` renders the Fleet Monitor as `{activity === 'monitor' && <FleetMonitor />}`.
 Leave that tab and every `ServerMonitorCard` unmounts, `useServerMetrics` stops, and sampling ends.
@@ -470,13 +495,13 @@ list at all.**
 
 **First — stop making the operator go and look.**
 
-1. **Background metrics sampling (item 16).** Not a feature; the prerequisite. Alerts cannot be
-   built at all until the app samples when nobody is watching, and search cannot be complete. This
-   moved to the front only after reading the code — the first version of this list ranked alerts
-   first without noticing they were blocked.
-2. **Alert channels, generic webhook first.** Immediately after, and small once 1 exists: the
-   threshold logic is already written in `store/alerts.ts`. Webhook first because it cannot be wrong
-   about anyone's API, and Slack is a webhook.
+1. ~~**Background metrics sampling (item 16).**~~ **Built.** Was the prerequisite: alerts could not
+   be built at all until the app sampled when nobody was watching. It reached the front of this list
+   only after reading the code — the first version ranked alerts first without noticing they were
+   blocked.
+2. ~~**Alert channels, generic webhook first.**~~ **Built**, along with failed-unit alerts, which
+   were not on this list and are the case that actually prompted it. Named Slack/WhatsApp/Twilio
+   integrations remain unbuilt and may stay that way: they all accept a webhook.
 3. **Run one command across many servers.** The defining problem of fifteen servers rather than
    three, and the largest gap on this page. Settle the approval model before writing the executor.
 4. **Fleet-wide search.** The best value-to-effort ratio here: the monitor already collects every
