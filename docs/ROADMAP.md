@@ -2,7 +2,7 @@
 
 Sixteen things we intended to build, what each one actually rests on in the code today, and what is
 genuinely hard about it. Written after 0.8.0, and maintained since: 0.9.0 through 0.9.3 shipped
-nine of the sixteen, and this document keeps their write-ups rather than deleting them, because the
+nine of the sixteen, and 0.9.4 through 0.9.7 were stability releases, and this document keeps their write-ups rather than deleting them, because the
 reasoning outlives the ticket.
 
 Items 1–10 were the original list. **Items 11–16 were not, and five of the six outrank most of what
@@ -15,7 +15,7 @@ It has since been built, and this document keeps the finding rather than quietly
 because "we ranked a blocked item first" is the kind of thing worth remembering the next time an
 ordering looks obvious.
 
-**Items A–C and 17–28 were added after 0.9.3**, from a second pass that asked a different question:
+**Items A–C and 17–28 were added after 0.9.7**, from a second pass that asked a different question:
 not "what does an operator want to see" — which the shipped work answers well — but "what does an
 operator want to *do*", measured against a real sysadmin's week. The answer put three pieces of
 plumbing in front of every feature on that list, which is why they are lettered rather than
@@ -30,7 +30,7 @@ guessing, because the cost of a wrong estimate here is a commitment nobody can k
 
 ## Built since this was written
 
-Shipped in 0.9.0 through 0.9.3. Kept here rather than deleted, because the write-ups say why each
+Shipped in 0.9.0 through 0.9.3, and hardened across 0.9.4 to 0.9.7. Kept here rather than deleted, because the write-ups say why each
 was built and that reasoning outlives the ticket.
 
 | Item | State |
@@ -125,7 +125,7 @@ Two properties are not negotiable as this grows, because they are what the app i
   `AI_CAPABILITIES`, a policy decision, and an audit row — or an explicit, tested decision that the
   surface is human-only, the way the local terminal is.
 
-A third property became visible only after 0.9.3, and is the reason for the operator-console
+A third property became visible only after 0.9.7, and is the reason for the operator-console
 section further down: **almost everything the app does today is a read.** Watching, searching,
 tailing, asking an agent — those are one verb, and the other half of an operator's job is the
 other one. Extending the sentence above to another kind of target is no longer the only axis;
