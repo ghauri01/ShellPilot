@@ -654,10 +654,38 @@ schedule and builds a complete `HostMetrics` per host, including units and liste
 thrown away after being rendered. The alert path, the broadcast results and the two JSONL logs are
 each a stream of events with no queryable home.
 
-**What is actually new.** A real embedded database — `better-sqlite3` is the obvious choice, it is
-synchronous, it needs no server, and it is one native module rather than five. Three tables carry
+**DECIDED: `node:sqlite`, measured rather than assumed.** The obvious answer was
+`better-sqlite3`, and the obvious objection was that this app has already paid the
+native-module bill once — `@lydell/node-pty` cost a lazy loader with a kill switch, two
+asarUnpack patterns, a files-exclusion glob that shipped two unsigned Windows binaries
+into the first 0.8.0 build, a force-install in the release workflow so Intel Macs are not
+handed `MODULE_NOT_FOUND`, a 9 KB verify script, a three-OS CI job, and library validation
+switched off in the hardened runtime. None of that is hypothetical; all of it is in the
+repository.
+
+It turns out neither is needed. Electron 43.4.1 bundles Node 24.18.1, which ships SQLite
+3.53.1 as `node:sqlite` — inside the binary this app already distributes. Verified by
+running it: `DatabaseSync`, `StatementSync`, `backup` all exported, no experimental
+warning, WAL accepted, and a `WITHOUT ROWID PRIMARY KEY(ts, host, metric)` table measured
+at **21.9 bytes per row**, where the primary key *is* the table and there is no second
+B-tree to pay for.
+
+So the store costs **zero new dependencies, zero prebuilds, zero packaging surface, zero
+signing surface**, which is the "one tool, no external dependencies" constraint met
+literally rather than approximately. The trade is a dependency risk for a platform-version
+risk: the version is whatever Electron bundles. That is the cheaper of the two here, and
+the escape hatch stays open because `better-sqlite3` has near-identical `prepare/run/get/all`
+semantics — provided the SQL never leaves one repository file. Three tables carry
 almost everything below: samples (host, metric, timestamp, value), events (alerts raised and
 resolved, jobs, changes, approvals) and facts (host, key, value, first seen, last seen).
+
+**The trap the arithmetic missed, and it is 5x the whole budget.** `HostMetrics` carries
+`services: ServiceUnit[] | null` and `listeners: PortListener[] | null`, sampled on every
+sweep like everything else. A host with forty systemd units stored naively as samples is
+28,800 rows a day *for one host* — 432,000 a day across fifteen, five times the entire
+metric budget, none of it changing between sweeps. Units and ports are **facts**, written
+only when they change, with the change itself recorded as an event. That is what items C
+and 25 want anyway. Decide it before the first write, not after.
 
 **What is genuinely hard, and it is not the schema.** Retention. Fifteen hosts at a two-minute
 cadence with eight metrics is roughly 86,000 rows a day — nothing for SQLite, and 30 million a year,
@@ -665,10 +693,15 @@ which is a file somebody eventually notices. This needs a downsample rule (full 
 week, hourly means after that, dropped after a quarter) decided before the first write, not after
 someone's disk fills. A tool that alerts on disk pressure must not become a cause of it.
 
-The second hard part is that this is the first native module the app would carry for a
-non-negotiable path. `localPty.ts` already shows the discipline — import it lazily, and let a
-machine where it cannot load still get a working app, degraded to today's behaviour rather than
-broken.
+Measured, not estimated: the naive schema is 730 MB a year, and 1.27 GB if a separate
+index is added. Seven days at full resolution plus eighty-three days of hourly
+average/min/max, then dropped, holds **20.7 MB in steady state and never grows**. Ship the
+retention pass on day one; a store that only gains a retention rule after someone complains
+has already written the year of rows.
+
+The `localPty.ts` discipline still applies even without a native module: import lazily
+behind an interface, keep a kill switch, and let a machine where the store will not open
+still get a working app running on today's in-memory behaviour.
 
 **Size.** 1–2 weeks. Unlocks items 19, 25, 26 and 14, and makes 17 and 5 auditable.
 
@@ -848,11 +881,37 @@ and percent per type, and `broadcast.ts` already classifies `docker`/`podman`
 `rm|rmi|stop|kill|prune|down` as destructive. The comment in `docker.ts` explaining why prune was
 not shipped is the correct instinct: `docker system prune -a` has ruined days.
 
-**What is actually new.** A prune that shows exactly what dies before it dies — itemised, by name,
-with sizes — behind the existing typed confirmation. Plus stale image and volume listing, and the
-engine version against the current release.
+**SPLIT, after research contradicted the plan.** `docker.ts` already refuses `prune`, and
+its stated reason is falsifiable rather than a preference: *"its blast radius is not knowable
+from the UI that offers it."* That is an objection to `prune`, not to reclaiming disk — and
+it is answered by making the blast radius a literal list of ids.
 
-**Size.** 3–5 days.
+Research also found the `-a` case is worse than its flag reads. `system prune -a` removes
+every stopped container **first**, so images whose only reference was a stopped container
+become unreferenced within the same command and are then deleted too. A preview built by
+listing images beforehand cannot show them. That is not a race; it is a preview that is
+structurally wrong. `-a` is refused, not deferred.
+
+**21a — the itemised view. Shipping now.** `docker system df -v` gives what the summary
+cannot: per-image `UNIQUE SIZE`, per-volume size and link count, per-container state, build
+cache. Read-only, no deletion. This satisfies the existing comment's own remedy — *"the
+disk-usage panel exists precisely so the operator can decide what to remove themselves, in a
+shell, with the numbers in front of them"* — by giving them the numbers per item instead of
+per category. **3–5 days.**
+
+**21b — reclaim by id. Deferred, and costed honestly.** Not `prune`: `docker rm`/`rmi`/
+`volume rm` against exactly the ids the preview displayed, so anything that became eligible
+afterwards is untouched and the crashed container you were about to debug survives. It needs
+a re-preview-and-refuse-on-diff step, a per-item selection UI, podman fixtures nobody has
+yet, and a rewrite of three prose blocks and a forty-line test suite that currently assert
+the opposite. **1.5–2 weeks**, which is what moved it out of the cheap-wins wave.
+
+**Engine age, without phoning home.** `{{.Server.BuildTime}}` gives an absolute age that
+cannot go stale and cannot be wrong. A baked table of release versions was considered and
+rejected: it needs an owner and a refresh cadence, and a table that rots states something
+false. Age alone is honest and free.
+
+**Size.** 21a: 3–5 days. 21b: 1.5–2 weeks, unscheduled.
 
 ---
 
@@ -1035,7 +1094,8 @@ a cheap item, and treating it as one is how a quarter disappears.
 | # | Item | Reach | Freq | Pain | Moat | **Lev** | **Direct** | Blocked by | Quadrant |
 |---|---|---|---|---|---|---|---|---|---|
 | 19a | **Disk alert** | 100% | continuous | 4 | none | **8** | **0.5 day** | — | Do first |
-| 21 | **Docker housekeeping** | 60% | monthly | 3 | some | **5** | **1 wk** | — | Do first |
+| 21a | **Docker itemised disk view** | 60% | monthly | 3 | some | **5** | **3–5 days** | — | Do first |
+| 21b | **Docker reclaim by id** | 60% | monthly | 3 | some | **5** | 1.5–2 wk | podman fixtures | Deferred |
 | C | **Host facts** | 100% | continuous | 4 | strong | **3 direct / 21 unlocked** | **1.5 wk** | — | Enabler |
 | A | **Durable store** | — | — | — | — | **0 direct / 30 unlocked** | **1.5 wk** | — | Enabler |
 | B | **Job engine** | — | — | — | — | **0 direct / 38 unlocked** | **2.5 wk** | — | Enabler |
@@ -1114,7 +1174,7 @@ because a block that ships nothing visible for a month is a block that needs jus
 | Week | Build | What the user sees |
 |---|---|---|
 | 1 (½ day) | **19a. Disk alert** | A filling disk finally reaches a phone instead of a screen nobody is looking at |
-| 1 | **21. Docker housekeeping** | "You can reclaim 14 GB", itemised, behind the existing typed confirmation |
+| 1 | **21a. Docker itemised disk view** | Which images, volumes and containers are holding the space, per item, with honest per-item sizes |
 | 2–3 | **18. Database operations — Postgres** | Replication lag, connection counts, table bloat, slow queries, on a connection the app already holds |
 
 **Why this order and not the plumbing.** These cost three weeks between them, depend on nothing, and
