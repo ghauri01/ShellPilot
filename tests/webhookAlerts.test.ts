@@ -146,6 +146,31 @@ describe('payload sanitising — what actually leaves the machine', () => {
     expect(out!.threshold).toBeUndefined()
     expect(out!.minutes).toBeUndefined()
   })
+  it('drops a leading @, which is a mass ping and not a unit name', async () => {
+    // Discord's `@everyone` is all unit-name characters, so the character
+    // class alone let it through. systemd itself rejects a name whose prefix
+    // before `@` is empty, so refusing it costs no real unit name.
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      event: 'raised',
+      kind: 'unit-failed',
+      units: ['@everyone.service', '@here', '@@everyone']
+    })
+    expect(out?.units).toEqual(['everyone.service', 'here', 'everyone'])
+  })
+
+  it('keeps @ inside a template unit name', async () => {
+    // Why `@` stays in the class at all. `getty@tty1.service` is a real unit;
+    // mangling it would make the alert name a unit that does not exist.
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      event: 'raised',
+      kind: 'unit-failed',
+      units: ['getty@tty1.service', 'user@1000.service']
+    })
+    expect(out?.units).toEqual(['getty@tty1.service', 'user@1000.service'])
+  })
+
 })
 
 // ---- Delivery policy ----
@@ -324,4 +349,5 @@ describe('a webhook whose URL is taken away', () => {
     expect(calls).toEqual([])
     expect(m.webhookDeliveryStatus().lastError).toMatch(/no webhook url/i)
   })
+
 })

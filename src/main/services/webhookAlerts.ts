@@ -147,6 +147,19 @@ export function sanitisePayload(raw: unknown): AlertPayload | null {
       // A unit name is [A-Za-z0-9._@:-] plus the `\x2d` escapes systemd uses.
       // Anything else is not a unit name, whatever the host claims.
       .map((u) => text(u, MAX_UNIT_NAME).replace(/[^A-Za-z0-9._@:\-\\]/g, ''))
+      // `@` has to stay in the class for template units (`getty@tty1.service`),
+      // but a name that STARTS with it is not one. systemd agrees: it loads
+      // `getty@tty1.service` and rejects `@everyone.service` as "neither a
+      // valid invocation ID nor unit name" — the prefix before `@` cannot be
+      // empty. So dropping a leading `@` costs no real unit name.
+      //
+      // What it buys is the other half of the threat above. `<!channel>` is
+      // Slack's mass ping and the character class already removes it; Discord's
+      // is the literal text `@everyone`, which is all name characters and
+      // survived. Same attack — a unit name on a host we do not trust becoming
+      // a mass ping in a channel that trusts this integration — so it gets the
+      // same answer.
+      .map((u) => u.replace(/^@+/, ''))
       .filter((u) => u.length > 0)
   }
   return out
