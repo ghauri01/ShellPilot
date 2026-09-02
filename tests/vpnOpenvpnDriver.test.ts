@@ -288,7 +288,7 @@ describe('OpenVPN driver argv', () => {
       '--management-query-passwords',
       '--management-hold',
       '--script-security',
-      '0',
+      '1',
       '--pull-filter',
       'reject',
       'script-security',
