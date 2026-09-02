@@ -274,6 +274,8 @@ interface AppState {
   setSidebarWidth: (w: number) => void
   toggleSidebar: () => void
   openServer: (serverId: string, view?: PanelView) => void
+  /** A shell inside a container on that server. See the implementation. */
+  openContainerShell: (serverId: string, containerRef: string) => void
   newSession: (serverId: string) => void
   // A shell on this machine, in a new tab. Never focuses an existing one: a
   // second local shell is a second shell, never the same one.
@@ -735,10 +737,49 @@ export const useApp = create<AppState>((set, get) => ({
   // Focus an existing tab for this server (switching its view), or open one.
   // A server maps to a single tab whose view is switched in place, so the
   // terminal session survives Terminal <-> Monitor <-> Files navigation.
+  // A shell inside a container, in its own tab.
+  //
+  // Focuses an existing tab for the same container rather than opening a
+  // second: two shells in one container is occasionally wanted and always
+  // confusing to arrive at by accident, and the Docker panel's button is one
+  // click from a list that redraws.
+  //
+  // The tab is an SSH tab with a containerRef. What actually runs is built by
+  // buildDockerShellCommand, which validates the reference and throws rather
+  // than escaping it — the ref is never taken as free text.
+  openContainerShell: (serverId, containerRef) => {
+    const server = get().servers.find((s) => s.id === serverId)
+    if (!server) return
+    const existing = get().tabs.find(
+      (t) => t.kind === 'ssh' && t.serverId === serverId && t.containerRef === containerRef
+    )
+    if (existing) {
+      set({ activeTabId: existing.id })
+      return
+    }
+    const tab: Tab = {
+      id: uid('tab'),
+      kind: 'ssh',
+      workspaceId: server.workspaceId,
+      serverId,
+      containerRef,
+      title: containerRef,
+      // Monitor and Files read the host, not the container. Offering them here
+      // would show the host's disk usage under a container's name.
+      view: 'terminal'
+    }
+    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, activity: 'connections' }))
+  },
+
   openServer: (serverId, view = 'terminal') => {
     const server = get().servers.find((s) => s.id === serverId)
     if (!server) return
-    const existing = get().tabs.find((t) => t.kind === 'ssh' && t.serverId === serverId)
+    // `!t.containerRef` matters: a container shell is also an SSH tab for this
+    // server, and without it "open this server" would focus a shell inside a
+    // container instead of one on the host.
+    const existing = get().tabs.find(
+      (t) => t.kind === 'ssh' && t.serverId === serverId && !t.containerRef
+    )
     if (existing) {
       set((s) => ({
         activeTabId: existing.id,

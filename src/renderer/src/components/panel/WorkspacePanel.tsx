@@ -20,7 +20,7 @@ import { ContextMenu, MenuEntry } from '../connections/ContextMenu'
 import { clsx } from '../../lib/format'
 import { EmptyState } from '../common/EmptyState'
 import { TerminalView } from '../terminal/TerminalView'
-import { localTransport, sshTransport } from '../../lib/transport'
+import { containerTransport, localTransport, sshTransport } from '../../lib/transport'
 import { LocalShellMenu } from '../terminal/LocalShellMenu'
 import { PaneGrid } from './PaneGrid'
 import { MonitorView } from './MonitorView'
@@ -135,7 +135,12 @@ function Terminals({ tab, tp }: { tab: Tab; tp: TabPanes | undefined }): React.J
   }
   // A demo server has no transport: TerminalView falls through to the
   // simulated shell, which is what `server` is still passed for.
-  const transport = server.demo === false ? sshTransport(server, setServerStatus) : undefined
+  const transport =
+    server.demo === false
+      ? tab.containerRef
+        ? containerTransport(server, tab.containerRef, setServerStatus)
+        : sshTransport(server, setServerStatus)
+      : undefined
   return <TerminalView transport={transport} server={server} tabId={tab.id} />
 }
 

@@ -18,6 +18,20 @@ export interface SshConnectConfig extends SshHop {
   cols: number
   rows: number
   hops?: SshHop[]
+  /**
+   * Run this instead of the login shell, on a PTY.
+   *
+   * The only caller is a container shell: `docker exec -it <ref> /bin/sh` is a
+   * PTY over a channel, which is the same shape a login shell is — so it is a
+   * transport, not a second terminal.
+   *
+   * MUST be built by a validating builder in shared/ (buildDockerShellCommand),
+   * never assembled from user text. A field on the connect config that accepts
+   * arbitrary strings is "run anything on any saved server" with none of the
+   * confirmation broadcast has, and it would be reachable from anywhere that
+   * can open a tab.
+   */
+  initialCommand?: string
 }
 
 export type SshStatusPhase = 'connecting' | 'hop' | 'authenticating' | 'ready' | 'closed' | 'error'

@@ -589,7 +589,22 @@ export async function sshConnect(wc: WebContents, cfg: SshConnectConfig): Promis
 
     status(wc, sessionId, 'authenticating', { hopCount: cfg.hops?.length ?? 0 })
 
-    target.shell({ term: 'xterm-256color', cols: cfg.cols, rows: cfg.rows }, (err, stream) => {
+    // A container shell is `exec` with a PTY rather than `shell`; everything
+    // after this point — write, resize, close, the close reason — is identical,
+    // which is the whole reason this is one code path and not a second
+    // terminal.
+    //
+    // `initialCommand` is only ever produced by a validating builder in
+    // shared/; see the field's own comment. Main does not re-derive it because
+    // there is nothing to re-derive: it is a constant shape with one validated
+    // identifier in it.
+    const pty = { term: 'xterm-256color', cols: cfg.cols, rows: cfg.rows }
+    type ShellCb = (err: Error | undefined, stream: ClientChannel) => void
+    const open = (cb: ShellCb): void => {
+      if (cfg.initialCommand) target.exec(cfg.initialCommand, { pty }, cb)
+      else target.shell(pty, cb)
+    }
+    open((err, stream) => {
       if (err) {
         status(wc, sessionId, 'error', { message: err.message })
         cleanup(sessionId)

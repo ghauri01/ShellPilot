@@ -176,6 +176,20 @@ interface TabBase {
 export interface SshTab extends TabBase {
   kind: 'ssh'
   serverId: UUID
+  /**
+   * Set when this tab is a shell inside a container on that server, rather than
+   * a shell on the server itself.
+   *
+   * A field on SshTab rather than a fourth tab kind because that is what it
+   * genuinely is: the same connection, the same session machinery, one
+   * different command. A separate kind would fork every switch in the app to
+   * describe a difference that only exists at connect time.
+   *
+   * Only 'terminal' is meaningful with it — the Monitor and Files views read
+   * the host, not the container, and showing the host's disk usage under a
+   * container's name would be worse than not offering them.
+   */
+  containerRef?: string
 }
 
 // A tab backed by a shell on this machine. It has no server, and deliberately

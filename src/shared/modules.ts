@@ -70,7 +70,7 @@ export const MODULES: ModuleDef[] = [
     id: 'docker',
     label: 'Docker',
     detail:
-      'List containers on a server and read their logs, using the docker binary already on the host. Reading only.',
+      'List containers on a server, read their logs, and open a shell inside a running one. Uses the docker binary already on the host — a container shell is arbitrary code execution there.',
     defaultEnabled: false
   },
   {
@@ -134,7 +134,14 @@ export const MODULE_FORBIDDEN_IMPORTS = [
   'services/vault',
   'services/credentialResolver',
   'services/localPty',
-  'services/secrets'
+  'services/secrets',
+  // The renderer's own copy, which is a different file with the same secrets in
+  // it. `store/vault` is not matched by `services/vault`, and a renderer module
+  // importing it can read `VaultEntry.password` straight out of renderer memory
+  // without ever touching main. Verified against every module's import closure
+  // before adding: none reaches it today, so this costs nothing now and closes
+  // the path before something does.
+  'store/vault'
 ] as const
 
 /**

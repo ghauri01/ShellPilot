@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { Container, RefreshCw, ScrollText, TriangleAlert } from 'lucide-react'
+import { Container, RefreshCw, ScrollText, SquareTerminal, TriangleAlert } from 'lucide-react'
+import { useApp } from '../../store/app'
 import { sshHopsFor } from '../../lib/ssh'
 import { clsx } from '../../lib/format'
 import {
@@ -27,6 +28,7 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   const [probe, setProbe] = useState<DockerProbe | null>(null)
   const [loading, setLoading] = useState(false)
   const [logs, setLogs] = useState<{ ref: string; output: string } | null>(null)
+  const openContainerShell = useApp((st) => st.openContainerShell)
 
   const eligible = useMemo(() => servers.filter((s) => s.status !== 'offline'), [servers])
   const server = eligible.find((s) => s.id === serverId) ?? eligible[0]
@@ -151,6 +153,22 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
               <button className="icon-btn sm" title="Last 200 log lines" onClick={() => void openLogs(c)}>
                 <ScrollText size={13} />
               </button>
+              {/* Only for a container that is actually running — `docker exec`
+                  into a stopped one fails with a message the user then has to
+                  go and read, and the button implies it would work.
+                  Deliberately no confirmation dialog: the user picked this
+                  container and pressed a button labelled shell, which is the
+                  approval. A modal here would be the nag that teaches
+                  click-through on the ones that matter. */}
+              {c.state === 'running' && validateContainerRef(c.name) && server && (
+                <button
+                  className="icon-btn sm"
+                  title={`Open a shell in ${c.name}. This runs commands inside the container, on ${server.name}.`}
+                  onClick={() => openContainerShell(server.id, c.name)}
+                >
+                  <SquareTerminal size={13} />
+                </button>
+              )}
             </div>
           ))}
         </>

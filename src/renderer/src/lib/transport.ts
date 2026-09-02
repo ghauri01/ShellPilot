@@ -3,6 +3,7 @@ import type { LocalCloseInfo, LocalShell } from '../../../shared/local'
 import type { Server } from '../types'
 import { sshHopsFor } from './ssh'
 import { withVaultUnlock } from './withVaultUnlock'
+import { buildDockerShellCommand } from '../../../shared/docker'
 
 // Everything a terminal needs to run a session, with no knowledge of whether
 // the bytes come from a socket or a pty. `useTerminalSession` talks only to
@@ -126,6 +127,58 @@ export function sshTransport(
       if (phase === 'connecting') setServerStatus(server.id, 'connecting')
       else setServerStatus(server.id, phase === 'online' ? 'online' : 'offline')
     }
+  }
+}
+
+/**
+ * A shell inside a container, over the server that hosts it.
+ *
+ * The third TerminalTransport, and deliberately a transport rather than a new
+ * terminal: `docker exec -it` is a PTY over a channel, which is exactly what an
+ * SSH login shell is. Everything after connect — write, resize, close, the
+ * close reason, the vault-unlock prompt — is the SSH implementation unchanged.
+ *
+ * The command is built by `buildDockerShellCommand`, which validates the
+ * container reference and throws rather than escaping it. Nothing here accepts
+ * a command from anywhere else.
+ *
+ * Worth stating plainly, because the button is small and the consequence is
+ * not: this is arbitrary code execution on the host. Anyone who can reach the
+ * docker socket is effectively root on most installs. It sits behind a module
+ * that is off by default, and it is not reachable by an agent — the MCP bridge
+ * has no container tool and `execute_command` is gated per server.
+ */
+export function containerTransport(
+  server: Server,
+  containerRef: string,
+  setServerStatus: (id: string, s: Server['status']) => void
+): TerminalTransport {
+  const base = sshTransport(server, setServerStatus)
+  return {
+    ...base,
+    // Distinct from the server's own key so a container shell and a shell on
+    // the host are different sessions rather than one stealing the other.
+    key: `container:${server.id}:${containerRef}`,
+    title: containerRef,
+    subtitle: `container on ${server.name}`,
+    endpoint: `${containerRef} · ${server.host}`,
+    connect: (sessionId, cols, rows) =>
+      withVaultUnlock(`Opening a shell in ${containerRef}`, () =>
+        Promise.resolve(
+          window.shellpilot?.ssh?.connect({
+            sessionId,
+            serverId: server.id,
+            host: server.host,
+            port: server.port,
+            username: server.username,
+            auth: asAuth(server.auth),
+            cols,
+            rows,
+            hops: sshHopsFor(server),
+            initialCommand: buildDockerShellCommand(containerRef)
+          })
+        )
+      )
   }
 }
 
