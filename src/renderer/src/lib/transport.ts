@@ -148,6 +148,41 @@ export function sshTransport(
  * that is off by default, and it is not reachable by an agent — the MCP bridge
  * has no container tool and `execute_command` is gated per server.
  */
+/**
+ * Why a container shell ended, said in terms of the container.
+ *
+ * The generic SSH reason is "shell exited with 1", which for a container shell
+ * is true and useless: the exit code belongs to `docker exec`, not to anything
+ * the user typed. The Docker panel classifies its failures carefully and the
+ * terminal tab did not, so a shell that could not open left a dead pane and a
+ * raw daemon error with no next step.
+ *
+ * The codes are docker's own: 125 is the daemon refusing the command, 126 is
+ * "found it but could not run it", 127 is "no such executable in the image" —
+ * which for `/bin/sh` means a distroless or scratch image that genuinely has no
+ * shell to give.
+ */
+function containerCloseReason(info: SshCloseInfo, ref: string): string {
+  if (info.signal) return sshCloseReason(info)
+  switch (info.code) {
+    case 0:
+      return 'shell exited'
+    case 125:
+      return `docker could not run the command — the daemon refused it, or ${ref} is no longer running`
+    case 126:
+      return `${ref} has a shell that could not be executed (permissions, or a broken interpreter)`
+    case 127:
+      return `${ref} has neither /bin/bash nor /bin/sh — a distroless or scratch image has no shell to open`
+    case 1:
+      // The most common real cause here, and it is a permission story rather
+      // than a container story: the account could list containers because the
+      // panel escalated, and this exec did not inherit that.
+      return `could not exec into ${ref} — usually the docker socket refusing this account`
+    default:
+      return sshCloseReason(info)
+  }
+}
+
 export function containerTransport(
   server: Server,
   containerRef: string,
@@ -177,6 +212,12 @@ export function containerTransport(
     title: containerRef,
     subtitle: `container on ${server.name}`,
     endpoint: `${containerRef} · ${server.host}`,
+    // The close reason is the container's, not the host's. See
+    // containerCloseReason: "shell exited with 127" is true and tells nobody
+    // that the image simply has no shell.
+    onClose: (id, cb) =>
+      window.shellpilot?.ssh?.onClose(id, (info) => cb(containerCloseReason(info, containerRef))) ??
+      ((): void => {}),
     connect: (sessionId, cols, rows) =>
       withVaultUnlock(`Opening a shell in ${containerRef}`, () =>
         Promise.resolve(

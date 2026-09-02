@@ -151,3 +151,47 @@ describe('the shell command itself', () => {
     expect(cmd).toMatch(/\|\|.*\/bin\/sh/)
   })
 })
+
+// A container shell that cannot open used to leave a dead pane saying
+// "shell exited with 1". True, and useless: the exit code belongs to
+// `docker exec`, not to anything the user typed, and the Docker panel
+// classifies its failures carefully while the terminal tab did not.
+describe('why a container shell ended', () => {
+  const src = read('src/renderer/src/lib/transport.ts')
+  const fn = src.slice(src.indexOf('function containerCloseReason'), src.indexOf('export function containerTransport'))
+
+  it('names the distroless case rather than printing 127', () => {
+    // A scratch or distroless image genuinely has no shell to give, and no
+    // amount of retrying changes that.
+    expect(fn).toMatch(/case 127:/)
+    expect(fn).toMatch(/neither \/bin\/bash nor \/bin\/sh/)
+  })
+
+  it('reads exit 1 as the socket refusing this account', () => {
+    // The common real cause, and a permission story rather than a container
+    // story — the panel escalated for the listing and the exec did not inherit
+    // it.
+    expect(fn).toMatch(/case 1:/)
+    expect(fn).toMatch(/docker socket refusing this account/)
+  })
+
+  it('separates the daemon refusing from the image lacking a shell', () => {
+    // 125 and 127 send you to completely different places.
+    expect(fn).toMatch(/case 125:/)
+    expect(fn).toMatch(/daemon refused it/)
+  })
+
+  it('falls back to the ordinary SSH reason for anything unclassified', () => {
+    // Inventing a container explanation for a signal or an unknown code would
+    // be worse than the generic sentence.
+    expect(fn).toMatch(/default:\s*\n\s*return sshCloseReason\(info\)/)
+    expect(fn).toMatch(/if \(info\.signal\) return sshCloseReason\(info\)/)
+  })
+
+  it('is actually used by the container transport', () => {
+    // The helper existing is not the feature; the transport overriding onClose
+    // is.
+    const block = src.slice(src.indexOf('export function containerTransport'))
+    expect(block).toMatch(/containerCloseReason\(info, containerRef\)/)
+  })
+})

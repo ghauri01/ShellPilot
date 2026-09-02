@@ -20,9 +20,9 @@
 // A second definition of "where does this host keep its binaries" or "may this
 // account become root" is a second thing to keep in step with reality, and the
 // answers do not differ by feature.
-import { SUDO_PROBE, resolveBinary } from './docker'
+import { SUDO_PROBE, resolveBinary, validateContainerRef } from './docker'
 
-export type LogSourceKind = 'unit' | 'file'
+export type LogSourceKind = 'unit' | 'file' | 'container'
 
 /** journald's severities, lowest number first. `-p err` means err and worse. */
 export const LOG_PRIORITIES = ['emerg', 'alert', 'crit', 'err', 'warning', 'notice', 'info', 'debug'] as const
@@ -146,6 +146,22 @@ export function validateLogSource(source: LogSource): { ok: true } | { ok: false
       error: 'That is not a time journalctl will take. Try "2 hours ago", "yesterday" or "2024-01-01 09:30".'
     }
   }
+  // A container reference is validated by docker's own rule rather than a
+  // second copy of it here — the two drifting apart is how one of them starts
+  // accepting something the other refuses.
+  if (source.kind === 'container') {
+    if (!validateContainerRef(t)) {
+      return { ok: false, error: 'That is not a container name or id.' }
+    }
+    if (source.priority || (source.since && source.since.trim() !== '')) {
+      // Both are journalctl flags. `docker logs` has --since but not -p, and
+      // silently ignoring a filter the user set is how a pane looks unfiltered
+      // for no visible reason.
+      return { ok: false, error: 'Priority and since are journald filters and do not apply to a container.' }
+    }
+    return { ok: true }
+  }
+
   if (source.kind === 'unit') {
     if (!UNIT_RE.test(t)) {
       return { ok: false, error: 'That is not a unit name. Letters, digits and - _ . @ : only.' }
@@ -224,6 +240,10 @@ export type LogTailIssue =
   | 'file-missing'
   | 'file-denied'
   | 'file-is-dir'
+  | 'no-docker'
+  | 'docker-denied'
+  | 'container-missing'
+  | 'container-stopped'
 
 export interface LogDiagnosis {
   issue: LogTailIssue
@@ -250,7 +270,15 @@ export const LOG_ISSUE_HELP: Record<LogTailIssue, string> = {
     'That path does not exist yet. tail -F keeps waiting and picks the file up the moment it appears — right when you are watching for a log about to be written, and an empty pane forever otherwise.',
   'file-denied':
     'That file exists but this account cannot read it. /var/log/secure and /var/log/audit/audit.log are root-only on most hosts.',
-  'file-is-dir': 'That path is a directory, not a file.'
+  'file-is-dir': 'That path is a directory, not a file.',
+  'no-docker':
+    'No docker on this host. Looked on PATH and in the usual install directories — if it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
+  'docker-denied':
+    'This account cannot reach the docker socket, so it cannot read container logs. Adding it to the docker group grants root-equivalent access on most installs, which is a decision worth making deliberately.',
+  'container-missing':
+    'No container with that name or id on this host. It may have been removed, or the name may belong to a different host.',
+  'container-stopped':
+    'That container is not running. Its logs are still readable — this is history, not a live stream, and nothing new will arrive until it starts again.'
 }
 
 /** Groups systemd's own tmpfiles ACLs grant read on the journal. */
@@ -271,6 +299,23 @@ export function diagnoseLogTail(facts: Record<string, string>): LogDiagnosis {
 
   if (facts.journal === 'missing') return { ...base, issue: 'no-journal', waiting: false }
   if (facts.tailbin === 'missing') return { ...base, issue: 'no-tail', waiting: false }
+
+  if (facts.docker === 'missing') return { ...base, issue: 'no-docker', waiting: false }
+  if (facts.container !== undefined) {
+    // Denial first: a socket this account cannot reach cannot tell us whether
+    // the container exists, so "missing" there would be a guess dressed as a
+    // fact. Root getting us in means the read is no longer denied, which is
+    // what `usedSudo` already carries.
+    if (facts.container === 'denied' && !usedSudo) {
+      return { ...base, issue: 'docker-denied', waiting: false }
+    }
+    if (facts.container === 'absent') return { ...base, issue: 'container-missing', waiting: false }
+    // Not an error, and not styled as one: a stopped container's logs are the
+    // reason you are looking, and `docker logs -f` on one is history that
+    // simply will not grow.
+    if (facts.container === 'stopped') return { ...base, issue: 'container-stopped', waiting: true }
+    return { ...base, issue: 'ok', waiting: false }
+  }
 
   if (facts.file !== undefined) {
     if (facts.file === 'dir') return { ...base, issue: 'file-is-dir', waiting: false }
@@ -476,6 +521,34 @@ export function buildTailCommand(source: LogSource, historyLines = 200): string 
       mark('begin=1'),
       `exec $SP_SUDO "$SP_BIN" --no-pager --output=short-iso -n ${n} -f -u ${t}${p}${since} 2>&1`,
       `else ${mark('journal=missing')}; fi`
+    ].join('; ')
+  }
+
+  if (source.kind === 'container') {
+    // The same preflight discipline the other two kinds get, for the same
+    // reason: `docker logs` on a refused socket, a removed container and a
+    // stopped one all produce a dead pane, and they need three different
+    // sentences.
+    //
+    // `docker inspect -f {{.State.Running}}` answers existence and state in
+    // one call. Its stderr is captured rather than dropped so a socket refusal
+    // is distinguishable from a container that is simply not there.
+    return [
+      resolveBinary('docker'),
+      `if command -v "$SP_BIN" >/dev/null 2>&1; then ${mark('docker=present')}`,
+      `SP_INSPECT=$("$SP_BIN" inspect -f '{{.State.Running}}' ${t} 2>&1)`,
+      `SP_C=absent`,
+      `case "$SP_INSPECT" in true) SP_C=running ;; false) SP_C=stopped ;; ` +
+        `*'permission denied'*|*'Got permission denied'*) SP_C=denied ;; esac`,
+      markVar('container', 'SP_C'),
+      sudoBlock(sudo, `[ "$SP_C" = denied ]`),
+      // Re-ask as root, or the panel reports a denial it has just escalated
+      // past and the stream that follows contradicts the banner above it.
+      `if [ -n "$SP_SUDO" ]; then SP_INSPECT=$($SP_SUDO "$SP_BIN" inspect -f '{{.State.Running}}' ${t} 2>&1); ` +
+        `case "$SP_INSPECT" in true) SP_C=running ;; false) SP_C=stopped ;; esac; ${markVar('container', 'SP_C')}; fi`,
+      mark('begin=1'),
+      `exec $SP_SUDO "$SP_BIN" logs --tail ${n} -f ${t} 2>&1`,
+      `else ${mark('docker=missing')}; fi`
     ].join('; ')
   }
 

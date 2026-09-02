@@ -316,6 +316,13 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
           <button className={clsx('seg-btn', kind === 'file' && 'active')} disabled={running} onClick={() => setKind('file')}>
             File
           </button>
+          <button
+            className={clsx('seg-btn', kind === 'container' && 'active')}
+            disabled={running}
+            onClick={() => setKind('container')}
+          >
+            Container
+          </button>
         </div>
         {/* A picker for units, a free field for paths.
             A unit name typed from memory is how you get "systemd does not know
@@ -329,7 +336,9 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
           className="input grow mono"
           list={kind === 'unit' ? 'sp-unit-list' : undefined}
           placeholder={
-            kind === 'unit'
+            kind === 'container'
+              ? 'new_system-redis-1'
+              : kind === 'unit'
               ? units.length
                 ? `nginx.service — ${units.length} on this host`
                 : 'nginx.service'
