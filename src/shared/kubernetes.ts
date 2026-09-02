@@ -300,9 +300,28 @@ export function buildK8sReadCommand(context?: string, namespace?: string): strin
   const t = T
   const resolve = k8sResolve()
   const k = K
+  // PHASE is not what kubectl shows, and the difference is the whole point of
+  // this column.
+  //
+  // `.status.phase` for a CrashLoopBackOff pod is literally `Running` — the pod
+  // is running, it is the container inside that keeps dying. kubectl's own
+  // STATUS column shows the container's waiting/terminated REASON instead, which
+  // is why kubectl says `CrashLoopBackOff` and `ImagePullBackOff` where the
+  // phase says `Running` and `Pending`.
+  //
+  // Caught against a real cluster: a deliberately crashlooping pod with three
+  // restarts was reported as `Running`, which is the one word that makes an
+  // operator stop looking. `podTone` keys on CrashLoopBackOff and could never
+  // have matched either.
   const cols =
     `custom-columns=NS:.metadata.namespace,NAME:.metadata.name,` +
     `READY:.status.containerStatuses[*].ready,PHASE:.status.phase,` +
+    // How many containers the pod ASKED for. A pod that never scheduled has no
+    // containerStatuses at all, so counting those gives 0/0 where kubectl says
+    // 0/1 — it falls back to the spec, and so do we.
+    `WANT:.spec.containers[*].name,` +
+    `WAIT:.status.containerStatuses[*].state.waiting.reason,` +
+    `TERM:.status.containerStatuses[*].state.terminated.reason,` +
     `RESTARTS:.status.containerStatuses[*].restartCount,NODE:.spec.nodeName,START:.status.startTime`
   return [
     resolve,
@@ -347,14 +366,23 @@ function cleanCell(v: string): string {
   return v === '<none>' || v === '<nil>' ? '' : v
 }
 
+/** First real reason in a comma-joined custom-columns cell, or null. */
+function firstReason(cell: string): string | null {
+  for (const r of cleanCell(cell).split(',')) {
+    const v = r.trim()
+    if (v !== '' && v !== '<none>') return v
+  }
+  return null
+}
+
 function parsePods(text: string): K8sPod[] {
   const pods: K8sPod[] = []
   for (const raw of text.split('\n')) {
     const line = raw.trim()
     if (line === '' || looksLikeError(line)) continue
     const f = line.split(/\s+/)
-    if (f.length < 7) continue
-    const [ns, name, ready, phase, restarts, node, start] = f
+    if (f.length < 10) continue
+    const [ns, name, ready, phase, want, wait, term, restarts, node, start] = f
     // READY comes back as "true,true" or "true,false"; kubectl's own table
     // shows "2/2". Reconstructing it keeps the column meaning what operators
     // expect rather than showing raw booleans.
@@ -364,8 +392,13 @@ function parsePods(text: string): K8sPod[] {
     pods.push({
       namespace: ns,
       name,
-      ready: flags.length ? `${readyCount}/${flags.length}` : '0/0',
-      status: phase,
+      ready: flags.length
+        ? `${readyCount}/${flags.length}`
+        : `0/${cleanCell(want).split(',').filter(Boolean).length || 0}`,
+      // Reason first, phase as the fallback — the order kubectl itself uses.
+      // A multi-container pod reports one reason per container; the first
+      // non-empty one is the one that explains why the pod is not ready.
+      status: firstReason(wait) ?? firstReason(term) ?? phase,
       restarts: restartList.length ? Math.max(...restartList) : 0,
       age: cleanCell(start),
       node: cleanCell(node)

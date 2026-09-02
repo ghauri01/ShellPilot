@@ -14,6 +14,32 @@ import {
 // with a zero-length list. "No pods" for a permissions failure is the same lie
 // the Docker module is shaped to avoid.
 
+
+// A pod row in the column order `buildK8sReadCommand` actually emits:
+//   NS NAME READY PHASE WANT WAIT TERM RESTARTS NODE START
+//
+// These fixtures previously had seven columns because that is what I guessed
+// kubectl printed. Running the real command against a real cluster showed ten,
+// and showed that `.status.phase` is `Running` for a CrashLoopBackOff pod —
+// which is why STATUS now comes from the container's waiting/terminated reason
+// and the phase is only a fallback.
+const podRow = (o: {
+  ns?: string; name: string; ready?: string; phase?: string; want?: string
+  wait?: string; term?: string; restarts?: string; node?: string; start?: string
+}): string =>
+  [
+    o.ns ?? 'default',
+    o.name,
+    o.ready ?? 'true',
+    o.phase ?? 'Running',
+    o.want ?? 'app',
+    o.wait ?? '<none>',
+    o.term ?? '<none>',
+    o.restarts ?? '0',
+    o.node ?? 'node-1',
+    o.start ?? '2026-09-01T10:00:00Z'
+  ].join('   ')
+
 const out = (parts: Record<string, string>): string =>
   [
     parts.version ?? '{"clientVersion":{"gitVersion":"v1.29.2"}}',
@@ -32,9 +58,9 @@ describe('reading a cluster', () => {
     ctx: '*         prod-eks    prod-eks    admin      default\n          staging     staging     admin      default',
     ns: 'default\nkube-system\napp',
     all: [
-      'default     web-7d9f          true,true    Running   0,0   node-1   2026-09-01T10:00:00Z',
-      'kube-system coredns-abc       true         Running   3     node-2   2026-08-20T09:00:00Z',
-      'app         worker-1          true,false   Running   0,12  node-1   2026-09-01T11:00:00Z'
+      podRow({ name: 'web-7d9f', ready: 'true,true', want: 'a,b', restarts: '0,0' }),
+      podRow({ ns: 'kube-system', name: 'coredns-abc', restarts: '3', node: 'node-2' }),
+      podRow({ ns: 'app', name: 'worker-1', ready: 'true,false', want: 'a,b', restarts: '0,12' })
     ].join('\n')
   })
 
@@ -77,7 +103,7 @@ describe('RBAC, which is what makes this different from docker', () => {
         ctx: '*  prod  prod  admin  default',
         ns: 'default',
         all: 'Error from server (Forbidden): pods is forbidden: User "dev" cannot list resource "pods" in API group "" at the cluster scope',
-        nsPods: 'default  web-1  true  Running  0  node-1  2026-09-01T10:00:00Z'
+        nsPods: podRow({ name: 'web-1' })
       }),
       0
     )
@@ -224,7 +250,7 @@ describe('mistakes inherited from the modules written before this one', () => {
       '===SHELLPILOT-NS===',
       'default',
       '===SHELLPILOT-PODS-ALL===',
-      'default  web-1  true  Running  0  node-1  2026-09-01T10:00:00Z',
+      podRow({ name: 'web-1' }),
       '===SHELLPILOT-PODS-NS===',
       ''
     ].join('\r\n')
@@ -242,8 +268,8 @@ describe('mistakes inherited from the modules written before this one', () => {
         ctx: '*  prod  prod  admin  default',
         ns: 'default\nerror-reporting\nunauthorized-probe',
         all: [
-          'error-reporting    forbidden-checker   true  Running  0  node-1  2026-09-01T10:00:00Z',
-          'unauthorized-probe timeout-watchdog    true  Running  0  node-2  2026-09-01T10:00:00Z'
+          podRow({ ns: 'error-reporting', name: 'forbidden-checker' }),
+          podRow({ ns: 'unauthorized-probe', name: 'timeout-watchdog', node: 'node-2' })
         ].join('\n')
       }),
       0
@@ -968,5 +994,57 @@ describe('an empty answer is not a denied one, for every resource', () => {
     const u = parseK8sUsage(block({ TOPPODS: EMPTY, TOPNODES: EMPTY }), 0)
     expect(u.pods).toEqual({ ok: true, items: [] })
     expect(u.nodes).toEqual({ ok: true, items: [] })
+  })
+})
+
+// Found by running the real command against a real k3s cluster with a
+// deliberately crashlooping pod in it. No fixture caught this because every
+// fixture encoded my own guess at kubectl's output.
+describe('status is what kubectl shows, not the pod phase', () => {
+  it('reports CrashLoopBackOff rather than Running', () => {
+    // `.status.phase` for a crashlooping pod is literally `Running` — the POD
+    // is running, the container inside keeps dying. Reporting the phase showed
+    // a pod with five restarts as healthy, which is the one word that makes an
+    // operator stop looking. Verified against a real cluster: kubectl said
+    // `Error`, we said `Running`.
+    const r = parseK8sOutput(
+      out({ all: podRow({ name: 'boom', ready: 'false', phase: 'Running', term: 'Error', restarts: '5' }) }),
+      0
+    )
+    expect(r.ok && r.pods[0].status).toBe('Error')
+  })
+
+  it('prefers a waiting reason over a terminated one', () => {
+    // ImagePullBackOff is a waiting reason and it is what kubectl shows.
+    const r = parseK8sOutput(
+      out({ all: podRow({ name: 'pull', ready: 'false', phase: 'Pending', wait: 'ImagePullBackOff' }) }),
+      0
+    )
+    expect(r.ok && r.pods[0].status).toBe('ImagePullBackOff')
+  })
+
+  it('falls back to the phase when no container has a reason', () => {
+    const r = parseK8sOutput(out({ all: podRow({ name: 'fine' }) }), 0)
+    expect(r.ok && r.pods[0].status).toBe('Running')
+  })
+
+  it('takes the first real reason in a multi-container pod', () => {
+    // custom-columns joins per container. One healthy container must not hide
+    // the one that is failing.
+    const r = parseK8sOutput(
+      out({ all: podRow({ name: 'multi', ready: 'true,false', want: 'a,b', wait: '<none>,CrashLoopBackOff' }) }),
+      0
+    )
+    expect(r.ok && r.pods[0].status).toBe('CrashLoopBackOff')
+  })
+
+  it('counts containers from the spec when the pod never scheduled', () => {
+    // A Pending pod has no containerStatuses at all, so counting those gave
+    // 0/0 where kubectl says 0/1 — it falls back to the spec, and so do we.
+    const r = parseK8sOutput(
+      out({ all: podRow({ name: 'pending', ready: '<none>', phase: 'Pending', want: 'only', node: '<none>' }) }),
+      0
+    )
+    expect(r.ok && r.pods[0].ready).toBe('0/1')
   })
 })
