@@ -128,9 +128,16 @@ function FleetSamplerLine(): React.JSX.Element | null {
     const since = status.lastSweepAt
       ? `nothing has been checked for ${duration(status.lastSweepAt)}`
       : 'no pass has ever run'
+    // No longer "turn this off and on again". That was a workaround for a
+    // missing wire — unlocking the vault did not re-arm the sampler — and
+    // telling someone to power-cycle a feature is an admission, not an
+    // instruction. Unlock now resumes checking on its own, so reaching this
+    // state means something genuinely unexpected and the honest thing is to
+    // say so rather than to prescribe a ritual.
     return (
       <div className="s-desc danger">
-        {`Switched on, but nothing is scheduled — ${since}. Turn this off and on again to restart it.`}
+        {`Switched on, but nothing is scheduled — ${since}. This should not happen; ` +
+          'switching it off and on will restart it, and it is worth reporting.'}
       </div>
     )
   }

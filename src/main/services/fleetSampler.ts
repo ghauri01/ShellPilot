@@ -185,6 +185,28 @@ export class FleetSampler {
     return entry ? { entry, intervalMs: this.cfg.intervalMs } : undefined
   }
 
+  /**
+   * Re-arm after an external condition changed.
+   *
+   * `shouldRun()` is only consulted at configure() and at the end of a sweep.
+   * A vault that locks mid-sweep fails that check, the loop stops — correctly,
+   * since it cannot resolve a credential — and then nothing was telling it the
+   * vault had come back. It stayed stopped until the user toggled the setting,
+   * which is a workaround the settings pane was literally instructing people to
+   * perform: "Turn this off and on again to restart it."
+   *
+   * That line was honest about the state and wrong about the remedy. Telling a
+   * user to power-cycle a feature is an admission that something is not wired,
+   * not an instruction worth shipping.
+   *
+   * Idempotent: a call while sweeping or already scheduled does nothing, so
+   * every unlock path can call it without coordinating.
+   */
+  resume(): void {
+    if (this.disposed || this.sweeping || this.timer !== null) return
+    if (this.shouldRun()) this.schedule(0)
+  }
+
   status(): FleetSamplerStatus {
     const base = {
       targetCount: this.cfg.targets.length,

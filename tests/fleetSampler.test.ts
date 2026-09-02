@@ -514,3 +514,67 @@ describe('what the sampler remembers for the MCP bridge', () => {
     expect(h.sampler.lookup('a')).toBeUndefined()
   })
 })
+
+// Unlocking the vault must resume checking.
+//
+// Found by installing 0.9.0 and unlocking: the sampler stops when the vault
+// locks — correctly, it cannot resolve a credential — but nothing told it the
+// vault had come back. It stayed stopped, and the settings pane instructed the
+// user to turn the feature off and on again. That is a workaround for a missing
+// wire, not a remedy, and shipping it as advice was worse than the bug.
+describe('coming back after the vault was locked', () => {
+  it('resumes on unlock without the user touching the setting', async () => {
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.calls).toEqual([fleetKey('a')])
+
+    // Vault locks; the next scheduled sweep declines to run and stops the loop.
+    h.setUnlocked(false)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.sampler.status()).toMatchObject({ running: false, idleReason: 'vault-locked' })
+    const afterLock = h.calls.length
+
+    // Unlock alone changes nothing until something tells the sampler.
+    h.setUnlocked(true)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(h.calls.length, 'a bare unlock cannot restart it by itself').toBe(afterLock)
+
+    h.sampler.resume()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.calls.length).toBeGreaterThan(afterLock)
+    expect(h.sampler.status().running).toBe(true)
+  })
+
+  it('is idempotent, so every unlock path can call it', async () => {
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    const before = h.calls.length
+    h.sampler.resume()
+    h.sampler.resume()
+    await vi.advanceTimersByTimeAsync(0)
+    // Already scheduled: resume must not stack a second sweep on top.
+    expect(h.calls.length).toBe(before)
+  })
+
+  it('does nothing while the vault is still locked', async () => {
+    const h = harness()
+    h.setUnlocked(false)
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    h.sampler.resume()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.calls).toEqual([])
+  })
+
+  it('does nothing after dispose', async () => {
+    const h = harness()
+    h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    h.sampler.dispose()
+    const after = h.calls.length
+    h.sampler.resume()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.calls.length).toBe(after)
+  })
+})

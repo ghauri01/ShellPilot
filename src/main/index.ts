@@ -1055,7 +1055,23 @@ setVpnPrompter((req) => {
 // ---- Vault ----
 ipcMain.handle('vault:status', () => vaultStatus())
 ipcMain.handle('vault:create', (_e, password: string) => vaultCreate(password))
-ipcMain.handle('vault:unlock', (_e, password: string) => vaultUnlock(password))
+// Every unlock path re-arms background checking.
+//
+// The sampler stops when the vault locks — correctly, it cannot resolve a
+// credential — but nothing was telling it the vault had come back, so it stayed
+// stopped and the settings pane told the user to turn the feature off and on
+// again. That is a workaround for a missing wire, not a remedy, and shipping it
+// as instructions was worse than the bug.
+//
+// `resume()` is idempotent, so each path calls it without coordinating.
+const resumeChecksAfterUnlock = (r: { ok: boolean }): { ok: boolean } => {
+  if (r.ok) fleetSampler.resume()
+  return r
+}
+
+ipcMain.handle('vault:unlock', async (_e, password: string) =>
+  resumeChecksAfterUnlock(await vaultUnlock(password))
+)
 // Auto-lock needs the renderer told, or the UI keeps showing an unlocked vault
 // it can no longer read. The biometric session key goes with it.
 setVaultAutoLock(15, () => {
@@ -1096,7 +1112,7 @@ ipcMain.handle('vault:bio-enable', (_e, scope: 'session' | 'persistent' = 'sessi
 ipcMain.handle('vault:bio-scope', () => biometricScope())
 ipcMain.handle('vault:set-auto-lock', (_e, minutes: number) => setVaultAutoLock(minutes))
 ipcMain.handle('vault:bio-disable', () => disableBiometricUnlock())
-ipcMain.handle('vault:bio-unlock', () => biometricUnlock())
+ipcMain.handle('vault:bio-unlock', async () => resumeChecksAfterUnlock(await biometricUnlock()))
 
 // ---- Workspace locks ----
 ipcMain.handle('wslock:ids', () => wsLockIds())
