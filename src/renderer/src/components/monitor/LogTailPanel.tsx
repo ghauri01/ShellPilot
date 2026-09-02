@@ -125,6 +125,35 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, unitHost?.id])
 
+  // Containers on the selected host, for the same reason units are a picker —
+  // and here it is worse than a convenience. The Docker panel groups by compose
+  // project and shows the SERVICE name (`redis`), while the container is
+  // actually `new_system-redis-1`. Someone reading one panel and typing into
+  // the other gets "No such container", which is a correct answer to a question
+  // they did not mean to ask.
+  const [containers, setContainers] = useState<string[]>([])
+  useEffect(() => {
+    if (kind !== 'container' || !unitHost) {
+      setContainers([])
+      return
+    }
+    let live = true
+    void (
+      window.shellpilot?.docker as
+        | { list?: (cfg: unknown) => Promise<{ ok: boolean; containers?: { name: string }[] }> }
+        | undefined
+    )
+      ?.list?.(cfgFor(unitHost))
+      .then((r) => {
+        if (live && r?.ok && r.containers) setContainers(r.containers.map((c) => c.name))
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, unitHost?.id])
+
   const colourOf = useMemo(() => {
     const m = new Map<string, string>()
     eligible.forEach((s, i) => m.set(s.id, HOST_COLOURS[i % HOST_COLOURS.length]))
@@ -334,10 +363,12 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
             Paths stay a plain field — there is no bounded list to offer. */}
         <input
           className="input grow mono"
-          list={kind === 'unit' ? 'sp-unit-list' : undefined}
+          list={kind === 'unit' ? 'sp-unit-list' : kind === 'container' ? 'sp-container-list' : undefined}
           placeholder={
             kind === 'container'
-              ? 'new_system-redis-1'
+              ? containers.length
+                ? `${containers[0]} — ${containers.length} on this host`
+                : 'new_system-redis-1'
               : kind === 'unit'
               ? units.length
                 ? `nginx.service — ${units.length} on this host`
@@ -351,6 +382,13 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
           }}
           disabled={running}
         />
+        {kind === 'container' && (
+          <datalist id="sp-container-list">
+            {containers.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+        )}
         {kind === 'unit' && (
           <datalist id="sp-unit-list">
             {units.map((u) => (

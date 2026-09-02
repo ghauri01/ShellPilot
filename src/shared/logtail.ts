@@ -544,8 +544,20 @@ export function buildTailCommand(source: LogSource, historyLines = 200): string 
       sudoBlock(sudo, `[ "$SP_C" = denied ]`),
       // Re-ask as root, or the panel reports a denial it has just escalated
       // past and the stream that follows contradicts the banner above it.
+      // The re-ask needs a default. Without one, a container that does not exist
+      // stayed `denied` from the unprivileged attempt, the diagnosis saw
+      // denied+usedSudo and called it `ok`, and `docker logs` then printed
+      // "No such container" straight into the pane as if it were a log line.
+      // Reported from a real host: the panel showed a compose service name,
+      // that name is not the container's, and the tail said nothing useful.
       `if [ -n "$SP_SUDO" ]; then SP_INSPECT=$($SP_SUDO "$SP_BIN" inspect -f '{{.State.Running}}' ${t} 2>&1); ` +
-        `case "$SP_INSPECT" in true) SP_C=running ;; false) SP_C=stopped ;; esac; ${markVar('container', 'SP_C')}; fi`,
+        `case "$SP_INSPECT" in true) SP_C=running ;; false) SP_C=stopped ;; *) SP_C=absent ;; esac; ` +
+        `${markVar('container', 'SP_C')}; fi`,
+      // Do not follow a container that is not there. `tail -F` waits for a file
+      // because a file appearing is a thing that happens; a container id does
+      // not materialise, so running `docker logs` on it only produces a daemon
+      // error dressed as content.
+      `if [ "$SP_C" = absent ]; then ${mark('begin=1')}; exit 0; fi`,
       mark('begin=1'),
       `exec $SP_SUDO "$SP_BIN" logs --tail ${n} -f ${t} 2>&1`,
       `else ${mark('docker=missing')}; fi`

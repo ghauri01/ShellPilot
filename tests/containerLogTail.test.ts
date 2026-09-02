@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildTailCommand, validateLogSource, diagnoseLogTail, LOG_ISSUE_HELP } from '../src/shared/logtail'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 // Following a container's logs, rather than reading 200 static lines.
 //
@@ -103,5 +105,54 @@ describe('what the panel says', () => {
 
   it('does not describe a stopped container as an error', () => {
     expect(LOG_ISSUE_HELP['container-stopped']).toMatch(/history, not a live stream/)
+  })
+})
+
+// Reported from a real host: the Container tab was given `redis` and both hosts
+// answered "Error response from daemon: No such container: redis" — printed
+// into the pane as though it were a log line, with no diagnosis at all.
+//
+// Three separate faults, two of them in this file's preflight.
+describe('a container that is not there', () => {
+  it('does not stay "denied" after root proves it absent', () => {
+    // THE bug. The unprivileged inspect was refused, so SP_C=denied. The
+    // re-ask as root had no default branch, so a "No such container" answer
+    // left SP_C at denied — and diagnose() saw denied + usedSudo and called the
+    // whole thing `ok`. That is why no banner appeared.
+    const cmd = buildTailCommand(src('web'))
+    const reask = cmd.slice(cmd.indexOf('if [ -n "$SP_SUDO" ]'))
+    expect(reask).toMatch(/\*\) SP_C=absent ;;/)
+  })
+
+  it('refuses to follow a container that does not exist', () => {
+    // `tail -F` waits for a file because a file appearing is a thing that
+    // happens. A container id does not materialise, so `docker logs` on it
+    // only produces a daemon error dressed as content.
+    const cmd = buildTailCommand(src('web'))
+    expect(cmd).toMatch(/if \[ "\$SP_C" = absent \]; then .* exit 0; fi/)
+    // And it still marks begin, so the tailer settles a diagnosis rather than
+    // treating it as a preflight that never finished.
+    const guard = cmd.slice(cmd.indexOf('if [ "$SP_C" = absent ]'))
+    expect(guard).toMatch(/begin=1/)
+  })
+
+  it('diagnoses absent even when root was used', () => {
+    expect(diagnoseLogTail({ docker: 'present', container: 'absent', sudo: '1' }).issue).toBe(
+      'container-missing'
+    )
+  })
+
+  it('offers the container names that actually exist', () => {
+    // The third fault, and the one that caused the other two to be seen: the
+    // Docker panel groups by compose project and shows the SERVICE name
+    // (`redis`) while the container is `new_system-redis-1`. Reading one panel
+    // and typing into the other is a correct answer to a question nobody meant
+    // to ask.
+    const panel = readFileSync(
+      join(__dirname, '..', 'src/renderer/src/components/monitor/LogTailPanel.tsx'),
+      'utf8'
+    )
+    expect(panel).toMatch(/sp-container-list/)
+    expect(panel).toMatch(/docker as[\s\S]{0,200}list\?:/)
   })
 })
