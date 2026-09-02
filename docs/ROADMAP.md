@@ -753,12 +753,66 @@ count of pending updates and of *security* updates specifically, the reboot-requ
 virtualisation type, and the machine's own idea of its uptime. Stored in A, surfaced through the
 fleet search query surface that already exists.
 
+**The finding that changes item 17, and it is not a detail.** "Security updates, counted
+separately" is item 17's headline number. Research against the real package managers says
+it cannot always exist:
+
+| Manager | Pending | Security | Why |
+|---|---|---|---|
+| apt | yes, from cache, no root | **yes** | `apt-check`, or origins ending `-security`. Best-supported path. |
+| zypper | yes | **yes, best of any** | SUSE genuinely models patches by category. |
+| dnf / yum | yes (exit 100 means updates) | **only where `updateinfo` exists** | Rocky and Alma publish it, Fedora publishes it, CentOS Stream historically does not, and many internal mirrors strip it. When it is missing dnf returns **zero rows**, which is indistinguishable from "no security updates". |
+| pacman | yes, from the local sync DB | **never** | Arch has no security channel. |
+| apk | yes | **never** | Alpine tracks secfixes in build metadata, not the installed index. |
+
+So on two of five managers the number can never exist, and on a third it silently reads
+zero during exactly the week it matters. A silent zero is the precise failure this item
+exists to prevent, so `unsupported` is a first-class status distinct from both `0` and
+"not checked", it must render differently in the table, in the fleet-search coverage
+sentence and in anything an agent is told — and item 17 must promise "security updates
+where the distribution publishes them", not "security updates".
+
+Detecting the dnf case is required work, not a nicety: probe `updateinfo summary`, and if
+it answers nothing while pending updates exist, the security count is `unsupported`.
+
+**Three things already exist and shrink the probe.** Kernel, total memory and uptime are
+already in `HostMetrics`. Do not collect them twice.
+
+**Two mechanical traps.** `metrics.ts`'s `exec` discards the exit code, and exit status is
+the API for three of these probes — dnf signals updates with 100, zypper reboot-needed
+with 102, `needs-restarting -r` with 1. And `section()` cuts at the next `__MARKER__`, so
+a `PRETTY_NAME` containing one truncates its own section and shifts every later fact.
+`cron.ts` already solved the second by accumulating status in a shell variable and
+printing it once at the end, where nothing read out of a file can forge it. Copy cron,
+not metrics.
+
+**Never mutate.** No `apt update`, no `pacman -Sy`, no `dnf makecache`. All three hit the
+network, take seconds, and `pacman -Sy` creates the partial-upgrade state that is the
+classic way to break an Arch box. Read the cache and **report its age** — "0 pending
+updates" from metadata refreshed forty days ago is a lie of the exact kind this item
+forbids. That is a second staleness axis: the fact's own age, and the age of the data
+behind it.
+
+**Never source the file.** `. /etc/os-release` on a host under an attacker's control is
+arbitrary code execution as the SSH user. Read it and parse in TypeScript.
+
 **What is genuinely hard.** The same `null`-is-not-empty discipline the monitor and fleet search
 already enforce, applied where it is most tempting to skip. "No pending updates" and "could not
 check for updates" must stay visibly different, or the feature lies during exactly the week a CVE
 matters. A host whose facts are four days stale should say so rather than presenting them as now.
 
-**Size.** 1–2 weeks. Item 17 cannot start without it; items 24, 25 and 26 are much weaker without it.
+**Consent, decided.** This gets its own `hostFacts` capability rather than widening
+`serverMetrics`. "How many unpatched security updates, and which kernel" is a
+vulnerability report about the host and is arguably the most attacker-useful thing the
+bridge could return — materially different from "CPU and memory". The 0.8.0 finding above
+was exactly a consent that had drifted wider than its grid text, and the standard it set
+is that the grid must describe what is actually taken. A new capability backfills to DENY
+for every existing group, which is the correct default here.
+
+**Size.** Revised to **2–3 weeks**, and honestly 1.5 only if apt and dnf ship first with
+the other three managers marked `unsupported` on day one. The roadmap assumed the
+collection path was the work. It is not — the distribution matrix and the honesty plumbing
+are. Item 17 cannot start without it; items 24, 25 and 26 are much weaker without it.
 
 ---
 
