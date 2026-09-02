@@ -138,7 +138,7 @@ function Terminals({ tab, tp }: { tab: Tab; tp: TabPanes | undefined }): React.J
   const transport =
     server.demo === false
       ? tab.containerRef
-        ? containerTransport(server, tab.containerRef, setServerStatus)
+        ? containerTransport(server, tab.containerRef, setServerStatus, tab.containerSudo === true)
         : sshTransport(server, setServerStatus)
       : undefined
   return <TerminalView transport={transport} server={server} tabId={tab.id} />

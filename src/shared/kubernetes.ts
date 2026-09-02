@@ -132,7 +132,11 @@ export type K8sFailure =
   | 'unknown'
 
 export const K8S_FAILURE_HELP: Record<K8sFailure, string> = {
-  'not-installed': 'kubectl is not on this host, or not on the PATH an SSH session gets.',
+  // Says where we looked, because we now look. The old wording — "or not on the
+  // PATH an SSH session gets" — described a limitation that resolveBinary
+  // removed, so it sent people to check a PATH that had already been searched.
+  'not-installed':
+    'No kubectl on this host. Looked on PATH and in /usr/bin, /usr/local/bin, /snap/bin, /opt/homebrew/bin, /usr/sbin, plus the k3s, rke2 and microk8s wrappers. If it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
   'no-kubeconfig':
     'kubectl is installed but found no kubeconfig. It looks in $KUBECONFIG then ~/.kube/config, and an SSH session may not have the same environment as a login shell.',
   'no-cluster':

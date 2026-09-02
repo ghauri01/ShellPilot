@@ -501,3 +501,59 @@ export function buildTailCommand(source: LogSource, historyLines = 200): string 
     `else ${mark('tailbin=missing')}; fi`
   ].join('; ')
 }
+
+/**
+ * List the units on a host, so the unit field can be chosen rather than typed.
+ *
+ * Typing a unit name from memory is how you get "systemd does not know this
+ * unit" — which the panel now says, but not making the mistake beats explaining
+ * it. `list-units --all` includes loaded-but-inactive units, which is most of
+ * what you want to tail: a service that just died is exactly the one being
+ * investigated.
+ *
+ * `--no-legend --plain` so there is no header, no bullet column and no
+ * "N loaded units listed" footer to strip.
+ */
+export function buildUnitListCommand(): string {
+  return [
+    resolveBinary('systemctl'),
+    // --no-pager, or systemctl pipes into less and the exec never returns.
+    `"$SP_BIN" list-units --type=service --all --no-legend --plain --no-pager 2>&1`
+  ].join('; ')
+}
+
+export interface UnitChoice {
+  name: string
+  /** loaded | not-found | masked — a not-found unit cannot be tailed. */
+  load: string
+  active: string
+  sub: string
+  description: string
+}
+
+/**
+ * Parse `systemctl list-units --plain --no-legend`.
+ *
+ * Rejects by SHAPE, not content: a unit named `error-reporter.service` is an
+ * ordinary thing to have, and matching an error word against data lines is the
+ * bug that ate a namespace list in the Kubernetes module.
+ */
+export function parseUnitList(output: string): UnitChoice[] {
+  const units: UnitChoice[] = []
+  for (const raw of output.split('\n')) {
+    const line = raw.trim()
+    if (line === '') continue
+    const f = line.split(/\s+/)
+    // UNIT LOAD ACTIVE SUB DESCRIPTION… — a real row has at least four columns
+    // and its first ends in .service.
+    if (f.length < 4 || !/\.service$/.test(f[0])) continue
+    units.push({
+      name: f[0],
+      load: f[1],
+      active: f[2],
+      sub: f[3],
+      description: f.slice(4).join(' ')
+    })
+  }
+  return units.sort((a, b) => a.name.localeCompare(b.name))
+}

@@ -56,6 +56,10 @@ import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSou
 import { DockerReader } from './services/docker'
 import { buildDockerLogsCommand } from '../shared/docker'
 import type { DockerAction, DockerLogsOptions } from '../shared/docker'
+
+// The one refusal worth retrying as root. Deliberately narrow: a container that
+// simply has no logs, or a dead daemon, is not something root fixes.
+const DOCKER_SOCKET_REFUSED = /permission denied while trying to connect|got permission denied.*docker/i
 import { KubernetesReader } from './services/kubernetes'
 import { buildK8sLogsCommand } from '../shared/kubernetes'
 import type { K8sRolloutTarget } from '../shared/kubernetes'
@@ -676,6 +680,16 @@ ipcMain.handle('logtail:stop', (_e, tailId: string) => {
 // Pause holds the stream and leaves the SSH channel open, so narrowing what you
 // are looking at does not cost the buffer you were reading. Stop is still the
 // thing that ends the remote command.
+// The unit picker's source. A unit name typed from memory is how you get
+// "systemd does not know this unit", and not making the mistake beats
+// explaining it well.
+ipcMain.handle('logtail:units', (_e, cfg: unknown) =>
+  logTailer.listUnits(
+    (c, command, timeoutMs) =>
+      sshExec(resolveChainSecrets(c as SshConnectConfig), command, timeoutMs, false),
+    cfg
+  )
+)
 ipcMain.handle('logtail:pause', (_e, tailId: string) => logTailer.pause(tailId))
 ipcMain.handle('logtail:resume', (_e, tailId: string) => logTailer.resume(tailId))
 
@@ -788,20 +802,36 @@ ipcMain.handle(
   const safeLines = Number.isFinite(n) ? n : 200
   // buildDockerLogsCommand throws on an invalid reference rather than escaping
   // it; let that surface as a rejected invoke rather than running anything.
-  const r = await sshExec(
-    resolveChainSecrets(cfg as SshConnectConfig),
-    // Every option re-derived from the raw value rather than trusted: these
-    // arrive as structured-clone values with no runtime type, and `since` is
-    // interpolated, so the builder's own allowlist is the thing that has to see
-    // it. `=== true` rather than truthiness for the same reason.
-    buildDockerLogsCommand(ref, safeLines, false, {
-      sudo: opts?.sudo === true,
-      timestamps: opts?.timestamps === true,
-      since: opts?.since
-    }),
-    20_000
-  )
-  return { ok: r.ok, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error }
+  // Every option re-derived from the raw value rather than trusted: these
+  // arrive as structured-clone values with no runtime type, and `since` is
+  // interpolated, so the builder's own allowlist is the thing that has to see
+  // it. `=== true` rather than truthiness for the same reason.
+  const logOpts = {
+    timestamps: opts?.timestamps === true,
+    since: opts?.since
+  }
+  const readLogs = async (
+    sudo: boolean
+  ): Promise<{ ok: boolean; output: string; error?: string }> => {
+    const r = await sshExec(
+      resolveChainSecrets(cfg as SshConnectConfig),
+      buildDockerLogsCommand(ref, safeLines, false, { ...logOpts, sudo }),
+      20_000
+    )
+    return { ok: r.ok, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error }
+  }
+
+  // Same failover the container LIST already had, and it has to be here too:
+  // reading the list as root and then refusing to read a log is one feature
+  // behaving as two. Reported by an operator whose containers listed fine and
+  // whose logs said permission denied.
+  const first = await readLogs(opts?.sudo === true)
+  if (opts?.sudo === true || !DOCKER_SOCKET_REFUSED.test(first.output)) return first
+  if (!(await dockerReader.canSudo(cfg))) return first
+  const elevated = await readLogs(true)
+  // If root does not help either, the first refusal is the one that describes
+  // the user's situation.
+  return DOCKER_SOCKET_REFUSED.test(elevated.output) ? first : elevated
 })
 
 ipcMain.handle('docker:disk', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>

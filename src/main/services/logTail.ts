@@ -1,10 +1,12 @@
-import type { LogDiagnosis, LogLine, LogSource, LogTailState } from '../../shared/logtail'
+import type { LogDiagnosis, LogLine, LogSource, LogTailState, UnitChoice } from '../../shared/logtail'
 import {
   LOG_LINE_CAP,
   LOG_PAUSE_BUFFER,
   LOG_RATE_PER_SEC,
   buildTailCommand,
+  buildUnitListCommand,
   diagnoseLogTail,
+  parseUnitList,
   parseLogMark,
   validateLogSource
 } from '../../shared/logtail'
@@ -377,6 +379,32 @@ export class LogTailer {
       }
     }
     return true
+  }
+
+  /**
+   * The units on a host, for the unit picker.
+   *
+   * Uses the plain exec, not the streaming one: this is a question with an
+   * answer, not a follow.
+   */
+  async listUnits(
+    exec: (cfg: unknown, command: string, timeoutMs: number) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    cfg: unknown
+  ): Promise<{ ok: boolean; units: UnitChoice[]; error?: string }> {
+    try {
+      const r = await exec(cfg, buildUnitListCommand(), 15_000)
+      if (!r.ok) return { ok: false, units: [], error: r.error ?? 'could not reach the host' }
+      const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
+      const units = parseUnitList(out)
+      // No units parsed AND something that reads like a shell complaint means
+      // no systemd here — distinct from a host with genuinely no services.
+      if (units.length === 0 && /not found|no such file/i.test(out)) {
+        return { ok: false, units: [], error: 'systemd is not available on this host.' }
+      }
+      return { ok: true, units }
+    } catch (e) {
+      return { ok: false, units: [], error: e instanceof Error ? e.message : String(e) }
+    }
   }
 
   stop(tailId: string): void {

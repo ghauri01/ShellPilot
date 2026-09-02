@@ -17,8 +17,10 @@ describe('the command', () => {
     // A minimal image has no bash and the failure is otherwise a pane that
     // dies instantly with no explanation.
     const cmd = buildDockerShellCommand('web')
-    expect(cmd).toMatch(/docker exec -it web \/bin\/bash/)
-    expect(cmd).toMatch(/\|\|.*docker exec -it web \/bin\/sh/)
+    // Runs the RESOLVED binary now, not a bare `docker` — an ssh non-login
+    // shell often cannot see it on PATH.
+    expect(cmd).toMatch(/"\$SP_BIN" exec -it web \/bin\/bash/)
+    expect(cmd).toMatch(/\|\|.*"\$SP_BIN" exec -it web \/bin\/sh/)
   })
 
   it('refuses a reference it cannot prove safe rather than escaping it', () => {
@@ -65,7 +67,7 @@ describe('how it reaches a terminal', () => {
     // The field accepts a string; the whole safety of it is that one caller
     // exists and it goes through a builder that throws.
     const transport = read('src/renderer/src/lib/transport.ts')
-    expect(transport).toMatch(/initialCommand: buildDockerShellCommand\(containerRef\)/)
+    expect(transport).toMatch(/initialCommand: buildDockerShellCommand\(containerRef, \{ sudo \}\)/)
     // No other initialCommand producer anywhere in the renderer.
     const uses = transport.match(/initialCommand:/g) ?? []
     expect(uses).toHaveLength(1)
@@ -93,5 +95,59 @@ describe('what must NOT be able to reach it', () => {
     // The MCP server never constructs an SshConnectConfig for a terminal.
     const mcp = read('src/main/services/mcpServer.ts')
     expect(mcp).not.toMatch(/initialCommand/)
+  })
+})
+
+// Reported by an operator running 0.9.1 against a real host.
+//
+// Three failures, one cause: the container shell was wired as if it were the
+// host's own shell, and the docker permission decision was made per-feature
+// instead of once.
+describe('what a failing container shell must not take down', () => {
+  it('does not report the HOST as offline', () => {
+    // `containerTransport` spreads sshTransport, which reports
+    // connecting/online/offline into setServerStatus. A container shell that
+    // failed — refused socket, no /bin/sh, wrong image — therefore marked the
+    // SERVER offline, the Fleet Monitor stopped sampling a perfectly reachable
+    // host, and the only way back was reconnecting a plain SSH session by hand.
+    const t = read('src/renderer/src/lib/transport.ts')
+    const block = t.slice(t.indexOf('export function containerTransport'))
+    expect(block).toMatch(/onLifecycle: undefined/)
+  })
+
+  it('carries the listingticket sudo decision into the shell', () => {
+    // Listing containers as root and then opening a shell as an account that
+    // cannot reach the socket is one feature behaving as two.
+    const t = read('src/renderer/src/lib/transport.ts')
+    expect(t).toMatch(/buildDockerShellCommand\(containerRef, \{ sudo \}\)/)
+    const panel = read('src/renderer/src/components/docker/DockerPanel.tsx')
+    expect(panel).toMatch(/openContainerShell\(server\.id, c\.name, usedSudoNow\)/)
+  })
+
+  it('remembers the escalation on the tab, not just at click time', () => {
+    // The panel that knew may be gone when the session reconnects, and a shell
+    // that silently drops the escalation fails in a way that looks like the
+    // container died.
+    expect(read('src/renderer/src/types.ts')).toMatch(/containerSudo\?: boolean/)
+  })
+})
+
+describe('the shell command itself', () => {
+  it('resolves the binary like every other docker path', async () => {
+    const { buildDockerShellCommand } = await import('../src/shared/docker')
+    expect(buildDockerShellCommand('web')).toContain('/usr/local/bin/docker')
+  })
+
+  it('can run as root, and does not by default', async () => {
+    const { buildDockerShellCommand } = await import('../src/shared/docker')
+    expect(buildDockerShellCommand('web')).not.toMatch(/sudo/)
+    expect(buildDockerShellCommand('web', { sudo: true })).toMatch(/sudo -n "\$SP_BIN" exec -it web/)
+  })
+
+  it('still falls back to sh under sudo', async () => {
+    const { buildDockerShellCommand } = await import('../src/shared/docker')
+    const cmd = buildDockerShellCommand('web', { sudo: true })
+    expect(cmd).toMatch(/\/bin\/bash/)
+    expect(cmd).toMatch(/\|\|.*\/bin\/sh/)
   })
 })

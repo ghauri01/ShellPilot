@@ -12,7 +12,7 @@ import type {
 } from '../shared/ssh'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
-import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
+import type { LogLine, LogSource, LogTailState, UnitChoice } from '../shared/logtail'
 import type { CronEntry, CronSourceReport } from '../shared/cron'
 import type {
   DockerAction,
@@ -348,6 +348,8 @@ const api = {
       targets: { serverId: string; serverName: string; cfg: unknown }[]
     ): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('logtail:start', tailId, source, targets),
     stop: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:stop', tailId),
+    units: (cfg: unknown): Promise<{ ok: boolean; units: UnitChoice[]; error?: string }> =>
+      ipcRenderer.invoke('logtail:units', cfg),
     pause: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:pause', tailId),
     resume: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:resume', tailId),
     onLine: (fn: (l: LogLine) => void): (() => void) => {

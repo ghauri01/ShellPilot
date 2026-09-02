@@ -84,7 +84,8 @@ export type DockerFailure =
   | 'unknown'
 
 export const DOCKER_FAILURE_HELP: Record<DockerFailure, string> = {
-  'not-installed': 'The docker command is not on this host, or not on the PATH the SSH session gets.',
+  'not-installed':
+    'No docker on this host. Looked on PATH and in /usr/bin, /usr/local/bin, /snap/bin, /opt/homebrew/bin and /usr/sbin. If it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
   'daemon-unreachable':
     'Docker is installed but its daemon is not answering. It may not be running, or it may be listening on a socket this user cannot see.',
   'permission-denied':
@@ -525,9 +526,17 @@ export function buildDockerLogsCommand(
  * Tries bash and falls back to sh, because a minimal image has no bash and the
  * failure is otherwise an immediately-dead pane with no explanation.
  */
-export function buildDockerShellCommand(ref: string): string {
+export function buildDockerShellCommand(ref: string, opts: { sudo?: boolean } = {}): string {
   if (!validateContainerRef(ref)) throw new Error('refusing to build a command from an invalid container reference')
-  return `docker exec -it ${ref} /bin/bash 2>/dev/null || docker exec -it ${ref} /bin/sh`
+  // The binary is resolved and the socket permission is honoured here for the
+  // same reason the read paths do it: an account that cannot reach the docker
+  // socket cannot exec either, and a panel that lists containers as root and
+  // then opens a shell as nobody is not one feature, it is two that disagree.
+  const run = opts.sudo ? 'sudo -n "$SP_BIN"' : '"$SP_BIN"'
+  return [
+    resolveBinary('docker'),
+    `${run} exec -it ${ref} /bin/bash 2>/dev/null || ${run} exec -it ${ref} /bin/sh`
+  ].join('; ')
 }
 
 // ===========================================================================

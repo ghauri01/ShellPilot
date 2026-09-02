@@ -190,6 +190,16 @@ export interface SshTab extends TabBase {
    * container's name would be worse than not offering them.
    */
   containerRef?: string
+  /**
+   * The container shell needs sudo because this account cannot reach the docker
+   * socket unprivileged.
+   *
+   * On the tab rather than recomputed at connect time: the panel that knew it
+   * may be long gone by the time the session reconnects, and a shell that
+   * silently drops the escalation fails in a way that looks like the container
+   * died.
+   */
+  containerSudo?: boolean
 }
 
 // A tab backed by a shell on this machine. It has no server, and deliberately

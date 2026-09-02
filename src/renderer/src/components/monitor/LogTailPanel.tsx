@@ -12,7 +12,8 @@ import {
   type LogLine,
   type LogPriority,
   type LogSource,
-  type LogTailState
+  type LogTailState,
+  type UnitChoice
 } from '../../../../shared/logtail'
 import type { Server } from '../../types'
 
@@ -81,6 +82,49 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
   const scroller = useRef<HTMLDivElement | null>(null)
 
   const eligible = useMemo(() => servers.filter((s) => s.status !== 'offline'), [servers])
+  const cfgFor = (s: Server): unknown => ({
+    sessionId: `logtail-units-${s.id}`,
+    cols: 80,
+    rows: 24,
+    serverId: s.id,
+    host: s.host,
+    port: s.port,
+    username: s.username,
+    auth: s.auth === 'password' || s.auth === 'agent' ? s.auth : 'key',
+    hops: sshHopsFor(s)
+  })
+
+  // Units on the first selected host, for the picker. One host, not all of
+  // them: the list is nearly identical across an estate and asking every server
+  // on every selection change is a lot of exec channels for an autocomplete.
+  const [units, setUnits] = useState<UnitChoice[]>([])
+  const unitHost = eligible.find((s) => selected.has(s.id))
+  useEffect(() => {
+    if (kind !== 'unit' || !unitHost) {
+      setUnits([])
+      return
+    }
+    let live = true
+    void (window.shellpilot?.logtail as { units?: (cfg: unknown) => Promise<{ ok: boolean; units: UnitChoice[] }> })
+      ?.units?.(cfgFor(unitHost))
+      .then((r) => {
+        // A failure here is silent on purpose: the field still works typed, and
+        // an error about an autocomplete would sit next to the real diagnosis
+        // this panel exists to show.
+        if (live && r?.ok) setUnits(r.units)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+    // Keyed on the host's ID, not the object. `eligible` is rebuilt whenever
+    // any server's status flips, so depending on `unitHost` itself would
+    // refetch the unit list on every connect and disconnect in the workspace.
+    // The directive has to sit immediately above the code — with the reasoning
+    // above it, "next line" was another comment and it suppressed nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, unitHost?.id])
+
   const colourOf = useMemo(() => {
     const m = new Map<string, string>()
     eligible.forEach((s, i) => m.set(s.id, HOST_COLOURS[i % HOST_COLOURS.length]))
@@ -273,9 +317,24 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
             File
           </button>
         </div>
+        {/* A picker for units, a free field for paths.
+            A unit name typed from memory is how you get "systemd does not know
+            this unit" — the panel explains that well, but not making the
+            mistake beats explaining it. A datalist rather than a select so the
+            field is still typable: a host with three hundred services is faster
+            to filter than to scroll, and a unit that is masked or not yet
+            loaded can still be entered by hand.
+            Paths stay a plain field — there is no bounded list to offer. */}
         <input
           className="input grow mono"
-          placeholder={kind === 'unit' ? 'nginx.service' : '/var/log/syslog'}
+          list={kind === 'unit' ? 'sp-unit-list' : undefined}
+          placeholder={
+            kind === 'unit'
+              ? units.length
+                ? `nginx.service — ${units.length} on this host`
+                : 'nginx.service'
+              : '/var/log/syslog'
+          }
           value={target}
           onChange={(e) => {
             setTarget(e.target.value)
@@ -283,6 +342,16 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
           }}
           disabled={running}
         />
+        {kind === 'unit' && (
+          <datalist id="sp-unit-list">
+            {units.map((u) => (
+              <option key={u.name} value={u.name}>
+                {u.active === 'failed' ? 'failed — ' : ''}
+                {u.description}
+              </option>
+            ))}
+          </datalist>
+        )}
         {running && (
           <button className="btn" onClick={() => void togglePause()} title="Hold the stream without closing the connection">
             {paused ? <Play size={13} /> : <Pause size={13} />} {paused ? 'Resume' : 'Pause'}

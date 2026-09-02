@@ -275,7 +275,7 @@ interface AppState {
   toggleSidebar: () => void
   openServer: (serverId: string, view?: PanelView) => void
   /** A shell inside a container on that server. See the implementation. */
-  openContainerShell: (serverId: string, containerRef: string) => void
+  openContainerShell: (serverId: string, containerRef: string, sudo?: boolean) => void
   newSession: (serverId: string) => void
   // A shell on this machine, in a new tab. Never focuses an existing one: a
   // second local shell is a second shell, never the same one.
@@ -747,7 +747,7 @@ export const useApp = create<AppState>((set, get) => ({
   // The tab is an SSH tab with a containerRef. What actually runs is built by
   // buildDockerShellCommand, which validates the reference and throws rather
   // than escaping it — the ref is never taken as free text.
-  openContainerShell: (serverId, containerRef) => {
+  openContainerShell: (serverId, containerRef, sudo = false) => {
     const server = get().servers.find((s) => s.id === serverId)
     if (!server) return
     const existing = get().tabs.find(
@@ -763,6 +763,7 @@ export const useApp = create<AppState>((set, get) => ({
       workspaceId: server.workspaceId,
       serverId,
       containerRef,
+      containerSudo: sudo || undefined,
       title: containerRef,
       // Monitor and Files read the host, not the container. Offering them here
       // would show the host's disk usage under a container's name.

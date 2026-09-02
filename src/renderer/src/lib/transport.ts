@@ -151,11 +151,26 @@ export function sshTransport(
 export function containerTransport(
   server: Server,
   containerRef: string,
-  setServerStatus: (id: string, s: Server['status']) => void
+  setServerStatus: (id: string, s: Server['status']) => void,
+  // True when the panel had to read this host's containers as root. An account
+  // that cannot reach the docker socket cannot exec either, so a shell opened
+  // without it fails the same way the listing would have.
+  sudo = false
 ): TerminalTransport {
   const base = sshTransport(server, setServerStatus)
   return {
     ...base,
+    // NOT the host's lifecycle. `sshTransport` reports connecting/online/offline
+    // into `setServerStatus`, and spreading that here meant a container shell
+    // that failed — a wrong image, no /bin/sh, a refused docker socket — marked
+    // the SERVER offline. The Fleet Monitor then stopped sampling a host that
+    // was perfectly reachable, and the only way back was reconnecting a plain
+    // SSH session by hand.
+    //
+    // A container shell says nothing about the host it runs on. The pooled
+    // connection is shared and refcounted, so the host's own sessions keep it
+    // alive regardless of what happens in here.
+    onLifecycle: undefined,
     // Distinct from the server's own key so a container shell and a shell on
     // the host are different sessions rather than one stealing the other.
     key: `container:${server.id}:${containerRef}`,
@@ -175,7 +190,7 @@ export function containerTransport(
             cols,
             rows,
             hops: sshHopsFor(server),
-            initialCommand: buildDockerShellCommand(containerRef)
+            initialCommand: buildDockerShellCommand(containerRef, { sudo })
           })
         )
       )

@@ -119,6 +119,12 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   const [actionResult, setActionResult] = useState<{ action: DockerAction; result: DockerActionResult } | null>(null)
 
   const openContainerShell = useApp((st) => st.openContainerShell)
+  // True when this host's containers are being read as root — either because
+  // the user pinned it, or because the automatic retry had to. Line 426 already
+  // uses exactly this pair to draw the "reading as root" banner; the shell has
+  // to make the same decision or it opens a session that cannot reach the
+  // socket the listing just used.
+  const usedSudoNow = useSudo || (probe?.ok && probe.usedSudo === true)
 
   const eligible = useMemo(() => servers.filter((s) => s.status !== 'offline'), [servers])
   const server = eligible.find((s) => s.id === serverId) ?? eligible[0]
@@ -595,7 +601,11 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
                         <button
                           className="icon-btn sm"
                           title={`Open a shell in ${c.name}. This runs commands inside the container, on ${server.name}.`}
-                          onClick={() => openContainerShell(server.id, c.name)}
+                          // Carries the sudo decision the listing already made. Without it the
+                  // panel lists containers as root and then opens a shell as an
+                  // account that cannot reach the socket — one feature behaving
+                  // as two, which is exactly what an operator reported.
+                  onClick={() => openContainerShell(server.id, c.name, usedSudoNow)}
                         >
                           <SquareTerminal size={13} />
                         </button>
