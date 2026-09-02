@@ -18,6 +18,7 @@ import {
   k8sRelativeTime,
   nodeIsUnhealthy,
   planK8sRollout,
+  readsAfterNamespaceChange,
   validatePodName,
   workloadIsDegraded,
   type K8sDiagnosis,
@@ -185,13 +186,18 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
     hops: sshHopsFor(s)
   })
 
-  const load = async (ctx?: string): Promise<void> => {
+  // `ns` overrides the namespace in state. Every one of these can be called
+  // from the change handler of the control that sets that state, and React has
+  // not applied it yet at that point — so reading it here would fetch the
+  // selection the user just moved away from. `??` and not `||`: empty string is
+  // "all namespaces", a real choice, not an absent one.
+  const load = async (ctx?: string, ns?: string): Promise<void> => {
     if (!server) return
     setLoading(true)
     setLogs(null)
     setDiag(null)
     try {
-      const r = await bridge().read?.(cfgFor(server), ctx || undefined, namespace || undefined)
+      const r = await bridge().read?.(cfgFor(server), ctx || undefined, (ns ?? namespace) || undefined)
       setProbe(r ?? null)
     } catch (e) {
       setProbe({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
@@ -202,7 +208,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
     }
   }
 
-  const loadOverview = async (): Promise<void> => {
+  const loadOverview = async (ns?: string): Promise<void> => {
     if (!server) return
     setOverviewLoading(true)
     try {
@@ -212,7 +218,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
         setOverview({ deployments: f, statefulSets: f, daemonSets: f, nodes: f, events: f })
         return
       }
-      setOverview(await fn(cfgFor(server), context || undefined, namespace || undefined))
+      setOverview(await fn(cfgFor(server), context || undefined, (ns ?? namespace) || undefined))
     } catch (e) {
       const f = {
         ok: false,
@@ -225,7 +231,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
     }
   }
 
-  const loadUsage = async (): Promise<void> => {
+  const loadUsage = async (ns?: string): Promise<void> => {
     if (!server) return
     setUsageLoading(true)
     try {
@@ -235,7 +241,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
         setUsage({ pods: f, nodes: f })
         return
       }
-      setUsage(await fn(cfgFor(server), context || undefined, namespace || undefined))
+      setUsage(await fn(cfgFor(server), context || undefined, (ns ?? namespace) || undefined))
     } catch (e) {
       const f = {
         ok: false,
@@ -444,9 +450,26 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
             style={{ maxWidth: 170 }}
             value={namespace}
             onChange={(e) => {
-              setNamespace(e.target.value)
+              // Changing the namespace has to REREAD, not just discard.
+              //
+              // This cleared the cached reads and stopped, which left the pane
+              // holding the previous namespace's pods and showed an empty
+              // "namespace X" heading under the cluster tab. The data came back
+              // only when the user clicked another tab, because those handlers
+              // reload whatever is null — so the control appeared to do nothing
+              // and the fix appeared to be "go somewhere else and come back".
+              //
+              // The context selector beside this one always reloaded. This is
+              // the same control over the same reads and it behaves the same
+              // way now.
+              const ns = e.target.value
+              setNamespace(ns)
               setOverview(null)
               setUsage(null)
+              const again = readsAfterNamespaceChange(view)
+              if (again.pods) void load(context, ns)
+              if (again.overview) void loadOverview(ns)
+              if (again.usage) void loadUsage(ns)
             }}
             title="Scopes the cluster and usage reads. Nodes are cluster-scoped and are never namespace-filtered."
           >

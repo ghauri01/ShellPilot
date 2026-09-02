@@ -5,7 +5,8 @@ import {
   buildK8sReadCommand,
   buildK8sLogsCommand,
   validatePodName,
-  validateContext
+  validateContext,
+  readsAfterNamespaceChange
 } from '../src/shared/kubernetes'
 
 // The roadmap's warning about Kubernetes is that doing it badly is worse than
@@ -1046,5 +1047,24 @@ describe('status is what kubectl shows, not the pod phase', () => {
       0
     )
     expect(r.ok && r.pods[0].ready).toBe('0/1')
+  })
+})
+
+describe('changing the namespace re-reads', () => {
+  // The control cleared its cached reads and started no new ones, so it looked
+  // inert: the pane kept the previous namespace's pods, the cluster tab showed
+  // an empty "namespace X" heading, and the data only came back when the user
+  // clicked a different tab — whose handler reloads whatever is null.
+  it('always re-reads the pod list', () => {
+    for (const v of ['pods', 'cluster', 'usage'] as const) {
+      expect(readsAfterNamespaceChange(v).pods).toBe(true)
+    }
+  })
+
+  it('re-reads the tab being looked at, and only that one', () => {
+    expect(readsAfterNamespaceChange('cluster')).toEqual({ pods: true, overview: true, usage: false })
+    expect(readsAfterNamespaceChange('usage')).toEqual({ pods: true, overview: false, usage: true })
+    // Nothing extra on the default tab: both are loaded lazily on first view.
+    expect(readsAfterNamespaceChange('pods')).toEqual({ pods: true, overview: false, usage: false })
   })
 })
