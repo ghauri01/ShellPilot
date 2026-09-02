@@ -152,7 +152,61 @@ describe('a container that is not there', () => {
       join(__dirname, '..', 'src/renderer/src/components/monitor/LogTailPanel.tsx'),
       'utf8'
     )
-    expect(panel).toMatch(/sp-container-list/)
+    // A real dropdown now, not a datalist: the browser's own affordance needs
+    // the field focused and is a few pixels wide, which is how a name got typed
+    // by hand while the list sat unopened.
+    expect(panel).toMatch(/lt-picker/)
     expect(panel).toMatch(/docker as[\s\S]{0,200}list\?:/)
+    // The same picker serves all three modes rather than one being special.
+    expect(panel).toMatch(/kind === 'unit' \? units\.map/)
+    expect(panel).toMatch(/: kind === 'container' \? containers : files/)
+  })
+})
+
+// File mode needed the same treatment: a path typed from memory is how you
+// tail something that is not there and then wait for a file that will never
+// appear — `tail -F` is patient by design, so the mistake is silent.
+describe('offering the log files that exist', () => {
+  it('looks where logs actually live', async () => {
+    const { buildLogFileListCommand } = await import('../src/shared/logtail')
+    const cmd = buildLogFileListCommand()
+    for (const d of ['/var/log', '/var/log/nginx', '/var/log/audit']) {
+      expect(cmd, d).toContain(d)
+    }
+  })
+
+  it('excludes rotated and compressed files', () => {
+    // Tailing syslog.3.gz is not a thing anyone means to do, and they would
+    // otherwise be most of the list on a busy host.
+    return import('../src/shared/logtail').then(({ buildLogFileListCommand }) => {
+      expect(buildLogFileListCommand()).toMatch(/grep -vE/)
+      expect(buildLogFileListCommand()).toMatch(/gz\|xz\|bz2\|zst/)
+    })
+  })
+
+  it('is bounded, because a picker is not an archive browser', () => {
+    return import('../src/shared/logtail').then(({ buildLogFileListCommand }) => {
+      expect(buildLogFileListCommand()).toMatch(/-maxdepth 1/)
+      expect(buildLogFileListCommand()).toMatch(/head -n 200/)
+    })
+  })
+
+  it('keeps only absolute paths, decided by shape', async () => {
+    const { parseLogFileList } = await import('../src/shared/logtail')
+    const out = [
+      '/var/log/syslog',
+      '/var/log/nginx/access.log',
+      "find: '/var/log/private': Permission denied",
+      'not/absolute',
+      '/var/log/with a space.log'
+    ].join('\n')
+    // The find complaint is a sentence with spaces and cannot be mistaken for
+    // a path — the same shape-not-content rule the other parsers follow.
+    expect(parseLogFileList(out)).toEqual(['/var/log/nginx/access.log', '/var/log/syslog'])
+  })
+
+  it('deduplicates, since the directories overlap', async () => {
+    const { parseLogFileList } = await import('../src/shared/logtail')
+    expect(parseLogFileList('/var/log/syslog\n/var/log/syslog\n')).toEqual(['/var/log/syslog'])
   })
 })

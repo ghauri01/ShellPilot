@@ -350,6 +350,8 @@ const api = {
     stop: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:stop', tailId),
     units: (cfg: unknown): Promise<{ ok: boolean; units: UnitChoice[]; error?: string }> =>
       ipcRenderer.invoke('logtail:units', cfg),
+    logfiles: (cfg: unknown): Promise<{ ok: boolean; files: string[]; error?: string }> =>
+      ipcRenderer.invoke('logtail:logfiles', cfg),
     pause: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:pause', tailId),
     resume: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:resume', tailId),
     onLine: (fn: (l: LogLine) => void): (() => void) => {

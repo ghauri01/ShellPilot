@@ -2832,3 +2832,31 @@ details[open] > .disclosure-head .chev {
   margin: 10px 0 14px;
   flex-wrap: wrap;
 }
+
+/* Log tail source picker. A real dropdown rather than a datalist: the browser
+   affordance is a few pixels wide and an operator typed a container name by
+   hand while the list sat unopened. */
+.lt-picker {
+  margin-top: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-hover);
+  display: flex;
+  flex-direction: column;
+}
+.lt-pick {
+  text-align: left;
+  padding: 5px 10px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.lt-pick:hover {
+  background: var(--accent);
+  color: #fff;
+}

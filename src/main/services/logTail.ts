@@ -4,8 +4,10 @@ import {
   LOG_PAUSE_BUFFER,
   LOG_RATE_PER_SEC,
   buildTailCommand,
+  buildLogFileListCommand,
   buildUnitListCommand,
   diagnoseLogTail,
+  parseLogFileList,
   parseUnitList,
   parseLogMark,
   validateLogSource
@@ -404,6 +406,22 @@ export class LogTailer {
       return { ok: true, units }
     } catch (e) {
       return { ok: false, units: [], error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  /** Log files on a host, for the File picker. */
+  async listLogFiles(
+    exec: (cfg: unknown, command: string, timeoutMs: number) => Promise<{ ok: boolean; stdout?: string; stderr?: string; error?: string }>,
+    cfg: unknown
+  ): Promise<{ ok: boolean; files: string[]; error?: string }> {
+    try {
+      const r = await exec(cfg, buildLogFileListCommand(), 15_000)
+      if (!r.ok) return { ok: false, files: [], error: r.error ?? 'could not reach the host' }
+      // stdout only. find writes its permission complaints to stderr, and those
+      // are not paths — including them would put sentences in a path picker.
+      return { ok: true, files: parseLogFileList(r.stdout ?? '') }
+    } catch (e) {
+      return { ok: false, files: [], error: e instanceof Error ? e.message : String(e) }
     }
   }
 

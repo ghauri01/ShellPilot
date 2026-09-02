@@ -690,6 +690,13 @@ ipcMain.handle('logtail:units', (_e, cfg: unknown) =>
     cfg
   )
 )
+ipcMain.handle('logtail:logfiles', (_e, cfg: unknown) =>
+  logTailer.listLogFiles(
+    (c, command, timeoutMs) =>
+      sshExec(resolveChainSecrets(c as SshConnectConfig), command, timeoutMs, false),
+    cfg
+  )
+)
 ipcMain.handle('logtail:pause', (_e, tailId: string) => logTailer.pause(tailId))
 ipcMain.handle('logtail:resume', (_e, tailId: string) => logTailer.resume(tailId))
 

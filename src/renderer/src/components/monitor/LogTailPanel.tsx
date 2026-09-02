@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Square, ScrollText, Pause, Filter, ShieldAlert } from 'lucide-react'
+import { Play, Square, ScrollText, Pause, Filter, ShieldAlert, ChevronDown } from 'lucide-react'
 import { bridgeOn } from '../../lib/bridge'
 import { sshHopsFor } from '../../lib/ssh'
 import { clsx } from '../../lib/format'
@@ -327,6 +327,40 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jump])
 
+  // Log files on the selected host, for the File picker. Same reasoning as the
+  // other two: a path typed from memory is how you tail something that is not
+  // there and wait for a file that will never appear.
+  const [files, setFiles] = useState<string[]>([])
+  useEffect(() => {
+    if (kind !== 'file' || !unitHost) {
+      setFiles([])
+      return
+    }
+    let live = true
+    void (
+      window.shellpilot?.logtail as
+        | { logfiles?: (cfg: unknown) => Promise<{ ok: boolean; files: string[] }> }
+        | undefined
+    )
+      ?.logfiles?.(cfgFor(unitHost))
+      .then((r) => {
+        if (live && r?.ok) setFiles(r.files)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, unitHost?.id])
+
+  const [picking, setPicking] = useState(false)
+  const options = kind === 'unit' ? units.map((u) => u.name) : kind === 'container' ? containers : files
+  const typedQ = target.trim().toLowerCase()
+  // `pickShown`, not `shown`: the panel already has a `shown` for the filtered
+  // log LINES, and two different lists under one name in one component is how
+  // the wrong one gets rendered.
+  const pickShown = (typedQ === '' ? options : options.filter((o) => o.toLowerCase().includes(typedQ))).slice(0, 200)
+
   const failed = Object.values(states).filter((s) => s.state === 'failed')
   // Anything the preflight found worth saying, plus every host that got in as
   // root. Both are drawn for as long as the tail lives, above the stream rather
@@ -363,7 +397,6 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
             Paths stay a plain field — there is no bounded list to offer. */}
         <input
           className="input grow mono"
-          list={kind === 'unit' ? 'sp-unit-list' : kind === 'container' ? 'sp-container-list' : undefined}
           placeholder={
             kind === 'container'
               ? containers.length
@@ -382,23 +415,24 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
           }}
           disabled={running}
         />
-        {kind === 'container' && (
-          <datalist id="sp-container-list">
-            {containers.map((c) => (
-              <option key={c} value={c} />
-            ))}
-          </datalist>
-        )}
-        {kind === 'unit' && (
-          <datalist id="sp-unit-list">
-            {units.map((u) => (
-              <option key={u.name} value={u.name}>
-                {u.active === 'failed' ? 'failed — ' : ''}
-                {u.description}
-              </option>
-            ))}
-          </datalist>
-        )}
+        {/* An explicit affordance, not a datalist.
+            A datalist needs the field focused and its arrow is a few pixels
+            wide — an operator typed a container name by hand while the list sat
+            unopened, which is the whole reason it existed. The list filters
+            against whatever is typed, so it narrows rather than replacing the
+            keyboard. */}
+        <button
+          className="btn ghost sm"
+          title={
+            options.length
+              ? `Pick from ${options.length} on this host`
+              : 'Select a server to load the list'
+          }
+          disabled={running || options.length === 0}
+          onClick={() => setPicking((v) => !v)}
+        >
+          <ChevronDown size={13} />
+        </button>
         {running && (
           <button className="btn" onClick={() => void togglePause()} title="Hold the stream without closing the connection">
             {paused ? <Play size={13} /> : <Pause size={13} />} {paused ? 'Resume' : 'Pause'}
@@ -443,6 +477,35 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
               setError(null)
             }}
           />
+        </div>
+      )}
+
+      {picking && !running && (
+        <div className="lt-picker">
+          {pickShown.length === 0 ? (
+            <div className="faint" style={{ padding: '6px 10px' }}>
+              Nothing matches what you have typed.
+            </div>
+          ) : (
+            pickShown.map((o) => (
+              <button
+                key={o}
+                className="lt-pick mono"
+                onClick={() => {
+                  setTarget(o)
+                  setPicking(false)
+                  setError(null)
+                }}
+              >
+                {o}
+              </button>
+            ))
+          )}
+          {options.length > pickShown.length && (
+            <div className="faint" style={{ padding: '4px 10px', fontSize: 11 }}>
+              {pickShown.length} of {options.length} — keep typing to narrow.
+            </div>
+          )}
         </div>
       )}
 

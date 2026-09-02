@@ -642,3 +642,46 @@ export function parseUnitList(output: string): UnitChoice[] {
   }
   return units.sort((a, b) => a.name.localeCompare(b.name))
 }
+
+/**
+ * Log files on a host, so File mode is pickable rather than remembered.
+ *
+ * Bounded deliberately: `/var/log` on a busy host has thousands of rotated
+ * files, and an autocomplete is not an archive browser. Depth 2 covers the
+ * directories that matter (nginx/, apache2/, audit/) without walking a year of
+ * gzipped history, and the rotated suffixes are excluded because tailing
+ * `syslog.3.gz` is not a thing anyone means to do.
+ *
+ * `-readable` is not POSIX find, so readability is tested per file instead —
+ * a file this account cannot open is worth OFFERING, because the tail's own
+ * preflight will then say it is denied and offer root, which is a better
+ * answer than the file being invisible.
+ */
+export function buildLogFileListCommand(): string {
+  return [
+    'for d in /var/log /var/log/nginx /var/log/apache2 /var/log/httpd /var/log/audit',
+    'do [ -d "$d" ] || continue',
+    // -maxdepth 1 per directory rather than one deep walk: it keeps the output
+    // bounded per directory instead of letting one noisy tree fill the budget.
+    'find "$d" -maxdepth 1 -type f 2>/dev/null',
+    'done',
+    // Rotated and compressed files are noise in a picker.
+    "| grep -vE '\\.(gz|xz|bz2|zst|[0-9]+)$'",
+    '| sort -u | head -n 200'
+  ].join('; ').replace('; |', ' |')
+}
+
+/** Absolute paths only, and nothing that could not be tailed. */
+export function parseLogFileList(output: string): string[] {
+  const seen = new Set<string>()
+  for (const raw of output.split('\n')) {
+    const line = raw.trim()
+    // Decided by SHAPE: an absolute path with no whitespace and no shell
+    // metacharacter. A `find: ... Permission denied` line on stderr is a
+    // sentence with spaces and cannot be mistaken for one.
+    if (!line.startsWith('/') || /\s/.test(line)) continue
+    if (!PATH_RE.test(line)) continue
+    seen.add(line)
+  }
+  return [...seen].sort()
+}
