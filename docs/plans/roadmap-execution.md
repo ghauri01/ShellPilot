@@ -108,3 +108,57 @@ after.
 - [ ] Research: durable store options (running)
 - [ ] Research: host facts
 - [ ] Research: job engine — blocked on the store decision
+
+### What the adversarial pass caught, before any code was written
+
+Four blockers. Three were in decisions taken above, which is the point of running the
+pass at all — each would have shipped, and two of them would have shipped silently.
+
+**1. A six-hour silence on a genuinely new disk-full event.** `evaluate` deliberately does
+not clear the repeat window on recovery, and the comment explaining why is sound: at a
+60-second window the residual suppression is 60 seconds. At six hours it is six hours. A
+disk that hits 96%, gets cleared to 40%, and refills to 92% two hours later raises the
+status-bar chip and notifies **nobody**. Decision D1 changed one constant and not the rule
+that depended on it.
+
+**2. The escalation rule was inert in exactly that case.** D2 was flagged as the decision
+most likely to be wrong, and it was, for a reason that was not obvious: "risen five points
+since the last notification" needs a baseline map, and that map inherits the
+never-cleared-on-recovery semantics. In the trace above the baseline is still 96 from the
+first alert, the disk is at 92, and 92 is four points *below* the baseline — so escalation
+does not fire either. Both halves of the design failed on the same case.
+
+The fix is to clear the baseline inside the resolve *transition* — not on every
+below-threshold sample — and to treat an absent baseline as "notify now". The flap this
+appears to reinvite is already prevented by `clearAt`: a resolve only registers five points
+below the line, so a re-raise above it is a real event rather than an oscillation. That
+argument is now a test rather than a paragraph.
+
+**3. The two screens disagreed at exactly 85.000%.** `hostHealth` is strictly greater,
+`evaluate` is greater-or-equal. Feeding the constant straight in would fire an alert for a
+host the Fleet Monitor's own attention list does not show and whose disk bar is not red —
+breaking the invariant that constant's docstring exists to assert. Worse, the planned
+`isDiskCritical` extraction would have been **dead code**: called from the row builder and
+never from the alert path, which is the first failure pattern the pre-release review named.
+Both paths now go through the one predicate.
+
+**4. The drift test could not fail.** Deriving both sides of an assertion from
+`ALERT_KINDS` produces a test that passes for any future kind, including one that is never
+plumbed through the renderer — the second pattern that review named, reproduced exactly.
+Tests now assert literal strings and payload contents, and each must be shown to fail
+against the bug it catches before it counts.
+
+Smaller findings folded in: the webhook sanitiser rejects an unknown kind and writes no
+`lastError`, so the Settings pane reports a healthy webhook while dropping every message;
+`resolved` is ungated while `raised` is throttled, so an oscillating host would send
+resolutions for alerts the endpoint never received; switching alerts off never clears an
+active chip, which for a chronic disk means one that survives until restart; and the new
+baseline map needs purging in `onServerForgotten` beside the existing one, or a re-added
+server inherits a suppression it never earned.
+
+Two honest limits, documented rather than fixed: alert state is in-memory, so a chronically
+full disk re-announces once per app launch; and `fleetSamplingEnabled` defaults to off, so
+without background checking these alerts still only fire while someone is looking at that
+server. The copy reuses `alertCoverage`'s existing language rather than claiming otherwise.
+
+Revised estimate: 2–3 days.
