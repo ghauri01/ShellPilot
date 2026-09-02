@@ -443,7 +443,7 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
             if (!session.stopping) ctx.log('the management channel closed', 'app')
           }
         },
-        { runDir: ctx.runDir, platform }
+        { platform }
       )
 
       session = {
