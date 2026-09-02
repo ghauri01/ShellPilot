@@ -244,6 +244,17 @@ export function parseDockerOutput(output: string, exitCode: number | null): Dock
   const failing = noise.find((l) => PS_FAILURE.test(l))
   if (failing) return { ok: false, reason: classifyDockerFailure(failing, exitCode), detail: failing }
 
+  // Nothing listed, nothing recognised, and a non-zero exit: `docker ps` did
+  // not run. The exit status is the honest signal here — an empty list comes
+  // back as 0 — and it is what keeps the shell's own wording ("docker: command
+  // not found") from having to be pattern-matched against warning lines, where
+  // a stray "not found" would be read as a missing binary. Without this, a host
+  // with no docker at all reports "Docker is running and has no containers."
+  if (rows.length === 0 && noise.length > 0 && exitCode !== 0) {
+    const detail = noise[noise.length - 1]
+    return { ok: false, reason: classifyDockerFailure(noise.join('\n'), exitCode), detail }
+  }
+
   const containers: DockerContainer[] = []
   const malformed: string[] = []
   for (const line of rows) {

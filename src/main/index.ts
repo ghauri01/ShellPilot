@@ -55,6 +55,8 @@ import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry } from '../shared/cron'
 import { DockerReader } from './services/docker'
 import { buildDockerLogsCommand } from '../shared/docker'
+import { KubernetesReader } from './services/kubernetes'
+import { buildK8sLogsCommand } from '../shared/kubernetes'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
@@ -700,6 +702,37 @@ const dockerReader = new DockerReader({
     // one of fifteen identical modals nobody can reason about.
     sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs)
 })
+
+// ---- Kubernetes ----
+//
+// Read-only, and the module comment in shared/kubernetes.ts says where the line
+// is: no context switching (that rewrites the user's kubeconfig for every
+// process on the host), no exec, nothing that writes. Contexts are chosen per
+// read with --context.
+//
+// allowPrompt stays true for the same reason as Docker: one server the user
+// picked, not a fan-out.
+const k8sReader = new KubernetesReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs)
+})
+
+ipcMain.handle('k8s:read', (_e, cfg: unknown, context?: string, namespace?: string) =>
+  k8sReader.read(cfg, context, namespace)
+)
+ipcMain.handle(
+  'k8s:logs',
+  async (_e, cfg: unknown, namespace: string, pod: string, lines: unknown, context?: string) => {
+    // buildK8sLogsCommand validates the names and clamps `lines` itself — the
+    // argument that is not a string is the one nobody thinks to check.
+    const r = await sshExec(
+      resolveChainSecrets(cfg as SshConnectConfig),
+      buildK8sLogsCommand(namespace, pod, lines as number, context),
+      20_000
+    )
+    return { ok: r.ok, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error }
+  }
+)
 
 ipcMain.handle('docker:list', (_e, cfg: unknown) => dockerReader.list(cfg))
 ipcMain.handle('docker:logs', async (_e, cfg: unknown, ref: string, lines: unknown) => {

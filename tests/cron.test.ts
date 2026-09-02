@@ -521,3 +521,25 @@ describe('the cron.d collector, on files that do not end in a newline', () => {
     ])
   })
 })
+
+describe('describing lists, which real crontabs are full of', () => {
+  it('names the unit once for a list of values', () => {
+    expect(describeSchedule('0,15,30,45 * * * *')).toBe('minute 0, 15, 30, 45')
+    expect(describeSchedule('0 3 * * 1,3,5')).toBe('minute 0, hour 3, on Monday, Wednesday, Friday')
+    expect(describeSchedule('0 3 * jan,jul *')).toBe('minute 0, hour 3, month January, July')
+  })
+
+  it('describes a step inside a range without pretending it is a plain range', () => {
+    // /etc/cron.d/sysstat's schedule. "minute 5 to 55" would be wrong: it runs
+    // every ten minutes in that window, not continuously through it.
+    expect(describeSchedule('5-55/10 * * * *')).toBe('every 10 minutes from 5 to 55')
+  })
+
+  it('declines N/S, whose end depends on which field it is in', () => {
+    expect(describeSchedule('10/15 * * * *')).toBeNull()
+  })
+
+  it('reads day-of-week 7 as Sunday, as cron does', () => {
+    expect(describeSchedule('47 6 * * 7')).toBe('at 06:47 every Sunday')
+  })
+})

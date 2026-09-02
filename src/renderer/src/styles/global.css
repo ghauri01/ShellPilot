@@ -2824,3 +2824,11 @@ details[open] > .disclosure-head .chev {
     transform: rotate(360deg);
   }
 }
+
+/* Fleet Monitor sub-navigation.
+   Every module added today appended a panel to that page; with all of them on
+   it was five stacked forms above the health summary the page is named for. */
+.monitor-tabs {
+  margin: 10px 0 14px;
+  flex-wrap: wrap;
+}

@@ -15,6 +15,7 @@ import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '.
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import type { CronEntry } from '../shared/cron'
 import type { DockerProbe } from '../shared/docker'
+import type { K8sProbe } from '../shared/kubernetes'
 import type {
   AlertPayload,
   WebhookConfig,
@@ -241,6 +242,18 @@ const api = {
       ipcRenderer.invoke('webhook:set-url', url),
     test: (): Promise<WebhookTestResult> => ipcRenderer.invoke('webhook:test'),
     notify: (payload: AlertPayload): Promise<void> => ipcRenderer.invoke('webhook:notify', payload)
+  },
+  k8s: {
+    read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>
+      ipcRenderer.invoke('k8s:read', cfg, context, namespace),
+    logs: (
+      cfg: unknown,
+      namespace: string,
+      pod: string,
+      lines: number,
+      context?: string
+    ): Promise<{ ok: boolean; output: string; error?: string }> =>
+      ipcRenderer.invoke('k8s:logs', cfg, namespace, pod, lines, context)
   },
   docker: {
     list: (cfg: unknown): Promise<DockerProbe> => ipcRenderer.invoke('docker:list', cfg),

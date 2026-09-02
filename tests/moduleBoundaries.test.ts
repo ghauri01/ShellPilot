@@ -38,7 +38,12 @@ const MODULE_FILES: Record<string, string[]> = {
     'src/renderer/src/components/monitor/LogTailPanel.tsx'
   ],
   cron: ['src/shared/cron.ts', 'src/renderer/src/components/monitor/CronPanel.tsx'],
-  docker: ['src/shared/docker.ts', 'src/main/services/docker.ts', 'src/renderer/src/components/docker/DockerPanel.tsx']
+  docker: ['src/shared/docker.ts', 'src/main/services/docker.ts', 'src/renderer/src/components/docker/DockerPanel.tsx'],
+  kubernetes: [
+    'src/shared/kubernetes.ts',
+    'src/main/services/kubernetes.ts',
+    'src/renderer/src/components/kubernetes/KubernetesPanel.tsx'
+  ]
 }
 
 // Non-relative specifiers the bundler still resolves inside this repo.

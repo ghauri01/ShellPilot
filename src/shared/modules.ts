@@ -17,7 +17,7 @@
 // does not silently switch itself on for an existing install — see
 // `backfillModules`, which mirrors `backfillCapabilities`.
 
-export type ModuleId = 'docker' | 'cron' | 'logTail' | 'broadcast' | 'fleetSearch'
+export type ModuleId = 'docker' | 'kubernetes' | 'cron' | 'logTail' | 'broadcast' | 'fleetSearch'
 
 export interface ModuleDef {
   id: ModuleId
@@ -70,7 +70,14 @@ export const MODULES: ModuleDef[] = [
     id: 'docker',
     label: 'Docker',
     detail:
-      'List containers on a server, read their logs and open a shell inside one. Uses the docker binary already on the host.',
+      'List containers on a server and read their logs, using the docker binary already on the host. Reading only.',
+    defaultEnabled: false
+  },
+  {
+    id: 'kubernetes',
+    label: 'Kubernetes',
+    detail:
+      'List contexts, namespaces and pods and read pod logs, using the kubectl already on the host. Reading only: it never switches your context, never execs into a pod, and never applies or deletes anything.',
     defaultEnabled: false
   }
 ]

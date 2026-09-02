@@ -430,6 +430,47 @@ describe('the --tail count, which arrives over IPC', () => {
   it('leaves nothing injectable in the command it does build', () => {
     const cmd = buildDockerLogsCommand('web', 500)
     expect(cmd).toBe('docker logs --tail 500 web 2>&1')
-    expect(cmd).not.toMatch(/[;|&`$]/)
+    // Nothing but the deliberate `2>&1` carries shell meaning.
+    expect(cmd.replace(/ 2>&1$/, '')).not.toMatch(/[;|&`$()<>]/)
+  })
+})
+
+describe('the whole round trip on a host with no docker', () => {
+  it('still says "not installed" rather than "no containers"', () => {
+    // The version probe now falls back to `docker --version`, so its block no
+    // longer carries the diagnosis. The exit status does: an empty list comes
+    // back as 0, and 127 is the shell saying it never found the program. This
+    // is what the collector actually returns on such a host.
+    const out = [
+      'bash: docker: command not found',
+      '===SHELLPILOT-PS===',
+      'bash: docker: command not found',
+      ''
+    ].join('\n')
+    const r = parseDockerOutput(out, 127)
+    expect(r.ok).toBe(false)
+    expect(!r.ok && r.reason).toBe('not-installed')
+    expect(!r.ok && r.detail).toMatch(/command not found/)
+  })
+
+  it('reports a stopped daemon from the ps block, with a working version above it', () => {
+    // The fallback probe answers even when the daemon does not, so this host
+    // reports a version AND a failure — and the failure is the one that matters.
+    const out = [
+      'Docker version 24.0.7, build afdd53b',
+      '===SHELLPILOT-PS===',
+      'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?',
+      ''
+    ].join('\n')
+    const r = parseDockerOutput(out, 1)
+    expect(!r.ok && r.reason).toBe('daemon-unreachable')
+  })
+
+  it('does not turn a warning-only, exit-zero run into a failure', () => {
+    // A host that genuinely has no containers still prints its warnings.
+    const out = ['24.0.7', '===SHELLPILOT-PS===', 'WARNING: No swap limit support', ''].join('\n')
+    const r = parseDockerOutput(out, 0)
+    expect(r.ok).toBe(true)
+    expect(r.ok && r.containers).toEqual([])
   })
 })

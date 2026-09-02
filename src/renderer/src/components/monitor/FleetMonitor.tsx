@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Activity,
   ChevronRight,
@@ -21,9 +21,10 @@ import { FleetSearch } from './FleetSearch'
 import { BroadcastPanel } from './BroadcastPanel'
 import { LogTailPanel } from './LogTailPanel'
 import { CronPanel } from './CronPanel'
-import { MODULES, moduleEnabled } from '../../../../shared/modules'
+import { MODULES, moduleEnabled, type ModuleDef, type ModuleId } from '../../../../shared/modules'
 import { openSettings } from '../../store/nav'
 import { DockerPanel } from '../docker/DockerPanel'
+import { KubernetesPanel } from '../kubernetes/KubernetesPanel'
 
 function pct(used: number, total: number): number {
   return total > 0 ? (used / total) * 100 : 0
@@ -215,6 +216,30 @@ export function FleetMonitor(): React.JSX.Element {
   // A disabled module is one more branch, not a new mechanism — the same way
   // the activity bar and viewbar already hide what does not apply.
   const modules = useApp((s) => s.settings.modules)
+
+  // Sub-navigation, added after looking at the composite rather than at each
+  // panel on its own.
+  //
+  // Every module built today appended a panel to this page. With all of them on
+  // that was five stacked forms ABOVE the health summary and the server cards —
+  // so the thing the page is named for sat below four tools nobody was using at
+  // that moment, and the first screen was a wall of inputs. Each panel was
+  // reasonable; the page was not.
+  //
+  // Panels stay MOUNTED and are hidden rather than unmounted. A running
+  // broadcast or an open log tail must survive looking at the overview — and
+  // LogTailPanel stops its remote command on unmount, so switching tab would
+  // otherwise kill a tail the user is in the middle of reading.
+  const [tab, setTab] = useState<'overview' | ModuleId>('overview')
+  const tabs = useMemo<ModuleDef[]>(
+    () => MODULES.filter((m) => moduleEnabled(modules, m.id)),
+    [modules]
+  )
+  // A module switched off while its tab is open would otherwise leave the page
+  // blank with no way back.
+  const activeTab = tab === 'overview' || tabs.some((t) => t.id === tab) ? tab : 'overview'
+  const show = (id: 'overview' | ModuleId): React.CSSProperties | undefined =>
+    activeTab === id ? undefined : { display: 'none' }
   const groups = useWorkspaceMonitorGroups()
   const hosts = useFleet((s) => s.hosts)
   const workspaceId = useApp((s) => s.activeWorkspaceId)
@@ -290,38 +315,73 @@ export function FleetMonitor(): React.JSX.Element {
         </button>
       </div>
 
-      {/* Above the health panel: when someone types here they are looking
-          for one thing, and should not have to scroll past the estate
-          summary to see whether it was found. */}
       {/* Correctly switching every new module off on upgrade has a cost: the
           user sees nothing new and has no reason to look for it. One line,
           shown only when they are ALL off, rather than a per-module nag that
           would teach people to ignore this row. */}
-      {MODULES.every((m) => !moduleEnabled(modules, m.id)) && (
+      {tabs.length === 0 && (
         <div className="s-desc" style={{ marginBottom: 12 }}>
-          Search, running a command across servers, log tailing, scheduled jobs and Docker are
-          available and switched off.{' '}
+          Search, running a command across servers, log tailing, scheduled jobs, Docker and
+          Kubernetes are available and switched off.{' '}
           <button className="btn ghost sm" onClick={() => openSettings('modules')}>
             Choose modules
           </button>
         </div>
       )}
 
-      {moduleEnabled(modules, 'fleetSearch') && (
-        <FleetSearch servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+      {tabs.length > 0 && (
+        <div className="segment monitor-tabs">
+          <button
+            className={clsx('seg-btn', activeTab === 'overview' && 'active')}
+            onClick={() => setTab('overview')}
+          >
+            Overview
+          </button>
+          {tabs.map((m) => (
+            <button
+              key={m.id}
+              className={clsx('seg-btn', activeTab === m.id && 'active')}
+              onClick={() => setTab(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
       )}
 
-      {moduleEnabled(modules, 'broadcast') && <BroadcastPanel servers={servers} />}
+      {moduleEnabled(modules, 'fleetSearch') && (
+        <div style={show('fleetSearch')}>
+          <FleetSearch servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'broadcast') && (
+        <div style={show('broadcast')}>
+          <BroadcastPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'logTail') && (
+        <div style={show('logTail')}>
+          <LogTailPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'cron') && (
+        <div style={show('cron')}>
+          <CronPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'docker') && (
+        <div style={show('docker')}>
+          <DockerPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'kubernetes') && (
+        <div style={show('kubernetes')}>
+          <KubernetesPanel servers={servers} />
+        </div>
+      )}
 
-      {/* Directly under broadcast: the monitor says a unit failed, broadcast
-          lets you act on it, and this is the "why" that belongs between them. */}
-      {moduleEnabled(modules, 'logTail') && <LogTailPanel servers={servers} />}
-
-      {moduleEnabled(modules, 'cron') && <CronPanel servers={servers} />}
-
-      {moduleEnabled(modules, 'docker') && <DockerPanel servers={servers} />}
-
-      <FleetHealth servers={servers} />
+      <div style={show('overview')}>
+        <FleetHealth servers={servers} />
 
       {totals.reporting > 0 && (
         <div className="fleet-totals">
@@ -389,6 +449,7 @@ export function FleetMonitor(): React.JSX.Element {
             commit={commit}
           />
         ))}
+        </div>
       </div>
     </div>
   )

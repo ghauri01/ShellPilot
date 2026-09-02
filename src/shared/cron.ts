@@ -157,8 +157,16 @@ function describeItem(item: string, u: Unit): string | null {
 }
 
 function describeField(value: string, u: Unit): string | null {
+  const items = value.split(',')
+  const bare = (v: string): boolean => /^\d+$/.test(v) || (u.abbr?.includes(v.toLowerCase()) ?? false)
+
+  // `0,15,30,45` is one list of values, not four separate clauses. Naming the
+  // unit once reads as the crontab does; repeating it gives "minute 0, minute
+  // 15, minute 30, minute 45".
+  if (items.every(bare)) return `${u.one} ${items.map((v) => label(v, u)).join(', ')}`
+
   const parts: string[] = []
-  for (const item of value.split(',')) {
+  for (const item of items) {
     const d = describeItem(item, u)
     if (d === null) return null
     parts.push(d)
