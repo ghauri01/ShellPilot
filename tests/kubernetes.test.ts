@@ -153,9 +153,14 @@ describe('commands', () => {
   it('bounds every call, because kubectl waits forever by default', () => {
     // A dead cluster would otherwise hang the SSH exec with no output.
     const cmd = buildK8sReadCommand()
-    for (const part of cmd.split(';').filter((p) => p.includes('kubectl'))) {
-      expect(part, part).toMatch(/--request-timeout=/)
-    }
+    // Every INVOCATION, which now goes through "$SP_BIN" — the PATH resolver
+    // mentions kubectl by name without being a call, and matching on the word
+    // would test the resolver rather than the calls.
+    // A CALL runs the binary; the resolver's fallback assigns to it. Matching
+    // on the variable name alone caught the assignment too.
+    const calls = cmd.split(';').filter((p) => /"\$SP_BIN"\s+\w/.test(p))
+    expect(calls.length).toBeGreaterThanOrEqual(5)
+    for (const part of calls) expect(part, part).toMatch(/--request-timeout=/)
   })
 
   it('ignores a context or namespace it cannot prove safe', () => {
@@ -262,5 +267,40 @@ describe('mistakes inherited from the modules written before this one', () => {
       1
     )
     expect(r.ok).toBe(false)
+  })
+})
+
+
+// "kubectl: command not found" over SSH is usually wrong about the cause.
+//
+// `ssh host cmd` runs a NON-LOGIN shell, so PATH is roughly /usr/bin:/bin — no
+// /usr/local/bin, no /snap/bin. That is where kubectl most often lives, so the
+// message sends someone to install a thing that is already there.
+describe('finding the binary a non-login shell cannot see', () => {
+  it('looks in the places a login shell would', () => {
+    const cmd = buildK8sReadCommand()
+    for (const p of ['/usr/local/bin/kubectl', '/snap/bin/kubectl', '/usr/bin/kubectl']) {
+      expect(cmd, p).toContain(p)
+    }
+  })
+
+  it('covers the wrappers k3s and microk8s ship instead of kubectl', () => {
+    const cmd = buildK8sReadCommand()
+    expect(cmd).toContain('/snap/bin/microk8s.kubectl')
+    expect(cmd).toContain('/var/lib/rancher/rke2/bin/kubectl')
+  })
+
+  it('falls back to the bare name so PATH still gets a chance', () => {
+    // If none of the candidates exist, running `kubectl` unqualified is still
+    // the right last attempt — the user may have it somewhere unusual.
+    expect(buildK8sReadCommand()).toMatch(/SP_BIN=kubectl/)
+  })
+
+  it('does not try sudo, because sudo cannot fix RBAC', () => {
+    // Docker permission denied is a unix group problem root solves. Kubernetes
+    // `forbidden` is about the identity in the kubeconfig, and `sudo kubectl`
+    // reads ROOT's kubeconfig — usually absent — turning a precise error into
+    // a vague one.
+    expect(buildK8sReadCommand()).not.toMatch(/sudo/)
   })
 })

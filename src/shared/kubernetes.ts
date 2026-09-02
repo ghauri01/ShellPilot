@@ -90,6 +90,21 @@ export const K8S_FAILURE_HELP: Record<K8sFailure, string> = {
 }
 
 /**
+ * Why there is no sudo retry here, unlike Docker.
+ *
+ * Docker's "permission denied" is a unix group problem, and root fixes it.
+ * Kubernetes `forbidden` is cluster RBAC — it is about the identity in the
+ * kubeconfig, not the uid running kubectl — so `sudo kubectl` does not
+ * escalate anything. Worse, it reads ROOT's kubeconfig, which usually does not
+ * exist, turning a precise "your token cannot list pods" into a vague "no
+ * configuration has been provided" and sending the user somewhere unrelated.
+ *
+ * The useful failover for kubectl is finding the binary, which is what
+ * buildK8sReadCommand does.
+ */
+export const K8S_SUDO_DOES_NOT_HELP = true
+
+/**
  * Classify a failed kubectl invocation.
  *
  * Ordered most specific first. `forbidden` is checked before `no-cluster`
@@ -130,6 +145,8 @@ export function classifyK8sFailure(stderr: string, exitCode: number | null): K8s
   return 'unknown'
 }
 
+import { resolveBinary } from './docker'
+
 // Names are echoed into a shell command, so they are validated rather than
 // escaped — the same rule the log tailer and the docker module follow.
 // Kubernetes names are RFC 1123 labels; contexts are looser but bounded.
@@ -157,20 +174,33 @@ export function buildK8sReadCommand(context?: string, namespace?: string): strin
   const ctx = context && validateContext(context) ? ` --context=${context}` : ''
   const ns = namespace && validateNamespace(namespace) ? ` --namespace=${namespace}` : ''
   const t = ' --request-timeout=10s'
+  // `ssh host cmd` runs a NON-LOGIN shell — PATH is roughly /usr/bin:/bin, with
+  // no /usr/local/bin and no /snap/bin. kubectl is very commonly installed in
+  // exactly those places, so "command not found" over SSH usually means "not
+  // where this shell looks" rather than "not installed", and those have
+  // different fixes. k3s and microk8s ship their own wrappers, which is why
+  // they are in the list.
+  const resolve = resolveBinary('kubectl', [
+    '/var/lib/rancher/rke2/bin/kubectl',
+    '/usr/local/bin/k3s',
+    '/snap/bin/microk8s.kubectl'
+  ])
+  const k = '"$SP_BIN"'
   const cols =
     `custom-columns=NS:.metadata.namespace,NAME:.metadata.name,` +
     `READY:.status.containerStatuses[*].ready,PHASE:.status.phase,` +
     `RESTARTS:.status.containerStatuses[*].restartCount,NODE:.spec.nodeName,START:.status.startTime`
   return [
-    `kubectl version --client -o json${t} 2>&1`,
+    resolve,
+    `${k} version --client -o json${t} 2>&1`,
     'echo "===SHELLPILOT-CTX==="',
-    `kubectl config get-contexts --no-headers${t} 2>&1`,
+    `${k} config get-contexts --no-headers${t} 2>&1`,
     'echo "===SHELLPILOT-NS==="',
-    `kubectl get ns --no-headers -o custom-columns=NAME:.metadata.name${ctx}${t} 2>&1`,
+    `${k} get ns --no-headers -o custom-columns=NAME:.metadata.name${ctx}${t} 2>&1`,
     'echo "===SHELLPILOT-PODS-ALL==="',
-    `kubectl get pods --all-namespaces --no-headers -o ${cols}${ctx}${t} 2>&1`,
+    `${k} get pods --all-namespaces --no-headers -o ${cols}${ctx}${t} 2>&1`,
     'echo "===SHELLPILOT-PODS-NS==="',
-    `kubectl get pods --no-headers -o ${cols}${ctx}${ns}${t} 2>&1`
+    `${k} get pods --no-headers -o ${cols}${ctx}${ns}${t} 2>&1`
   ].join('; ')
 }
 

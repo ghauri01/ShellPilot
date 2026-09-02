@@ -36,7 +36,18 @@ export interface DockerContainer {
 }
 
 export type DockerProbe =
-  | { ok: true; version: string | null; containers: DockerContainer[] }
+  | {
+      ok: true
+      version: string | null
+      containers: DockerContainer[]
+      /**
+       * Read as root after the unprivileged attempt was refused.
+       *
+       * Surfaced rather than hidden: running as root is a thing the user should
+       * know happened, even when it is the only way to get an answer.
+       */
+      usedSudo?: boolean
+    }
   | { ok: false; reason: DockerFailure; detail: string }
 
 /**
@@ -137,6 +148,66 @@ export function classifyDockerFailure(stderr: string, exitCode: number | null): 
 // printable byte that is impossible in an image reference *and* in a Ports
 // string, so this one stays.
 export const DOCKER_SEP = '\u0001'
+
+/**
+ * Where a tool actually lives when an SSH session cannot find it.
+ *
+ * `ssh host cmd` runs a NON-LOGIN shell, which on most distributions means a
+ * PATH of roughly `/usr/bin:/bin` — no `/usr/local/bin`, no `/snap/bin`, no
+ * `/opt/homebrew/bin`. So "command not found" over SSH very often means
+ * "installed, but not somewhere this shell looks", which is a completely
+ * different problem from not being installed and has a completely different
+ * fix.
+ *
+ * Emits a shell fragment that sets `$SP_BIN` to the first thing that exists,
+ * so the caller can run `"$SP_BIN" ...` and get the same answer a login shell
+ * would.
+ */
+export function resolveBinary(name: string, extraPaths: string[] = []): string {
+  const candidates = [
+    name,
+    `/usr/bin/${name}`,
+    `/usr/local/bin/${name}`,
+    `/snap/bin/${name}`,
+    `/opt/homebrew/bin/${name}`,
+    `/usr/sbin/${name}`,
+    ...extraPaths
+  ]
+  // `command -v` rather than `which`: built in, and it is the POSIX spelling.
+  return (
+    `SP_BIN=""; for c in ${candidates.join(' ')}; do ` +
+    `command -v "$c" >/dev/null 2>&1 && SP_BIN="$c" && break; done; ` +
+    `[ -z "$SP_BIN" ] && SP_BIN=${name}`
+  )
+}
+
+/**
+ * Whether this account could re-run something as root WITHOUT being asked for
+ * a password.
+ *
+ * `sudo -n` never prompts — it fails immediately when a password is required.
+ * That is the whole reason it is safe to probe: it cannot hang an exec waiting
+ * on a tty that is not there, and it cannot silently consume a cached sudo
+ * timestamp the user did not intend for us.
+ */
+export const SUDO_PROBE = 'sudo -n true >/dev/null 2>&1 && echo SP_SUDO_OK || true'
+
+/**
+ * Build the read command, optionally as root and with the binary resolved.
+ *
+ * `sudo` is a parameter rather than a second constant because the retry has to
+ * be the SAME probe — a sudo path that read differently would answer a
+ * different question and the two results could not be compared.
+ */
+export function buildDockerListCommand(opts: { sudo?: boolean } = {}): string {
+  const run = opts.sudo ? 'sudo -n "$SP_BIN"' : '"$SP_BIN"'
+  return [
+    resolveBinary('docker'),
+    `${run} version --format "{{.Server.Version}}" 2>/dev/null || ${run} --version 2>&1`,
+    `echo "===SHELLPILOT-PS==="`,
+    `${run} ps --all --no-trunc --format "{{.ID}}${DOCKER_SEP}{{.Names}}${DOCKER_SEP}{{.Image}}${DOCKER_SEP}{{.State}}${DOCKER_SEP}{{.Status}}${DOCKER_SEP}{{.Ports}}${DOCKER_SEP}{{.CreatedAt}}" 2>&1`
+  ].join('; ')
+}
 
 export const DOCKER_LIST_COMMAND = [
   // Two probes, because they answer different questions. `--format

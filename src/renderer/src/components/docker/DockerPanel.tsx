@@ -28,6 +28,12 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   const [probe, setProbe] = useState<DockerProbe | null>(null)
   const [loading, setLoading] = useState(false)
   const [logs, setLogs] = useState<{ ref: string; output: string } | null>(null)
+  // Sticky per panel: an operator who knows this account is not in the docker
+  // group should not pay a failed round trip on every refresh.
+  const [useSudo, setUseSudo] = useState(false)
+  // null = not asked yet. Probed only when a permission failure makes it
+  // relevant, so an ordinary host never runs a sudo probe at all.
+  const [sudoAvailable, setSudoAvailable] = useState<boolean | null>(null)
   const openContainerShell = useApp((st) => st.openContainerShell)
 
   const eligible = useMemo(() => servers.filter((s) => s.status !== 'offline'), [servers])
@@ -45,13 +51,22 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
     hops: sshHopsFor(s)
   })
 
-  const load = async (): Promise<void> => {
+  const load = async (sudoOverride?: boolean): Promise<void> => {
     if (!server) return
     setLoading(true)
     setLogs(null)
     try {
-      const r = await window.shellpilot?.docker?.list(cfgFor(server))
+      const r = await window.shellpilot?.docker?.list(cfgFor(server), { sudo: sudoOverride ?? useSudo })
       setProbe(r ?? null)
+      // Only ask about sudo once something has actually been refused by it —
+      // and only when the automatic retry did not already solve it, which it
+      // usually does.
+      if (r && !r.ok && r.reason === 'permission-denied') {
+        const can = await window.shellpilot?.docker?.canSudo(cfgFor(server))
+        setSudoAvailable(can ?? false)
+      } else {
+        setSudoAvailable(null)
+      }
     } catch (e) {
       setProbe({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
     } finally {
@@ -123,6 +138,51 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
           <div className="mono" style={{ marginTop: 4, opacity: 0.8 }}>
             {probe.detail}
           </div>
+          {/* Offered the moment a permission failure is seen, rather than left
+              for the user to work out. `sudo -n` never prompts, so if it is not
+              available that is said plainly instead of producing a button that
+              hangs on a password prompt with no tty to type into. */}
+          {probe.reason === 'permission-denied' && sudoAvailable === true && (
+            <div className="row" style={{ gap: 8, marginTop: 8, alignItems: 'center' }}>
+              <button
+                className="btn sm"
+                onClick={() => {
+                  setUseSudo(true)
+                  void load(true)
+                }}
+              >
+                Retry with sudo
+              </button>
+              <span className="faint">
+                This account has passwordless sudo on that host, so containers can be read as root.
+              </span>
+            </div>
+          )}
+          {probe.reason === 'permission-denied' && sudoAvailable === false && (
+            <div className="faint" style={{ marginTop: 6 }}>
+              sudo would need a password here, and there is no terminal to type it into. Add this
+              user to the docker group on the host, or configure passwordless sudo for it.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Once root is in use, say so and leave a way back. A panel silently
+          reading as root is the thing worth avoiding, not root itself. */}
+      {(useSudo || (probe?.ok && probe.usedSudo)) && (
+        <div className="s-desc warn">
+          {probe?.ok && probe.usedSudo && !useSudo
+            ? 'Read as root: the unprivileged attempt was refused and passwordless sudo was available.'
+            : 'Reading as root on every refresh.'}{' '}
+          <button
+            className="btn ghost sm"
+            onClick={() => {
+              setUseSudo(false)
+              void load(false)
+            }}
+          >
+            Stop using sudo
+          </button>
         </div>
       )}
 

@@ -734,7 +734,10 @@ ipcMain.handle(
   }
 )
 
-ipcMain.handle('docker:list', (_e, cfg: unknown) => dockerReader.list(cfg))
+ipcMain.handle('docker:list', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+  dockerReader.list(cfg, opts ?? {})
+)
+ipcMain.handle('docker:can-sudo', (_e, cfg: unknown) => dockerReader.canSudo(cfg))
 ipcMain.handle('docker:logs', async (_e, cfg: unknown, ref: string, lines: unknown) => {
   // `lines: number` was a compile-time annotation only. IPC arguments are
   // structured-clone values with no runtime type, so a renderer — or anything

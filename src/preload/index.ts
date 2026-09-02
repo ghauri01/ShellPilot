@@ -256,7 +256,9 @@ const api = {
       ipcRenderer.invoke('k8s:logs', cfg, namespace, pod, lines, context)
   },
   docker: {
-    list: (cfg: unknown): Promise<DockerProbe> => ipcRenderer.invoke('docker:list', cfg),
+    list: (cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerProbe> =>
+      ipcRenderer.invoke('docker:list', cfg, opts),
+    canSudo: (cfg: unknown): Promise<boolean> => ipcRenderer.invoke('docker:can-sudo', cfg),
     logs: (
       cfg: unknown,
       ref: string,
