@@ -96,7 +96,7 @@ export const OVPN_REJECT_RULES: readonly OvpnRejectRule[] = [
   {
     id: 'script-security',
     directives: ['script-security'],
-    reason: 'script-security is what enables every one of the script directives. ShellPilot always sets it to 0.'
+    reason: 'script-security is what enables every one of the script directives. ShellPilot always sets it to 1, which permits the ifconfig openvpn runs for its own interface and nothing else.'
   },
 
   // --- arbitrary read, write or process control ---
@@ -985,7 +985,24 @@ export function ovpnArgs(spec: OpenVpnSpec, opts: OvpnArgOptions): string[] {
 
   // A clean local config is only half the job. The second half is refusing the
   // same directives when a hostile *server* pushes them (E38).
-  args.push('--script-security', '0')
+  //
+  // 1, not 0. openvpn's own levels, from its --help:
+  //
+  //   0 -- strictly no calling of external programs
+  //   1 -- (default) only call built-ins such as ifconfig
+  //   2 -- allow calling of built-ins and scripts
+  //
+  // The property wanted here is "no user-defined scripts", which is 1. 0 is
+  // stricter than that in a way that has nothing to do with scripts: it also
+  // forbids the ifconfig openvpn runs to configure its OWN tun interface, so
+  // every connection died with "Mac OS X ifconfig failed: disallowed by
+  // script-security setting" the moment it got that far. OpenVPN could not
+  // bring up a tunnel on macOS at all.
+  //
+  // 1 still refuses `up`, `down`, `route-up` and every other script directive,
+  // which is what the reject rules and pull-filters above are protecting, and
+  // it is openvpn's own default rather than a loosening we invented.
+  args.push('--script-security', '1')
   for (const f of OVPN_PULL_FILTER_REJECTS) args.push('--pull-filter', 'reject', f)
 
   if (!spec.redirectGateway) {

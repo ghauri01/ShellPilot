@@ -658,17 +658,26 @@ export function parseUnitList(output: string): UnitChoice[] {
  * answer than the file being invisible.
  */
 export function buildLogFileListCommand(): string {
-  return [
+  // The loop is statements joined by `;`; the filters are a PIPELINE off the
+  // end of it. Those are different joins, so they are written differently.
+  //
+  // This was one array joined with '; ' and then repaired by
+  // `.replace('; |', ' |')` — which takes a string, so it fixed only the FIRST
+  // of the two, and every command this ever built ended `...$'; | sort -u`.
+  // That is a shell syntax error, so the File picker returned nothing on every
+  // host it has ever run against. Nothing said so: the renderer swallows the
+  // failure and the button simply stays disabled, with a tooltip blaming the
+  // absence on no server being selected.
+  const scan = [
     'for d in /var/log /var/log/nginx /var/log/apache2 /var/log/httpd /var/log/audit',
     'do [ -d "$d" ] || continue',
     // -maxdepth 1 per directory rather than one deep walk: it keeps the output
     // bounded per directory instead of letting one noisy tree fill the budget.
     'find "$d" -maxdepth 1 -type f 2>/dev/null',
-    'done',
-    // Rotated and compressed files are noise in a picker.
-    "| grep -vE '\\.(gz|xz|bz2|zst|[0-9]+)$'",
-    '| sort -u | head -n 200'
-  ].join('; ').replace('; |', ' |')
+    'done'
+  ].join('; ')
+  // Rotated and compressed files are noise in a picker.
+  return `${scan} | grep -vE '\\.(gz|xz|bz2|zst|[0-9]+)$' | sort -u | head -n 200`
 }
 
 /** Absolute paths only, and nothing that could not be tailed. */

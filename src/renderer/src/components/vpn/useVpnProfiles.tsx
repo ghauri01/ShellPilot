@@ -81,6 +81,10 @@ function openExternal(url: string): void {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+/** The generic sentence `internal` carries. Matched, not guessed: it is the one
+ *  message in VPN_ERROR_MESSAGE that describes nothing. */
+const INTERNAL_PREFIX = 'Something went wrong inside ShellPilot.'
+
 /** The first sentence of a message from main.
  *
  *  Every VPN failure is composed as message + detail + hint (see
@@ -88,10 +92,21 @@ function openExternal(url: string): void {
  *  The hint is advice, and the advice is a button now; the detail is
  *  diagnostics — the paths an engine was looked for in — which belong under
  *  Details, read by someone who wants them rather than at someone who does
- *  not. */
-function headline(text: string): string {
-  const end = text.indexOf('. ')
-  return end === -1 ? text.trim() : text.slice(0, end + 1)
+ *  not.
+ *
+ *  Except for `internal`, whose first sentence says nothing at all. OpenVPN
+ *  failing because its management socket path was too long produced the toast
+ *  "Something went wrong inside ShellPilot." and an empty log drawer — a
+ *  message with no fact in it, in front of the one detail that explained the
+ *  failure. When the sentence is that one, the detail IS the headline. */
+export function headline(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.startsWith(INTERNAL_PREFIX)) {
+    const rest = trimmed.slice(INTERNAL_PREFIX.length).trim()
+    if (rest !== '') return headline(rest)
+  }
+  const end = trimmed.indexOf('. ')
+  return end === -1 ? trimmed : trimmed.slice(0, end + 1)
 }
 
 /** What each remedy actually does, supplied by the component that can do it. */

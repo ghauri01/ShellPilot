@@ -139,6 +139,12 @@ portable:
   # the whole thing really is portable.
   unpackDirName: ShellPilot
 
+# Runs after electron-builder signs, and rewrites resources/bin/manifest.json to
+# the hashes of the binaries as signed. Signing rewrites every nested Mach-O, so
+# the hashes the build scripts recorded before packaging describe files that no
+# longer exist — which made the app refuse to run its own engines. See the hook.
+afterSign: scripts/after-sign.cjs
+
 mac:
   icon: build/icon.icns
   category: public.app-category.developer-tools

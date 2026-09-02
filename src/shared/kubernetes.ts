@@ -1260,3 +1260,24 @@ export function workloadIsDegraded(w: K8sWorkload): boolean {
 export function nodeIsUnhealthy(n: K8sNode): boolean {
   return !/^Ready$/i.test(n.status)
 }
+
+/** Which reads the panel must repeat when the selected namespace changes.
+ *
+ *  Every read in this panel is namespace-scoped except the node list, so
+ *  changing the namespace invalidates all of them. The pod list is always
+ *  re-read because it is behind the default tab; the other two are re-read
+ *  only when their tab is the one being looked at, since both are loaded
+ *  lazily on first view anyway.
+ *
+ *  Named and tested because the bug was an ABSENCE: the namespace control
+ *  discarded the cached reads and started no new ones, so it looked inert and
+ *  the data only reappeared after clicking a different tab. A missing call is
+ *  invisible in review — there is nothing on the screen to be wrong about.
+ */
+export function readsAfterNamespaceChange(view: 'pods' | 'cluster' | 'usage'): {
+  pods: boolean
+  overview: boolean
+  usage: boolean
+} {
+  return { pods: true, overview: view === 'cluster', usage: view === 'usage' }
+}

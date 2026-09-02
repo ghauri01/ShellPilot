@@ -52,6 +52,21 @@ const script = (withSleep: boolean): string => [
   'df -kP / | tail -1',
   'echo __NET__',
   'cat /proc/net/dev',
+  // Which of those interfaces are real hardware.
+  //
+  // A packet arriving for a container is counted on the wire, again on the
+  // bridge it crosses, and again on the veth into the namespace, so summing
+  // every interface reports one packet three times. Measured on a host running
+  // k3s and Docker: 69,462 bytes summed across all interfaces for 7,666 bytes
+  // that actually crossed eth0 — nine times the truth, on exactly the kind of
+  // host this app is for.
+  //
+  // A physical interface is the one with a backing device in sysfs. veth,
+  // bridges, flannel, and both VPN tunnel types have none — and the tunnels
+  // are right to be excluded too, since their traffic also leaves through the
+  // wire encrypted and would otherwise be counted twice.
+  'echo __PHYS__',
+  'for i in /sys/class/net/*; do [ -e "$i/device" ] && basename "$i"; done 2>/dev/null',
   'echo __UP__',
   'head -1 /proc/uptime',
   'echo __HOST__',
@@ -199,6 +214,41 @@ function cpuPct(a: CpuSnap, b: CpuSnap): number {
   return dTotal > 0 ? Math.max(0, Math.min(100, (1 - dIdle / dTotal) * 100)) : 0
 }
 
+/**
+ * Cumulative bytes in and out across this host's own interfaces.
+ *
+ * `physLines` is what sysfs said has a backing device. When it names anything,
+ * only those interfaces count. A packet destined for a container is counted on
+ * the wire, again on the bridge, and again on the veth into the namespace, so
+ * summing everything reports one packet several times over — measured at nine
+ * times the truth on a host running k3s and Docker.
+ *
+ * When it names nothing, every non-loopback interface counts instead. That is
+ * the case on a host whose sysfs we could not read, and on a container, where
+ * there IS no physical interface and the veth genuinely is the wire.
+ */
+export function sumNetwork(
+  netLines: string[],
+  physLines: string[]
+): { netRx: number; netTx: number } {
+  const physical = new Set(physLines.map((l) => l.trim()).filter(Boolean))
+  let netRx = 0
+  let netTx = 0
+  for (const l of netLines) {
+    const idx = l.indexOf(':')
+    if (idx === -1) continue
+    const iface = l.slice(0, idx).trim()
+    if (iface === 'lo') continue
+    if (physical.size > 0 && !physical.has(iface)) continue
+    // /proc/net/dev: eight receive columns, then eight transmit ones, so
+    // transmitted bytes is index 8.
+    const cols = l.slice(idx + 1).trim().split(/\s+/).map(Number)
+    netRx += cols[0] || 0
+    netTx += cols[8] || 0
+  }
+  return { netRx, netTx }
+}
+
 // `prev` is the snapshot from this key's previous poll; the returned `snap` is
 // the one to diff the next poll against.
 function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: CpuSnap | null } {
@@ -220,17 +270,7 @@ function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: C
   const diskTotal = (parseInt(disk[1]) || 0) * 1024
   const diskUsed = (parseInt(disk[2]) || 0) * 1024
 
-  let netRx = 0
-  let netTx = 0
-  for (const l of section(text, 'NET')) {
-    const idx = l.indexOf(':')
-    if (idx === -1) continue
-    const iface = l.slice(0, idx).trim()
-    if (iface === 'lo') continue
-    const cols = l.slice(idx + 1).trim().split(/\s+/).map(Number)
-    netRx += cols[0] || 0
-    netTx += cols[8] || 0
-  }
+  const { netRx, netTx } = sumNetwork(section(text, 'NET'), section(text, 'PHYS'))
 
   const uptime = parseFloat(section(text, 'UP')[0] ?? '0') || 0
   const hostname = section(text, 'HOST')[0] ?? ''
