@@ -597,7 +597,7 @@ interface FakeHost {
   root: string
   bin: string
   /** Run the shipped collector against this tree. */
-  collect: (opts?: { sudo?: boolean; deny?: string[] }) => string
+  collect: (opts?: { sudo?: boolean; deny?: string[]; noSystemctl?: boolean }) => string
 }
 
 function fakeHost(): FakeHost {
@@ -631,10 +631,18 @@ function fakeHost(): FakeHost {
   return {
     root,
     bin,
-    collect: ({ sudo = true, deny = [] } = {}) => {
-      const cmd = buildCronCollectCommand({ sudo })
+    collect: ({ sudo = true, deny = [], noSystemctl = false } = {}) => {
+      let cmd = buildCronCollectCommand({ sudo })
         .replaceAll('/etc/cron', `${root}/etc/cron`)
         .replaceAll('/var/spool/cron', `${root}/var/spool/cron`)
+      // Point the systemctl resolver at a name that cannot exist. Without this
+      // a Linux host answers with its own timers, and the tree under `root`
+      // stops being the only thing the test is measuring.
+      if (noSystemctl) {
+        cmd = cmd
+          .replace(/for c in systemctl [^;]*;/, 'for c in sp-no-such-systemctl;')
+          .replace(/SP_BIN=systemctl\b/, 'SP_BIN=sp-no-such-systemctl')
+      }
       return execFileSync('/bin/sh', ['-c', cmd], {
         encoding: 'utf8',
         env: { PATH: `${bin}:/usr/bin:/bin`, SP_DENY: deny.join(':') }
@@ -805,7 +813,19 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     rmSync(join(host.bin, 'systemctl'))
     rmSync(join(host.root, 'etc/cron.d'), { recursive: true })
     rmSync(join(host.root, 'var/spool/cron'), { recursive: true })
-    const r = parseCronCollection(host.collect({ sudo: false, deny: [join(host.root, 'etc/crontab')] }))
+    // Deleting the fake from $bin is not enough: resolveBinary also probes
+    // absolute paths, so on a Linux runner the host's REAL /usr/bin/systemctl
+    // answers and the test reads that machine's own timers. It passed on macOS
+    // only because macOS has no systemctl anywhere — which is exactly the kind
+    // of green that means nothing. The sibling crontab test above neuters the
+    // candidate list the same way.
+    const r = parseCronCollection(
+      host.collect({
+        sudo: false,
+        deny: [join(host.root, 'etc/crontab')],
+        noSystemctl: true
+      })
+    )
     expect(r.entries.map((e) => e.kind)).toEqual(['user-crontab'])
     expect(r.sources.map((s) => s.status)).toEqual(['ok', 'denied', 'absent', 'absent', 'no-tool'])
   })
