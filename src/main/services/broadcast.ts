@@ -7,7 +7,8 @@ import {
   BROADCAST_CONCURRENCY,
   BROADCAST_OUTPUT_CAP,
   BROADCAST_STALL_GRACE_MS,
-  BROADCAST_TIMEOUT_MS
+  BROADCAST_TIMEOUT_MS,
+  classifyBroadcastResult
 } from '../../shared/broadcast'
 
 // Runs one command across many servers.
@@ -24,7 +25,16 @@ import {
 //     machines an operator cannot afford to wobble. Three at a time.
 //  3. Per-host results, always. One host failing must not end the run, and
 //     merged output loses which machine said what — the only question anyone
-//     asks afterwards.
+//     asks afterwards. Each result carries its own classification, so "which
+//     three hosts do not have docker" is answerable without reading fifteen
+//     exit codes.
+//
+// What it deliberately does NOT do is retry a refused command as root. The
+// reasoning is written out at the end of shared/broadcast.ts, next to the
+// approval model it would otherwise undermine; the short version is that a
+// fan-out retry is N simultaneous escalations of a command the user approved
+// unprivileged, and re-running an arbitrary command is a second execution
+// rather than a retry.
 
 export type Executor = (
   cfg: unknown,
@@ -125,7 +135,8 @@ export class BroadcastRunner {
         const skipped: BroadcastHostResult = {
           serverId: t.serverId,
           serverName: t.serverName,
-          state: 'skipped'
+          state: 'skipped',
+          outcome: 'cancelled'
         }
         results.push(skipped)
         this.deps.emit({ runId: req.runId, host: skipped, cancelled: true })
@@ -162,6 +173,13 @@ export class BroadcastRunner {
           ms: this.now - started,
           truncated: out.truncated || err.truncated || r.truncated || undefined
         }
+        // Classified here rather than in the renderer, from the UNCAPPED
+        // streams: the shell's "command not found" is the last thing on
+        // stderr, and a host that printed 20k of warnings first would have had
+        // it cut off before anyone could read it. `state` is untouched — a
+        // missing command is still a host that answered.
+        host.outcome =
+          classifyBroadcastResult({ ...host, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }) ?? undefined
       } catch (e) {
         // One unreachable host must not end the run — the others are the
         // reason it was started.
@@ -172,6 +190,9 @@ export class BroadcastRunner {
           error: e instanceof Error ? e.message : String(e),
           ms: this.now - started
         }
+        // A stall-guard rejection is a timeout, not an unreachable host, and
+        // its message is the only place that says so.
+        host.outcome = classifyBroadcastResult(host) ?? undefined
       }
       results.push(host)
       this.deps.emit({ runId: req.runId, host })

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { DockerReader } from '../src/main/services/docker'
-import { buildDockerListCommand, resolveBinary, SUDO_PROBE, DOCKER_SEP } from '../src/shared/docker'
+import { buildDockerListCommand, resolveBinary, SUDO_PROBE, DOCKER_MARKERS, DOCKER_SEP } from '../src/shared/docker'
 
 // Found by running 0.9.0 against a real host: the panel correctly said "this
 // user cannot talk to the docker socket" and then stopped. Naming a problem is
@@ -159,5 +159,143 @@ describe('finding a binary a non-login shell cannot see', () => {
 
   it('is reusable for other tools', () => {
     expect(resolveBinary('kubectl')).toContain('/usr/local/bin/kubectl')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The same discipline applied to the rest of the reads — and deliberately NOT
+// applied to the one method that changes state.
+// ---------------------------------------------------------------------------
+
+const dfOk = (): string =>
+  [
+    DOCKER_MARKERS.df,
+    'TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE',
+    'Images          31        9         12.71GB   8.216GB (64%)'
+  ].join('\n')
+
+const inspectOk = (): string =>
+  [
+    DOCKER_MARKERS.health,
+    'healthy',
+    DOCKER_MARKERS.inspect,
+    [
+      'abc123def4567890',
+      '/web',
+      'nginx:1.25',
+      'sha256:aa',
+      'running',
+      '0',
+      '2026-08-30T09:14:02Z',
+      '2026-08-28T11:02:44Z',
+      'always',
+      '0',
+      '0',
+      '7',
+      '',
+      '',
+      '',
+      'json-file'
+    ].join(DOCKER_SEP)
+  ].join('\n')
+
+const statsOk = (): string =>
+  [DOCKER_MARKERS.stats, ['web', '2.41%', '182.7MiB / 3.8GiB', '4.64%', '1.4GB / 3.2GB', '0B / 0B'].join(DOCKER_SEP)].join(
+    '\n'
+  )
+
+describe('every read gets the same failover, not just the list', () => {
+  const cases: { name: string; ok: () => string; call: (r: DockerReader) => Promise<{ ok: boolean }> }[] = [
+    { name: 'disk', ok: dfOk, call: (r) => r.disk({}) },
+    { name: 'inspect', ok: inspectOk, call: (r) => r.inspect({}, 'web') },
+    { name: 'stats', ok: statsOk, call: (r) => r.stats({}, ['web']) }
+  ]
+
+  for (const c of cases) {
+    it(`${c.name} retries as root and says that it did`, async () => {
+      const h = reader((cmd) =>
+        cmd.includes('sudo -n true')
+          ? { ok: true, stdout: 'SP_SUDO_OK' }
+          : cmd.includes('sudo -n')
+            ? { ok: true, stdout: c.ok() }
+            : { ok: true, stdout: DENIED }
+      )
+      const r = (await c.call(h.reader)) as { ok: boolean; usedSudo?: boolean }
+      expect(r.ok).toBe(true)
+      expect(r.usedSudo).toBe(true)
+    })
+
+    it(`${c.name} reports the ORIGINAL failure when root does not help`, async () => {
+      const h = reader((cmd) =>
+        cmd.includes('sudo -n true') ? { ok: true, stdout: 'SP_SUDO_OK' } : { ok: true, stdout: DENIED }
+      )
+      const r = (await c.call(h.reader)) as { ok: boolean; reason?: string }
+      expect(r.ok).toBe(false)
+      expect(r.reason).toBe('permission-denied')
+    })
+
+    it(`${c.name} does not probe sudo on a healthy host`, async () => {
+      const h = reader(() => ({ ok: true, stdout: c.ok() }))
+      expect((await c.call(h.reader)).ok).toBe(true)
+      expect(h.commands.some((x) => x.includes('sudo'))).toBe(false)
+    })
+
+    it(`${c.name} does not retry a missing binary`, async () => {
+      const h = reader(() => ({ ok: true, stdout: 'bash: docker: command not found', code: 127 }))
+      const r = (await c.call(h.reader)) as { ok: boolean; reason?: string }
+      expect(r.reason).toBe('not-installed')
+      expect(h.commands.some((x) => x.includes('sudo'))).toBe(false)
+    })
+  }
+})
+
+describe('changing state does NOT auto-escalate', () => {
+  // The reads above may quietly retry as root because a read retried as root
+  // gives the same answer either way. An ACTION retried as root is a privileged
+  // write nobody asked for: the user approved "restart this container", not
+  // "restart it as root if the socket says no", and a passwordless sudoers
+  // entry the user wrote for other reasons is not consent for this.
+  it('reports the refusal instead of retrying', async () => {
+    const h = reader(() => ({ ok: true, stdout: `${DOCKER_MARKERS.act}\n${DENIED}` }))
+    const r = await h.reader.act({}, 'restart', ['web'])
+    expect(r.ok).toBe(false)
+    expect(!r.ok && r.reason).toBe('permission-denied')
+    // Not even the probe: asking whether we COULD become root is the first step
+    // of deciding to, and that decision is not this method's to make.
+    expect(h.commands.some((c) => c.includes('sudo'))).toBe(false)
+  })
+
+  it('runs as root only when explicitly told to, and says so', async () => {
+    const h = reader(() => ({ ok: true, stdout: `${DOCKER_MARKERS.act}\nweb` }))
+    const r = await h.reader.act({}, 'stop', ['web'], { sudo: true })
+    expect(r.ok && r.usedSudo).toBe(true)
+    expect(h.commands[0]).toMatch(/sudo -n "\$SP_BIN" stop web/)
+  })
+
+  it('rejects an unsafe reference rather than dressing it as a docker failure', async () => {
+    // A refused build is a bug or an attack, not a condition of the host.
+    // Reporting it as "docker returned an error that could not be classified"
+    // would put an injection attempt behind a shrug.
+    const h = reader(() => ({ ok: true, stdout: '' }))
+    await expect(h.reader.act({}, 'stop', ['web; reboot'])).rejects.toThrow(/refusing/)
+    await expect(h.reader.act({}, 'destroy' as never, ['web'])).rejects.toThrow(/refusing/)
+    expect(h.commands).toHaveLength(0)
+  })
+
+  it('reports per container when the host answered', async () => {
+    const h = reader(() => ({
+      ok: true,
+      stdout: [DOCKER_MARKERS.act, 'web', 'Error response from daemon: No such container: db'].join('\n')
+    }))
+    const r = await h.reader.act({}, 'stop', ['web', 'db'])
+    expect(r.ok).toBe(true)
+    expect(r.ok && r.outcomes.map((o) => o.ok)).toEqual([true, false])
+  })
+
+  it('does not turn an unreachable host into a docker diagnosis', async () => {
+    const h = reader(() => ({ ok: false, stdout: '' }))
+    const r = await h.reader.act({}, 'stop', ['web'])
+    expect(r.ok).toBe(false)
+    expect(!r.ok && r.reason).toBe('unknown')
   })
 })

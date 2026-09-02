@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   assessCommand,
+  classifyBroadcastResult,
   confirmationFor,
   planBroadcast,
-  TYPE_ABOVE_HOSTS
+  summariseBroadcast,
+  TYPE_ABOVE_HOSTS,
+  type BroadcastHostResult
 } from '../src/shared/broadcast'
 
 // The approval model, settled before the executor was written.
@@ -230,5 +235,86 @@ describe('and still not crying wolf', () => {
     ]) {
       expect(assessCommand(c).risk, c).toBe('ordinary')
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fifteen hosts, made scannable.
+//
+// The per-host list is the record and stays complete — merged output loses
+// which machine said what, which is the only question anyone asks afterwards.
+// But a list is not an answer, and at fifteen rows nobody reads it top to
+// bottom. The summary is the line that says whether they need to.
+// ---------------------------------------------------------------------------
+
+const host = (over: Partial<BroadcastHostResult>): BroadcastHostResult => ({
+  serverId: over.serverName ?? 'id',
+  serverName: 'h',
+  state: 'ok',
+  ...over
+})
+
+describe('summarising a partial failure', () => {
+  it('counts every category, and they add up', () => {
+    const rows: BroadcastHostResult[] = [
+      host({ exitCode: 0, outcome: 'ok' }),
+      host({ exitCode: 0, outcome: 'ok' }),
+      host({ exitCode: 1, outcome: 'nonzero' }),
+      host({ exitCode: 127, outcome: 'missing-command' }),
+      host({ exitCode: 127, outcome: 'missing-command' }),
+      host({ state: 'failed', outcome: 'timeout', error: 'Command timed out after 60000ms' }),
+      host({ state: 'skipped', outcome: 'cancelled' }),
+      host({ state: 'running' })
+    ]
+    const s = summariseBroadcast(rows)
+    expect(s.total).toBe(8)
+    expect(s.running).toBe(1)
+    expect(s.counts).toMatchObject({
+      ok: 2,
+      nonzero: 1,
+      'missing-command': 2,
+      timeout: 1,
+      cancelled: 1,
+      'permission-denied': 0,
+      unreachable: 0
+    })
+    const finished = Object.values(s.counts).reduce((a, b) => a + b, 0)
+    expect(finished + s.running).toBe(s.total)
+  })
+
+  it('does not count a host that has not finished as an answer', () => {
+    // A category for "we do not know yet" would be counted in the summary as
+    // though it were a result.
+    expect(classifyBroadcastResult(host({ state: 'pending' }))).toBeNull()
+    expect(classifyBroadcastResult(host({ state: 'running' }))).toBeNull()
+    expect(summariseBroadcast([host({ state: 'pending' })]).counts.ok).toBe(0)
+  })
+
+  it('falls back to classifying a result that carries no outcome', () => {
+    // The runner sets it, but a result that has been through an older main
+    // process has not got one, and a summary that silently dropped those rows
+    // would under-report the fan-out.
+    const s = summariseBroadcast([host({ exitCode: 127, stderr: 'bash: docker: command not found' })])
+    expect(s.counts['missing-command']).toBe(1)
+  })
+})
+
+describe('the decision not to escalate on a fan-out', () => {
+  it('is written down where the next person will look for it', () => {
+    // Docker retries a refused read as root and this does not, which is a
+    // difference somebody will want to undo. The reasoning has to be next to
+    // the approval model it would otherwise invert, not in a commit message.
+    const src = readFileSync(resolve(__dirname, '../src/shared/broadcast.ts'), 'utf8')
+    expect(src).toMatch(/Why there is no sudo retry here/)
+  })
+
+  it('leaves the escalation to the classifier that already gates it', () => {
+    // The alternative to retrying is not doing nothing: the user types `sudo`
+    // themselves, and that goes through the model rather than around it.
+    expect(assessCommand('sudo systemctl restart nginx').risk).toBe('elevated')
+    expect(confirmationFor('elevated', TYPE_ABOVE_HOSTS + 1)).toEqual({
+      kind: 'type-to-confirm',
+      phrase: 'RUN'
+    })
   })
 })

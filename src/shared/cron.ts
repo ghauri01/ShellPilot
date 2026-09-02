@@ -11,7 +11,29 @@
 // it knows. `description: null` means "this is a valid schedule I will not
 // pretend to describe" — better than a confident sentence about the wrong time.
 
-export type CronSourceKind = 'user-crontab' | 'system-crontab' | 'cron.d' | 'systemd-timer'
+// `resolveBinary` and `SUDO_PROBE` are the Docker module's, deliberately not
+// re-derived here. Both encode a fact about the environment rather than
+// anything about Docker — that `ssh host cmd` gets a non-login PATH of roughly
+// /usr/bin:/bin, and that `sudo -n` is the only escalation that cannot prompt —
+// and a second copy of either is a second thing to drift.
+import { SUDO_PROBE, resolveBinary } from './docker'
+
+export type CronSourceKind =
+  | 'user-crontab'
+  | 'system-crontab'
+  | 'cron.d'
+  | 'systemd-timer'
+  /**
+   * Another account's crontab, read out of the spool directory.
+   *
+   * A sysadmin asking "what is scheduled on this box" means root's crontab at
+   * least as much as their own, and `crontab -l` cannot answer that: it reads
+   * exactly one account's file. The spool is normally root-only, so this source
+   * exists or does not depending on whether root can be reached without a
+   * password — which is why its status is reported rather than its absence
+   * being quietly folded into "nothing scheduled".
+   */
+  | 'other-user-crontab'
 
 export interface CronEntry {
   kind: CronSourceKind
@@ -42,6 +64,120 @@ export interface CronParseResult {
   entries: CronEntry[]
   /** Lines that looked like jobs but did not parse, kept verbatim. */
   unparsed: { origin: string; line: string }[]
+}
+
+// ---- Did we actually read it? -----------------------------------------
+//
+// The bug this fixes, found on a real host: `crontab -l 2>/dev/null || true`
+// and `cat /etc/crontab 2>/dev/null || true` produce EXACTLY the same output —
+// nothing — whether the file was empty, absent, unreadable, or the binary was
+// not installed at all. Four different answers, one rendering: "Nothing
+// scheduled."
+//
+// Three of those four are lies, and the worst is the third. /etc/cron.d is
+// commonly root-only, so an operator looking at a fully loaded box is shown an
+// empty schedule and has no reason to doubt it. A monitor that cannot tell
+// "there is nothing here" from "I was not allowed to look" is worse than no
+// monitor, because it is trusted.
+//
+// So every source now reports what happened to it, and the panel says how much
+// of the picture it actually has.
+
+/** The five places a scheduled job can live, each read independently. */
+export type CronSourceId =
+  | 'user-crontab'
+  | 'system-crontab'
+  | 'cron.d'
+  | 'other-crontabs'
+  | 'systemd-timers'
+
+export type CronSourceStatus =
+  /** Read it. An empty result here really does mean nothing is scheduled. */
+  | 'ok'
+  /** Some of it was read and some was refused — cron.d with mixed modes. */
+  | 'partial'
+  /** It is genuinely not on this host: no /etc/crontab, no crontab for this user. */
+  | 'absent'
+  /** It exists and this user may not read it. Root did not help, or was not available. */
+  | 'denied'
+  /** The tool that reads it is not installed, or systemd is not running here. */
+  | 'no-tool'
+  /** Something else happened, or the collector never reported on this source. */
+  | 'unknown'
+
+export interface CronSourceReport {
+  id: CronSourceId
+  /** What to call it on screen. */
+  label: string
+  status: CronSourceStatus
+  /** Read as root after the unprivileged attempt was refused. Never silent. */
+  usedSudo?: boolean
+  /** The collector's own words, when it had any. */
+  detail?: string
+}
+
+/** A collection, plus how much of it we were actually allowed to see. */
+export interface CronCollection extends CronParseResult {
+  sources: CronSourceReport[]
+}
+
+export const CRON_SOURCE_LABEL: Record<CronSourceId, string> = {
+  'user-crontab': 'crontab -l',
+  'system-crontab': '/etc/crontab',
+  'cron.d': '/etc/cron.d',
+  'other-crontabs': 'other users’ crontabs',
+  'systemd-timers': 'systemd timers'
+}
+
+/**
+ * What a status means for the completeness of the list.
+ *
+ * `no-tool` and `absent` are complete answers: a host with no systemd has no
+ * systemd timers, and that is a fact rather than a gap. `denied`, `partial` and
+ * `unknown` are gaps, and the panel must say so.
+ */
+export const CRON_STATUS_HELP: Record<CronSourceStatus, string> = {
+  ok: 'read in full',
+  partial: 'only partly readable — some files were refused',
+  absent: 'not present on this host',
+  denied: 'exists, but this account may not read it (and root was not available without a password)',
+  'no-tool': 'nothing here can schedule a job — the tool that would read it is not installed or not running',
+  unknown: 'the collector did not report on this source'
+}
+
+const CRON_SOURCE_IDS: CronSourceId[] = [
+  'user-crontab',
+  'system-crontab',
+  'cron.d',
+  'other-crontabs',
+  'systemd-timers'
+]
+
+const CRON_STATUSES: CronSourceStatus[] = ['ok', 'partial', 'absent', 'denied', 'no-tool', 'unknown']
+
+/**
+ * How much of a host's schedule this collection actually represents.
+ *
+ * `answered` deliberately counts `absent` and `no-tool`: those are answers, not
+ * gaps. Counting them as failures would make every minimal container look
+ * half-read and train people to ignore the number — the same "cries wolf"
+ * failure the broadcast risk classifier is built to avoid.
+ */
+export function summariseCronSources(sources: CronSourceReport[]): {
+  total: number
+  answered: number
+  incomplete: CronSourceReport[]
+  usedSudo: boolean
+} {
+  const incomplete = sources.filter(
+    (s) => s.status === 'denied' || s.status === 'partial' || s.status === 'unknown'
+  )
+  return {
+    total: sources.length,
+    answered: sources.length - incomplete.length,
+    incomplete,
+    usedSudo: sources.some((s) => s.usedSudo)
+  }
 }
 
 const DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -468,33 +604,301 @@ export function parseSystemdTimers(text: string): CronParseResult {
   return { entries, unparsed }
 }
 
+// ---- Collecting ---------------------------------------------------------
+
+/**
+ * Where per-user crontabs live, most specific first.
+ *
+ * Debian and Ubuntu use the `crontabs` subdirectory; Red Hat derivatives, Arch
+ * and SUSE put the files straight into /var/spool/cron. Both exist on Debian —
+ * /var/spool/cron is the parent — so the order matters: picking the parent
+ * would find no files and report an empty spool on a host full of them.
+ */
+const SPOOL_DIRS = ['/var/spool/cron/crontabs', '/var/spool/cron']
+
+export interface CronCollectOptions {
+  /**
+   * Retry an unreadable source as root. On by default.
+   *
+   * Safe on by default for exactly the reason the Docker reader gives: the
+   * retry is `sudo -n`, which NEVER prompts. It either works, because this
+   * account already has passwordless sudo — a decision made on that host, by
+   * whoever set it up, not one taken here — or it fails instantly. It cannot
+   * hang an exec waiting for a tty that is not there.
+   *
+   * Worth retrying at all because /etc/cron.d and the crontab spool are
+   * commonly root-only, so without it the honest answer on a hardened host is
+   * "denied" for half the sources — correct, but useless when root was one
+   * `sudo -n` away.
+   *
+   * Every source that used it says so, and the panel shows it. Reading files as
+   * root silently would be the wrong trade even when it is the only way to get
+   * an answer.
+   */
+  sudo?: boolean
+}
+
 /**
  * The command that collects everything, in one round trip.
  *
  * Each section is fenced with a marker so the parser knows which file each
- * block came from — and therefore whether it has a user field. Failures are
- * swallowed per section (`2>/dev/null || true`) because a host with no
- * /etc/cron.d, or a user with no crontab, is the normal case and must not fail
- * the whole collection.
+ * block came from — and therefore whether it has a user field.
+ *
+ * The important change from the first version: every read now says what
+ * happened to it, in a `===SHELLPILOT-STATUS===` block at the end. Before, a
+ * missing `crontab` binary, an unreadable /etc/crontab and an empty crontab
+ * were all "no output", and the panel rendered all three as "Nothing
+ * scheduled." Two of those three were lies, and on a host whose /etc/cron.d is
+ * root-only — which is normal — it was lying about the busiest file on the box.
+ *
+ * The status block is accumulated in a shell variable and printed at the end
+ * rather than interleaved, so that nothing read out of a *file* can end up in
+ * it. A crontab containing a line that looks like a status line cannot forge
+ * one.
+ *
+ * Failure is still contained per source. There is no `set -e`, every read is
+ * inside a conditional or ends in `|| true`, and the script's last command is a
+ * `printf` — so a host with no /etc/cron.d, no systemd and no crontab binary
+ * still returns every other section and exits 0.
  */
-export const CRON_COLLECT_COMMAND = [
-  'echo "===SHELLPILOT-USER==="',
-  'crontab -l 2>/dev/null || true',
-  'echo "===SHELLPILOT-SYSTEM==="',
-  'cat /etc/crontab 2>/dev/null || true',
-  'echo "===SHELLPILOT-CROND==="',
-  // The trailing `printf` is load-bearing. Plenty of /etc/cron.d files ship
-  // without a final newline, and `cat a` followed by the marker for b then
-  // glues them together: a's last job grows a `#FILE:/etc/cron.d/b` tail on its
-  // command, and every job in b gets filed under a. Both are silent, and the
-  // second makes a job unfindable by the file it actually lives in.
-  '{ for f in /etc/cron.d/*; do [ -f "$f" ] || continue; printf "#FILE:%s\\n" "$f"; cat "$f"; printf "\\n"; done; } 2>/dev/null || true',
-  'echo "===SHELLPILOT-TIMERS==="',
-  'systemctl list-timers --all --no-pager 2>/dev/null || true'
-].join('; ')
+export function buildCronCollectCommand(opts: CronCollectOptions = {}): string {
+  const sudo = opts.sudo !== false
+  // Omitted entirely rather than left in place behind `[ "$SP_SUDO" = 1 ]`.
+  // A dead branch would never run, but "this command contains no sudo at all"
+  // is a property somebody can check by reading it, and a runtime guard is
+  // not.
+  const ifSudo = (...lines: string[]): string[] => (sudo ? lines : [])
+  // The same probe the Docker reader uses, for the same reason: `sudo -n`
+  // never prompts, so asking whether root is available cannot hang and cannot
+  // consume a cached sudo timestamp interactively. Asked ONCE, up front, rather
+  // than per file — a `sudo -n` that fails is a sudoers violation, and on a
+  // host where this account has no sudo at all, one per file would mail root a
+  // small pile of them on every refresh.
+  const probe = sudo
+    ? `SP_SUDO=0\n[ "$(${SUDO_PROBE})" = SP_SUDO_OK ] && SP_SUDO=1`
+    : 'SP_SUDO=0'
 
-/** Split the collector's output and parse each section with the right rules. */
-export function parseCronCollection(output: string): CronParseResult {
+  return [
+    // A literal newline in a variable, so statuses can be accumulated one per
+    // line. `$(printf ...)` cannot be used for this: command substitution
+    // strips trailing newlines, which is the entire content here.
+    "SP_NL='\n'",
+    'SP_STATUS=""',
+    'sp_note() { SP_STATUS="$SP_STATUS$*$SP_NL"; }',
+    probe,
+
+    // `ssh host cmd` runs a NON-LOGIN shell, so PATH is roughly /usr/bin:/bin.
+    // `crontab` is nearly always in /usr/bin, but a busybox or minimal image
+    // may not have it at all — and "no crontab binary" and "an empty crontab"
+    // produced identical output before this.
+    resolveBinary('crontab'),
+    'SP_CRONTAB=""',
+    'command -v "$SP_BIN" >/dev/null 2>&1 && SP_CRONTAB="$SP_BIN"',
+    resolveBinary('systemctl'),
+    'SP_SYSTEMCTL=""',
+    'command -v "$SP_BIN" >/dev/null 2>&1 && SP_SYSTEMCTL="$SP_BIN"',
+
+    'echo "===SHELLPILOT-USER==="',
+    'if [ -z "$SP_CRONTAB" ]; then',
+    'sp_note user-crontab no-tool - "this host has no crontab command"',
+    'elif SP_OUT=$("$SP_CRONTAB" -l 2>/dev/null); then',
+    `printf '%s\\n' "$SP_OUT"`,
+    'sp_note user-crontab ok -',
+    'else',
+    // Non-zero from `crontab -l` is overwhelmingly "no crontab for <user>",
+    // which is `absent` and completely normal. Anything else is not, and
+    // saying which is the whole point of this block.
+    'SP_ERR=$("$SP_CRONTAB" -l 2>&1 >/dev/null || true)',
+    'case "$SP_ERR" in',
+    '*"no crontab for"*) sp_note user-crontab absent - ;;',
+    `*) sp_note user-crontab unknown - "$(printf '%s' "$SP_ERR" | tr '\\n' ' ')" ;;`,
+    'esac',
+    'fi',
+
+    'echo "===SHELLPILOT-SYSTEM==="',
+    'if [ ! -e /etc/crontab ]; then',
+    'sp_note system-crontab absent -',
+    'elif [ -r /etc/crontab ] && cat /etc/crontab 2>/dev/null; then',
+    'sp_note system-crontab ok -',
+    ...ifSudo(
+      'elif [ "$SP_SUDO" = 1 ] && sudo -n cat /etc/crontab 2>/dev/null; then',
+      'sp_note system-crontab ok root'
+    ),
+    'else',
+    'sp_note system-crontab denied -',
+    'fi',
+
+    'echo "===SHELLPILOT-CROND==="',
+    'SP_OK=0',
+    'SP_DENIED=0',
+    'SP_USED=-',
+    'if [ ! -d /etc/cron.d ]; then',
+    'sp_note cron.d absent -',
+    'elif [ -r /etc/cron.d ] && [ -x /etc/cron.d ]; then',
+    'for f in /etc/cron.d/*; do',
+    '[ -f "$f" ] || continue',
+    // Captured into a variable and re-printed with exactly one trailing
+    // newline, rather than `cat` straight to stdout. Plenty of packaged
+    // /etc/cron.d files ship without a final newline, and `cat a` followed by
+    // the marker for b glues them: a's last job grows a `#FILE:/etc/cron.d/b`
+    // tail on its command, and every job in b gets filed under a — where
+    // nobody looking at b will ever find it.
+    'if SP_TXT=$(cat "$f" 2>/dev/null); then',
+    `printf '#FILE:%s\\n%s\\n' "$f" "$SP_TXT"`,
+    'SP_OK=$((SP_OK+1))',
+    ...ifSudo(
+      'elif [ "$SP_SUDO" = 1 ] && SP_TXT=$(sudo -n cat "$f" 2>/dev/null); then',
+      `printf '#FILE:%s\\n%s\\n' "$f" "$SP_TXT"`,
+      'SP_OK=$((SP_OK+1))',
+      'SP_USED=root'
+    ),
+    'else',
+    'SP_DENIED=$((SP_DENIED+1))',
+    'fi',
+    'done',
+    // Counted, so "read 3 of 5 files" can be said out loud. A directory where
+    // one file is 0600 root is the case that used to silently vanish.
+    'if [ "$SP_DENIED" -gt 0 ] && [ "$SP_OK" -gt 0 ]; then',
+    'sp_note cron.d partial "$SP_USED" "read $SP_OK of $((SP_OK+SP_DENIED)) files"',
+    'elif [ "$SP_DENIED" -gt 0 ]; then',
+    'sp_note cron.d denied - "$SP_DENIED file(s) could not be read"',
+    'else',
+    'sp_note cron.d ok "$SP_USED"',
+    'fi',
+    // The directory itself unreadable. The glob above would have expanded to
+    // the literal pattern, matched nothing, and reported an empty cron.d.
+    ...ifSudo(
+      `elif [ "$SP_SUDO" = 1 ] && SP_TXT=$(sudo -n sh -c 'for f in /etc/cron.d/*; do [ -f "$f" ] || continue; SP_T=$(cat "$f"); printf "#FILE:%s\\n%s\\n" "$f" "$SP_T"; done' 2>/dev/null); then`,
+      `printf '%s\\n' "$SP_TXT"`,
+      'sp_note cron.d ok root "the directory is readable only by root"'
+    ),
+    'else',
+    'sp_note cron.d denied - "the directory is readable only by root"',
+    'fi',
+
+    // Other accounts' crontabs. `crontab -l` reads exactly one account's file,
+    // and it is not usually the interesting one: root's is.
+    'echo "===SHELLPILOT-SPOOL==="',
+    `SP_ME=$(id -un 2>/dev/null || echo "")`,
+    // Emitted so the parser can drop our own file rather than listing every
+    // job in `crontab -l` a second time under a different heading.
+    `printf '#SELF:%s\\n' "$SP_ME"`,
+    'SP_OK=0',
+    'SP_DENIED=0',
+    'SP_USED=-',
+    'SP_DIR=""',
+    `for d in ${SPOOL_DIRS.join(' ')}; do`,
+    '[ -d "$d" ] || continue',
+    'SP_DIR="$d"',
+    'break',
+    'done',
+    'if [ -z "$SP_DIR" ]; then',
+    'sp_note other-crontabs absent - "no per-user crontab spool on this host"',
+    'elif [ -r "$SP_DIR" ] && [ -x "$SP_DIR" ]; then',
+    'for f in "$SP_DIR"/*; do',
+    '[ -f "$f" ] || continue',
+    'if SP_TXT=$(cat "$f" 2>/dev/null); then',
+    `printf '#FILE:%s\\n%s\\n' "$f" "$SP_TXT"`,
+    'SP_OK=$((SP_OK+1))',
+    ...ifSudo(
+      'elif [ "$SP_SUDO" = 1 ] && SP_TXT=$(sudo -n cat "$f" 2>/dev/null); then',
+      `printf '#FILE:%s\\n%s\\n' "$f" "$SP_TXT"`,
+      'SP_OK=$((SP_OK+1))',
+      'SP_USED=root'
+    ),
+    'else',
+    'SP_DENIED=$((SP_DENIED+1))',
+    'fi',
+    'done',
+    'if [ "$SP_DENIED" -gt 0 ] && [ "$SP_OK" -gt 0 ]; then',
+    'sp_note other-crontabs partial "$SP_USED" "read $SP_OK of $((SP_OK+SP_DENIED)) crontabs"',
+    'elif [ "$SP_DENIED" -gt 0 ]; then',
+    'sp_note other-crontabs denied - "$SP_DENIED crontab(s) could not be read"',
+    'else',
+    'sp_note other-crontabs ok "$SP_USED"',
+    'fi',
+    // The normal case on Debian: the spool is mode 1730 root:crontab, so an
+    // ordinary account cannot even list it. Without root there is genuinely
+    // nothing to report here, and `denied` says so rather than implying root
+    // has no jobs.
+    // The spool directory is passed as an ARGUMENT, not interpolated: inside
+    // the single-quoted script the outer shell's `$SP_DIR` would stay literal
+    // and the inner shell's would be unset, so the loop would read nothing and
+    // this branch would silently report success over an empty result.
+    ...ifSudo(
+      `elif [ "$SP_SUDO" = 1 ] && SP_TXT=$(sudo -n sh -c 'for f in "$1"/*; do [ -f "$f" ] || continue; SP_T=$(cat "$f"); printf "#FILE:%s\\n%s\\n" "$f" "$SP_T"; done' sh "$SP_DIR" 2>/dev/null); then`,
+      `printf '%s\\n' "$SP_TXT"`,
+      'sp_note other-crontabs ok root "the spool is readable only by root"'
+    ),
+    'else',
+    'sp_note other-crontabs denied - "the spool is readable only by root"',
+    'fi',
+
+    'echo "===SHELLPILOT-TIMERS==="',
+    'if [ -z "$SP_SYSTEMCTL" ]; then',
+    'sp_note systemd-timers no-tool - "this host has no systemctl"',
+    'elif SP_TXT=$("$SP_SYSTEMCTL" list-timers --all --no-pager 2>&1); then',
+    `printf '%s\\n' "$SP_TXT"`,
+    'sp_note systemd-timers ok -',
+    'else',
+    // systemctl installed but PID 1 is not systemd — every Docker image built
+    // FROM a distro base, and most LXC containers. Reported as `no-tool`
+    // because the conclusion is the same and it is not a gap in the reading:
+    // there are no systemd timers here to miss.
+    'case "$SP_TXT" in',
+    '*"not been booted"*|*"Failed to connect"*|*"Failed to get D-Bus"*|*"Refusing to operate"*)',
+    'sp_note systemd-timers no-tool - "systemctl is installed but systemd is not running here" ;;',
+    `*) sp_note systemd-timers unknown - "$(printf '%s' "$SP_TXT" | tr '\\n' ' ')" ;;`,
+    'esac',
+    'fi',
+
+    'echo "===SHELLPILOT-STATUS==="',
+    `printf '%s' "$SP_STATUS"`
+  ].join('\n')
+}
+
+/**
+ * The default collection: everything, with a passwordless-root retry.
+ *
+ * Kept as a constant because the caller has no decision to make here — the
+ * retry cannot prompt, and the alternative is reporting `denied` for sources
+ * that were one `sudo -n` away.
+ */
+export const CRON_COLLECT_COMMAND = buildCronCollectCommand()
+
+/**
+ * One `<id> <status> <root|-> <detail...>` line from the status block.
+ *
+ * The third column says who did the reading. It is spelled `root` rather than
+ * `sudo` so that the one rule worth grepping the whole command for — that every
+ * escalation in it is `sudo -n`, which cannot prompt — has no false positives
+ * to argue with.
+ */
+function parseStatusLine(line: string): CronSourceReport | null {
+  const [id, status, readBy, ...rest] = line.trim().split(/\s+/)
+  if (!CRON_SOURCE_IDS.includes(id as CronSourceId)) return null
+  const detail = rest.join(' ').replace(/^"|"$/g, '').trim()
+  return {
+    id: id as CronSourceId,
+    label: CRON_SOURCE_LABEL[id as CronSourceId],
+    // An unrecognised status is reported as unknown rather than passed
+    // through: the panel switches on this, and a value outside the union
+    // would render as nothing at all.
+    status: CRON_STATUSES.includes(status as CronSourceStatus) ? (status as CronSourceStatus) : 'unknown',
+    ...(readBy === 'root' ? { usedSudo: true } : {}),
+    ...(detail === '' || detail === '-' ? {} : { detail })
+  }
+}
+
+/**
+ * Split the collector's output and parse each section with the right rules.
+ *
+ * Sources the status block did not mention come back as `unknown` rather than
+ * being left out of the list. The output is capped by the transport, so a host
+ * with an enormous cron.d can lose the tail — including the status block — and
+ * a list that quietly shrank to four sources would read as complete.
+ */
+export function parseCronCollection(output: string): CronCollection {
   const section = (name: string): string => {
     // `\r?` because a transport that hands back CRLF would otherwise miss every
     // marker and report an entirely empty estate — a host with nothing
@@ -510,27 +914,76 @@ export function parseCronCollection(output: string): CronParseResult {
     unparsed.push(...r.unparsed)
   }
 
+  const reported = new Map<CronSourceId, CronSourceReport>()
+  for (const line of section('STATUS').split('\n')) {
+    if (line.trim() === '') continue
+    const s = parseStatusLine(line)
+    if (s) reported.set(s.id, s)
+  }
+  const sources: CronSourceReport[] = CRON_SOURCE_IDS.map(
+    (id) =>
+      reported.get(id) ?? {
+        id,
+        label: CRON_SOURCE_LABEL[id],
+        status: 'unknown' as const,
+        detail: 'the collector did not report on this source'
+      }
+  )
+
   take(parseCrontab(section('USER'), 'crontab -l', 'user-crontab', false))
   take(parseCrontab(section('SYSTEM'), '/etc/crontab', 'system-crontab', true))
 
-  // cron.d is many files in one blob, fenced by #FILE: markers the collector
-  // wrote. Attributing an entry to the wrong file makes it unfindable.
-  const crond = section('CROND')
-  let current = '/etc/cron.d'
-  let buffer: string[] = []
-  const flush = (): void => {
-    if (buffer.length) take(parseCrontab(buffer.join('\n'), current, 'cron.d', true))
-    buffer = []
+  // Many files in one blob, fenced by #FILE: markers the collector wrote.
+  // Attributing an entry to the wrong file makes it unfindable.
+  const byFile = (
+    text: string,
+    fallback: string,
+    kind: CronSourceKind,
+    hasUserField: boolean,
+    userFromFile = false,
+    skip?: string
+  ): void => {
+    let current = fallback
+    let buffer: string[] = []
+    const flush = (): void => {
+      const owner = current.slice(current.lastIndexOf('/') + 1)
+      if (buffer.length && !(skip !== undefined && skip !== '' && owner === skip)) {
+        const r = parseCrontab(buffer.join('\n'), current, kind, hasUserField)
+        // A spool file has no user column — the FILENAME is the user. Reading
+        // one as a system crontab would take the first word of every command
+        // and report it as the account, which is a plausible-looking lie.
+        take(userFromFile ? { ...r, entries: r.entries.map((e) => ({ ...e, user: owner })) } : r)
+      }
+      buffer = []
+    }
+    for (const line of text.split('\n')) {
+      const m = line.replace(/\r/g, '').match(/^#FILE:(.*)$/)
+      if (m) {
+        flush()
+        current = m[1].trim()
+      } else buffer.push(line)
+    }
+    flush()
   }
-  for (const line of crond.split('\n')) {
-    const m = line.replace(/\r/g, '').match(/^#FILE:(.*)$/)
-    if (m) {
-      flush()
-      current = m[1].trim()
-    } else buffer.push(line)
-  }
-  flush()
+
+  byFile(section('CROND'), '/etc/cron.d', 'cron.d', true)
+
+  // Our own spool file, if we could read it, is the same jobs `crontab -l`
+  // already returned. Listed twice it looks like the job is scheduled twice.
+  // Only skipped when the user crontab was actually read — if that source came
+  // back `no-tool`, the spool copy is the only copy there is.
+  const spool = section('SPOOL')
+  const self = spool.match(/^#SELF:(.*)$/m)?.[1].trim() ?? ''
+  const userRead = reported.get('user-crontab')?.status === 'ok'
+  byFile(
+    spool.replace(/^#SELF:.*$/m, ''),
+    'crontab spool',
+    'other-user-crontab',
+    false,
+    true,
+    userRead ? self : undefined
+  )
 
   take(parseSystemdTimers(section('TIMERS')))
-  return { entries, unparsed }
+  return { entries, unparsed, sources }
 }

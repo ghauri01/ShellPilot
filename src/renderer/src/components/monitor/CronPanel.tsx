@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
-import { CalendarClock, RefreshCw } from 'lucide-react'
+import { CalendarClock, RefreshCw, ShieldAlert } from 'lucide-react'
 import { sshHopsFor } from '../../lib/ssh'
 import { clsx } from '../../lib/format'
-import type { CronEntry } from '../../../../shared/cron'
+import { CRON_STATUS_HELP, summariseCronSources } from '../../../../shared/cron'
+import type { CronEntry, CronSourceReport } from '../../../../shared/cron'
 import type { Server } from '../../types'
 
 // What is scheduled across the estate — currently unanswerable without visiting
@@ -17,6 +18,15 @@ interface HostCron {
   serverName: string
   entries: CronEntry[]
   unparsed: number
+  /**
+   * What each source had to say for itself.
+   *
+   * Optional because it arrives over IPC: a main process that has not been
+   * taught to forward it sends nothing, and a panel that treated that as "all
+   * five read fine" would be inventing the very reassurance this field exists
+   * to withdraw.
+   */
+  sources?: CronSourceReport[]
   error?: string
 }
 
@@ -24,7 +34,52 @@ const KIND_LABEL: Record<CronEntry['kind'], string> = {
   'user-crontab': 'user crontab',
   'system-crontab': '/etc/crontab',
   'cron.d': 'cron.d',
-  'systemd-timer': 'systemd timer'
+  'systemd-timer': 'systemd timer',
+  'other-user-crontab': 'crontab spool'
+}
+
+/**
+ * What a host's list of jobs is actually worth.
+ *
+ * This is the whole point of the change. "Nothing scheduled." under a host name
+ * is a claim, and until now it was made just as confidently for a box whose
+ * /etc/cron.d we were refused as for one that genuinely has nothing. An
+ * operator has no way to tell those apart from the outside, so the panel has to
+ * say which it is.
+ */
+function SourceStatus({ sources }: { sources?: CronSourceReport[] }): React.JSX.Element {
+  if (!sources || sources.length === 0) {
+    return (
+      <div className="faint" style={{ fontSize: 11 }}>
+        This host did not report which sources it managed to read, so this list may be incomplete.
+      </div>
+    )
+  }
+  const { answered, total, incomplete, usedSudo } = summariseCronSources(sources)
+  const complete = incomplete.length === 0
+  return (
+    <div style={{ fontSize: 11 }}>
+      <span className={clsx(complete ? 'faint' : 'warn')}>
+        {complete ? `read all ${total} sources` : `read ${answered} of ${total} sources`}
+      </span>
+      {/* Reading as root is a thing that happened, not an implementation
+          detail. It is surfaced for the same reason the Docker panel surfaces
+          it: silent escalation is the wrong trade even when it is the only way
+          to get an answer. */}
+      {usedSudo && (
+        <span className="faint" title="Some sources were readable only as root, and were read with sudo -n — which never prompts.">
+          {' '}
+          · read as root
+        </span>
+      )}
+      {incomplete.map((s) => (
+        <div key={s.id} className="warn" style={{ marginTop: 2 }}>
+          <ShieldAlert size={11} /> {s.label}: {CRON_STATUS_HELP[s.status]}
+          {s.detail ? ` (${s.detail})` : ''}
+        </div>
+      ))}
+    </div>
+  )
 }
 
 export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element {
@@ -71,6 +126,9 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
   const total = visible.reduce((n, h) => n + h.entries.length, 0)
   const failed = visible.filter((h) => h.error)
   const unparsed = visible.reduce((n, h) => n + h.unparsed, 0)
+  const partial = visible.filter(
+    (h) => !h.error && (h.sources?.length ?? 0) > 0 && summariseCronSources(h.sources ?? []).incomplete.length > 0
+  ).length
 
   return (
     <div className="bc-panel">
@@ -93,8 +151,10 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
 
       {!rows && !loading && (
         <div className="s-desc">
-          Reads crontabs, /etc/cron.d and systemd timers from every online server. Nothing is
-          written or changed — this only looks.
+          Reads crontabs, /etc/crontab, /etc/cron.d, other accounts’ crontabs and systemd timers
+          from every online server, and says which of those it was actually allowed to read.
+          Sources that are root-only are retried with <span className="mono">sudo -n</span>, which
+          never prompts for a password. Nothing is written or changed — this only looks.
         </div>
       )}
 
@@ -109,6 +169,15 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
                 hidden. A schedule silently missing from this view is a command
                 running on a box that nobody knows about. */}
             {unparsed > 0 && <span className="warn">{unparsed} line{unparsed === 1 ? '' : 's'} not understood</span>}
+            {/* Counted across the estate as well as per host: with a dozen
+                servers, a single host whose cron.d was refused is easy to
+                scroll past, and it is exactly the host you would want to look
+                at. */}
+            {partial > 0 && (
+              <span className="warn">
+                {partial} host{partial === 1 ? '' : 's'} only partly readable
+              </span>
+            )}
           </div>
 
           {failed.map((h) => (
@@ -124,9 +193,19 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
                 <div className="s-title">
                   {h.serverName} <span className="faint">· {h.entries.length}</span>
                 </div>
+                <SourceStatus sources={h.sources} />
                 {h.entries.length === 0 && (
                   <div className="faint" style={{ fontSize: 12 }}>
-                    {q === '' ? 'Nothing scheduled.' : 'Nothing matching.'}
+                    {q !== ''
+                      ? 'Nothing matching.'
+                      : // Only claimed when every source actually answered. On a
+                        // host where /etc/cron.d was refused, "Nothing
+                        // scheduled" is a sentence about our permissions
+                        // wearing a sentence about the host.
+                        (h.sources?.length ?? 0) > 0 &&
+                          summariseCronSources(h.sources ?? []).incomplete.length === 0
+                        ? 'Nothing scheduled.'
+                        : 'Nothing found in the sources that could be read.'}
                   </div>
                 )}
                 {h.entries.map((e, i) => (

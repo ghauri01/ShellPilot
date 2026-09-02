@@ -13,9 +13,25 @@ import type {
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
-import type { CronEntry } from '../shared/cron'
-import type { DockerProbe } from '../shared/docker'
-import type { K8sProbe } from '../shared/kubernetes'
+import type { CronEntry, CronSourceReport } from '../shared/cron'
+import type {
+  DockerAction,
+  DockerActionResult,
+  DockerBridge,
+  DockerDiskProbe,
+  DockerInspectProbe,
+  DockerLogsOptions,
+  DockerProbe,
+  DockerStatsProbe
+} from '../shared/docker'
+import type {
+  K8sDiagnosis,
+  K8sOverview,
+  K8sProbe,
+  K8sRolloutResult,
+  K8sRolloutTarget,
+  K8sUsage
+} from '../shared/kubernetes'
 import type {
   AlertPayload,
   WebhookConfig,
@@ -253,8 +269,34 @@ const api = {
       lines: number,
       context?: string
     ): Promise<{ ok: boolean; output: string; error?: string }> =>
-      ipcRenderer.invoke('k8s:logs', cfg, namespace, pod, lines, context)
+      ipcRenderer.invoke('k8s:logs', cfg, namespace, pod, lines, context),
+    // Deliberately no `previous` argument on `logs`. An unwired handler would
+    // ignore the extra parameter and return CURRENT logs under a "previous"
+    // label, which is worse than not offering it. Previous-container logs reach
+    // the panel only through `diagnose`, where the section marker comes from
+    // the command itself.
+    diagnose: (
+      cfg: unknown,
+      namespace: string,
+      pod: string,
+      context?: string,
+      previousLines?: number
+    ): Promise<K8sDiagnosis> =>
+      ipcRenderer.invoke('k8s:diagnose', cfg, namespace, pod, context, previousLines),
+    overview: (cfg: unknown, context?: string, namespace?: string): Promise<K8sOverview> =>
+      ipcRenderer.invoke('k8s:overview', cfg, context, namespace),
+    usage: (cfg: unknown, context?: string, namespace?: string): Promise<K8sUsage> =>
+      ipcRenderer.invoke('k8s:usage', cfg, context, namespace),
+    rolloutRestart: (
+      cfg: unknown,
+      target: K8sRolloutTarget,
+      confirmed: boolean
+    ): Promise<K8sRolloutResult> =>
+      ipcRenderer.invoke('k8s:rollout-restart', cfg, target, confirmed)
   },
+  // `satisfies DockerBridge` so a channel added to the contract and forgotten
+  // here is a compile error rather than a method the panel calls at runtime and
+  // finds undefined.
   docker: {
     list: (cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerProbe> =>
       ipcRenderer.invoke('docker:list', cfg, opts),
@@ -262,15 +304,42 @@ const api = {
     logs: (
       cfg: unknown,
       ref: string,
-      lines: number
+      lines: number,
+      opts?: DockerLogsOptions
     ): Promise<{ ok: boolean; output: string; error?: string }> =>
-      ipcRenderer.invoke('docker:logs', cfg, ref, lines)
-  },
+      ipcRenderer.invoke('docker:logs', cfg, ref, lines, opts),
+    disk: (cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerDiskProbe> =>
+      ipcRenderer.invoke('docker:disk', cfg, opts),
+    inspect: (
+      cfg: unknown,
+      ref: string,
+      opts?: { sudo?: boolean; autoSudo?: boolean }
+    ): Promise<DockerInspectProbe> => ipcRenderer.invoke('docker:inspect', cfg, ref, opts),
+    stats: (
+      cfg: unknown,
+      refs: string[],
+      opts?: { sudo?: boolean; autoSudo?: boolean }
+    ): Promise<DockerStatsProbe> => ipcRenderer.invoke('docker:stats', cfg, refs, opts),
+    act: (
+      cfg: unknown,
+      action: DockerAction,
+      refs: string[],
+      opts?: { sudo?: boolean; timeoutSec?: number }
+    ): Promise<DockerActionResult> => ipcRenderer.invoke('docker:act', cfg, action, refs, opts)
+  } satisfies DockerBridge,
   cron: {
     collect: (
       targets: { serverId: string; serverName: string; cfg: unknown }[]
-    ): Promise<{ serverId: string; serverName: string; entries: CronEntry[]; unparsed: number; error?: string }[]> =>
-      ipcRenderer.invoke('cron:collect', targets)
+    ): Promise<
+      {
+        serverId: string
+        serverName: string
+        entries: CronEntry[]
+        unparsed: number
+        sources?: CronSourceReport[]
+        error?: string
+      }[]
+    > => ipcRenderer.invoke('cron:collect', targets)
   },
   logtail: {
     start: (
@@ -279,6 +348,8 @@ const api = {
       targets: { serverId: string; serverName: string; cfg: unknown }[]
     ): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('logtail:start', tailId, source, targets),
     stop: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:stop', tailId),
+    pause: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:pause', tailId),
+    resume: (tailId: string): Promise<boolean> => ipcRenderer.invoke('logtail:resume', tailId),
     onLine: (fn: (l: LogLine) => void): (() => void) => {
       const h = (_e: unknown, l: LogLine): void => fn(l)
       ipcRenderer.on('logtail:line', h)

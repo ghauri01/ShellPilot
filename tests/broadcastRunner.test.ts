@@ -261,4 +261,186 @@ describe('the panel that drives it', () => {
     // call site; the rows are right there.
     expect(panel).not.toMatch(/\.get\([^)]*\)!/)
   })
+
+  it('summarises the run rather than only listing it', () => {
+    expect(panel).toMatch(/summariseBroadcast\(rows\)/)
+  })
+
+  it('does not offer to re-run anything as root', () => {
+    // The panel is where the person is, so it is where a "retry with sudo"
+    // button would go. It must not: the escalation is theirs to type, and
+    // typing it puts the command back through the risk classifier.
+    expect(panel).not.toMatch(/sudo:\s*true|retryAsRoot|autoSudo/)
+    // It does have to say that nothing was retried, though — silence there is
+    // the same lie as a blank cron panel.
+    expect(panel).toMatch(/Nothing was retried as root/)
+  })
+
+  it('has one opinion about what a result means', () => {
+    // The runner classifies. A second classifier here is a second thing to
+    // drift, and the two disagreeing is invisible until someone reads both.
+    expect(panel).toMatch(/r\.outcome \?\? classifyBroadcastResult\(r\)/)
+    expect(panel).not.toMatch(/exitCode === 127|exitCode !== 0/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Which hosts said what.
+//
+// "Non-zero is a result, not a failure" is right and stays. It is also not an
+// answer: `docker ps` across fifteen hosts comes back as fifteen `state: 'ok'`
+// rows, three of which are exit 127 because those boxes have no docker, and
+// finding them means reading exit codes one at a time. The classification is
+// additive — `state` keeps its meaning exactly — and it is done in the runner,
+// which is the only place that has both the raw streams and the transport's own
+// error text.
+// ---------------------------------------------------------------------------
+
+describe('telling the fan-out apart', () => {
+  const one = async (
+    r: { ok: boolean; code?: number | null; stdout?: string; stderr?: string; error?: string },
+    command = 'docker ps'
+  ) => {
+    const h = makeRunner({ exec: async () => r })
+    const out = await h.runner.run({ runId: 'r', command, targets: targets(1) })
+    return out[0]
+  }
+
+  it('marks a host that does not have the command', async () => {
+    // 127 with the shell's own wording. This is the single most common
+    // fan-out surprise and it used to be indistinguishable from a command
+    // that ran and failed.
+    const r = await one({ ok: true, code: 127, stdout: '', stderr: 'bash: docker: command not found' })
+    expect(r.outcome).toBe('missing-command')
+    // And the rule the classification must not break: the host DID answer.
+    expect(r.state).toBe('ok')
+    expect(r.exitCode).toBe(127)
+  })
+
+  it('recognises the busybox wording too', async () => {
+    const r = await one({ ok: true, code: 127, stdout: '', stderr: 'sh: 1: docker: not found' })
+    expect(r.outcome).toBe('missing-command')
+  })
+
+  it('does not call a working command missing because it mentioned a missing file', async () => {
+    // `cat /nope` says "No such file or directory" about its ARGUMENT. Reading
+    // that as a missing binary files a working host under "go and install
+    // this", which is the wrong machine.
+    const r = await one({
+      ok: true,
+      code: 1,
+      stdout: '',
+      stderr: 'cat: /etc/nope: No such file or directory'
+    })
+    expect(r.outcome).toBe('nonzero')
+  })
+
+  it('keeps a non-zero exit a result rather than a failure', async () => {
+    // grep finding nothing. If this ever becomes a failure, half the useful
+    // commands look broken.
+    const r = await one({ ok: true, code: 1, stdout: '', stderr: '' }, 'grep nope /etc/hosts')
+    expect(r.outcome).toBe('nonzero')
+    expect(r.state).toBe('ok')
+  })
+
+  it('marks a host that refused the command', async () => {
+    const r = await one({ ok: true, code: 126, stdout: '', stderr: 'bash: /usr/local/bin/x: Permission denied' })
+    expect(r.outcome).toBe('permission-denied')
+  })
+
+  it('marks a sudo that would have needed a password', async () => {
+    const r = await one({
+      ok: true,
+      code: 1,
+      stdout: '',
+      stderr: 'sudo: a password is required'
+    })
+    expect(r.outcome).toBe('permission-denied')
+  })
+
+  it('does not call a command that worked permission-denied for one unreadable file', async () => {
+    // `find / -name x` prints hundreds of these and still does its job.
+    // Colouring the host red would bury the answer it gave.
+    const r = await one({
+      ok: true,
+      code: 1,
+      stdout: '/home/me/x\n/srv/x\n',
+      stderr: "find: '/proc/1': Permission denied"
+    })
+    expect(r.outcome).toBe('nonzero')
+  })
+
+  it('tells a timeout from an unreachable host', async () => {
+    // Different machines to go and look at: one is a slow command or a slow
+    // link, the other is a box or a bastion that is down.
+    const slow = await one({ ok: false, error: 'Command timed out after 60000ms' })
+    expect(slow.outcome).toBe('timeout')
+    const dead = await one({ ok: false, error: 'connect ECONNREFUSED 10.0.0.4:22' })
+    expect(dead.outcome).toBe('unreachable')
+  })
+
+  it('classifies a stall-guard rejection as a timeout', async () => {
+    // The exec that never settles: sshExec's own timer starts only after the
+    // connection is up, so a bastion that accepts TCP and then says nothing is
+    // caught by the guard, not by the timeout.
+    const runner = new BroadcastRunner({
+      stallGraceMs: 5,
+      exec: async () => new Promise(() => {}),
+      emit: () => {}
+    })
+    const out = await runner.run({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(1) })
+    expect(out[0].state).toBe('failed')
+    expect(out[0].outcome).toBe('timeout')
+  })
+
+  it('classifies from the uncapped streams', async () => {
+    // The shell's "command not found" is the LAST thing on stderr. A host that
+    // printed 20k of deprecation warnings first would have had it cut off
+    // before anyone — or anything — could read it.
+    const noise = 'warning: this is fine\n'.repeat(2_000)
+    const r = await one({
+      ok: true,
+      code: 127,
+      stdout: '',
+      stderr: `${noise}bash: docker: command not found`
+    })
+    expect(r.truncated).toBe(true)
+    expect(r.stderr?.length).toBe(BROADCAST_OUTPUT_CAP)
+    expect(r.outcome).toBe('missing-command')
+  })
+
+  it('marks a host that was never started', async () => {
+    const h = makeRunner({ exec: async () => ({ ok: true, code: 0, stdout: '' }) })
+    h.runner.cancel('r')
+    const started = h.runner.run({ runId: 'r', command: 'uptime', targets: targets(3) })
+    h.runner.cancel('r')
+    const out = await started
+    expect(out.every((r) => r.outcome === 'cancelled' || r.outcome === 'ok')).toBe(true)
+  })
+})
+
+describe('what the runner refuses to do about a refusal', () => {
+  it('never re-runs a refused command as root', async () => {
+    // The decision, pinned. A fan-out retry is N simultaneous escalations of a
+    // command the user approved UNPRIVILEGED, and re-running an arbitrary
+    // command is a second execution rather than a retry: `a && b` that failed
+    // partway has already had an effect. The reasoning is written out at the
+    // end of shared/broadcast.ts.
+    const seen: string[] = []
+    const h = makeRunner({
+      exec: async (_cfg, cmd) => {
+        seen.push(cmd)
+        return { ok: true, code: 126, stdout: '', stderr: 'bash: /sbin/reboot: Permission denied' }
+      }
+    })
+    await h.runner.run({ runId: 'r', command: 'systemctl restart nginx', targets: targets(3) })
+    // Once per host, verbatim. Not twice, and never with a `sudo` we added.
+    expect(seen).toEqual(['systemctl restart nginx', 'systemctl restart nginx', 'systemctl restart nginx'])
+    expect(seen.some((c) => /\bsudo\b/.test(c))).toBe(false)
+  })
+
+  it('has no sudo probe anywhere in the runner', () => {
+    const src = readFileSync(resolve(__dirname, '../src/main/services/broadcast.ts'), 'utf8')
+    expect(src).not.toMatch(/sudo -n/)
+  })
 })

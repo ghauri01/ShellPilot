@@ -1,5 +1,13 @@
-import type { LogLine, LogSource, LogTailState } from '../../shared/logtail'
-import { LOG_LINE_CAP, LOG_RATE_PER_SEC, buildTailCommand, validateLogSource } from '../../shared/logtail'
+import type { LogDiagnosis, LogLine, LogSource, LogTailState } from '../../shared/logtail'
+import {
+  LOG_LINE_CAP,
+  LOG_PAUSE_BUFFER,
+  LOG_RATE_PER_SEC,
+  buildTailCommand,
+  diagnoseLogTail,
+  parseLogMark,
+  validateLogSource
+} from '../../shared/logtail'
 
 // Streams a following log from one or more hosts.
 //
@@ -13,6 +21,12 @@ import { LOG_LINE_CAP, LOG_RATE_PER_SEC, buildTailCommand, validateLogSource } f
 // tens of thousands of lines a second; without a cap that becomes an IPC flood
 // that wedges the renderer, and the user's conclusion is "ShellPilot froze"
 // rather than "that service is screaming".
+//
+// Two things arrive on the same channel: the preflight's facts, and then the
+// log. They are told apart by ORDER — see LOG_MARK — and the facts are turned
+// into a diagnosis that rides on the host's STATE rather than being written
+// into the stream. A tail is long-lived, and a notice written once as a log
+// line ("reading as root") has scrolled away within the second.
 
 export type StreamExec = (
   cfg: unknown,
@@ -34,13 +48,24 @@ export interface LogTailDeps {
 
 interface Active {
   stop: () => void
-  /** Emits anything the rate limiter is still holding, before the tail ends. */
+  /** Emits anything still held — throttled drops and the paused buffer alike. */
   flush: () => void
+  /** Emits the paused buffer only. */
+  drain: () => void
   serverId: string
 }
 
 export class LogTailer {
   private active = new Map<string, Active[]>()
+  /**
+   * Tails whose stream is held rather than stopped.
+   *
+   * Separate from `active` because a paused tail is still a running tail: the
+   * channel is open, the remote command is still following, and Stop still
+   * means Stop. Conflating them is how "pause" becomes "lose the buffer", which
+   * is the thing pause exists to avoid.
+   */
+  private paused = new Set<string>()
 
   constructor(private readonly deps: LogTailDeps) {}
 
@@ -50,6 +75,10 @@ export class LogTailer {
 
   isActive(tailId: string): boolean {
     return this.active.has(tailId)
+  }
+
+  isPaused(tailId: string): boolean {
+    return this.paused.has(tailId)
   }
 
   async start(
@@ -65,6 +94,9 @@ export class LogTailer {
     if (!v.ok) return { ok: false, error: v.error }
 
     // Starting a tail that is already running would silently double every line.
+    // It also clears any hold, which is what keeps a restart from being a
+    // resume: a new stream arriving into the old one's pause would sit there
+    // empty with nothing on screen to say why.
     if (this.active.has(tailId)) this.stop(tailId)
 
     const command = buildTailCommand(source)
@@ -82,7 +114,6 @@ export class LogTailer {
 
     for (const t of targets) {
       if (!owns()) break
-      this.deps.emitState({ tailId, serverId: t.serverId, serverName: t.serverName, state: 'starting' })
 
       let seq = 0
       let windowStart = this.now
@@ -92,9 +123,46 @@ export class LogTailer {
       // and emitting the halves separately makes a log unreadable in exactly
       // the moments it matters.
       let carry = ''
+      // What the preflight said, and whether it is over. Only lines before
+      // `begin` may be read as facts; the tail is not exec'd until `begin` has
+      // been printed, so nothing a remote log says can ever be in a position to
+      // claim, for instance, that it was read as root.
+      const facts: Record<string, string> = {}
+      let preflightDone = false
+      let diagnosis: LogDiagnosis | undefined
+      let held: LogLine[] = []
+      let heldDropped = 0
+
+      // Every state for this host carries the diagnosis once there is one. The
+      // preflight's facts can land before execStream has even resolved, so an
+      // emit that only attached the diagnosis at the moment it was computed
+      // would be overwritten a moment later by the plain `streaming` below —
+      // and the panel, which keeps the last state per host, would lose it.
+      const emit = (state: LogTailState['state'], extra: Partial<LogTailState> = {}): void =>
+        this.deps.emitState({
+          tailId,
+          serverId: t.serverId,
+          serverName: t.serverName,
+          state,
+          ...(diagnosis ? { diagnosis } : {}),
+          ...(this.paused.has(tailId) ? { paused: true } : {}),
+          ...extra
+        })
+
+      emit('starting')
+
+      // Settling it only computes; announcing it is the caller's business,
+      // because the state it belongs on differs — `streaming` when the
+      // preflight handed over to the tail, `ended` when it never got that far.
+      const settleDiagnosis = (): void => {
+        if (diagnosis) return
+        diagnosis = diagnoseLogTail(facts)
+      }
+
+      const send = (line: LogLine): void => this.deps.emitLine(line)
 
       const notice = (text: string, at: number): void =>
-        this.deps.emitLine({
+        send({
           tailId,
           serverId: t.serverId,
           serverName: t.serverName,
@@ -115,6 +183,21 @@ export class LogTailer {
         dropped = 0
       }
 
+      // Everything the pause held, in the order the host said it. The overflow
+      // count is reported for the same reason the rate limiter reports its own:
+      // a gap nobody mentions is how someone concludes a service went quiet.
+      const drain = (): void => {
+        if (held.length === 0 && heldDropped === 0) return
+        const buffered = held
+        held = []
+        for (const l of buffered) send(l)
+        if (heldDropped > 0) {
+          const n = heldDropped
+          heldDropped = 0
+          notice(`— ${n} lines dropped while paused, the pane holds ${LOG_PAUSE_BUFFER} —`, this.now)
+        }
+      }
+
       const push = (text: string, isError: boolean): void => {
         // A superseded or stopped tail must not paint the pane: its channel may
         // still deliver buffered data after stop() has been called.
@@ -133,7 +216,7 @@ export class LogTailer {
           return
         }
         inWindow++
-        this.deps.emitLine({
+        const line: LogLine = {
           tailId,
           serverId: t.serverId,
           serverName: t.serverName,
@@ -141,7 +224,25 @@ export class LogTailer {
           text,
           isError: isError || undefined,
           at: now
-        })
+        }
+        // Held, not dropped. The channel stays open while paused — that is the
+        // whole difference from Stop — so the lines have to go somewhere, and
+        // the oldest go first once the buffer is full: during an incident the
+        // newest lines are the ones being waited for.
+        //
+        // The rate limiter above still applies while paused, which is not an
+        // oversight: resume emits the whole buffer in one go, so the burst it
+        // has to survive is the same IPC burst the limiter exists for. Both
+        // caps report what they discarded, so neither produces a silent gap.
+        if (this.paused.has(tailId)) {
+          held.push(line)
+          while (held.length > LOG_PAUSE_BUFFER) {
+            held.shift()
+            heldDropped++
+          }
+          return
+        }
+        send(line)
       }
 
       // Nothing guarantees a newline ever arrives, so a line longer than the
@@ -155,10 +256,31 @@ export class LogTailer {
         for (let i = 0; i < text.length; i += LOG_LINE_CAP) push(text.slice(i, i + LOG_LINE_CAP), isError)
       }
 
+      // A preflight fact rather than a log line, or null. Only consulted before
+      // `begin`: after it, a line that looks like a marker is content and is
+      // shown as content.
+      const takeMark = (line: string): boolean => {
+        if (preflightDone) return false
+        const m = parseLogMark(line)
+        if (!m) return false
+        if (m.key === 'begin') {
+          preflightDone = true
+          settleDiagnosis()
+          if (owns()) emit('streaming')
+          return true
+        }
+        facts[m.key] = m.value
+        return true
+      }
+
       const feed = (chunk: string, isError: boolean): void => {
         const parts = (carry + chunk).split('\n')
         carry = parts.pop() ?? ''
-        for (const line of parts) pushCapped(line.replace(/\r$/, ''), isError)
+        for (const raw of parts) {
+          const line = raw.replace(/\r$/, '')
+          if (takeMark(line)) continue
+          pushCapped(line, isError)
+        }
         while (carry.length > LOG_LINE_CAP) {
           push(carry.slice(0, LOG_LINE_CAP), isError)
           carry = carry.slice(LOG_LINE_CAP)
@@ -171,19 +293,23 @@ export class LogTailer {
           onStderr: (c) => feed(c, true),
           onClose: () => {
             if (carry !== '') {
-              pushCapped(carry, false)
+              if (!takeMark(carry)) pushCapped(carry, false)
               carry = ''
             }
             flushDrops()
+            drain()
+            // A preflight that refused — no journalctl on the host — never
+            // reaches `begin`, so the diagnosis has to be settled here too.
+            // Otherwise the one case the preflight exists to catch is the one
+            // case it says nothing about.
+            settleDiagnosis()
             // A channel belonging to a superseded start closing must not report
             // "ended" for a host the current tail is streaming from.
-            if (owns()) {
-              this.deps.emitState({ tailId, serverId: t.serverId, serverName: t.serverName, state: 'ended' })
-            }
+            if (owns()) emit('ended')
           },
           onError: (message) => {
             if (!owns()) return
-            this.deps.emitState({ tailId, serverId: t.serverId, serverName: t.serverName, state: 'failed', error: message })
+            emit('failed', { error: message })
           }
         })
         if (!owns()) {
@@ -197,37 +323,73 @@ export class LogTailer {
           }
           return { ok: false, error: 'This tail was restarted while it was starting.' }
         }
-        running.push({ stop, flush: flushDrops, serverId: t.serverId })
-        this.deps.emitState({ tailId, serverId: t.serverId, serverName: t.serverName, state: 'streaming' })
+        running.push({
+          stop,
+          flush: () => {
+            flushDrops()
+            drain()
+          },
+          drain,
+          serverId: t.serverId
+        })
+        emit('streaming')
       } catch (e) {
         if (!owns()) return { ok: false, error: 'This tail was restarted while it was starting.' }
         // One host refusing must not stop the others — comparing a failing host
         // against a working one is most of why this reads several at once.
-        this.deps.emitState({
-          tailId,
-          serverId: t.serverId,
-          serverName: t.serverName,
-          state: 'failed',
-          error: e instanceof Error ? e.message : String(e)
-        })
+        emit('failed', { error: e instanceof Error ? e.message : String(e) })
       }
     }
 
     if (!owns()) return { ok: false, error: 'This tail was restarted while it was starting.' }
     if (running.length === 0) {
       this.active.delete(tailId)
+      this.paused.delete(tailId)
       return { ok: false, error: 'No host accepted the tail.' }
     }
     return { ok: true }
   }
 
+  /**
+   * Hold the stream without touching the channel.
+   *
+   * Stop is the other thing, and conflating them is what this fixes: reading a
+   * burst used to mean pressing Stop, which killed `journalctl -f` on every
+   * host, discarded the pane and made Tail the only way back — a second
+   * connection, a second history fetch, and whatever the host said in between
+   * gone. Here the remote command keeps running and its lines are held.
+   */
+  pause(tailId: string): boolean {
+    if (!this.active.has(tailId)) return false
+    this.paused.add(tailId)
+    return true
+  }
+
+  resume(tailId: string): boolean {
+    if (!this.paused.delete(tailId)) return false
+    const running = this.active.get(tailId)
+    if (!running) return false
+    for (const r of running) {
+      try {
+        r.drain()
+      } catch {
+        /* one host's buffer must not strand another's */
+      }
+    }
+    return true
+  }
+
   stop(tailId: string): void {
     const running = this.active.get(tailId)
+    // The hold is cleared before the flush, so what the pause was holding is
+    // emitted rather than filed straight back into the buffer it came from.
+    this.paused.delete(tailId)
     if (!running) return
     for (const r of running) {
       // Before the channel goes, and before the id is forgotten: whatever the
-      // rate limiter is still holding is the last thing the user gets to see,
-      // and losing it turns a throttled burst into an unexplained gap.
+      // rate limiter or the pause is still holding is the last thing the user
+      // gets to see, and losing it turns a throttled burst — or a deliberate
+      // pause — into an unexplained gap.
       try {
         r.flush()
       } catch {

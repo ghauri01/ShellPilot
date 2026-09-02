@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { LogTailer } from '../src/main/services/logTail'
 import type { LogLine, LogTailState } from '../src/shared/logtail'
-import { LOG_LINE_CAP, LOG_RATE_PER_SEC } from '../src/shared/logtail'
+import { LOG_LINE_CAP, LOG_MARK, LOG_PAUSE_BUFFER, LOG_RATE_PER_SEC } from '../src/shared/logtail'
 
 // A following log never completes on its own, so everything here is about
 // ending cleanly and not flooding. A tail holding a channel open after the pane
@@ -292,6 +292,133 @@ describe('the last thing a throttled host said', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// The preflight's facts and the log arrive on the same channel. They are told
+// apart by ORDER: markers count only before `begin`, and the tail is not exec'd
+// until `begin` has been printed, so nothing a remote log says can be in a
+// position to claim, for instance, that it was read as root.
+
+const M = LOG_MARK
+
+describe('what the preflight says, and where it says it', () => {
+  it('keeps its facts out of the pane', async () => {
+    // They used to be indistinguishable from log content, because they did not
+    // exist: the pane simply showed `sh: journalctl: not found` as a log line.
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.feeds.get('a')!.out(`${M}journal=present\n${M}entries=1\n${M}begin=1\nreal log line\n`)
+    expect(h.lines.map((l) => l.text)).toEqual(['real log line'])
+  })
+
+  it('puts the diagnosis on the host state, where it can be shown all tail long', async () => {
+    // Not into the stream. A tail is long-lived and a notice written once as a
+    // log line has scrolled away within the second.
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.feeds.get('a')!.out(`${M}unit-load=loaded\n${M}entries=0\n${M}priv=0\n${M}sudo=0\n${M}begin=1\n`)
+    const s = h.states.filter((x) => x.diagnosis).pop()
+    expect(s?.diagnosis?.issue).toBe('journal-unreadable')
+  })
+
+  it('says root was used for as long as the tail runs, not once at the start', async () => {
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.feeds.get('a')!.out(`${M}sudo=1\n${M}entries=0\n${M}priv=0\n${M}begin=1\n`)
+    h.feeds.get('a')!.out('a line\n')
+    h.feeds.get('a')!.close()
+    // Every state emitted after the preflight carries it, including the last.
+    expect(h.states[h.states.length - 1]).toMatchObject({ state: 'ended', diagnosis: { usedSudo: true } })
+  })
+
+  it('will not let a log line forge a fact once the tail has started', async () => {
+    // A remote host can print anything, including our own marker bytes. It
+    // cannot print them BEFORE the preflight has handed over, which is the only
+    // window in which they mean anything.
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.feeds.get('a')!.out(`${M}sudo=0\n${M}begin=1\n`)
+    h.feeds.get('a')!.out(`${M}sudo=1\n`)
+    expect(h.lines.map((l) => l.text)).toEqual([`${M}sudo=1`])
+    expect(h.states.filter((s) => s.diagnosis).pop()?.diagnosis?.usedSudo).toBe(false)
+  })
+
+  it('still reports a preflight that never got as far as tailing', async () => {
+    // No journalctl on the host: the command prints one fact and exits, so
+    // `begin` never arrives. Without settling the diagnosis at close, the one
+    // case the preflight exists to catch is the one case it says nothing about.
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.feeds.get('a')!.out(`${M}journal=missing\n`)
+    h.feeds.get('a')!.close()
+    expect(h.states[h.states.length - 1]).toMatchObject({ state: 'ended', diagnosis: { issue: 'no-journal' } })
+    expect(h.lines).toHaveLength(0)
+  })
+})
+
+describe('pausing a tail rather than killing it', () => {
+  it('holds the lines and leaves the channel open', async () => {
+    // Stop used to be the only way to make the pane sit still, and it closed
+    // journalctl on every host and threw the buffer away.
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.feeds.get('a')!.out('before\n')
+    h.tailer.pause('t1')
+    h.feeds.get('a')!.out('during-one\nduring-two\n')
+    expect(h.lines.map((l) => l.text)).toEqual(['before'])
+    expect(h.stopped).toEqual([])
+    expect(h.tailer.isActive('t1')).toBe(true)
+
+    h.tailer.resume('t1')
+    expect(h.lines.map((l) => l.text)).toEqual(['before', 'during-one', 'during-two'])
+  })
+
+  it('reports what it had to drop rather than leaving a silent gap', async () => {
+    // Same rule as the rate limiter: a gap nobody mentions is how someone
+    // concludes a service stopped logging.
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.tailer.pause('t1')
+    // Past the per-second cap, so the clock is wound on between bursts.
+    for (let i = 0; i < LOG_PAUSE_BUFFER + 40; i++) {
+      h.tick(10)
+      h.feeds.get('a')!.out(`line-${i}\n`)
+    }
+    h.tailer.resume('t1')
+    expect(h.lines).toHaveLength(LOG_PAUSE_BUFFER + 1)
+    // The newest are what someone waiting on an incident wants, so the oldest go.
+    expect(h.lines[0].text).toBe('line-40')
+    expect(h.lines[h.lines.length - 1].text).toMatch(/40 lines dropped while paused/)
+  })
+
+  it('does not lose the held lines if the user stops instead of resuming', async () => {
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.tailer.pause('t1')
+    h.feeds.get('a')!.out('held\n')
+    h.tailer.stop('t1')
+    expect(h.lines.map((l) => l.text)).toEqual(['held'])
+    expect(h.stopped).toEqual(['a'])
+    expect(h.tailer.isPaused('t1')).toBe(false)
+  })
+
+  it('does not start a new tail into an old hold', async () => {
+    // Nothing on screen would say why the new stream was empty.
+    const h = harness()
+    await h.tailer.start('t1', unit, h.targets(['a']))
+    h.tailer.pause('t1')
+    await h.tailer.start('t1', unit, h.targets(['b']))
+    expect(h.tailer.isPaused('t1')).toBe(false)
+    h.feeds.get('b')!.out('fresh\n')
+    expect(h.lines.map((l) => l.text)).toEqual(['fresh'])
+  })
+
+  it('refuses to pause something that is not running', async () => {
+    const h = harness()
+    expect(h.tailer.pause('nope')).toBe(false)
+    expect(h.tailer.resume('nope')).toBe(false)
+  })
+})
+
 describe('the panel that drives it', () => {
   const panel = readFileSync(resolve(__dirname, '../src/renderer/src/components/monitor/LogTailPanel.tsx'), 'utf8')
 
@@ -308,5 +435,46 @@ describe('the panel that drives it', () => {
   it('leaves the panel usable if the start or stop call throws', () => {
     expect(panel).toMatch(/catch \(e\)[\s\S]{0,200}setRunning\(false\)/)
     expect(panel).toMatch(/} finally \{[\s\S]{0,300}setRunning\(false\)/)
+  })
+
+  it('says what a filtered count is a count of', () => {
+    // "12 lines" under a filter reads as a quiet host. The denominator is what
+    // makes it a filter rather than a claim about the log.
+    expect(panel).toMatch(/of \$\{lines\.length\} lines match/)
+  })
+
+  it('draws the diagnosis and the root badge outside the scrolling stream', () => {
+    // Inside it, both scroll away — which for "reading as root" means a
+    // privileged tail becomes indistinguishable from an ordinary one after a
+    // second of traffic.
+    const stream = panel.indexOf('className="bc-out log-stream"')
+    expect(panel.indexOf('reading as root')).toBeLessThan(stream)
+    expect(panel.indexOf('LOG_ISSUE_HELP[d.issue]')).toBeLessThan(stream)
+  })
+
+  it('does not dress a pane that may yet fill as a failure', () => {
+    // A file tail -F is waiting for, or a unit that genuinely has not spoken,
+    // is not the same kind of thing as a masked unit or a denied read.
+    expect(panel).toMatch(/clsx\('s-desc', !d\.waiting && 'danger'\)/)
+  })
+
+  it('offers root only when it would help and cannot prompt', () => {
+    // Same discipline as docker: `sudo -n` never asks, so the button cannot
+    // produce a password prompt on a host that would want one.
+    expect(panel).toMatch(
+      /!d\.usedSudo && d\.sudoAvailable && \(d\.issue === 'journal-unreadable' \|\| d\.issue === 'file-denied'\)/
+    )
+    expect(panel).toMatch(/sudo: 'always'/)
+  })
+
+  it('says so rather than pretending, when the pause bridge is not wired', () => {
+    // A Pause button that flips its own label over a stream nobody paused is
+    // worse than no button.
+    expect(panel).toMatch(/typeof call !== 'function'/)
+  })
+
+  it('sends journalctl-only flags only for a unit', () => {
+    expect(panel).toMatch(/kind === 'unit' && priority !== '' \? \{ priority \}/)
+    expect(panel).toMatch(/kind === 'unit' && since\.trim\(\) !== '' \? \{ since/)
   })
 })

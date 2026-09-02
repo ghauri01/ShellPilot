@@ -1,9 +1,15 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import {
   parseCrontab,
   parseSystemdTimers,
   parseCronCollection,
   describeSchedule,
+  summariseCronSources,
+  buildCronCollectCommand,
   CRON_COLLECT_COMMAND
 } from '../src/shared/cron'
 
@@ -152,7 +158,9 @@ describe('collecting from one host', () => {
 
   it('survives a host with nothing scheduled', () => {
     const empty = ['===SHELLPILOT-USER===', '===SHELLPILOT-SYSTEM===', '===SHELLPILOT-CROND===', '===SHELLPILOT-TIMERS==='].join('\n')
-    expect(parseCronCollection(empty)).toEqual({ entries: [], unparsed: [] })
+    const r = parseCronCollection(empty)
+    expect(r.entries).toEqual([])
+    expect(r.unparsed).toEqual([])
   })
 
   it('survives output with sections missing entirely', () => {
@@ -164,23 +172,46 @@ describe('collecting from one host', () => {
 
 describe('the collector command', () => {
   it('never fails the whole collection for one missing source', () => {
-    // No /etc/cron.d, or a user with no crontab, is the normal case.
-    // Each collected source carries its own guard, so a host with no
-    // /etc/cron.d or a user with no crontab still returns the other sections.
-    const guarded = CRON_COLLECT_COMMAND.split('; echo').filter((s) => /crontab|cat|for f|systemctl/.test(s))
-    expect(guarded.length).toBeGreaterThanOrEqual(4)
-    for (const s of guarded) expect(s, s).toMatch(/\|\| true/)
+    // No /etc/cron.d, or a user with no crontab, is the normal case, and one
+    // of them must not take the others down with it. The executable tests
+    // below prove this on a real shell; this pins the two properties that
+    // make it true, because both are one careless edit away.
+    expect(CRON_COLLECT_COMMAND).not.toMatch(/set\s+-e/)
+    // Every read is inside a conditional, and the last thing the script does
+    // is print the status block — so the exit status can never be a failed
+    // read.
+    expect(CRON_COLLECT_COMMAND.trimEnd().endsWith('printf \'%s\' "$SP_STATUS"')).toBe(true)
   })
 
   it('is read-only', () => {
     // The whole premise of shipping this before any editing.
-    // `2>/dev/null` is the only redirect allowed; anything writing to a real
-    // path, removing a crontab, or touching unit state fails this.
     expect(CRON_COLLECT_COMMAND).not.toMatch(/crontab\s+-r/)
     expect(CRON_COLLECT_COMMAND).not.toMatch(/\b(rm|tee|mv|cp|chmod|chown)\b/)
     expect(CRON_COLLECT_COMMAND).not.toMatch(/systemctl\s+(start|stop|enable|disable|mask)/)
-    const redirects = CRON_COLLECT_COMMAND.match(/>+\s*\S+/g) ?? []
+    // Only /dev/null may be written to. File-descriptor duplication (`2>&1`,
+    // `>&2`) is not a write to a path and is excluded before the check —
+    // without that, `command -v x >/dev/null 2>&1` fails a rule it obeys.
+    const redirects = CRON_COLLECT_COMMAND.replace(/[12]?>&[12]/g, '').match(/>+\s*\S+/g) ?? []
     for (const r of redirects) expect(r, r).toMatch(/\/dev\/null/)
+  })
+
+  it('never escalates in a way that could prompt', () => {
+    // The one rule that makes a sudo retry safe to have on by default: `sudo`
+    // without `-n` can block on a password prompt with no tty, which hangs the
+    // exec until its timeout with no output to explain why.
+    const sudos = CRON_COLLECT_COMMAND.match(/\bsudo\b[^\n]*/g) ?? []
+    expect(sudos.length).toBeGreaterThan(0)
+    for (const line of sudos) expect(line, line).toMatch(/sudo -n\b/)
+  })
+
+  it('does not escalate at all when asked not to', () => {
+    expect(buildCronCollectCommand({ sudo: false })).not.toMatch(/\bsudo\b/)
+  })
+
+  it('reads the crontab spool as well as this account', () => {
+    // A sysadmin asking what is scheduled means root's crontab at least as
+    // much as their own, and `crontab -l` cannot answer that.
+    expect(CRON_COLLECT_COMMAND).toMatch(/\/var\/spool\/cron\/crontabs \/var\/spool\/cron\b/)
   })
 })
 
@@ -499,9 +530,11 @@ describe('the cron.d collector, on files that do not end in a newline', () => {
     // `#FILE:` tail on its command, and every job in b is filed under a — where
     // nobody looking at b will ever find it.
     //
-    // The collector now prints its own newline after each file, so this is what
-    // the parser receives.
-    expect(CRON_COLLECT_COMMAND).toMatch(/cat "\$f"; printf "\\n"/)
+    // The collector captures each file and re-prints it with exactly one
+    // trailing newline, which fixes it whether the file had none or several.
+    // Proven end to end in the executable tests below; pinned here because the
+    // printf format is what does it.
+    expect(CRON_COLLECT_COMMAND).toMatch(/printf '#FILE:%s\\n%s\\n' "\$f" "\$SP_TXT"/)
   })
 
   it('files each entry under the file it came from', () => {
@@ -541,5 +574,294 @@ describe('describing lists, which real crontabs are full of', () => {
 
   it('reads day-of-week 7 as Sunday, as cron does', () => {
     expect(describeSchedule('47 6 * * 7')).toBe('at 06:47 every Sunday')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The collector, actually run.
+//
+// Everything above tests the parser against strings. That is not enough for
+// this change: the whole point of it is a SHELL script that has to tell four
+// indistinguishable situations apart, and a shell script is exactly the kind of
+// thing that reads correctly and does the wrong thing. So these run the real
+// shipped command through /bin/sh against a directory tree built to look like a
+// host, with the absolute paths redirected into it.
+//
+// What is deliberately NOT covered here: the two branches that read a
+// directory whose own mode denies us, which need real root — a fake `sudo`
+// cannot glob a directory the test process cannot open. Those are asserted
+// structurally instead.
+// ---------------------------------------------------------------------------
+
+interface FakeHost {
+  root: string
+  bin: string
+  /** Run the shipped collector against this tree. */
+  collect: (opts?: { sudo?: boolean; deny?: string[] }) => string
+}
+
+function fakeHost(): FakeHost {
+  const root = mkdtempSync(join(tmpdir(), 'sp-cron-'))
+  const bin = join(root, 'bin')
+  mkdirSync(bin, { recursive: true })
+
+  const script = (name: string, body: string): void => {
+    const f = join(bin, name)
+    writeFileSync(f, `#!/bin/sh\n${body}\n`)
+    chmodSync(f, 0o755)
+  }
+
+  // A `cat` that refuses the paths named in $SP_DENY. Real permissions cannot
+  // be used for the files, because then the sudo path could not read them
+  // either: the test process is not root, and a fake sudo does not make it so.
+  script(
+    'cat',
+    'for a in "$@"; do case ":$SP_DENY:" in *":$a:"*) echo "cat: $a: Permission denied" >&2; exit 1;; esac; done\nexec /bin/cat "$@"'
+  )
+  // A sudo that behaves like the real one in the only ways that matter: it
+  // refuses to do anything without -n, answers the probe, and runs the command
+  // in an environment where the deny list does not apply — which is what being
+  // root means here.
+  script(
+    'sudo',
+    '[ "$1" = "-n" ] || { echo "sudo: a password is required" >&2; exit 1; }\nshift\n' +
+      '[ "$1" = "true" ] && exit 0\nexec env SP_DENY= PATH=/usr/bin:/bin "$@"'
+  )
+
+  return {
+    root,
+    bin,
+    collect: ({ sudo = true, deny = [] } = {}) => {
+      const cmd = buildCronCollectCommand({ sudo })
+        .replaceAll('/etc/cron', `${root}/etc/cron`)
+        .replaceAll('/var/spool/cron', `${root}/var/spool/cron`)
+      return execFileSync('/bin/sh', ['-c', cmd], {
+        encoding: 'utf8',
+        env: { PATH: `${bin}:/usr/bin:/bin`, SP_DENY: deny.join(':') }
+      })
+    }
+  }
+}
+
+const statusOf = (out: string, id: string): { status: string; usedSudo?: boolean; detail?: string } => {
+  const s = parseCronCollection(out).sources.find((x) => x.id === id)
+  if (!s) throw new Error(`no status reported for ${id}`)
+  return { status: s.status, usedSudo: s.usedSudo, detail: s.detail }
+}
+
+describe.skipIf(process.platform === 'win32')('the collector, run against a host-shaped tree', () => {
+  let host: FakeHost
+  const written: string[] = []
+
+  beforeEach(() => {
+    host = fakeHost()
+    written.push(host.root)
+    mkdirSync(join(host.root, 'etc/cron.d'), { recursive: true })
+    mkdirSync(join(host.root, 'var/spool/cron/crontabs'), { recursive: true })
+    writeFileSync(join(host.root, 'etc/crontab'), '17 * * * * root cd / && run-parts /etc/cron.hourly\n')
+    // No trailing newline, like plenty of packaged files.
+    writeFileSync(join(host.root, 'etc/cron.d/certbot'), '0 */12 * * * root certbot -q renew')
+    writeFileSync(join(host.root, 'etc/cron.d/sysstat'), '5-55/10 * * * * sysstat /usr/lib/sysstat/sa1 1 1')
+    writeFileSync(join(host.root, 'var/spool/cron/crontabs/root'), '0 3 * * * /root/nightly.sh\n')
+    writeFileSync(join(host.bin, 'crontab'), '#!/bin/sh\necho "0 2 * * * /home/me/backup.sh"\n')
+    chmodSync(join(host.bin, 'crontab'), 0o755)
+    writeFileSync(
+      join(host.bin, 'systemctl'),
+      '#!/bin/sh\nprintf "NEXT LEFT LAST PASSED UNIT ACTIVATES\\n' +
+        'Tue 2026-09-02 06:00:00 UTC 5h left Mon 2026-09-01 06:00:00 UTC 18h ago logrotate.timer logrotate.service\\n"\n'
+    )
+    chmodSync(join(host.bin, 'systemctl'), 0o755)
+  })
+
+  afterEach(() => {
+    for (const d of written.splice(0)) rmSync(d, { recursive: true, force: true })
+  })
+
+  it('reads every source and says that it did', () => {
+    const r = parseCronCollection(host.collect())
+    expect(r.sources.map((s) => `${s.id}=${s.status}`)).toEqual([
+      'user-crontab=ok',
+      'system-crontab=ok',
+      'cron.d=ok',
+      'other-crontabs=ok',
+      'systemd-timers=ok'
+    ])
+    expect(summariseCronSources(r.sources).incomplete).toEqual([])
+    expect(r.entries.map((e) => e.kind).sort()).toEqual([
+      'cron.d',
+      'cron.d',
+      'other-user-crontab',
+      'system-crontab',
+      'systemd-timer',
+      'user-crontab'
+    ])
+  })
+
+  it('separates cron.d files that do not end in a newline', () => {
+    // End to end this time, not by matching the command text: a's last job
+    // growing a `#FILE:` tail was a real bug and the fix belongs to the shell.
+    const crond = parseCronCollection(host.collect()).entries.filter((e) => e.kind === 'cron.d')
+    expect(crond.map((e) => [e.origin.replace(host.root, ''), e.command])).toEqual([
+      ['/etc/cron.d/certbot', 'certbot -q renew'],
+      ['/etc/cron.d/sysstat', '/usr/lib/sysstat/sa1 1 1']
+    ])
+  })
+
+  it('tells an unreadable /etc/crontab from an absent one', () => {
+    // THE bug. Both used to be silence, and silence rendered as "Nothing
+    // scheduled" over a host with a full system crontab.
+    const denied = host.collect({ sudo: false, deny: [join(host.root, 'etc/crontab')] })
+    expect(statusOf(denied, 'system-crontab').status).toBe('denied')
+
+    rmSync(join(host.root, 'etc/crontab'))
+    expect(statusOf(host.collect({ sudo: false }), 'system-crontab').status).toBe('absent')
+  })
+
+  it('tells a missing crontab binary from an empty crontab', () => {
+    // Also indistinguishable before: `crontab -l 2>/dev/null || true` prints
+    // nothing either way.
+    rmSync(join(host.bin, 'crontab'))
+    // The resolver checks absolute paths too, so the candidate list has to go
+    // as well or the host's own /usr/bin/crontab answers.
+    const cmd = buildCronCollectCommand({ sudo: false })
+      .replace(/for c in crontab [^;]*;/, 'for c in sp-no-such-crontab;')
+      .replace(/SP_BIN=crontab\b/, 'SP_BIN=sp-no-such-crontab')
+      .replaceAll('/etc/cron', `${host.root}/etc/cron`)
+      .replaceAll('/var/spool/cron', `${host.root}/var/spool/cron`)
+    const out = execFileSync('/bin/sh', ['-c', cmd], {
+      encoding: 'utf8',
+      env: { PATH: `${host.bin}:/usr/bin:/bin`, SP_DENY: '' }
+    })
+    expect(statusOf(out, 'user-crontab')).toMatchObject({ status: 'no-tool' })
+
+    writeFileSync(join(host.bin, 'crontab'), '#!/bin/sh\nexit 0\n')
+    chmodSync(join(host.bin, 'crontab'), 0o755)
+    expect(statusOf(host.collect({ sudo: false }), 'user-crontab').status).toBe('ok')
+  })
+
+  it('reads "no crontab for <user>" as absent rather than as an error', () => {
+    writeFileSync(join(host.bin, 'crontab'), '#!/bin/sh\necho "no crontab for sam" >&2\nexit 1\n')
+    chmodSync(join(host.bin, 'crontab'), 0o755)
+    expect(statusOf(host.collect({ sudo: false }), 'user-crontab').status).toBe('absent')
+  })
+
+  it('reports a cron.d that is only partly readable, and still returns the rest', () => {
+    const out = host.collect({ sudo: false, deny: [join(host.root, 'etc/cron.d/sysstat')] })
+    expect(statusOf(out, 'cron.d')).toMatchObject({ status: 'partial', detail: 'read 1 of 2 files' })
+    // The readable one is not lost to protect the point.
+    expect(parseCronCollection(out).entries.some((e) => e.command === 'certbot -q renew')).toBe(true)
+    // And the missing one is not silently absent from the picture.
+    expect(summariseCronSources(parseCronCollection(out).sources).answered).toBe(4)
+  })
+
+  it('retries a refused file as root, and says that it did', () => {
+    const out = host.collect({ deny: [join(host.root, 'etc/crontab')] })
+    expect(statusOf(out, 'system-crontab')).toMatchObject({ status: 'ok', usedSudo: true })
+    expect(parseCronCollection(out).entries.some((e) => e.kind === 'system-crontab')).toBe(true)
+    expect(summariseCronSources(parseCronCollection(out).sources).usedSudo).toBe(true)
+  })
+
+  it('reports denied rather than escalating when root needs a password', () => {
+    // The sudoers-less host: `sudo -n` fails instantly, which is the entire
+    // reason it is safe to attempt without asking.
+    writeFileSync(join(host.bin, 'sudo'), '#!/bin/sh\necho "sudo: a password is required" >&2\nexit 1\n')
+    chmodSync(join(host.bin, 'sudo'), 0o755)
+    const out = host.collect({ deny: [join(host.root, 'etc/crontab')] })
+    expect(statusOf(out, 'system-crontab')).toMatchObject({ status: 'denied', usedSudo: undefined })
+  })
+
+  it("attributes another account's crontab to that account", () => {
+    // A spool file has no user column — the filename is the user. Parsed as a
+    // system crontab it would report `0` as the account and drop the minute
+    // from the schedule.
+    const root = parseCronCollection(host.collect()).entries.find((e) => e.kind === 'other-user-crontab')
+    expect(root).toMatchObject({ user: 'root', command: '/root/nightly.sh', schedule: '0 3 * * *' })
+  })
+
+  it('does not list our own crontab twice', () => {
+    const me = execFileSync('/usr/bin/id', ['-un'], { encoding: 'utf8' }).trim()
+    writeFileSync(join(host.root, 'var/spool/cron/crontabs', me), '0 2 * * * /home/me/backup.sh\n')
+    const entries = parseCronCollection(host.collect()).entries.filter(
+      (e) => e.command === '/home/me/backup.sh'
+    )
+    expect(entries.map((e) => e.kind)).toEqual(['user-crontab'])
+  })
+
+  it('says a host has no systemd rather than that it has no timers', () => {
+    writeFileSync(
+      join(host.bin, 'systemctl'),
+      '#!/bin/sh\necho "System has not been booted with systemd as init system (PID 1)." >&2\nexit 1\n'
+    )
+    chmodSync(join(host.bin, 'systemctl'), 0o755)
+    const s = statusOf(host.collect({ sudo: false }), 'systemd-timers')
+    expect(s.status).toBe('no-tool')
+    expect(s.detail).toMatch(/not running/)
+    // Still an answered source: a host with no systemd is not a host we failed
+    // to read. Counting it as a gap would make every container look half-read.
+    expect(summariseCronSources(parseCronCollection(host.collect({ sudo: false })).sources).incomplete).toEqual([])
+  })
+
+  it('still returns every other section when everything that can fail does', () => {
+    rmSync(join(host.bin, 'systemctl'))
+    rmSync(join(host.root, 'etc/cron.d'), { recursive: true })
+    rmSync(join(host.root, 'var/spool/cron'), { recursive: true })
+    const r = parseCronCollection(host.collect({ sudo: false, deny: [join(host.root, 'etc/crontab')] }))
+    expect(r.entries.map((e) => e.kind)).toEqual(['user-crontab'])
+    expect(r.sources.map((s) => s.status)).toEqual(['ok', 'denied', 'absent', 'absent', 'no-tool'])
+  })
+})
+
+describe('a collection that reported nothing about itself', () => {
+  it('never implies it read everything', () => {
+    // The transport caps exec output, so a host with an enormous cron.d can
+    // lose the tail — including the status block. Four sources silently
+    // dropping off the list would read as a complete answer.
+    const r = parseCronCollection('===SHELLPILOT-USER===\n0 1 * * * /x')
+    expect(r.entries).toHaveLength(1)
+    expect(r.sources).toHaveLength(5)
+    expect(r.sources.every((s) => s.status === 'unknown')).toBe(true)
+    expect(summariseCronSources(r.sources).answered).toBe(0)
+  })
+
+  it('cannot be forged by a crontab that contains a status-shaped line', () => {
+    // The statuses are accumulated in a shell variable and printed in their own
+    // block at the end, so nothing read out of a file can land in it.
+    const out = [
+      '===SHELLPILOT-USER===',
+      'cron.d ok - read 9 of 9 files',
+      '0 1 * * * /x',
+      '===SHELLPILOT-STATUS===',
+      'cron.d denied - the directory is readable only by root'
+    ].join('\n')
+    expect(statusOf(out, 'cron.d').status).toBe('denied')
+  })
+})
+
+describe('the panel that shows it', () => {
+  const panel = readFileSync(
+    resolve(__dirname, '../src/renderer/src/components/monitor/CronPanel.tsx'),
+    'utf8'
+  )
+
+  it('does not claim a host has nothing scheduled unless every source answered', () => {
+    // The sentence this whole change exists to stop: "Nothing scheduled."
+    // under a host whose /etc/cron.d we were simply not allowed to open.
+    expect(panel).toMatch(/incomplete\.length === 0\s*\?\s*'Nothing scheduled\.'/)
+    expect(panel).toMatch(/Nothing found in the sources that could be read/)
+  })
+
+  it('says how much of the picture it has', () => {
+    expect(panel).toMatch(/read \$\{answered\} of \$\{total\} sources/)
+  })
+
+  it('treats a missing source report as a gap rather than as completeness', () => {
+    // Until main forwards the per-source statuses this field is absent, and a
+    // panel that read that as "all five fine" would be inventing the
+    // reassurance the change exists to withdraw.
+    expect(panel).toMatch(/did not report which sources it managed to read/)
+  })
+
+  it('says out loud when something was read as root', () => {
+    expect(panel).toMatch(/read as root/)
   })
 })

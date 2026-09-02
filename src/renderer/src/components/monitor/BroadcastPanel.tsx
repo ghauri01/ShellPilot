@@ -4,7 +4,15 @@ import { useApp } from '../../store/app'
 import { bridgeOn } from '../../lib/bridge'
 import { sshHopsFor } from '../../lib/ssh'
 import { clsx } from '../../lib/format'
-import { planBroadcast, type BroadcastHostResult, type BroadcastProgress } from '../../../../shared/broadcast'
+import {
+  BROADCAST_OUTCOME_LABEL,
+  classifyBroadcastResult,
+  planBroadcast,
+  summariseBroadcast,
+  type BroadcastHostOutcome,
+  type BroadcastHostResult,
+  type BroadcastProgress
+} from '../../../../shared/broadcast'
 import type { Server } from '../../types'
 
 // Run one command across many servers.
@@ -13,24 +21,52 @@ import type { Server } from '../../types'
 // because this is where the person is: main runs what it is told, and a second
 // copy of the rule there would be a second thing to drift out of step.
 
+// The runner classifies; this is the fallback for a result that predates the
+// field, and it keeps the panel from having a second opinion about what a
+// result means.
+const outcomeOf = (r: BroadcastHostResult): BroadcastHostOutcome | null =>
+  r.outcome ?? classifyBroadcastResult(r)
+
+// Tone by outcome, not by exit code.
+//
+// `missing-command` is amber rather than red on purpose: on a fan-out it is
+// usually not a fault at all, it is the answer ("these four boxes do not run
+// docker"). Colouring it the same as an unreachable host would make the one
+// row that needs someone to go and look indistinguishable from four that do
+// not.
+const TONE: Record<BroadcastHostOutcome, string> = {
+  ok: '',
+  nonzero: 'warn',
+  'missing-command': 'warn',
+  'permission-denied': 'warn',
+  timeout: 'danger',
+  unreachable: 'danger',
+  cancelled: 'warn'
+}
+
 function resultTone(r: BroadcastHostResult): string {
-  if (r.state === 'failed') return 'danger'
-  if (r.state === 'skipped') return 'warn'
-  if (r.state === 'ok' && r.exitCode && r.exitCode !== 0) return 'warn'
-  return ''
+  const o = outcomeOf(r)
+  return o === null ? '' : TONE[o]
 }
 
 function HostResult({ r }: { r: BroadcastHostResult }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const out = [r.stdout, r.stderr].filter((s) => s && s.trim() !== '').join('\n')
+  const outcome = outcomeOf(r)
+  const took = r.ms !== undefined ? ` · ${(r.ms / 1000).toFixed(1)}s` : ''
   const summary =
     r.state === 'running'
       ? 'running…'
-      : r.state === 'skipped'
-        ? 'not run — cancelled'
-        : r.state === 'failed'
-          ? (r.error ?? 'failed')
-          : `exit ${r.exitCode ?? 0}${r.ms !== undefined ? ` · ${(r.ms / 1000).toFixed(1)}s` : ''}`
+      : outcome === null
+        ? 'waiting…'
+        : outcome === 'cancelled'
+          ? 'not run — cancelled'
+          : outcome === 'unreachable' || outcome === 'timeout'
+            ? (r.error ?? BROADCAST_OUTCOME_LABEL[outcome])
+            : // The exit code stays visible next to the category. The category
+              // is what makes the list scannable; the code is what someone
+              // checks when they do not believe it.
+              `${BROADCAST_OUTCOME_LABEL[outcome]} · exit ${r.exitCode ?? 0}${took}`
 
   return (
     <div className="bc-host">
@@ -156,7 +192,25 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
     plan.confirmation.kind !== 'type-to-confirm' || phrase.trim() === plan.confirmation.phrase
 
   const rows = Object.values(results)
-  const finished = rows.filter((r) => r.state !== 'pending' && r.state !== 'running').length
+  const summary = summariseBroadcast(rows)
+  const finished = rows.length - summary.running
+  // Only the categories that actually occurred, in a fixed order so the line
+  // does not reshuffle itself as results land. `ok` is included even at zero
+  // once something has finished: "0 ok" is the most important thing that line
+  // can say, and dropping it because the count is zero is the one case where
+  // its absence reads as reassurance.
+  const chips = ([
+    'ok',
+    'nonzero',
+    'missing-command',
+    'permission-denied',
+    'timeout',
+    'unreachable',
+    'cancelled'
+  ] as BroadcastHostOutcome[])
+    .filter((o) => summary.counts[o] > 0 || (o === 'ok' && finished > 0))
+    .map((o) => ({ o, n: summary.counts[o] }))
+  const refused = rows.filter((r) => outcomeOf(r) === 'permission-denied')
 
   return (
     <div className="bc-panel">
@@ -253,8 +307,17 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
       {rows.length > 0 && (
         <div className="bc-results">
           <div className="row muted" style={{ fontSize: 11, justifyContent: 'space-between' }}>
-            <span>
-              {finished} of {rows.length} finished
+            <span className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <span>
+                {finished} of {rows.length} finished
+              </span>
+              {/* Fifteen hosts is a list nobody reads top to bottom. This is
+                  the line that says whether they need to. */}
+              {chips.map(({ o, n }) => (
+                <span key={o} className={clsx(TONE[o])}>
+                  {n} {BROADCAST_OUTCOME_LABEL[o]}
+                </span>
+              ))}
             </span>
             {/* Not while it is running: this navigates away, which unmounts
                 the panel and takes the results with it — including the Stop
@@ -265,6 +328,22 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
               </button>
             )}
           </div>
+          {/* Said once, here, rather than on each refused row: the decision
+              is one decision. Escalation is deliberately the operator's to
+              make — see the note at the end of shared/broadcast.ts. Re-running
+              this as root on their behalf would raise the blast radius after
+              they had already approved it at a lower one. */}
+          {refused.length > 0 && (
+            <div className="s-desc warn">
+              {refused.length === 1
+                ? `${refused[0].serverName} refused this command for this account.`
+                : `${refused.length} hosts refused this command for this account.`}{' '}
+              Nothing was retried as root. Prefixing the command with{' '}
+              <span className="mono">sudo</span> will re-run it here — and will ask you to confirm
+              again, because running as root across several hosts is a bigger thing than running it
+              as yourself.
+            </div>
+          )}
           {rows.map((r) => (
             <HostResult key={r.serverId} r={r} />
           ))}

