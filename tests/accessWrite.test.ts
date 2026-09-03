@@ -1,7 +1,17 @@
 import { describe, it, expect, afterAll } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -354,14 +364,30 @@ describe('rule 2 — nothing is committed without a second, independent session'
     expect(accessDisarmCommand('/home/ops/.ssh/authorized_keys', plan.token)).toContain(': > "$SP_M"')
   })
 
-  it('arms the watchdog BEFORE the file is replaced', async () => {
+  it('arms the watchdog BEFORE the file is replaced, and gates the replacement on it', async () => {
     // Ordering is the whole safety property. Armed after the `mv`, a session
     // that dies in the instant between them leaves the new file in place with
     // nothing watching it — which is the exact failure the watchdog exists for.
+    //
+    // And ordering ALONE is not enough, which is what the earlier version of
+    // this test could not see: the launch was a bare line whose failure was
+    // discarded. So the `mv` must also come after the check that the watchdog
+    // wrote its arming sentinel.
     const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).spec!.steps[0]
       .command
-    expect(command.indexOf('nohup sh -c')).toBeLessThan(command.indexOf('mv "$SP_T" "$SP_F"'))
-    expect(command.indexOf('nohup sh -c')).toBeGreaterThan(command.indexOf('cp -p "$SP_F" "$SP_B"'))
+    const backup = command.indexOf('cp -p "$SP_F" "$SP_B"')
+    const launch = command.indexOf('$SP_L sh -c')
+    const proof = command.indexOf('[ -f "$SP_ARM" ] || {')
+    const replace = command.indexOf('mv "$SP_T" "$SP_F"')
+    expect(backup).toBeGreaterThan(-1)
+    expect(launch).toBeGreaterThan(backup)
+    expect(proof).toBeGreaterThan(launch)
+    expect(replace).toBeGreaterThan(proof)
+    // The watchdog's first action is the sentinel, so the sentinel existing
+    // means a process is running that holds the backup path and the deadline.
+    expect(command).toContain(`sh -c ': > "$3"; sleep`)
+    // `disown` is a bashism, and this runs under whatever /bin/sh is there.
+    expect(command).not.toMatch(/\bdisown\b/)
   })
 
   it('tells the operator in the job output that the change is not permanent', async () => {
@@ -628,7 +654,10 @@ afterAll(() => {
 interface Fake {
   home: string
   file: string
-  run: (command: string) => { code: number; out: string }
+  run: (command: string, opts?: { shim?: Record<string, string>; onlyShim?: boolean }) => {
+    code: number
+    out: string
+  }
   read: () => string
   backups: () => string[]
 }
@@ -642,11 +671,34 @@ function fakeHome(lines: string[]): Fake {
   return {
     home,
     file,
-    run: (command) => {
+    // `shim` puts a directory of stub programs in FRONT of the real PATH, which
+    // is how a host that cannot detach a surviving process is reproduced here:
+    // a `nohup` that exits 127 is exactly what a busybox image without it looks
+    // like, and it stands in for the case that actually happens —
+    // systemd-logind with KillUserProcesses=yes, where the watchdog is
+    // SIGKILLed with the session rather than never starting.
+    //
+    // `onlyShim` drops the real PATH entirely except for the handful of tools
+    // the staged write itself needs, so "this host has no launcher at all" can
+    // be told from "its launcher failed".
+    run: (command, { shim = {}, onlyShim = false } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'sp-shim-'))
+      trees.push(dir)
+      for (const [name, body] of Object.entries(shim)) {
+        writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`)
+        chmodSync(join(dir, name), 0o755)
+      }
+      if (onlyShim) {
+        for (const tool of ['cp', 'mv', 'rm', 'grep', 'chmod', 'sleep', 'cmp', 'tail', 'ls']) {
+          for (const from of [`/bin/${tool}`, `/usr/bin/${tool}`]) {
+            if (existsSync(from) && !existsSync(join(dir, tool))) symlinkSync(from, join(dir, tool))
+          }
+        }
+      }
       try {
         const out = execFileSync('/bin/sh', ['-c', command], {
           encoding: 'utf8',
-          env: { HOME: home, PATH: '/usr/bin:/bin' },
+          env: { HOME: home, PATH: onlyShim ? dir : `${dir}:/usr/bin:/bin` },
           stdio: ['ignore', 'pipe', 'pipe']
         })
         return { code: 0, out }
@@ -741,6 +793,78 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     expect(r.code).toBe(0)
     expect(h.read().trim()).toBe('')
     expect(readFileSync(join(h.home, '.ssh/authorized_keys.shellpilot-t9.bak'), 'utf8')).toContain(A)
+  })
+
+  // -------------------------------------------------------------------------
+  // The watchdog has to be PROVED armed, not merely launched
+  // -------------------------------------------------------------------------
+  //
+  // The launch used to be a bare line in a `\n`-joined script with no `set -e`
+  // and no `&&`, so its failure was discarded and the `mv` ran regardless. The
+  // realistic trigger is not a missing `nohup`: it is systemd-logind with
+  // KillUserProcesses=yes — the upstream default on RHEL 8/9, CentOS Stream and
+  // Fedora — which SIGKILLs the whole user slice when the exec channel closes.
+  // On those hosts the dead-man's switch died with the session every time,
+  // while `describeAccessOutcome` went on telling the operator their previous
+  // file was back.
+
+  it('changes nothing when the watchdog cannot be started', async () => {
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    const before = h.read()
+    const r = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w1', expectRemoved: 1, rollbackSeconds: 60 }),
+      { shim: { nohup: 'exit 127', setsid: 'exit 127', 'systemd-run': 'exit 127' } }
+    )
+    expect(r.code).not.toBe(0)
+    expect(r.out).toContain('nothing was changed')
+    // THE assertion. Not "it printed a warning" — the file is untouched, and
+    // the STAGED line that promises a rollback was never printed.
+    expect(h.read()).toBe(before)
+    expect(r.out).not.toContain('STAGED:')
+    // And it does not leave the half-built replacement behind.
+    expect(readdirSync(join(h.home, '.ssh')).filter((n) => n.endsWith('.new'))).toEqual([])
+  })
+
+  it('changes nothing when the watchdog starts and is killed before it can arm', async () => {
+    // What KillUserProcesses actually looks like: the launcher works, the
+    // process starts, and something kills it. The arming sentinel is the
+    // watchdog's own first action, so a watchdog that is not running has not
+    // written one.
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    const before = h.read()
+    const r = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w2', expectRemoved: 1, rollbackSeconds: 60 }),
+      { shim: { nohup: 'exit 0', setsid: 'exit 0', 'systemd-run': 'exit 0' } }
+    )
+    expect(r.code).not.toBe(0)
+    expect(h.read()).toBe(before)
+    expect(r.out).not.toContain('STAGED:')
+  })
+
+  it('changes nothing on a host with no way to detach a process at all', async () => {
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    const before = h.read()
+    const r = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w3', expectRemoved: 1, rollbackSeconds: 60 }),
+      { onlyShim: true }
+    )
+    expect(r.code).not.toBe(0)
+    expect(r.out).toMatch(/no way to leave a process running/)
+    expect(h.read()).toBe(before)
+  })
+
+  it('says in the job output how the rollback was detached', async () => {
+    // The strength of the guarantee differs between launchers and the
+    // difference is recorded rather than smoothed over, exactly as the detached
+    // job engine records it. An operator reading the pane can tell a scope that
+    // survives a logind kill from a `nohup` that only survives SIGHUP.
+    const h = fakeHome([`ssh-ed25519 ${A} a`, `ssh-ed25519 ${B} b`, ''])
+    const r = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w4', expectRemoved: 1, rollbackSeconds: 60 })
+    )
+    expect(r.code).toBe(0)
+    expect(r.out).toMatch(/STAGED:/)
+    expect(r.out).toMatch(/rollback is running under (systemd-run|setsid|nohup)/)
   })
 
   it('changes nothing when the backup cannot be written', async () => {

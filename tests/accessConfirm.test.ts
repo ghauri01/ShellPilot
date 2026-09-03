@@ -128,7 +128,11 @@ describe('the disarm is issued only after an independent session', () => {
     const report = await committer(new Error('All configured authentication methods failed')).confirm({}, req())
     expect(report.outcome).toBe('reverted-verification-failed')
     expect(report.detail).toContain('All configured authentication methods failed')
-    expect(report.detail).toContain('nothing was committed')
+    // The sentence no longer claims the previous file IS back — that is a
+    // claim about something this process cannot see. It says the rollback was
+    // proved running before anything was replaced, and where it restores from.
+    expect(report.detail).toContain('armed and confirmed running')
+    expect(report.detail).toContain('/home/ops/.ssh/authorized_keys.shellpilot-t42.bak')
   })
 
   it('does not confirm when the check fails on the host', async () => {
@@ -212,10 +216,10 @@ describe('the three outcomes read as three different things', () => {
     const unconfirmed = describeAccessOutcome({ ...base, outcome: 'reverted-unconfirmed', reason: 'nobody was there.' })
 
     expect(committed).toBe(
-      "Committed on web-1. A second session authenticated after the change and called off the host's rollback, so ops's authorized_keys is now permanent. The previous file is still on the host at /b.bak."
+      "Committed on web-1. A second session authenticated after the change and called off the host's rollback, so ops's authorized_keys is now permanent. The previous file is at /b.bak until the 300-second window closes, after which the host removes it."
     )
     expect(failed).toBe(
-      "Reverted on web-1: the check failed. the host said no. The host's rollback was left armed, so ops's previous authorized_keys is back and nothing was committed."
+      "Reverted on web-1: the check failed. the host said no. The host's rollback was armed and confirmed running before anything was replaced, and was left armed, so ops's previous authorized_keys should be back within 300s of the change. It is restored from /b.bak; if you can still reach the host, that is where to look."
     )
     expect(unconfirmed).toBe(
       "Reverted on web-1: nothing confirmed it in time. nobody was there. That is the dead-man's switch doing its job rather than the change failing — ops's previous authorized_keys is back, the host is exactly as it was, and it can be staged again."

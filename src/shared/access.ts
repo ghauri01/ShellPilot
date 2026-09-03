@@ -2865,15 +2865,75 @@ function buildStagedWrite(o: {
     // came out the wrong size never becomes the live file at all.
     '[ "$SP_AFTER" = "$SP_WANT" ] || { rm -f "$SP_T"; echo "the new file has $SP_AFTER lines and $SP_WANT were expected; nothing was changed" >&2; exit 4; }',
     'chmod 600 "$SP_T" 2>/dev/null || true',
-    // RULE 2, armed BEFORE the replacement. If the mv succeeds and this session
-    // dies in the same instant, the watchdog is already running and the host
-    // puts the old file back on its own.
-    'rm -f "$SP_M"',
-    `nohup sh -c 'sleep ${wait}; [ -f "$0" ] || cp -p "$1" "$2"; rm -f "$0" "$1"' "$SP_M" "$SP_B" "$SP_F" >/dev/null 2>&1 &`,
+
+    // ---- RULE 2: arm the host's own rollback, and PROVE it armed ----------
+    //
+    // Armed BEFORE the replacement, so that if the mv succeeds and this session
+    // dies in the same instant the watchdog is already running. That ordering
+    // was always right. What was missing is that NOTHING CHECKED. The launch
+    // was a bare line in a `\n`-joined script with no `set -e` and no `&&`, so
+    // its failure was discarded and the mv ran anyway: the key went, the
+    // STAGED line promised a rollback that did not exist, and
+    // `describeAccessOutcome` later told the operator their previous file was
+    // back.
+    //
+    // AND THE REALISTIC TRIGGER IS NOT A MISSING `nohup`. It is systemd-logind
+    // with `KillUserProcesses=yes` — the upstream default, shipped by RHEL 8/9,
+    // CentOS Stream and Fedora — which SIGKILLs the whole user slice when the
+    // exec channel closes. `nohup` sets SIGHUP to ignore in one process and
+    // does nothing whatsoever about that. On those hosts the dead-man's switch
+    // died with the session EVERY TIME.
+    //
+    // So three things, in order:
+    //
+    //  1. CHOOSE A LAUNCHER THAT CAN ACTUALLY SURVIVE, preferring the one that
+    //     survives the case above. `systemd-run --user --scope` puts the
+    //     watchdog in a transient scope of its own, OUTSIDE the logind session
+    //     scope that KillUserProcesses kills — which `setsid` does not do, for
+    //     all that it is the stronger POSIX answer: a new session escapes the
+    //     terminal, not the cgroup. `nohup` is last and weakest. The choice is
+    //     probed on the host rather than assumed, and `systemd-run` is probed
+    //     by RUNNING it, because it is present and non-functional on any host
+    //     whose session has no user bus.
+    //
+    //     `disown` is not among them for the reason the detached job engine
+    //     dropped it: it is a bashism, and this command has to run under the
+    //     `/bin/sh` that is actually there.
+    //
+    //  2. REFUSE IF THERE IS NONE. A host that cannot leave a process running
+    //     after the session ends is a host this must not write to at all — the
+    //     rollback is not a nicety on top of the change, it is the reason the
+    //     change is allowed to be attempted.
+    //
+    //  3. PROVE IT ARMED. The watchdog's FIRST action is to create its arming
+    //     sentinel, so the sentinel existing means a process is running that
+    //     holds the backup path and the deadline. Polled for a few seconds, and
+    //     the mv is gated on it. A watchdog that was launched into a slice
+    //     about to be killed does not get that far, and nothing is replaced.
+    `SP_ARM="$SP_F.shellpilot-${o.token}.armed"`,
+    'rm -f "$SP_M" "$SP_ARM"',
+    'SP_L=',
+    // `--quiet` so the scope name does not land in the job output; `--collect`
+    // so a scope whose process died is not left behind as a failed unit.
+    'if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect true >/dev/null 2>&1; then SP_L="systemd-run --user --scope --quiet --collect"; elif command -v setsid >/dev/null 2>&1; then SP_L=setsid; elif command -v nohup >/dev/null 2>&1; then SP_L=nohup; fi',
+    '[ -n "$SP_L" ] || { rm -f "$SP_T"; echo "this host has no way to leave a process running after the session ends, so the rollback could not be armed and nothing was changed" >&2; exit 5; }',
+    // Unquoted on purpose: `$SP_L` is one of three literals this file wrote,
+    // and the systemd one is four words.
+    `$SP_L sh -c ': > "$3"; sleep ${wait}; [ -f "$0" ] || cp -p "$1" "$2"; rm -f "$0" "$1" "$3"' "$SP_M" "$SP_B" "$SP_F" "$SP_ARM" </dev/null >/dev/null 2>&1 &`,
+    // A fractional sleep is not POSIX and a host without one must not spend
+    // thirty seconds here, so the tick is probed and the try count follows it.
+    // Either way this waits about three seconds and no longer.
+    'if sleep 0.1 2>/dev/null; then SP_TICK=0.1; SP_TRIES=30; else SP_TICK=1; SP_TRIES=3; fi',
+    'SP_N=0',
+    'while [ ! -f "$SP_ARM" ] && [ "$SP_N" -lt "$SP_TRIES" ]; do sleep "$SP_TICK"; SP_N=$((SP_N+1)); done',
+    '[ -f "$SP_ARM" ] || { rm -f "$SP_T"; echo "the rollback did not start on this host, so nothing was changed" >&2; exit 5; }',
+
     'mv "$SP_T" "$SP_F" || { echo "the file could not be replaced" >&2; exit 3; }',
     // Said out loud, in the job output, so the operator reading the pane knows
-    // the change is NOT permanent and knows how long they have.
-    `echo "STAGED: $SP_F changed from $SP_BEFORE to $SP_AFTER lines. The previous file is at $SP_B and will be put back automatically in ${wait}s unless a new session confirms this change."`
+    // the change is NOT permanent, knows how long they have, and knows how
+    // strong the thing holding the deadline is. A `nohup` watchdog and a
+    // systemd scope are not the same promise and are not reported as one.
+    `echo "STAGED: $SP_F changed from $SP_BEFORE to $SP_AFTER lines. The previous file is at $SP_B and will be put back automatically in ${wait}s unless a new session confirms this change. The rollback is running under $SP_L."`
   ].join('\n')
 }
 
@@ -3144,9 +3204,20 @@ export function describeAccessOutcome(o: {
 }): string {
   switch (o.outcome) {
     case 'committed':
-      return `Committed on ${o.serverName}. A second session authenticated after the change and called off the host's rollback, so ${o.user}'s authorized_keys is now permanent. The previous file is still on the host at ${o.backupPath}.`
+      // The window, not "still on the host", because the watchdog removes the
+      // backup when it wakes and finds itself called off — which it has to, or
+      // the next change on this host would be refused for ever by the
+      // one-staged-change-at-a-time rule. An operator who wants that file wants
+      // it now, and telling them it will be there indefinitely is how they find
+      // out otherwise at the worst moment.
+      return `Committed on ${o.serverName}. A second session authenticated after the change and called off the host's rollback, so ${o.user}'s authorized_keys is now permanent. The previous file is at ${o.backupPath} until the ${o.rollbackSeconds}-second window closes, after which the host removes it.`
     case 'reverted-verification-failed':
-      return `Reverted on ${o.serverName}: the check failed. ${o.reason} The host's rollback was left armed, so ${o.user}'s previous authorized_keys is back and nothing was committed.`
+      // NOT "the previous file is back", which is a claim about something this
+      // process cannot see. The staged write proves the watchdog armed before
+      // it replaces anything, so what can honestly be said is that it was
+      // running and holding the deadline — and then where to look, because the
+      // operator reading this may be the one who has just been locked out.
+      return `Reverted on ${o.serverName}: the check failed. ${o.reason} The host's rollback was armed and confirmed running before anything was replaced, and was left armed, so ${o.user}'s previous authorized_keys should be back within ${o.rollbackSeconds}s of the change. It is restored from ${o.backupPath}; if you can still reach the host, that is where to look.`
     case 'reverted-unconfirmed':
       return `Reverted on ${o.serverName}: nothing confirmed it in time. ${o.reason} That is the dead-man's switch doing its job rather than the change failing — ${o.user}'s previous authorized_keys is back, the host is exactly as it was, and it can be staged again.`
   }
