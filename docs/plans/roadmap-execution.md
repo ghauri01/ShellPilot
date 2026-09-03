@@ -461,3 +461,40 @@ dependencies (`@xmldom/xmldom`, `fast-uri`, `qs`), all with fixes available. CI 
 `npm audit` as a gate step. Adding jsdom changed nothing about that report — the diff is
 byte-identical before and after — but the gate is already red for reasons that have nothing to
 do with this work.
+
+### A commit that does not build, and how it got there
+
+`1f9bef5` does not compile. It carries a rename of `hostHealth.ts` out of the renderer
+without the re-export shim or the five importer updates that make the rename survivable —
+those arrived in the next commit. `git bisect` across that pair is unusable, and per-commit
+CI would fail on it.
+
+The cause is worth writing down because the mistake was invisible at the time and the
+verification that should have caught it did not.
+
+Two agents were working the same worktree on disjoint files. One of them staged a `git mv`
+part-way through its task. When the other's work was committed — with explicit paths, chosen
+deliberately after an earlier blanket `git add` swept in a different agent's work-in-progress
+— the **already-staged rename came with it**, because naming paths on `git commit` does not
+unstage anything else. The index had a change nobody in this conversation had put there.
+
+Typecheck and the test suite were run first, and both passed, which is exactly why this was
+missed: the shim existed in the working tree as an **untracked file**. Every check ran against
+a tree that was correct and committed a tree that was not. Verifying the working tree says
+nothing about what is staged.
+
+Two things follow, and the second matters more.
+
+**Never commit from a shared worktree without inspecting the index**, not just the working
+tree — `git status --short` shows staged renames in the left column and it was on screen and
+read past. Better: agents editing one worktree concurrently should not stage anything, and a
+file move should be its own serialised step.
+
+**A green check on the working tree is not a green check on the commit.** The only honest
+verification of a commit is against what that commit contains — `git stash -u` then build, or
+build the committed tree in a scratch clone. Everything else measures a different artifact
+from the one being recorded.
+
+Not rewritten. Another agent was mid-task on this branch when the finding landed, and
+rewriting history under a live worker risks destroying real work to fix a bisect boundary.
+The tip is green; the record of the mistake is more useful than a tidy history.
