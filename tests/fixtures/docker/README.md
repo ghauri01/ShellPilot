@@ -91,3 +91,22 @@ non-verbose `system df` parser uses will not work unmodified here:
 A volume name is up to 64 hex characters, which is wider than its column header, and a
 named volume is simply one a person typed — there is no flag distinguishing it, only
 the shape.
+
+## A trap when recording on this machine
+
+A command-proxy tool on the recording machine rewrites some Docker output into a
+token-optimised summary. `docker compose ps` came back as `[compose] 3 services: …`
+rather than as Docker's table — a plausible-looking answer that is not the program's.
+A fixture captured naively that way is **fabricated without anyone deciding to fabricate
+it**, which is worse than an invented one, because it carries the authority of a recording.
+
+Checked, since it bears on what has already shipped: `docker system df -v` is NOT rewritten.
+The committed recording matches live output structurally, and the differences between them
+are the proof rather than a worry — column widths vary between the two (`TAG` is one
+character wider live; the build-cache columns are narrow here because this host's cache was
+empty and wide there because it is not). That is Go's tabwriter padding every column to its
+widest cell, header included, and it is exactly why the parser measures header offsets and
+reads cells by name instead of by index.
+
+**So: record through the proxy's passthrough form, and diff a fresh capture against the
+committed one before trusting either.** The failure is silent and the output looks fine.
