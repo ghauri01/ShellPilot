@@ -689,7 +689,7 @@ function fakeHome(lines: string[]): Fake {
         chmodSync(join(dir, name), 0o755)
       }
       if (onlyShim) {
-        for (const tool of ['cp', 'mv', 'rm', 'grep', 'chmod', 'sleep', 'cmp', 'tail', 'ls']) {
+        for (const tool of ['cp', 'mv', 'rm', 'rmdir', 'mkdir', 'grep', 'chmod', 'sleep', 'cmp', 'tail', 'ls']) {
           for (const from of [`/bin/${tool}`, `/usr/bin/${tool}`]) {
             if (existsSync(from) && !existsSync(join(dir, tool))) symlinkSync(from, join(dir, tool))
           }
@@ -865,6 +865,73 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     expect(r.code).toBe(0)
     expect(r.out).toMatch(/STAGED:/)
     expect(r.out).toMatch(/rollback is running under (systemd-run|setsid|nohup)/)
+  })
+
+  // -------------------------------------------------------------------------
+  // One staged change at a time
+  // -------------------------------------------------------------------------
+  //
+  // Each stage arms an INDEPENDENT watchdog holding its own copy of whatever
+  // the file was at ITS start, and the disarm marker is per-token, so disarming
+  // change 2 says nothing at all to change 1's watchdog. Two revokes a second
+  // apart, change 2 verified and disarmed: the file was correct after the
+  // commit, and change 1's watchdog then restored BOTH revoked keys — including
+  // the one the audit trail said was revoked.
+  //
+  // The likely path is not two operators racing. It is one: a revoke reports
+  // verification-failed, the operator fixes the plan and restages inside the
+  // window.
+
+  it('refuses to stage a second change while the first is still waiting', async () => {
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    const first = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x1', expectRemoved: 1, rollbackSeconds: 2 })
+    )
+    expect(first.code).toBe(0)
+    const after = h.read()
+
+    const second = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: B, token: 'x2', expectRemoved: 1, rollbackSeconds: 2 })
+    )
+    expect(second.code).not.toBe(0)
+    expect(second.out).toMatch(/still waiting for its rollback window/)
+    // Untouched, and — the part that matters — the first change's backup is
+    // still the only one on the host, so its watchdog still holds the file it
+    // was armed to restore.
+    expect(h.read()).toBe(after)
+    expect(h.backups()).toEqual(['authorized_keys.shellpilot-x1.bak'])
+  })
+
+  it('stages again once the first change’s window has closed', async () => {
+    // The refusal has to be temporary, or one failed change would lock a host
+    // out of this feature for good.
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x3', expectRemoved: 1, rollbackSeconds: 1 }))
+    await sleep(2500)
+    // The host put it back by itself and cleaned up after the change.
+    expect(h.read()).toContain(A)
+    expect(h.backups()).toEqual([])
+    const again = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: B, token: 'x4', expectRemoved: 1, rollbackSeconds: 60 })
+    )
+    expect(again.code).toBe(0)
+    expect(again.out).toContain('STAGED:')
+  })
+
+  it('leaves no backup behind when it refuses after writing one', async () => {
+    // A backup left by a change that did not happen would refuse every future
+    // change on the host under the rule above, for ever.
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${A} alice@second-machine`, ''])
+    const r = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x5', expectRemoved: 1, rollbackSeconds: 60 })
+    )
+    expect(r.code).toBe(4)
+    expect(h.backups()).toEqual([])
+    // And the next change is not refused because of it.
+    const next = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x6', expectRemoved: 2, rollbackSeconds: 60 })
+    )
+    expect(next.code).toBe(0)
   })
 
   it('changes nothing when the backup cannot be written', async () => {

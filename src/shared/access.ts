@@ -2841,14 +2841,52 @@ function buildStagedWrite(o: {
     `SP_B="$SP_F.shellpilot-${o.token}.bak"`,
     `SP_T="$SP_F.shellpilot-${o.token}.new"`,
     `SP_M="$HOME/.ssh/${marker}"`,
+    'SP_LOCK="$HOME/.ssh/.shellpilot-access.lock"',
+
+    // ---- ONE STAGED CHANGE AT A TIME -------------------------------------
+    //
+    // Every stage arms an INDEPENDENT watchdog holding its own copy of whatever
+    // the file was at ITS start, and the disarm marker is named per change — so
+    // confirming change 2 says nothing whatsoever to change 1's watchdog. Two
+    // revokes a second apart, the second verified and committed: the file was
+    // right after the commit, and eleven seconds later the first watchdog put
+    // BOTH revoked keys back, including the one the audit trail said was gone.
+    //
+    // The likely path is not two operators racing. It is one operator: a revoke
+    // reports verification-failed, they fix the plan and restage inside the
+    // 300-second window.
+    //
+    // THE ANSWER IS A REFUSAL, and it is chosen over making the watchdogs aware
+    // of each other on purpose. The alternative in front of it was a lock
+    // holding the live watchdog's pid, killed and replaced before arming — and
+    // killing change 1's watchdog while change 1 is still unconfirmed is
+    // exactly "silently make change 1 permanent", which is the same class of
+    // failure pointing the other way. There is no version of overlapping
+    // changes that is safe with one backup per host, and a host is only ever
+    // blocked for as long as its own rollback window: the watchdog removes the
+    // backup whichever way it goes, so the refusal clears itself.
+    //
+    // TWO MECHANISMS, because they cover different things. The `.bak` glob is
+    // the durable one — it survives this process dying and is what actually
+    // stops the restage-inside-the-window case. `mkdir` is atomic and covers
+    // the sliver the glob cannot: two runs reaching the check between each
+    // other's check and `cp`.
+    // The two reasons `mkdir` fails are not the same reason and must not read
+    // as one: the lock already being there is another change in flight, and
+    // anything else is a `~/.ssh` this account cannot write — which is a
+    // different problem with a different fix.
+    'mkdir "$SP_LOCK" 2>/dev/null || { [ -d "$SP_LOCK" ] && { echo "another key change is starting on this host right now; nothing was changed" >&2; exit 6; }; echo "a lock could not be created in ~/.ssh, so nothing was changed" >&2; exit 3; }',
+    'trap \'rmdir "$SP_LOCK" 2>/dev/null\' EXIT INT TERM HUP',
+    'for SP_OLD in "$HOME"/.ssh/*.shellpilot-*.bak; do [ -e "$SP_OLD" ] || continue; echo "a key change staged earlier is still waiting for its rollback window to close ($SP_OLD); nothing was changed" >&2; exit 6; done',
+
     // Refuse before touching anything. A file this account cannot write is a
     // file the change cannot make, and finding that out after the backup is
     // written leaves litter for no reason.
     '[ -f "$SP_F" ] || { echo "no authorized_keys to change" >&2; exit 3; }',
     '[ -w "$SP_F" ] || { echo "authorized_keys is not writable by this account" >&2; exit 3; }',
     // RULE 3. Before anything else, and the run stops if it did not land.
-    'cp -p "$SP_F" "$SP_B" || { echo "could not write a backup; nothing was changed" >&2; exit 3; }',
-    '[ -s "$SP_B" ] || { echo "the backup is empty; nothing was changed" >&2; exit 3; }',
+    'cp -p "$SP_F" "$SP_B" || { rm -f "$SP_B"; echo "could not write a backup; nothing was changed" >&2; exit 3; }',
+    '[ -s "$SP_B" ] || { rm -f "$SP_B"; echo "the backup is empty; nothing was changed" >&2; exit 3; }',
     // `|| echo 0` would be a bug here, and it is worth naming because it is
     // the obvious way to write it: `grep -c` PRINTS its count and then exits 1
     // when the count is zero, so `$(grep -c . f || echo 0)` yields the two-line
@@ -2858,12 +2896,15 @@ function buildStagedWrite(o: {
     'SP_BEFORE=$(grep -c . "$SP_F" 2>/dev/null || true)',
     "case \"$SP_BEFORE\" in ''|*[!0-9]*) SP_BEFORE=0 ;; esac",
     o.expect,
-    `${o.produce} || { rm -f "$SP_T"; echo "the new file could not be built; nothing was changed" >&2; exit 3; }`,
+    `${o.produce} || { rm -f "$SP_T" "$SP_B"; echo "the new file could not be built; nothing was changed" >&2; exit 3; }`,
     'SP_AFTER=$(grep -c . "$SP_T" 2>/dev/null || true)',
     "case \"$SP_AFTER\" in ''|*[!0-9]*) SP_AFTER=0 ;; esac",
     // The count check, before the replacement rather than after it. A file that
     // came out the wrong size never becomes the live file at all.
-    '[ "$SP_AFTER" = "$SP_WANT" ] || { rm -f "$SP_T"; echo "the new file has $SP_AFTER lines and $SP_WANT were expected; nothing was changed" >&2; exit 4; }',
+    // The backup goes with it. A backup left behind by a change that did not
+    // happen would refuse every future change on this host under the
+    // one-at-a-time rule above, for ever.
+    '[ "$SP_AFTER" = "$SP_WANT" ] || { rm -f "$SP_T" "$SP_B"; echo "the new file has $SP_AFTER lines and $SP_WANT were expected; nothing was changed" >&2; exit 4; }',
     'chmod 600 "$SP_T" 2>/dev/null || true',
 
     // ---- RULE 2: arm the host's own rollback, and PROVE it armed ----------
@@ -2916,17 +2957,23 @@ function buildStagedWrite(o: {
     // `--quiet` so the scope name does not land in the job output; `--collect`
     // so a scope whose process died is not left behind as a failed unit.
     'if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect true >/dev/null 2>&1; then SP_L="systemd-run --user --scope --quiet --collect"; elif command -v setsid >/dev/null 2>&1; then SP_L=setsid; elif command -v nohup >/dev/null 2>&1; then SP_L=nohup; fi',
-    '[ -n "$SP_L" ] || { rm -f "$SP_T"; echo "this host has no way to leave a process running after the session ends, so the rollback could not be armed and nothing was changed" >&2; exit 5; }',
+    '[ -n "$SP_L" ] || { rm -f "$SP_T" "$SP_B"; echo "this host has no way to leave a process running after the session ends, so the rollback could not be armed and nothing was changed" >&2; exit 5; }',
     // Unquoted on purpose: `$SP_L` is one of three literals this file wrote,
     // and the systemd one is four words.
     `$SP_L sh -c ': > "$3"; sleep ${wait}; [ -f "$0" ] || cp -p "$1" "$2"; rm -f "$0" "$1" "$3"' "$SP_M" "$SP_B" "$SP_F" "$SP_ARM" </dev/null >/dev/null 2>&1 &`,
+    'SP_WPID=$!',
     // A fractional sleep is not POSIX and a host without one must not spend
     // thirty seconds here, so the tick is probed and the try count follows it.
     // Either way this waits about three seconds and no longer.
     'if sleep 0.1 2>/dev/null; then SP_TICK=0.1; SP_TRIES=30; else SP_TICK=1; SP_TRIES=3; fi',
     'SP_N=0',
     'while [ ! -f "$SP_ARM" ] && [ "$SP_N" -lt "$SP_TRIES" ]; do sleep "$SP_TICK"; SP_N=$((SP_N+1)); done',
-    '[ -f "$SP_ARM" ] || { rm -f "$SP_T"; echo "the rollback did not start on this host, so nothing was changed" >&2; exit 5; }',
+    // `kill` is best effort: with `nohup` and `setsid` the recorded pid IS the
+    // watchdog, and with a systemd scope it is the launcher and the scope may
+    // outlive it. Either way the file was never replaced, so the worst a
+    // survivor can do at its deadline is copy the backup over an identical
+    // file and tidy up after itself.
+    '[ -f "$SP_ARM" ] || { kill "$SP_WPID" 2>/dev/null; rm -f "$SP_T" "$SP_B" "$SP_ARM"; echo "the rollback did not start on this host, so nothing was changed" >&2; exit 5; }',
 
     'mv "$SP_T" "$SP_F" || { echo "the file could not be replaced" >&2; exit 3; }',
     // Said out loud, in the job output, so the operator reading the pane knows
