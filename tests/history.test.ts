@@ -12,6 +12,7 @@ import {
   loadHistory,
   resetHistoryModuleForTests,
   steadyStateRows,
+  CAPACITY_METRIC_IDS_FOR_TESTS,
   EVENT_QUERIES_FOR_TESTS,
   FACTS_PREFIX_QUERY_FOR_TESTS,
   type HistoryStore
@@ -875,6 +876,125 @@ describe('the series read path', () => {
     const points = s.readSeries('h1', 'cpu', 0, now)
     expect(points.map((p) => p.res)).toEqual(['hourly', 'full'])
     expect(points[1]).toEqual({ ts: now - HOUR, v: 7, res: 'full' })
+  })
+})
+
+describe('the three capacity series, in one pass', () => {
+  it('reads both tiers in one scan each, not one scan per metric', async () => {
+    // The measured cost of the alternative is in the note above
+    // CAPACITY_METRIC_IDS: three readSeries calls are three separate walks of
+    // the same time range, because `samples` is keyed (ts, host, metric) and
+    // host and metric are not in the seek. This is the same data, and the
+    // metric ids are derived from METRICS rather than typed out — inserting a
+    // metric into the middle of that array would otherwise silently read three
+    // different series.
+    expect(CAPACITY_METRIC_IDS_FOR_TESTS).toBe('1, 2, 4')
+    expect(METRICS[0]).toBe('cpu')
+    expect(METRICS[1]).toBe('memPct')
+    expect(METRICS[3]).toBe('diskPct')
+
+    const s = await open()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(s.path)
+    try {
+      const plan = (sql: string): string =>
+        (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[])
+          .map((r) => r.detail)
+          .join(' | ')
+      const full = plan(
+        'SELECT ts, metric, v FROM samples WHERE host = ? AND ts >= ? AND ts <= ? ' +
+          'AND metric IN (1, 2, 4) ORDER BY ts'
+      )
+      // One range seek on the primary key, and no sort afterwards: the key
+      // leads with ts, so the rows arrive in the order the caller wants.
+      expect(full).toContain('SEARCH samples USING PRIMARY KEY')
+      expect(full).not.toContain('TEMP B-TREE')
+    } finally {
+      db.close()
+    }
+  })
+
+  // Roadmap item 26 asks one host for cpu, memPct and diskPct over a window.
+  // Three readSeries calls answer it and each one is a separate scan of the
+  // same time range — see the note above `trendRead` for the plan and the
+  // measurement. This is the same data through one scan.
+
+  it('returns the three series a capacity question is about, and only those', async () => {
+    const s = await open()
+    s.transaction(() => {
+      for (let i = 0; i < 5; i++) {
+        s.recordSamples('h1', i * 60_000, {
+          cpu: 10 + i,
+          memPct: 20 + i,
+          diskPct: 30 + i,
+          netRx: 999,
+          uptime: 5
+        })
+      }
+    })
+    const trends = s.readTrends('h1', 0, 5 * 60_000)
+    expect(Object.keys(trends).sort()).toEqual(['cpu', 'diskPct', 'memPct'])
+    expect(trends.cpu.map((p) => p.v)).toEqual([10, 11, 12, 13, 14])
+    expect(trends.memPct.map((p) => p.v)).toEqual([20, 21, 22, 23, 24])
+    expect(trends.diskPct.map((p) => p.v)).toEqual([30, 31, 32, 33, 34])
+    // netRx and uptime were written and are deliberately not here: this read
+    // exists to answer one question, not to be a general table dump.
+    expect(trends.cpu[0]).toEqual({ ts: 0, v: 10, res: 'full' })
+  })
+
+  it('agrees with readSeries point for point, across both tiers', async () => {
+    // The two paths must not be able to disagree. If they can, a panel and an
+    // alert looking at the same disk can show different numbers, which is the
+    // failure isDiskCritical exists to prevent one level up.
+    const s = await open()
+    const now = 30 * DAY
+    const bucket = Math.floor((now - 10 * DAY) / HOUR) * HOUR
+    s.transaction(() => {
+      ;[10, 20, 30, 40].forEach((v, i) => s.recordSamples('h1', bucket + i * 60_000, { diskPct: v }))
+      s.recordSamples('h1', now - HOUR, { diskPct: 77 })
+      s.recordSamples('h1', now, { diskPct: 78 })
+    })
+    s.retain(now)
+
+    const trends = s.readTrends('h1', 0, now)
+    expect(trends.diskPct).toEqual(s.readSeries('h1', 'diskPct', 0, now))
+    // And it is the stitched answer, hourly mean first with its extremes,
+    // then the full-resolution readings.
+    expect(trends.diskPct).toEqual([
+      { ts: bucket, v: 25, res: 'hourly', min: 10, max: 40, n: 4 },
+      { ts: now - HOUR, v: 77, res: 'full' },
+      { ts: now, v: 78, res: 'full' }
+    ])
+  })
+
+  it('reads only the window it was given', async () => {
+    const s = await open()
+    s.transaction(() => {
+      for (let i = 0; i < 10; i++) s.recordSamples('h1', i * 60_000, { diskPct: i })
+    })
+    expect(s.readTrends('h1', 3 * 60_000, 5 * 60_000).diskPct.map((p) => p.v)).toEqual([3, 4, 5])
+  })
+
+  it('answers a host it has never seen with three empty series, not with everything', async () => {
+    const s = await open()
+    s.recordSamples('h1', 1000, { diskPct: 50 })
+    const trends = s.readTrends('h2', 0, 9999)
+    expect(trends).toEqual({ cpu: [], memPct: [], diskPct: [] })
+  })
+
+  it('does not leak one host samples into another host trends', async () => {
+    const s = await open()
+    s.transaction(() => {
+      for (let i = 0; i < 20; i++) {
+        s.recordSamples('web-1', i * 60_000, { diskPct: 10 })
+        s.recordSamples('web-2', i * 60_000, { diskPct: 90 })
+      }
+    })
+    // One scan of the time range sees every host in it. The host filter is the
+    // only thing standing between web-1's chart and web-2's disk.
+    const trends = s.readTrends('web-1', 0, 20 * 60_000)
+    expect(new Set(trends.diskPct.map((p) => p.v))).toEqual(new Set([10]))
+    expect(trends.diskPct).toHaveLength(20)
   })
 })
 

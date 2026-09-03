@@ -15,6 +15,7 @@ import type {
 import { JOB_OUTPUT_RETENTION_DAYS, JOB_RECORD_RETENTION_DAYS, isJobDetachedHandle } from '../../shared/jobs'
 import type { BroadcastConfirmation, BroadcastRisk, CommandApproval } from '../../shared/broadcast'
 import { isCommandApproval } from '../../shared/broadcast'
+import { CAPACITY_METRICS, type CapacityMetric } from '../../shared/capacity'
 
 // A durable store for samples, events and facts — roadmap item A.
 //
@@ -221,6 +222,11 @@ export interface JobRetentionResult {
 export interface HistoryStore {
   recordSamples(hostId: string, at: number, values: Partial<Record<Metric, number>>): void
   readSeries(hostId: string, metric: Metric, from: number, to: number): SeriesPoint[]
+  /** The three series a capacity question is about — cpu, memPct, diskPct —
+   *  for one host, over one range, in ONE pass. See the note above
+   *  CAPACITY_METRIC_IDS for why that is not the same thing as three
+   *  readSeries calls. */
+  readTrends(hostId: string, from: number, to: number): Record<CapacityMetric, SeriesPoint[]>
   recordEvent(kind: string, hostId: string | null, payload?: unknown, at?: number): void
   readEvents(filter?: EventFilter): HistoryEvent[]
   upsertFact(hostId: string, key: string, value: string, at: number): FactOutcome
@@ -694,6 +700,89 @@ function migrateJob(db: Db): void {
 // the boundary is untouched, and the index earns its keep.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The sample read path, and the one thing its first consumer found.
+//
+// `samples` is WITHOUT ROWID with PRIMARY KEY (ts, host, metric): the key IS
+// the table, ts leads, and that is right for the write and retention paths —
+// every insert appends and every delete is `ts < ?`. It is not right for the
+// read that roadmap item 26 actually performs. Measured plan for seriesRead:
+//
+//   SEARCH samples USING PRIMARY KEY (ts>? AND ts<?)
+//
+// host and metric are not in the seek. A seven-day read walks every row in the
+// range for every host and every metric to return one series: at the roadmap's
+// reference estate — fifteen hosts, eight metrics, two-minute cadence — that is
+// 604,800 rows scanned for the 5,040 wanted, three times over, once per metric.
+// Measured on that store: 19.7 ms per metric, 58.8 ms for the three; at sixty
+// hosts, 70 ms and 225 ms. It grows with the fleet, not with the answer.
+//
+// The obvious fix is an index on (host, metric, ts), and it works — 4.4 ms,
+// SEARCH samples USING INDEX (host=? AND metric=? AND ts>? AND ts<?). It was
+// measured and REJECTED. On a WITHOUT ROWID table that index is very nearly a
+// second copy of the primary key, and it took the reference store from 16.6 MB
+// to 23.6 MB and the sixty-host store from 66 MB to 94 MB — 42% on a budget
+// this file's header states as ~16 MB at steady state and never growing, for a
+// panel a person opens by hand. A partial index over only the three capacity
+// metrics does not help either: `metric = ?` is a bound parameter, so SQLite
+// cannot prove the partial index applies and does not use it (measured: the
+// plan is unchanged).
+//
+// What is left costs nothing: ask for the three series in ONE scan instead of
+// three. 22.7 ms at fifteen hosts, 100 ms at sixty. The metric list below is
+// interpolated from METRICS at module load — a literal in this file, like every
+// fragment of EVENT_WHERE — and never from a caller. The rule that no SQL
+// crosses this boundary is untouched.
+// ---------------------------------------------------------------------------
+
+// Type aliases rather than interfaces: an interface has no implicit index
+// signature, so `rows as FullRow[]` off node:sqlite's SqliteRow would not
+// compile.
+type FullRow = { ts: number; v: number }
+type HourlyRow = { ts: number; v: number; mn: number; mx: number; n: number }
+
+/**
+ * The two tiers, stitched into one series.
+ *
+ * Anything older than the full-resolution horizon lives in the hourly tier. A
+ * caller asking for a 30-day range gets one series, not a hole where the
+ * downsampling starts — that hole is exactly the bug a two-table store invites,
+ * and it would read as "the host was off". Each point says which tier it came
+ * from, and an hourly point carries the min, max and sample count behind its
+ * mean: all three are written on every roll-up and were, for a while, simply
+ * not readable.
+ *
+ * The tiers do not overlap in practice — the roll-up deletes what it folds, in
+ * the same transaction — with one exception: a sample that arrives late for an
+ * hour already rolled up sits in `samples` until the next pass. Where such a
+ * row lands exactly on the bucket's own timestamp the full-resolution reading
+ * wins, because two points at one instant is the one thing a chart cannot draw.
+ */
+function mergeTiers(full: FullRow[], hourly: HourlyRow[]): SeriesPoint[] {
+  const seen = new Set(full.map((r) => Number(r.ts)))
+  const merged: SeriesPoint[] = [
+    ...hourly
+      .filter((r) => !seen.has(Number(r.ts)))
+      .map((r) => ({
+        ts: Number(r.ts),
+        v: Number(r.v),
+        res: 'hourly' as const,
+        min: Number(r.mn),
+        max: Number(r.mx),
+        n: Number(r.n)
+      })),
+    ...full.map((r) => ({ ts: Number(r.ts), v: Number(r.v), res: 'full' as const }))
+  ]
+  merged.sort((a, b) => a.ts - b.ts)
+  return merged
+}
+
+/** The ids of CAPACITY_METRICS, as a SQL list. Ids are the METRICS index + 1
+ *  and never move (see METRICS), so this is derived rather than typed out: a
+ *  hand-written `IN (1, 2, 4)` would silently read the wrong three series the
+ *  first time somebody inserted a metric into the middle of that array. */
+const CAPACITY_METRIC_IDS = CAPACITY_METRICS.map((m) => METRICS.indexOf(m) + 1).join(', ')
+
 /** The four filter shapes, in the order readEvents selects them:
  *  host+kind, host, kind, neither. */
 const EVENT_WHERE = [
@@ -724,6 +813,11 @@ function eventQuery(where: string, cursor: boolean): string {
  *  text of this module's own statements is not a query surface: nothing here
  *  lets a caller pass SQL in, which is the property the better-sqlite3 escape
  *  hatch depends on. */
+/** The capacity metric ids as they are interpolated into the two trend
+ *  statements, so a test can assert the derived list against METRICS rather
+ *  than against a number somebody typed. */
+export const CAPACITY_METRIC_IDS_FOR_TESTS = CAPACITY_METRIC_IDS
+
 export const EVENT_QUERIES_FOR_TESTS: readonly string[] = EVENT_WHERE.map((w) => eventQuery(w, false))
 
 /** A prefix sweep as a primary-key range rather than a LIKE.
@@ -1044,6 +1138,17 @@ function buildStore(
       'SELECT ts, v_avg AS v, v_min AS mn, v_max AS mx, n AS n FROM samples_hourly ' +
         'WHERE host = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts'
     ),
+    // Both tiers, three metrics, one scan each. See the note above
+    // CAPACITY_METRIC_IDS.
+    trendRead: db.prepare(
+      `SELECT ts, metric, v FROM samples WHERE host = ? AND ts >= ? AND ts <= ? ` +
+        `AND metric IN (${CAPACITY_METRIC_IDS}) ORDER BY ts`
+    ),
+    trendHourlyRead: db.prepare(
+      `SELECT ts, metric, v_avg AS v, v_min AS mn, v_max AS mx, n AS n FROM samples_hourly ` +
+        `WHERE host = ? AND ts >= ? AND ts <= ? ` +
+        `AND metric IN (${CAPACITY_METRIC_IDS}) ORDER BY ts`
+    ),
     eventInsert: db.prepare('INSERT INTO events (ts, kind, host, payload) VALUES (?, ?, ?, ?)'),
     // Rewrites the event a run of flapping is being folded into. See
     // FLAP_WINDOW_MS.
@@ -1170,6 +1275,11 @@ function buildStore(
   }
 
   const metricIds = new Map<Metric, number>(METRICS.map((m, i) => [m, i + 1]))
+  /** The other direction, for the read that selects the metric column rather
+   *  than binding it. Only the capacity three: nothing else asks. */
+  const metricNames = new Map<number, CapacityMetric>(
+    CAPACITY_METRICS.map((m) => [METRICS.indexOf(m) + 1, m])
+  )
   const hostIds = new Map<string, number>()
 
   const internHost = (hostId: string): number => {
@@ -1247,36 +1357,37 @@ function buildStore(
       const host = lookupHost(hostId)
       const m = metricIds.get(metric)
       if (host === null || m === undefined) return []
-      const full = st.seriesRead.all(host, m, from, to) as { ts: number; v: number }[]
-      // Anything older than the full-resolution horizon lives in the hourly
-      // tier. A caller asking for a 30-day range gets one series, not a hole
-      // where the downsampling starts — that hole is exactly the bug a
-      // two-table store invites. Each point says which tier it came from, and
-      // an hourly point carries the min, max and sample count behind its mean:
-      // all three are written on every roll-up and were simply not readable.
-      const hourly = st.hourlyRead.all(host, m, from, to) as {
-        ts: number
-        v: number
-        mn: number
-        mx: number
-        n: number
-      }[]
-      const seen = new Set(full.map((r) => Number(r.ts)))
-      const merged: SeriesPoint[] = [
-        ...hourly
-          .filter((r) => !seen.has(Number(r.ts)))
-          .map((r) => ({
-            ts: Number(r.ts),
-            v: Number(r.v),
-            res: 'hourly' as const,
-            min: Number(r.mn),
-            max: Number(r.mx),
-            n: Number(r.n)
-          })),
-        ...full.map((r) => ({ ts: Number(r.ts), v: Number(r.v), res: 'full' as const }))
-      ]
-      merged.sort((a, b) => a.ts - b.ts)
-      return merged
+      return mergeTiers(
+        st.seriesRead.all(host, m, from, to) as FullRow[],
+        st.hourlyRead.all(host, m, from, to) as HourlyRow[]
+      )
+    },
+
+    readTrends(hostId, from, to) {
+      const out = {} as Record<CapacityMetric, SeriesPoint[]>
+      const full = {} as Record<CapacityMetric, FullRow[]>
+      const hourly = {} as Record<CapacityMetric, HourlyRow[]>
+      for (const m of CAPACITY_METRICS) {
+        full[m] = []
+        hourly[m] = []
+        out[m] = []
+      }
+      if (closed) return out
+      const host = lookupHost(hostId)
+      // A host the store has never seen has no trends. One scan of a time range
+      // sees every host in it, so this filter is the only thing standing
+      // between one host's panel and another host's disk.
+      if (host === null) return out
+      for (const r of st.trendRead.all(host, from, to) as (FullRow & { metric: number })[]) {
+        const name = metricNames.get(Number(r.metric))
+        if (name !== undefined) full[name].push(r)
+      }
+      for (const r of st.trendHourlyRead.all(host, from, to) as (HourlyRow & { metric: number })[]) {
+        const name = metricNames.get(Number(r.metric))
+        if (name !== undefined) hourly[name].push(r)
+      }
+      for (const m of CAPACITY_METRICS) out[m] = mergeTiers(full[m], hourly[m])
+      return out
     },
 
     recordEvent(kind, hostId, payload, at) {
