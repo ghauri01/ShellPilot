@@ -2882,11 +2882,30 @@ function buildStagedWrite(o: {
     // Refuse before touching anything. A file this account cannot write is a
     // file the change cannot make, and finding that out after the backup is
     // written leaves litter for no reason.
+    // BEFORE `-f`, which follows the link. `~/.ssh/authorized_keys ->
+    // /etc/ssh/authorized_keys.d/$USER` is a common config-managed pattern, and
+    // the `mv` at the end replaces the LINK with a regular file — permanently
+    // destroying the indirection while the real file keeps the key. There is no
+    // safe way to edit through it from here, so it is a refusal.
+    '[ -h "$SP_F" ] && { echo "authorized_keys is a symbolic link on this host; replacing it would destroy the link and leave the real file untouched, so nothing was changed" >&2; exit 3; }',
     '[ -f "$SP_F" ] || { echo "no authorized_keys to change" >&2; exit 3; }',
     '[ -w "$SP_F" ] || { echo "authorized_keys is not writable by this account" >&2; exit 3; }',
     // RULE 3. Before anything else, and the run stops if it did not land.
     'cp -p "$SP_F" "$SP_B" || { rm -f "$SP_B"; echo "could not write a backup; nothing was changed" >&2; exit 3; }',
-    '[ -s "$SP_B" ] || { rm -f "$SP_B"; echo "the backup is empty; nothing was changed" >&2; exit 3; }',
+    // `cmp`, not `[ -s ]`. Two failures at once.
+    //
+    // A NON-EMPTY BACKUP IS NOT A COMPLETE ONE. `cp -p` on a full filesystem
+    // writes what it can and leaves a truncated file behind, which `[ -s ]`
+    // accepts — and the watchdog then restores that mutilated version over the
+    // live file at its deadline, losing keys that were never part of the
+    // change. Deleting that guard passed all 141 of this item's tests, which is
+    // to say it had no coverage at all.
+    //
+    // AND AN EMPTY authorized_keys IS A REAL FILE. A freshly provisioned
+    // account has one, and adding the first key to it is the first thing
+    // anybody will try; `[ -s ]` refused that with the wrong reason entirely.
+    'command -v cmp >/dev/null 2>&1 || { rm -f "$SP_B"; echo "this host has no cmp, so the backup could not be checked against the file it came from; nothing was changed" >&2; exit 3; }',
+    'cmp -s "$SP_F" "$SP_B" || { rm -f "$SP_B"; echo "the backup is not a faithful copy of authorized_keys; nothing was changed" >&2; exit 3; }',
     // `|| echo 0` would be a bug here, and it is worth naming because it is
     // the obvious way to write it: `grep -c` PRINTS its count and then exits 1
     // when the count is zero, so `$(grep -c . f || echo 0)` yields the two-line
@@ -2905,7 +2924,14 @@ function buildStagedWrite(o: {
     // happen would refuse every future change on this host under the
     // one-at-a-time rule above, for ever.
     '[ "$SP_AFTER" = "$SP_WANT" ] || { rm -f "$SP_T" "$SP_B"; echo "the new file has $SP_AFTER lines and $SP_WANT were expected; nothing was changed" >&2; exit 4; }',
-    'chmod 600 "$SP_T" 2>/dev/null || true',
+    // NOT `2>/dev/null || true`. This is the one permission-critical step in
+    // the command, and sshd's StrictModes rejects a group- or world-writable
+    // authorized_keys OUTRIGHT — locking out every key on the account, not only
+    // the one being changed. Under `umask 002`, which is what a host with
+    // per-user groups actually has, the file `grep` just created is 0664. The
+    // add path gets this right by copying the original with `cp -p`; the revoke
+    // path has to do it deliberately, and has to stop if it cannot.
+    'chmod 600 "$SP_T" || { rm -f "$SP_T" "$SP_B"; echo "the new authorized_keys could not be made private; sshd would refuse it, so nothing was changed" >&2; exit 3; }',
 
     // ---- RULE 2: arm the host's own rollback, and PROVE it armed ----------
     //

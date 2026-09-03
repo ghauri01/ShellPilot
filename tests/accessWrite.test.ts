@@ -7,8 +7,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  lstatSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync
 } from 'node:fs'
@@ -948,6 +950,83 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     } finally {
       chmodSync(join(h.home, '.ssh'), 0o700)
     }
+  })
+
+  it('refuses a truncated backup rather than arming a watchdog to restore one', async () => {
+    // `cp -p` on a full filesystem writes what it can and leaves a non-empty
+    // file, and `[ -s ]` accepts it. The watchdog would then restore the
+    // MUTILATED version over the live file, losing keys that were never part of
+    // the change. Deleting that guard passed all 141 tests this item had.
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    const before = h.read()
+    const r = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c1', expectRemoved: 1, rollbackSeconds: 60 }),
+      { shim: { cp: 'head -c 20 "$2" > "$3" 2>/dev/null || head -c 20 "$1" > "$2"' } }
+    )
+    expect(r.code).toBe(3)
+    expect(r.out).toMatch(/not a faithful copy/)
+    expect(h.read()).toBe(before)
+    expect(h.backups()).toEqual([])
+  })
+
+  it('adds the first key to an account whose authorized_keys is empty', async () => {
+    // A freshly provisioned account, and the first thing anyone will try. The
+    // emptiness check refused it with the wrong reason — "the backup is empty"
+    // — for a file that had simply never had a key in it.
+    const h = fakeHome([''])
+    expect(h.read()).toBe('')
+    const r = h.run(
+      buildAddKeyCommand({ path: h.file, line: `ssh-ed25519 ${B} bob@desktop`, token: 'c2', rollbackSeconds: 60 })
+    )
+    expect(r.code).toBe(0)
+    expect(h.read().split('\n').filter((l) => l !== '')).toEqual([`ssh-ed25519 ${B} bob@desktop`])
+  })
+
+  it('refuses a symlinked authorized_keys rather than replacing it with a file', async () => {
+    // `~/.ssh/authorized_keys -> /etc/ssh/authorized_keys.d/$USER` is a common
+    // config-managed pattern. `[ -f ]` follows the link, so the `mv` replaced
+    // the LINK with a regular file — permanently destroying the indirection
+    // while the real file kept the key.
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    const real = join(h.home, 'managed_keys')
+    writeFileSync(real, `ssh-ed25519 ${A} alice@laptop\nssh-ed25519 ${B} bob@desktop\n`)
+    rmSync(h.file)
+    symlinkSync(real, h.file)
+    const r = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c3', expectRemoved: 1, rollbackSeconds: 60 })
+    )
+    expect(r.code).toBe(3)
+    expect(r.out).toMatch(/symbolic link/)
+    expect(lstatSync(h.file).isSymbolicLink()).toBe(true)
+    expect(readFileSync(real, 'utf8')).toContain(A)
+  })
+
+  it('changes nothing when the new file cannot be made private', async () => {
+    // The one permission-critical step in the whole command, and its failure
+    // was swallowed by `2>/dev/null || true`. sshd's StrictModes rejects a
+    // group-writable authorized_keys OUTRIGHT — every key on the account, not
+    // just the one being changed.
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    const before = h.read()
+    const r = h.run(
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c4', expectRemoved: 1, rollbackSeconds: 60 }),
+      { shim: { chmod: 'exit 1' } }
+    )
+    expect(r.code).toBe(3)
+    expect(r.out).toMatch(/could not be made private/)
+    expect(h.read()).toBe(before)
+  })
+
+  it('leaves the new file private even under a permissive umask', async () => {
+    // `grep > file` creates 0664 under umask 002, which is what a host with a
+    // per-user group actually has. The add path gets this right by copying the
+    // original with `cp -p`; the revoke path has to do it deliberately.
+    const h = fakeHome([`ssh-ed25519 ${A} a`, `ssh-ed25519 ${B} b`, ''])
+    const r = h.run(
+      `umask 002\n${buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c5', expectRemoved: 1, rollbackSeconds: 60 })}`
+    )
+    expect(r.code).toBe(0)
+    expect((statSync(h.file).mode & 0o777).toString(8)).toBe('600')
   })
 
   it('changes nothing when there is no authorized_keys to change', async () => {
