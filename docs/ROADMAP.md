@@ -1263,13 +1263,13 @@ a cheap item, and treating it as one is how a quarter disappears.
 | B | ~~**Job engine B1+B2+B3**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | B4 remains | Part done |
 | 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** (pg+mysql) | mongo/redis remain | Part done |
 | 17 | ~~**Patch management**~~ | 100% | weekly | 5 | strong | **10** | **SHIPPED** | — | Done |
-| 5 | **Backups to real targets** | 90% | weekly | 5 | strong | **8** | 3.5 wk | B, scheduler | Invest |
+| 5 | ~~**Backups to real targets**~~ | 90% | weekly | 5 | strong | **8** | **SHIPPED** | — | Done |
 | 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | OOM kills, cert expiry remain | Part done |
-| 23 | **Fleet key management** | 100% | quarterly | 5 | very strong | **7** | 1 wk read / 2.5 wk full | C (read), B (write) | Differentiator |
+| 23 | ~~**Fleet key management**~~ | 100% | quarterly | 5 | very strong | **7** | **READ SHIPPED** | write gated, needs a real host | Part done |
 | 20 | ~~**Compose**~~ | 60% | daily | 3 | some | **6** | **SHIPPED** | — | Done |
 | 6e | **Cron editing** | 80% | monthly | 3 | some | **5** | 2.5 wk | B | Invest |
-| 24 | **Security posture** | 60% | monthly | 3 | some | **5** | 2.5 wk | C | Invest |
-| 26 | **Capacity trends** | 70% | monthly | 3 | some | **5** | 1.5 wk | A | Fill-in |
+| 24 | ~~**Security posture**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
+| 26 | ~~**Capacity trends**~~ | 70% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 27 | **Rule engine** | 40% | continuous | 3 | some | **5** | 1.5 wk | A, B | Fill-in |
 | 22 | **Kubernetes lifecycle** | 25% | weekly | 4 | weak | **5** | 4 wk | B | Defer |
 | 7 | **Credential proxy** | 30% | daily | 3 | very strong | **5** | 3.5 wk | — | Strategic |
@@ -1368,6 +1368,32 @@ turn something up.**
 **Why these rank at all.** The stated goal is a tool stable enough to daily-drive, and both
 of these are places where the project believes it has a check and does not. That is worse
 than a known absence, because it is budgeted for.
+
+---
+
+### 31. The firewall rules themselves, not a count of them
+
+**Raised by item 24 rather than planned, and it needs a decision rather than an implementation.**
+
+What shipped reads the firewall in both layers — the front end and the kernel beneath it,
+because "ufw is inactive" is not "nothing is filtering" on a cloud image with a boot-loaded
+nftables ruleset — and reports scalars: which tool, whether it is active, the default policy,
+a rule count, a deny count, the zones. Every one of those goes through the single-line
+unforgeable path, which is the strongest safety property this collector has.
+
+**But an operator reading "ufw · 12 rules · in deny" cannot tell whether 3306 is open to the
+world**, which is the question they came to ask. The next increment is a bounded, per-line
+sanitised list of the actual rules.
+
+**Why it was not built, and why that is a product decision.** A list of what is exposed on
+every host is the single most attacker-valuable thing this feature could hold, and it changes
+the threat model of the collector's output — which currently carries only counts and fixed
+vocabulary, and would then carry addresses and ports. That is the same widening the 0.8.0
+review caught when a metrics tool began returning a full service and port inventory under a
+consent that described something narrower. It should be decided deliberately, with its own
+line in the capability grid, not added because it is obviously useful.
+
+**Size.** Days to build, and the decision is the part worth taking time over.
 
 ---
 

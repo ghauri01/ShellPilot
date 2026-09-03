@@ -634,3 +634,29 @@ configuration nobody runs.
 `AccessJobSpec` and the `'access'` job kind were deleted rather than wired. Nothing ever
 created one, and the job engine cannot supply the fresh, unpooled session this protocol
 depends on — so the serialisation it needed is asserted where it actually lives.
+
+### The same commit mistake, twice, by me
+
+`1faa248` says it wires the capacity trends channel. It also contains five files belonging to
+the posture work — a panel, its tests, a module registration and two edits — swept in because
+they were staged in the index when I committed.
+
+This is the second time. After the first, I wrote down the lesson: *a green check on the
+working tree is not a green check on the commit; inspect the index.* Then I inspected the
+index **for my own two files** and committed. `git status --porcelain <path>` answers a
+question about those paths; it says nothing about what else is staged.
+
+The check that actually works is `git diff --cached --name-only` with no path argument, read
+in full, immediately before every commit — and it has to be the whole index, because the
+person who staged the other files is not in the room.
+
+Left in place rather than rewritten: the content is correct and complete, three commits sit on
+top of it, and rewriting history to fix an attribution is a poor trade against the risk. The
+record is here instead.
+
+The underlying cause is structural and worth naming: **git's index is shared mutable state and
+nothing in the tooling makes an agent's staged work visible to another agent about to commit.**
+One writer per file solves the working tree and does nothing for the index. The rule that
+actually holds is the one now in every brief — *do not `git add` until you are ready to
+commit* — and it only works if everyone follows it, which is exactly the property a shared
+mutable resource cannot guarantee.
