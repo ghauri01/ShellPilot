@@ -1244,11 +1244,11 @@ a cheap item, and treating it as one is how a quarter disappears.
 | A | ~~**Durable store**~~ | — | — | — | — | **0 / 30** | **SHIPPED** | — | Done |
 | B | ~~**Job engine B1+B2+B3**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | B4 remains | Part done |
 | 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** (pg+mysql) | mongo/redis remain | Part done |
-| 17 | **Patch management** | 100% | weekly | 5 | strong | **10** | 3.5 wk | A, B, C | Flagship |
+| 17 | ~~**Patch management**~~ | 100% | weekly | 5 | strong | **10** | **SHIPPED** | — | Done |
 | 5 | **Backups to real targets** | 90% | weekly | 5 | strong | **8** | 3.5 wk | B, scheduler | Invest |
 | 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | OOM kills, cert expiry remain | Part done |
 | 23 | **Fleet key management** | 100% | quarterly | 5 | very strong | **7** | 1 wk read / 2.5 wk full | C (read), B (write) | Differentiator |
-| 20 | **Compose** | 60% | daily | 3 | some | **6** | 2 wk | B (redeploy only) | Invest |
+| 20 | ~~**Compose**~~ | 60% | daily | 3 | some | **6** | **SHIPPED** | — | Done |
 | 6e | **Cron editing** | 80% | monthly | 3 | some | **5** | 2.5 wk | B | Invest |
 | 24 | **Security posture** | 60% | monthly | 3 | some | **5** | 2.5 wk | C | Invest |
 | 26 | **Capacity trends** | 70% | monthly | 3 | some | **5** | 1.5 wk | A | Fill-in |
