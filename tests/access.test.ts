@@ -1220,6 +1220,70 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(a.keyFileIsDefault).toBe(true)
   })
 
+  it('does not call authorized_keys2 alone the file it read', () => {
+    // Setting AuthorizedKeysFile REPLACES OpenSSH's default list rather than
+    // adding to it, so this host reads keys2 and nothing else. Every path it
+    // names is still a member of the default list — which is why a subset check
+    // said yes, and why the write gate opened on a host whose
+    // `~/.ssh/authorized_keys` sshd never opens.
+    const h = host()
+    h.file('etc/ssh/sshd_config', 'Port 22\nAuthorizedKeysFile .ssh/authorized_keys2\n')
+    const a = parse(h.collect())
+    expect(a.readsTheFileWeRead).toBe(false)
+    expect(a.readsLegacyKeyFile).toBe(true)
+    expect(summariseAccess(a).uncertainty.join(' ')).toContain(
+      'sshd does not read .ssh/authorized_keys on this host'
+    )
+  })
+
+  it('says yes to a host that reads both files', () => {
+    const h = host()
+    h.file('etc/ssh/sshd_config', 'Port 22\nAuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2\n')
+    const a = parse(h.collect())
+    expect(a.readsTheFileWeRead).toBe(true)
+    expect(a.readsLegacyKeyFile).toBe(true)
+    expect(a.keyFileIsDefault).toBe(true)
+  })
+
+  it('says no to a path outside the home directory entirely', () => {
+    const h = host()
+    h.file('etc/ssh/sshd_config', 'Port 22\nAuthorizedKeysFile /etc/ssh/keys.d/%u\n')
+    const a = parse(h.collect())
+    expect(a.readsTheFileWeRead).toBe(false)
+    expect(a.keyFileIsDefault).toBe(false)
+  })
+
+  it('says no to AuthorizedKeysFile none, which means sshd reads no file at all', () => {
+    // A real setting on hosts that authenticate entirely through an
+    // AuthorizedKeysCommand. Not a member of the default list, so it was
+    // already refused — it is here because it is the nearest reachable case to
+    // the empty-path one the `.length > 0` guard exists for, and because a
+    // host that reads NO key file must never be a host this edits one on.
+    const h = host()
+    h.file('etc/ssh/sshd_config', 'Port 22\nAuthorizedKeysFile none\n')
+    const a = parse(h.collect())
+    expect(a.keyFileIsDefault).toBe(false)
+    expect(a.readsTheFileWeRead).toBe(false)
+  })
+
+  it('cannot tell when a drop-in could not be read', () => {
+    // The read half already downgrades this source to `partial`. What matters
+    // here is that both write-facing answers go null with it rather than
+    // concluding from the part that was readable.
+    const h = host()
+    h.file('etc/ssh/sshd_config.d/10-hardening.conf', 'AuthorizedKeysFile .ssh/authorized_keys\n')
+    chmodSync(join(h.root, 'etc/ssh/sshd_config.d/10-hardening.conf'), 0o000)
+    try {
+      const a = parse(h.collect())
+      expect(accessSource(a, 'sshd-config').status).toBe('partial')
+      expect(a.keyFileIsDefault).toBeNull()
+      expect(a.readsTheFileWeRead).toBeNull()
+      expect(a.readsLegacyKeyFile).toBeNull()
+    } finally {
+      chmodSync(join(h.root, 'etc/ssh/sshd_config.d/10-hardening.conf'), 0o644)
+    }
+  })
+
   it('reads a drop-in it CAN read and still says ok', () => {
     const h = host()
     h.file('etc/ssh/sshd_config.d/10-cloudimg.conf', 'PasswordAuthentication no\n')

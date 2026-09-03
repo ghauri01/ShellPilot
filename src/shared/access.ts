@@ -498,6 +498,32 @@ export interface HostAccess {
    */
   keyFileIsDefault: boolean | null
   /**
+   * Whether sshd reads THE FILE THIS COLLECTION READ — `.ssh/authorized_keys`.
+   *
+   * A DIFFERENT QUESTION from `keyFileIsDefault`, and the difference is a
+   * whole class of silently-ineffective write. Setting `AuthorizedKeysFile`
+   * REPLACES OpenSSH's default list rather than adding to it, so a host
+   * configured `AuthorizedKeysFile .ssh/authorized_keys2` reads only keys2 —
+   * every path it names is still a member of the default list, so "is this the
+   * default set?" answered yes while "does it read the file we are about to
+   * edit?" answered no. The write half asked the first question and acted on
+   * the answer to the second.
+   *
+   * `null` for the same three reasons `keyFileIsDefault` is null: the config
+   * could not be read, part of it could not be read, or it disagrees with
+   * itself. The write gate treats null as a refusal.
+   */
+  readsTheFileWeRead: boolean | null
+  /**
+   * Whether sshd also reads `.ssh/authorized_keys2`, which this collection
+   * probes for but never reads the contents of.
+   *
+   * Its own field because it decides whether a revocation from
+   * `authorized_keys` can be reported as a revocation at all: a key written
+   * into both files is still trusted after one of them is edited.
+   */
+  readsLegacyKeyFile: boolean | null
+  /**
    * sshd is configured with an `AuthorizedKeysCommand`.
    *
    * When true, keys can come from a directory service and the files on disk are
@@ -1755,15 +1781,34 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
   // collection read some of, which is the finding this whole block exists to
   // stop.
   let keyFileIsDefault: boolean | null = null
+  // The question the WRITE half needs answered, which is not the one above.
+  // See `readsTheFileWeRead` on HostAccess for why they came apart.
+  let readsTheFileWeRead: boolean | null = null
+  let readsLegacyKeyFile: boolean | null = null
+  const onTheCompiledInDefault = (): void => {
+    keyFileIsDefault = true
+    readsTheFileWeRead = true
+    readsLegacyKeyFile = true
+  }
   if (source('sshd-config').status === 'absent') {
     // No sshd_config at all means sshd, if it is running, is on its
     // compiled-in defaults — which is exactly where this looked.
-    keyFileIsDefault = true
+    onTheCompiledInDefault()
   } else if (source('sshd-config').status === 'ok') {
-    if (authorizedKeysFile.length === 0) keyFileIsDefault = true
+    if (authorizedKeysFile.length === 0) onTheCompiledInDefault()
     else if (authorizedKeysFile.length === 1) {
       const paths = authorizedKeysFile[0].split(/\s+/).filter((p) => p !== '')
-      keyFileIsDefault = paths.every((p) => DEFAULT_KEY_FILES.includes(p.replace(/^%h\//, '')))
+      // `paths.length > 0` is not a formality. `.every()` over an EMPTY list is
+      // true, so an `AuthorizedKeysFile` directive whose value did not survive
+      // sanitising answered "yes, the default is in force" — the same trap one
+      // level down from the one this block exists to fix.
+      const named = paths.map((p) => p.replace(/^%h\//, ''))
+      keyFileIsDefault = named.length > 0 && named.every((p) => DEFAULT_KEY_FILES.includes(p))
+      // CONTAINS, not is-a-subset-of. This is the fix: a directive naming only
+      // `.ssh/authorized_keys2` is a subset of the default list and is not the
+      // file this collection read.
+      readsTheFileWeRead = named.includes('.ssh/authorized_keys')
+      readsLegacyKeyFile = named.includes('.ssh/authorized_keys2')
     }
   }
 
@@ -1931,6 +1976,8 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
     accounts,
     authorizedKeysFile,
     keyFileIsDefault,
+    readsTheFileWeRead,
+    readsLegacyKeyFile,
     authorizedKeysCommand,
     collectedAs,
     sessionKeyFingerprints,
@@ -2032,6 +2079,15 @@ export function summariseAccess(access: HostAccess): AccessSummary {
   } else if (access.keyFileIsDefault === null) {
     uncertainty.push(
       'sshd’s AuthorizedKeysFile setting could not be determined, so it is not known whether this is where it looks'
+    )
+  }
+  // The narrower fact, and the one a reader most needs. `AuthorizedKeysFile
+  // .ssh/authorized_keys2` names nothing outside the compiled-in default list,
+  // so the clause above stays quiet — and every key on this screen is still a
+  // key sshd does not look at.
+  if (access.readsTheFileWeRead === false) {
+    uncertainty.push(
+      'sshd does not read .ssh/authorized_keys on this host, which is the file this collection read, so the keys listed here are not the keys it accepts'
     )
   }
   const legacy = access.accounts.filter((a) => a.hasLegacyKeyFile === true).map((a) => a.user)
@@ -2507,10 +2563,46 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
     // sshd reading from somewhere else makes this edit possibly irrelevant —
     // and an irrelevant revocation is worse than no revocation, because it is
     // reported as done.
-    if (t.access.keyFileIsDefault !== true || t.access.authorizedKeysCommand !== null) {
+    //
+    // `readsTheFileWeRead`, NOT `keyFileIsDefault`. Setting AuthorizedKeysFile
+    // replaces OpenSSH's default list rather than adding to it, so a host
+    // configured `AuthorizedKeysFile .ssh/authorized_keys2` names nothing
+    // outside the default list — `keyFileIsDefault` was true — and reads only
+    // keys2. The staged write then edited `~/.ssh/authorized_keys`, and the
+    // revocation was staged, verified, committed and reported done with the key
+    // still trusted. Which is, verbatim, what the sentence below calls worse
+    // than none.
+    //
+    // `!== true` and not `=== false`, so `null` refuses too. Null is what a
+    // config that could not be read, a config only PARTLY read, and a config
+    // that disagrees with itself all produce, and none of the three is a
+    // licence to edit a file on a guess.
+    if (t.access.readsTheFileWeRead !== true || t.access.authorizedKeysCommand !== null) {
       block(
         'not-the-file-sshd-reads',
         `sshd on ${t.serverName} is not known to read ${account.keyPath}. Editing it may not change who can log in, and a revocation that is reported as done and did nothing is worse than none.`
+      )
+      continue
+    }
+
+    // The same failure from the other side, and the reason it is checked
+    // separately: on a host that IS on the compiled-in default, sshd reads
+    // `.ssh/authorized_keys2` as well. A key written into both files is still
+    // trusted after this edits one of them — a revocation reported as done that
+    // changed nothing about who can log in.
+    //
+    // `!== false`, so an account whose keys2 could not be checked refuses too.
+    // "Nobody could look" is not "it is not there".
+    if (
+      req.kind === 'revoke' &&
+      t.access.readsLegacyKeyFile !== false &&
+      account.hasLegacyKeyFile !== false
+    ) {
+      block(
+        'not-the-file-sshd-reads',
+        account.hasLegacyKeyFile === null
+          ? `${t.user}@${t.serverName} could not be checked for a legacy .ssh/authorized_keys2, which sshd also reads and this collection does not. A key in that file would survive this change and be reported as revoked.`
+          : `${t.user}@${t.serverName} has a legacy .ssh/authorized_keys2, which sshd also reads and this collection does not. The same key may be in it, in which case this change would remove nothing and be reported as done.`
       )
       continue
     }

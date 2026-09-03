@@ -116,6 +116,13 @@ function host(
     self?: string
     user?: string
     keysStatus?: string
+    /** The AuthorizedKeysFile value sshd is configured with. */
+    keyfile?: string
+    /** The status the sshd-config source reports. `partial` is a config this
+     *  collection read only part of. */
+    sshdStatus?: string
+    /** What the account's authorized_keys2 probe said. */
+    keys2?: 'present' | 'unknown'
   } = {}
 ): HostAccess {
   const user = over.user ?? 'ops'
@@ -129,14 +136,19 @@ function host(
       // passing the real length here is what makes the fixtures below able to
       // lie about it deliberately.
       ...(over.authinfo ?? []).map((f) => `A ${over.authinfoLen ?? f.length} ${f}`),
-      'V keyfile AuthorizedKeysFile .ssh/authorized_keys',
+      `V keyfile AuthorizedKeysFile ${over.keyfile ?? '.ssh/authorized_keys'}`,
       `U 1 keys ${over.keysStatus ?? 'ok'} -`,
       `U 1 path /home/${user}/.ssh/authorized_keys`,
       `U 1 name ${user}`,
+      ...(over.keys2 ? [`U 1 keys2 ${over.keys2}`] : []),
       `K 1 1 90 ssh-ed25519 ${A} alice@laptop`,
       `K 1 2 90 ssh-ed25519 ${B} bob@desktop`,
       ACCESS_STATUS_MARKER,
-      ...OK_STATUS
+      ...OK_STATUS.map((l) =>
+        over.sshdStatus && l.startsWith('sshd-config ')
+          ? `sshd-config ${over.sshdStatus} - /etc/ssh/sshd_config`
+          : l
+      )
     ].join('\n'),
     { sha256, now: 1_800_000_000_000 }
   )
@@ -461,6 +473,70 @@ describe('what a change refuses to be', () => {
     )
     const plan = revoke({ targets: [target(a)] })
     expect(plan.blocks.map((b) => b.kind)).toEqual(['not-the-file-sshd-reads'])
+  })
+
+  it('refuses a host whose sshd reads only authorized_keys2', async () => {
+    // BLOCKER 4. Setting AuthorizedKeysFile REPLACES OpenSSH's default list
+    // rather than adding to it. Every path this host names is a member of that
+    // list, so the subset check said "the default is in force" and the gate
+    // opened — and the staged write then edits `~/.ssh/authorized_keys`, which
+    // sshd never opens. Staged, verified, committed, reported done, key still
+    // trusted.
+    const a = host({ self: 'root', keyfile: '.ssh/authorized_keys2' })
+    expect(a.keyFileIsDefault).toBe(true)
+    expect(a.readsTheFileWeRead).toBe(false)
+    const plan = revoke({ fingerprint: B_FP, targets: [target(a)] })
+    expect(plan.blocks.map((b) => b.kind)).toEqual(['not-the-file-sshd-reads'])
+    expect(plan.spec).toBeNull()
+  })
+
+  it('refuses a host whose sshd config could only be read in part', async () => {
+    // BLOCKER 5's write half. The read half already downgrades this source to
+    // `partial` and takes `keyFileIsDefault` to null; what matters here is that
+    // the GATE consumes it rather than merely putting a banner on a screen.
+    const a = host({ self: 'root', sshdStatus: 'partial' })
+    expect(a.readsTheFileWeRead).toBeNull()
+    const plan = revoke({ fingerprint: B_FP, targets: [target(a)] })
+    expect(plan.blocks.map((b) => b.kind)).toEqual(['not-the-file-sshd-reads'])
+    expect(plan.spec).toBeNull()
+  })
+
+  it('refuses an account that has a legacy authorized_keys2 sshd also reads', async () => {
+    // The same "reported done and did nothing" failure from the other side: on
+    // a host that IS on the compiled-in default, sshd reads keys2 too, and a
+    // key written into both files survives an edit to one of them.
+    const plan = revoke({
+      fingerprint: B_FP,
+      targets: [
+        target(host({ self: 'root', keys2: 'present', keyfile: '.ssh/authorized_keys .ssh/authorized_keys2' }))
+      ]
+    })
+    expect(plan.blocks.map((b) => b.kind)).toEqual(['not-the-file-sshd-reads'])
+    expect(plan.blocks[0].reason).toContain('authorized_keys2')
+  })
+
+  it('refuses an account whose authorized_keys2 could not be checked', async () => {
+    // "Nobody could look" is not "it is not there".
+    const plan = revoke({
+      fingerprint: B_FP,
+      targets: [
+        target(host({ self: 'root', keys2: 'unknown', keyfile: '.ssh/authorized_keys .ssh/authorized_keys2' }))
+      ]
+    })
+    expect(plan.blocks.map((b) => b.kind)).toEqual(['not-the-file-sshd-reads'])
+    expect(plan.blocks[0].reason).toContain('could not be checked')
+  })
+
+  it('does not block a legacy file on a host whose sshd does not read one', async () => {
+    // The over-block this would otherwise be. `AuthorizedKeysFile
+    // .ssh/authorized_keys` alone means keys2 is not read, so its presence
+    // changes nothing about who can log in.
+    const plan = revoke({
+      fingerprint: B_FP,
+      targets: [target(host({ self: 'root', keys2: 'present', keyfile: '.ssh/authorized_keys' }))]
+    })
+    expect(plan.blocks).toEqual([])
+    expect(plan.spec).not.toBeNull()
   })
 
   it('leaves out a host the key is not on rather than counting it as revoked', async () => {
