@@ -299,6 +299,53 @@ describe('the honesty banner', () => {
   })
 })
 
+describe('a host whose last collection is old and whose probe is failing now', () => {
+  // fleetSampler deliberately keeps the last good collection ALONGSIDE a live
+  // error, and its own comment says why: "'read an hour ago and the probe is
+  // failing now' is two facts and both matter — most of all here." The panel
+  // kept only the first. A host with a three-week-old inventory and hourly
+  // failures ever since sat in `collected`, contributed 0 to `unchecked`, and
+  // carried `certain: true` out of the old collection.
+  const staleEntry = (): Entry => ({
+    access: complete(),
+    at: Date.now() - 21 * 24 * 3_600_000,
+    error: 'unreachable: ETIMEDOUT',
+    errorAt: Date.now() - 3_600_000
+  })
+
+  it('still shows the inventory it has', async () => {
+    mount([server('a', 'web-1')], { a: staleEntry() })
+    // The keys are still the best information anybody has about this host.
+    expect(await screen.findByText(ED25519_FP)).toBeTruthy()
+  })
+
+  it('counts toward unchecked instead of toward answered', async () => {
+    mount([server('a', 'web-1'), server('b', 'db-1')], {
+      a: { access: complete(), at: Date.now() },
+      b: staleEntry()
+    })
+    const unchecked = await screen.findByTestId('unchecked-hosts')
+    expect(unchecked.textContent).toContain('1 host')
+  })
+
+  it('is named as stale, with how old the reading is and what is failing now', async () => {
+    mount([server('a', 'web-1')], { a: staleEntry() })
+    const stale = await screen.findByTestId('stale-web-1')
+    expect(stale.textContent).toContain('ETIMEDOUT')
+    // The age of the READING, not of the failure. "Three weeks old" is the
+    // number that decides whether to act on what is on the screen.
+    expect(stale.textContent).toMatch(/504h|21d|3 weeks/)
+  })
+
+  it('never lets a stale collection carry a complete-picture claim', async () => {
+    // `complete()` summarises as certain. It was certain three weeks ago.
+    mount([server('a', 'web-1')], { a: staleEntry() })
+    expect((await screen.findByTestId('not-an-answer')).textContent).toContain(
+      'not a complete picture'
+    )
+  })
+})
+
 describe('the by-host view', () => {
   async function hosts(access: HostAccess): Promise<void> {
     mount([server('a', 'web-1')], { a: { access, at: 1 } })

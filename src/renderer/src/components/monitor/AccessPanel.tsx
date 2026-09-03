@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { KeyRound, RefreshCw, ShieldAlert } from 'lucide-react'
 import { bridgeHas } from '../../lib/bridge'
-import { clsx } from '../../lib/format'
+import { clsx, duration } from '../../lib/format'
 import { sshHopsFor } from '../../lib/ssh'
 import {
   ACCESS_STATUS_HELP,
@@ -305,10 +305,27 @@ export function AccessPanel({
     [servers, entries]
   )
 
+  // FOUR states, not three, and the fourth is the one the sampler goes out of
+  // its way to make available. `fleetSampler.rememberAccess` keeps the last
+  // good collection ALONGSIDE a live error — its own comment says why: "'read
+  // an hour ago and the probe is failing now' is two facts and both matter —
+  // most of all here." This used to keep only the first, so a host with a
+  // three-week-old inventory and hourly failures ever since sat in `collected`,
+  // contributed 0 to `unchecked`, and carried `certain: true` out of a
+  // collection that was certain three weeks ago.
+  //
+  // `collected` still holds it, because the old inventory is the best
+  // information anybody has about that host and hiding it helps nobody. What
+  // changes is that it is never counted as an answered host.
   const collected = hosts.filter((h) => h.entry?.access)
+  const stale = collected.filter((h) => h.entry?.error)
+  const current = collected.filter((h) => !h.entry?.error)
   const failed = hosts.filter((h) => !h.entry?.access && h.entry?.error)
   const never = hosts.filter((h) => !h.entry?.access && !h.entry?.error)
-  const incomplete = collected.filter((h) => h.summary && !h.summary.certain)
+  // Only over hosts that answered THIS time. A stale host is already counted
+  // under `unchecked`, and counting it twice would put two numbers in the
+  // banner for one machine.
+  const incomplete = current.filter((h) => h.summary && !h.summary.certain)
 
   /**
    * The by-key view. One row per distinct fingerprint across everything that
@@ -349,7 +366,7 @@ export function AccessPanel({
     )
   }, [collected])
 
-  const unchecked = failed.length + never.length
+  const unchecked = failed.length + never.length + stale.length
   // The write half is gated by the module switch in main, which also decides
   // whether the bridge has these methods at all. A build or an install where it
   // is off shows no button rather than a button that fails.
@@ -425,7 +442,14 @@ export function AccessPanel({
               is not on my fleet” cannot be concluded from it.{' '}
               {unchecked > 0 && (
                 <>
-                  {unchecked} host{unchecked === 1 ? ' was' : 's were'} not read at all
+                  {unchecked} host{unchecked === 1 ? '' : 's'} could not be read this time
+                  {stale.length > 0 && (
+                    <>
+                      {' '}
+                      ({stale.length} of {unchecked === 1 ? 'them is' : 'them'} showing an older
+                      reading below)
+                    </>
+                  )}
                   {incomplete.length > 0 ? ', and ' : '. '}
                 </>
               )}
@@ -781,6 +805,19 @@ export function AccessPanel({
           ))}
         </>
       )}
+
+      {/* Two facts on one line, because both matter and neither replaces the
+          other: what was read, and how long ago it stopped being confirmable.
+          The age is the age of the READING — that is the number that decides
+          whether to act on what is on the screen. */}
+      {stale.map((h) => (
+        <div key={h.server.id} className="s-desc warn" data-testid={`stale-${h.server.name}`}>
+          <ShieldAlert size={12} /> <b>{h.server.name}</b>: the keys shown above were read{' '}
+          <b>{duration(h.entry!.at ?? null)} ago</b> and the probe has been failing since —{' '}
+          {h.entry!.error}. They are what ShellPilot last saw, not what the host trusts now, and
+          this host is counted as unchecked.
+        </div>
+      ))}
 
       {failed.map((h) => (
         <div key={h.server.id} className="s-desc danger" data-testid={`failed-${h.server.name}`}>
