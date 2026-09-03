@@ -32,6 +32,8 @@ import type {
 import type { LogLine, LogSource, LogTailState, UnitChoice } from '../shared/logtail'
 import type { CronEntry, CronSourceReport } from '../shared/cron'
 import type { CapacityBridge, CapacityReport } from '../shared/capacity'
+import type { RuleDraftWire, RuleView, RulesBridge } from '../shared/rules'
+import type { ChangeLogBridge, ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
 import type {
   DockerAction,
   DockerActionResult,
@@ -366,6 +368,42 @@ const api = {
     trends: (hostId: string, windowDays: number): Promise<CapacityReport | null> =>
       ipcRenderer.invoke('capacity:trends', hostId, windowDays)
   } satisfies CapacityBridge,
+  // Roadmap item 27. Four channels and deliberately no fifth: there is no
+  // `run` and no `test`, because a button that fired a rule on demand would be
+  // a way to run a pinned job without the dialog that pins it.
+  //
+  // `create` carries a `CommandApproval` the panel minted with
+  // `jobApprovalFor`, exactly as `jobs.run` does, and the preload does not
+  // check it for the same reason: main re-derives `planJob` over that very spec
+  // and target list — at creation AND at every firing — so a caller that forges
+  // or omits one gets a refusal rather than a rule. Verifying here as well
+  // would be a second copy of the rule in the one place with no more
+  // information than the sender.
+  //
+  // `satisfies RulesBridge` so a channel added to the contract and forgotten
+  // here is a compile error rather than a method the panel calls at runtime and
+  // finds undefined.
+  rules: {
+    list: (): Promise<RuleView[]> => ipcRenderer.invoke('rules:list'),
+    create: (draft: RuleDraftWire): Promise<RuleView | null> =>
+      ipcRenderer.invoke('rules:create', draft),
+    setEnabled: (id: string, enabled: boolean): Promise<boolean> =>
+      ipcRenderer.invoke('rules:enable', id, enabled),
+    remove: (id: string): Promise<boolean> => ipcRenderer.invoke('rules:remove', id)
+  } satisfies RulesBridge,
+  // Roadmap item 14. One method, taking a filter and returning a page, for the
+  // reason `capacity` above has one: the merge, the ordering, the redaction and
+  // the per-source budget all live in main, and what crosses is the ANSWER.
+  //
+  // There is no write beside it and there will not be one: this is a reader
+  // over four append-only records, and a change log that can be edited is not
+  // a change log. `satisfies ChangeLogBridge` so a method added to the contract
+  // and forgotten here is a compile error rather than something the panel finds
+  // undefined at runtime.
+  changelog: {
+    read: (filter?: ChangeLogFilter): Promise<ChangeLogPage> =>
+      ipcRenderer.invoke('changelog:read', filter)
+  } satisfies ChangeLogBridge,
   k8s: {
     read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>
       ipcRenderer.invoke('k8s:read', cfg, context, namespace),

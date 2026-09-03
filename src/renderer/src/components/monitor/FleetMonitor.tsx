@@ -28,6 +28,8 @@ import { BroadcastPanel } from './BroadcastPanel'
 import { PatchPanel } from './PatchPanel'
 import { LogTailPanel } from './LogTailPanel'
 import { CronPanel } from './CronPanel'
+import { RulesPanel } from './RulesPanel'
+import { ChangeLogPanel } from './ChangeLogPanel'
 import { MODULES, moduleEnabled, type ModuleDef, type ModuleId } from '../../../../shared/modules'
 import { openSettings, useNav } from '../../store/nav'
 import { DockerPanel } from '../docker/DockerPanel'
@@ -434,6 +436,16 @@ export function FleetMonitor(): React.JSX.Element {
       {moduleEnabled(modules, 'cron') && (
         <div style={show('cron')}>
           <CronPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'rules') && (
+        <div style={show('rules')}>
+          <RulesPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'changeLog') && (
+        <div style={show('changeLog')}>
+          <ChangeLogPanel servers={servers} />
         </div>
       )}
       {moduleEnabled(modules, 'docker') && (

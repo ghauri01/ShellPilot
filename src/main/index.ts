@@ -3,7 +3,7 @@
 import './portable'
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, session, Menu, Notification, powerMonitor } from 'electron'
 import { join } from 'node:path'
-import { readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, renameSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import {
@@ -70,6 +70,8 @@ import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
 import { AccessCommitter, AccessReader } from './services/access'
 import { PostureReader } from './services/posture'
+import { readChangeLog } from './services/changelog'
+import type { ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
 import type {
   AccessChangePreview,
   AccessChangeTarget,
@@ -206,6 +208,10 @@ import {
 } from './services/updater'
 import type { UpdatePrefs } from '../shared/updater'
 import { parseSshConfig } from '../shared/sshconfig'
+import { RuleEngine } from './services/rules'
+import type { RuleEventStore, RulesFile } from './services/rules'
+import { RULES_FILE } from '../shared/rules'
+import type { RuleDraftWire } from '../shared/rules'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
 import { resolveDbSecrets, resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
@@ -411,6 +417,10 @@ function createWindow(): void {
     // window closing is exactly the case where one would keep working through
     // its queue with nowhere to report. Queued hosts must not start.
     jobRunner.disposeAll()
+  // Stop sweeping. A sweep that started is allowed to finish its own promise;
+  // what this prevents is a new one beginning against a store that is about to
+  // close.
+  ruleEngine.stop()
   })
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
@@ -882,10 +892,23 @@ let accessModuleOn = false
 // estate, and assembling one is a thing a person switches on rather than
 // discovers. See FleetSamplerDeps.postureEnabled.
 let postureModuleOn = false
+// Whether the change log may READ — roadmap item 14. Kept beside the other two
+// and refreshed from the same blob, and gated for a third distinct reason.
+//
+// The access probe is gated for what it does on a host and the posture probe
+// for what it produces. This one produces nothing and touches no host: it opens
+// four records that are written whether or not it is on. What a person consents
+// to is having their own week ASSEMBLED out of them — which is more useful than
+// any of the four separately, and is therefore also the thing to ask about.
+//
+// Absent reads as OFF, like both of its neighbours, so an upgrade never starts
+// reading somebody's local session log for a screen they did not ask for.
+let changeLogModuleOn = false
 function syncAccessModule(data: unknown): void {
   const modules = (data as { settings?: { modules?: Record<string, unknown> } } | null)?.settings?.modules
   accessModuleOn = modules?.access === true
   postureModuleOn = modules?.posture === true
+  changeLogModuleOn = modules?.changeLog === true
 }
 try {
   syncAccessModule(loadData())
@@ -893,6 +916,7 @@ try {
   // A blob that will not parse is not consent. Off.
   accessModuleOn = false
   postureModuleOn = false
+  changeLogModuleOn = false
 }
 
 // Fleet key and access, on the same slow clock — roadmap item 23. One reader
@@ -1525,6 +1549,100 @@ const jobRunner = new JobRunner({
   }
 })
 
+// ---- Rules (roadmap item 27) ----
+//
+// "When this alert fires, run that job, then call that webhook."
+//
+// Constructed HERE and nowhere else, the same single-construction-site rule
+// tests/jobsNotExposed.test.ts asserts about `new JobRunner(` — a second engine
+// would be a second idea of what a rule may do. Everything it acts with is
+// injected, so the engine itself holds no executor, no credential and no
+// webhook URL:
+//
+//  * `runJob` goes through `jobRunner.run`, which re-derives `planJob` over the
+//    rule's own spec and target list and refuses if the stored approval
+//    disagrees. A rule does not get a private door into the job engine; it uses
+//    the same one a person does, and is refused by the same gate.
+//  * `notify` is `webhookNotify`, which rebuilds the payload from its own
+//    whitelist. The rule engine may say a thing happened; it may not choose the
+//    shape that leaves the machine.
+//  * `resolveTarget` resolves a PINNED serverId against the current workspace
+//    and returns null when that host is gone, which the engine treats as a
+//    refusal of the whole rule rather than as a smaller run.
+//
+// Deliberately NOT reachable from the MCP bridge or the CLI. See
+// tests/rulesNotExposed.test.ts: DURABILITY DEFEATS REVOCATION, and a rule is
+// the worst case of it — between firings it has nothing pending at all, so
+// `denyAllPending()` has no list it appears on.
+const RULES_PATH = join(app.getPath('userData'), RULES_FILE)
+
+/** Same store accessor discipline as `jobStore`: resolved per call rather than
+ *  captured, because the engine is constructed at module scope and the history
+ *  store opens asynchronously after it — or never. */
+const ruleStore: RuleEventStore = {
+  readEvents: (filter) => historyStore?.readEvents(filter) ?? [],
+  recordEvent: (kind, hostId, payload, at) => historyStore?.recordEvent(kind, hostId, payload, at)
+}
+
+const ruleEngine = new RuleEngine({
+  // A getter would be nicer; this object is cheap and the engine only reads
+  // `store` inside a sweep, so the indirection above is what makes it live.
+  get store(): RuleEventStore | null {
+    return historyStore === null ? null : ruleStore
+  },
+  now: () => Date.now(),
+  read: () => {
+    try {
+      if (existsSync(RULES_PATH)) return JSON.parse(readFileSync(RULES_PATH, 'utf8'))
+    } catch (err) {
+      // Nothing here is worth failing app start over, and every field is
+      // narrowed again by `sanitiseRules` regardless. A rules file that will
+      // not parse is no rules, which is the safe direction: it disarms rather
+      // than arming something half-read.
+      console.error('[rules] file unreadable, starting with none:', err)
+    }
+    return null
+  },
+  write: (file: RulesFile) => {
+    try {
+      // Temp-then-rename at 0600, matching store.ts/vault.ts/policyStore.ts.
+      // This file holds approval records: a torn write is a rule whose
+      // authorisation half-survived.
+      writeFileSync(`${RULES_PATH}.tmp`, JSON.stringify(file), { mode: 0o600 })
+      renameSync(`${RULES_PATH}.tmp`, RULES_PATH)
+    } catch (err) {
+      console.error('[rules] save failed:', err)
+    }
+  },
+  notify: (raw) => webhookNotify(raw),
+  version: () => app.getVersion(),
+  newId: () => randomUUID(),
+  resolveTarget: (serverId) => {
+    const server = getCachedServer(serverId)
+    // Null means "this host is not in the workspace any more", and the engine
+    // refuses the whole rule on it. Resolved fresh at every firing rather than
+    // stored with the rule, so a machine that moved is dialled at its new
+    // address and one that was deleted is not dialled at all.
+    if (!server) return null
+    return { ...serverToSshConfig(server), sessionId: `rule:${serverId}` }
+  },
+  runJob: (launch) => {
+    if (!historyStore) {
+      throw new Error(
+        'Jobs need the history store, which is not open on this machine, so this rule did not run.'
+      )
+    }
+    return jobRunner.run(launch)
+  }
+})
+
+ipcMain.handle('rules:list', () => ruleEngine.list())
+ipcMain.handle('rules:create', (_e, draft: RuleDraftWire) => ruleEngine.create(draft))
+ipcMain.handle('rules:enable', (_e, id: string, enabled: boolean) =>
+  ruleEngine.setEnabled(id, enabled === true)
+)
+ipcMain.handle('rules:remove', (_e, id: string) => ruleEngine.remove(id))
+
 ipcMain.handle('jobs:list', (_e, limit?: number) => jobRunner.list(limit))
 ipcMain.handle('jobs:get', (_e, jobId: string) => jobRunner.get(jobId))
 ipcMain.handle('jobs:run', async (_e, req: JobRunRequest) => {
@@ -2106,6 +2224,43 @@ ipcMain.handle(
     })
   }
 )
+
+// ---- The change log — roadmap item 14 ----
+//
+// A READ of four records that already exist, merged into one timeline. It
+// writes nothing, stores nothing and starts nothing in the background; every
+// row it returns was written by something else for its own reasons.
+//
+// THE MODULE FLAG IS CHECKED INSIDE readChangeLog, not around this handler, and
+// that is deliberate. A handler guarded from the outside would return an empty
+// page when the module is off, which is indistinguishable on screen from a
+// quiet week — the exact confusion this feature exists to prevent. Passing the
+// flag in means the page comes back saying "switched off, nothing was opened",
+// and the panel can say so.
+//
+// There is deliberately no MCP tool beside this, for the reason `fleet:posture`
+// has none: a merged account of everything a person did on every host is not
+// something an agent gets to ask for. It is also the one place in the app that
+// reads `shellpilot-ai-audit.jsonl`, and that file's value rests on its rows
+// being an agent's rather than about one.
+ipcMain.handle('changelog:read', (_e, filter: unknown): ChangeLogPage => {
+  // Not an object is not a filter. An unparseable argument must narrow the
+  // read rather than widen it, so it falls back to no filter and the page's own
+  // limit rather than to whatever the caller sent.
+  const f: ChangeLogFilter =
+    filter !== null && typeof filter === 'object' ? (filter as ChangeLogFilter) : {}
+  return readChangeLog(
+    {
+      enabled: () => changeLogModuleOn,
+      // The same store every other history read uses, or null before it opens
+      // and forever on a machine where history is switched off — in which case
+      // the page says the store is not there rather than showing three sources
+      // and calling it a timeline.
+      history: () => historyStore
+    },
+    f
+  )
+})
 
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()
@@ -2781,6 +2936,11 @@ app.whenReady().then(() => {
   // whole reason the store is opened from inside whenReady rather than at
   // module scope. See startHistory.
   startHistory()
+  // After startHistory, so the first sweep has a store to read; before
+  // createWindow, so a rule does not wait on a window it never needs. The
+  // engine's first sweep sets its watermark to "now" and acts on nothing
+  // behind it, so starting it early cannot replay a backlog.
+  ruleEngine.start()
   createWindow()
   installMenu()
   // Primed once at launch so the MCP bridge can resolve server/workspace

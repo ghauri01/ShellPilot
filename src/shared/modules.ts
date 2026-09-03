@@ -29,6 +29,8 @@ export type ModuleId =
   | 'access'
   | 'posture'
   | 'capacity'
+  | 'rules'
+  | 'changeLog'
 
 export interface ModuleDef {
   id: ModuleId
@@ -121,6 +123,43 @@ export const MODULES: ModuleDef[] = [
     // consent, and a fresh install that arrived with nine tabs already open
     // would be the bloat this registry was built to avoid. Nothing here argues
     // that a module has to be dangerous to be optional.
+    defaultEnabled: false
+  },
+  {
+    id: 'changeLog',
+    label: 'Change log',
+    detail:
+      '"What did I change on Tuesday" — one timeline over four records that already exist: shells run on this machine, what you confirmed before a job or a broadcast ran, what an agent did through the MCP bridge, and the alerts, jobs and store events the durable history keeps. Metadata only: commands and targets, never output. It reads; it stores nothing of its own and writes nothing.',
+    // OFF by default, and this one's toggle gates the READ rather than the tab
+    // — see the `changelog:read` handler in main/index.ts, which returns a page
+    // saying "switched off" without opening a file.
+    //
+    // Gated because recording a person's work is a different consent question
+    // from recording an agent's, which is the roadmap's own words for item 14.
+    // The four records are written whether or not this is on, each for its own
+    // reasons and each relied on by something else; what a person consents to
+    // here is having them ASSEMBLED into one account of their week. That
+    // assembled thing is more useful than any of its parts, which is exactly
+    // why it is also the part to ask about.
+    defaultEnabled: false
+  },
+  {
+    id: 'rules',
+    label: 'Rules',
+    detail:
+      'When an alert fires, run a job or post to the webhook \u2014 with a ceiling on how often it may act. A rule runs the job it was confirmed with, on the hosts it was confirmed for, and refuses if either has changed. It is not a workflow language: one trigger, one filter, one action, one rate limit.',
+    // OFF by default, and this is the module the default matters most for.
+    //
+    // Every other module here is something a person presses. This one acts on
+    // its own, on hosts, while nobody is watching. `backfillModules` already
+    // guarantees an upgrade never switches a module on for an existing install;
+    // `defaultEnabled: false` extends that to a new one, so no install has ever
+    // had an unattended execution path appear without somebody choosing it.
+    //
+    // What the toggle gates is the PANEL and the sweep, not the rules
+    // themselves \u2014 a rule that exists stays on disk with its approval record
+    // intact, so switching the module off and on again does not silently
+    // re-arm anything. Disarming is per rule, on the rule.
     defaultEnabled: false
   },
   {

@@ -74,6 +74,30 @@ const MODULE_FILES: Record<string, string[]> = {
     'src/renderer/src/lib/capacity.ts',
     'src/renderer/src/components/monitor/CapacityPanel.tsx'
   ],
+  // Item 14. All three files are listed, unlike the collectors above, because
+  // none of them belongs to anything else: nothing reads the four records
+  // unless this panel asks, and the reader runs only from its own IPC handler.
+  // The records it reads ARE shared and are written whether or not this module
+  // is on, which is why they are not listed here.
+  changeLog: [
+    'src/shared/changelog.ts',
+    'src/main/services/changelog.ts',
+    'src/renderer/src/components/monitor/ChangeLogPanel.tsx'
+  ],
+  // Item 27. All three files are listed, unlike the collectors above: nothing
+  // here runs unless this module is on, and the main-process half is the one
+  // that most needs the closure walked — it is the only module file in the repo
+  // that can start a job. It passes because everything it acts with is
+  // injected: the job launcher, the webhook and the target resolver are handed
+  // to it by main, so it imports no executor, no credential resolver and no
+  // secret store of its own. Importing `services/webhookAlerts` to send its
+  // notification would have pulled `services/secrets` into a module's reach for
+  // the sake of one function call.
+  rules: [
+    'src/shared/rules.ts',
+    'src/main/services/rules.ts',
+    'src/renderer/src/components/monitor/RulesPanel.tsx'
+  ],
   broadcast: [
     'src/shared/broadcast.ts',
     'src/main/services/broadcast.ts',
