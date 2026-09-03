@@ -573,7 +573,15 @@ function openStore(mod: SqliteModule, path: string): HistoryStore {
     }
 
     let restored = false
-    if (existsSync(bak)) {
+    // Size, not just existence. SQLite reads a zero-length file as a perfectly
+    // valid EMPTY database, so integrity_check below cannot tell one from a
+    // real backup — and a truncated .bak is exactly what a backup that died
+    // mid-write used to leave behind (see the copy below, which now renames
+    // into place instead). Restoring from it reported 'restored-from-backup'
+    // and came up with nothing at all. Losing the history is survivable;
+    // saying it was recovered when it was not sends someone looking for data
+    // that is gone.
+    if (existsSync(bak) && statSync(bak).size > 0) {
       try {
         copyFileSync(bak, path)
         const retry = open(path)
@@ -626,18 +634,45 @@ function openStore(mod: SqliteModule, path: string): HistoryStore {
   // do not block startup on it. This is store.ts's copyFileSync-before-write
   // moved to a point where the file is known good: a backup taken mid-session
   // could capture the corruption it exists to undo.
+  //
+  // Written to a temp file and renamed into place, never straight onto the
+  // .bak. The copy overwrites its destination from the very first page, so
+  // writing directly meant the only file the ladder above can restore from was
+  // destroyed for the whole length of the backup — and a backup that does not
+  // finish leaves it destroyed. It does not always finish: the copy runs on a
+  // libuv thread against this same connection, so a write landing in the wrong
+  // moment fails it (measured: ERR_SQLITE_ERROR and a ZERO-BYTE .bak left on
+  // disk), and main/index.ts deliberately quits without waiting for it, which
+  // truncates it from the other direction. rename(2) is atomic: the .bak is
+  // either the previous good copy or a complete new one, and never half of
+  // either.
+  const backupTmp = `${bak}.tmp`
   const backupReady =
     recovery === 'none'
-      ? mod
-          .backup(db, bak)
-          .then(() => {
-            restrictPermissions(bak)
+      ? (async (): Promise<boolean> => {
+          try {
+            rmSync(backupTmp, { force: true })
+            await mod.backup(db, backupTmp)
+            // 0600 before it is visible under its real name, rather than a
+            // window with the whole inventory readable under the umask.
+            restrictPermissions(backupTmp)
+            renameSync(backupTmp, bak)
             return true
-          })
-          .catch((err) => {
+          } catch (err) {
             console.error('[history] backup failed (not fatal):', err)
+            // Only the attempt goes. Whatever .bak was already there is still
+            // whole, and is still what the next failure would restore from.
+            try {
+              rmSync(backupTmp, { force: true })
+              rmSync(`${backupTmp}-journal`, { force: true })
+            } catch {
+              /* `backupReady` answers true or false and never rejects: callers
+                 hold it for the length of the session and an unhandled
+                 rejection out of here would be a process-wide event. */
+            }
             return false
-          })
+          }
+        })()
       : // A store that was just recovered or started empty has nothing worth
         // backing up yet, and overwriting the .bak here would destroy the copy
         // the NEXT failure would have restored from.
@@ -1301,7 +1336,10 @@ export function historyBytes(path: string): number {
  */
 export function historyFiles(dir: string): string[] {
   const base = join(dir, HISTORY_FILE)
-  const files = [base, `${base}-wal`, `${base}-shm`, `${base}.bak`]
+  // `.bak.tmp` is where the backup is written before it is renamed onto the
+  // .bak; a process that died under one leaves it, and "delete all data" has
+  // to mean all of it.
+  const files = [base, `${base}-wal`, `${base}-shm`, `${base}.bak`, `${base}.bak.tmp`]
   try {
     for (const name of readdirSync(dir)) {
       if (name.startsWith(`${HISTORY_FILE}.corrupt-`)) files.push(join(dir, name))

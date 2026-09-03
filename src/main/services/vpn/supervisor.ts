@@ -518,7 +518,23 @@ export class Supervisor {
       // Killed rather than restarted here: the exit handler is the single
       // place that applies backoff, so a wedged engine takes the same path as
       // one that died on its own (E54).
-      if (run.child && run.child.exitCode === null) this.hardKill(run)
+      //
+      // Never while a stop is already in flight, though. A readiness promise
+      // does not only time out — it also REJECTS, the moment a driver gives up
+      // on the start, and a driver that gives up stops the run in the same
+      // turn. `stop()` is then already walking the graceful ladder: the
+      // engine's own control channel first (`signal SIGTERM` for openvpn),
+      // then a real SIGTERM, then SIGKILL. SIGKILL from here landed on a live,
+      // answering engine microseconds after it had been politely asked to
+      // exit, so it never acted on the request: the tun interface stayed up
+      // and the routes the server pushed stayed installed. On Windows, where
+      // `process.kill` is a hard TerminateProcess and the control channel is
+      // the only polite mechanism there is, nothing asked it at all.
+      //
+      // `stop()` ends in this same hardKill if the ladder runs out, so nothing
+      // survives by taking longer — it is bounded by gracefulTimeoutMs plus
+      // TERM_TO_KILL_MS.
+      if (!run.stopping && run.child && run.child.exitCode === null) this.hardKill(run)
     }
   }
 

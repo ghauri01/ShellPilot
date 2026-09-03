@@ -27,7 +27,16 @@ function paths(): string[] {
 // timestamped copies the ladder moves a corrupt primary aside to.
 function historyPaths(): string[] {
   const db = join(app.getPath('userData'), HISTORY_FILE)
-  return [db, `${db}-wal`, `${db}-shm`, `${db}.bak`, `${db}.corrupt-1700000000000`]
+  return [
+    db,
+    `${db}-wal`,
+    `${db}-shm`,
+    `${db}.bak`,
+    // The backup is written here and renamed onto the .bak, so a process that
+    // died under one leaves this behind holding the same inventory.
+    `${db}.bak.tmp`,
+    `${db}.corrupt-1700000000000`
+  ]
 }
 
 function writeHistoryFiles(): void {

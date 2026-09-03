@@ -92,10 +92,37 @@ describe('open', () => {
   })
 
   it('takes a .bak through the backup API', async () => {
+    // Settled before anything is written, and that ordering is load-bearing
+    // everywhere this file asserts the backup SUCCEEDED. `mod.backup` copies on
+    // a libuv thread against this same connection, so a write landing while it
+    // steps fails the copy outright — measured under a loaded full suite:
+    // ERR_SQLITE_ERROR, errcode 0, "not an error". Writing first and awaiting
+    // afterwards is therefore a coin toss, not a test.
     const s = await open()
-    s.recordSamples('h1', 1000, { cpu: 1 })
     await expect(s.backupReady).resolves.toBe(true)
     expect(statSync(`${s.path}.bak`).size).toBeGreaterThan(0)
+    // Renamed into place, so nothing is left half-written under either name.
+    expect(existsSync(`${s.path}.bak.tmp`)).toBe(false)
+  })
+
+  it('renames the backup into place rather than writing onto the .bak', async () => {
+    // The .bak is the only file the recovery ladder can restore from, and the
+    // copy overwrites its destination from the first page. Written directly, a
+    // backup that failed or was quit under left it truncated — measured, a
+    // zero-byte file — and SQLite reads a zero-length file as a valid EMPTY
+    // database, so the next launch "restored" from it and came up with nothing.
+    // What lands under the real name must always be a whole database.
+    const s = await open()
+    await expect(s.backupReady).resolves.toBe(true)
+    const { DatabaseSync } = await import('node:sqlite')
+    const bak = new DatabaseSync(`${s.path}.bak`)
+    try {
+      expect(bak.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
+      // A complete copy of THIS store, not an empty file that merely parses.
+      expect(bak.prepare("SELECT v FROM meta WHERE k = 'schema'").get()).toBeDefined()
+    } finally {
+      bak.close()
+    }
   })
 
   it('checkpoints the WAL back into the primary even with the backup in flight', async () => {
@@ -463,6 +490,10 @@ describe('retention', () => {
 
   it('holds the documented steady state and does not grow past it', async () => {
     const s = await open()
+    // Settled first, before a single row is written: the copy runs against this
+    // same connection and a write landing while it steps fails it. See the
+    // ordering note on 'takes a .bak through the backup API'.
+    await expect(s.backupReady).resolves.toBe(true)
     // The roadmap's reference estate: fifteen hosts, two-minute cadence, eight
     // metrics. 15 * 8 * 30/hour = 3,600 rows an hour, 86,400 a day.
     // Literals, not the implementation's own formula retyped: writing
@@ -521,7 +552,9 @@ describe('retention', () => {
     // Measured on the primary AFTER the close checkpoints the WAL back into it.
     // Measuring while a WAL that the retention pass has just inflated is still
     // on disk mixes a transient into a steady-state number.
-    await expect(s.backupReady).resolves.toBe(true)
+    //
+    // The backup was settled at the top of this test, so the close below is not
+    // racing a copy that is still holding this connection open.
     s.close()
     const primary = statSync(s.path).size
     const rows = after.samples + after.hourly
@@ -591,6 +624,27 @@ describe('corruption recovery', () => {
     expect(s.recovery).toBe('started-empty')
     s.recordSamples('h1', 1000, { cpu: 3 })
     expect(s.readSeries('h1', 'cpu', 0, 9999)).toEqual([{ ts: 1000, v: 3, res: 'full' }])
+  })
+
+  it('does not call a zero-byte .bak a restore', async () => {
+    // What a backup that died mid-write leaves behind, from either end: the
+    // copy failed because a write raced it, or the app quit while it ran —
+    // main/index.ts deliberately does not wait for it. Both used to truncate
+    // the .bak in place, because the copy wrote straight onto it.
+    //
+    // SQLite reads a zero-length file as a valid EMPTY database, so
+    // integrity_check answers 'ok' and the ladder cannot tell it from a real
+    // backup. It reported 'restored-from-backup', main/index.ts recorded a
+    // recovery event saying so, and the user's entire history was gone.
+    // Starting empty is survivable; being told it was recovered is what sends
+    // someone looking for data that no longer exists.
+    const path = join(dir, HISTORY_FILE)
+    writeFileSync(path, 'garbage')
+    writeFileSync(`${path}.bak`, '')
+
+    const s = await open()
+    expect(s.recovery).toBe('started-empty')
+    expect(s.readSeries('h1', 'cpu', 0, 9999)).toEqual([])
   })
 
   it('never throws out of loadHistory, whatever is on disk', async () => {
@@ -712,12 +766,17 @@ describe('file permissions', () => {
     // HEAD: db 0600, wal 0644, shm 0644.
     if (process.platform === 'win32') return
     const s = await open()
+    // Before the write, so the .bak below is a file that exists rather than an
+    // absent one the default in `mode` would wave through: a write racing the
+    // copy fails it. See the ordering note on 'takes a .bak through the backup
+    // API'.
+    await expect(s.backupReady).resolves.toBe(true)
     s.recordSamples('web-1', 1000, { cpu: 1 })
     const mode = (f: string): number => (existsSync(f) ? statSync(f).mode & 0o777 : 0o600)
     expect(mode(s.path)).toBe(0o600)
     expect(mode(`${s.path}-wal`)).toBe(0o600)
     expect(mode(`${s.path}-shm`)).toBe(0o600)
-    await s.backupReady
+    expect(existsSync(`${s.path}.bak`)).toBe(true)
     expect(mode(`${s.path}.bak`)).toBe(0o600)
   })
 })
@@ -957,11 +1016,18 @@ describe('historyBytes', () => {
     // doubling at steady state. A size function that omits it reports half of
     // what the user's disk gave up, and it is the function the headline number
     // is computed from.
+    //
+    // The backup is settled BEFORE the rows go in, not after. It is taken at
+    // open on a libuv thread against this same connection, so the transaction
+    // below racing it is what failed the copy — two full-suite runs in ten,
+    // ERR_SQLITE_ERROR errcode 0, and a .bak truncated to nothing. Nothing
+    // about this test is about that race: it needs a .bak on disk and a store
+    // with some rows in it, in that order.
     const s = await open()
+    await expect(s.backupReady).resolves.toBe(true)
     s.transaction(() => {
       for (let i = 0; i < 5000; i++) s.recordSamples('h1', i * 60_000, { cpu: i % 100 })
     })
-    await expect(s.backupReady).resolves.toBe(true)
     s.close()
     const bak = statSync(`${s.path}.bak`).size
     expect(bak).toBeGreaterThan(0)
