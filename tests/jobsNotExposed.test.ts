@@ -99,7 +99,17 @@ const ALLOWED_TOOLS = [
 // A hint, not the gate — the whitelist above has already failed by the time
 // this matches. It exists to put the word "job" in the failure message so
 // whoever trips it understands what they tripped over.
-const JOB_TOOL = /job|batch|broadcast|fan_?out|schedule/i
+//
+// `rule` is in the alternation for roadmap item 27, and it belongs in THIS
+// list rather than in one of its own because the argument is this file's
+// argument raised one further. A job an agent started is unrevocable while it
+// runs; a RULE an agent created is unrevocable while it sits there doing
+// nothing, because `denyAllPending()` resolves requests that are PENDING and a
+// rule between firings has none. Revoking every session, denying every
+// outstanding approval and stopping the bridge entirely leaves a rule exactly
+// where it was, holding a year-old human approval, and it fires at 3am on a
+// disk alert nobody connected to the agent that wrote it.
+const JOB_TOOL = /job|batch|broadcast|fan_?out|schedule|rule/i
 
 describe('the MCP bridge exposes no job surface', () => {
   let token: string
@@ -226,8 +236,15 @@ function scanJobModules(): string[] {
 const REVIEWED_JOB_FILES = ['jobDetached', 'jobExec', 'jobRunner']
 
 /** Job-adjacent modules outside `src/main/services`, named because that
- *  directory cannot be scanned wholesale. */
-const SHARED_JOB_MODULES = ['jobs', 'patch', 'topology', 'broadcast', 'approvalLog']
+ *  directory cannot be scanned wholesale.
+ *
+ *  `rules` is roadmap item 27 and covers BOTH halves — `src/shared/rules.ts`
+ *  and `src/main/services/rules.ts` — because the match below is on a basename.
+ *  It is not caught by the `job*.ts` scan above, and it is the module that most
+ *  needs catching: a rule is a job that has been given a year-long standing
+ *  authorisation, so everything this file says about the engine is true of it
+ *  and then some. See the note at JOB_TOOL. */
+const SHARED_JOB_MODULES = ['jobs', 'patch', 'topology', 'broadcast', 'approvalLog', 'rules']
 
 const JOB_MODULE_NAMES = [...new Set([...scanJobModules(), ...SHARED_JOB_MODULES])]
 
@@ -275,11 +292,17 @@ describe('the job engine is enumerated by scanning, not by memory', () => {
     // The specific miss this replaced: jobDetached — the executor that
     // deliberately OUTLIVES the link, which is the exact property that makes a
     // job unrevocable — was not in the hand-written alternation at all.
-    for (const name of ['jobRunner', 'jobExec', 'jobDetached', 'jobs', 'patch', 'topology']) {
+    for (const name of ['jobRunner', 'jobExec', 'jobDetached', 'jobs', 'patch', 'topology', 'rules']) {
       expect(JOB_MODULE.test(name), name).toBe(true)
     }
     // And the walker's specifier form of the same names.
-    for (const spec of ['./jobDetached', '../services/jobDetached.js', '../../shared/patch']) {
+    for (const spec of [
+      './jobDetached',
+      '../services/jobDetached.js',
+      '../../shared/patch',
+      '../../shared/rules',
+      './rules'
+    ]) {
       expect(isForbiddenSpecifier(spec), spec).toBe(true)
     }
     // Not everything beginning with "job" out in the world: the match is on a
@@ -537,6 +560,45 @@ describe('what must NOT be able to reach this', () => {
       // for work it was never granted.
       'approvalLog',
       'recordJobApproval',
+      // The rule engine — roadmap item 27, and the sharpest case this file
+      // covers.
+      //
+      // DURABILITY DEFEATS REVOCATION is the argument at the top of this file,
+      // and a rule is what happens when you take it one step further than a
+      // running job. The switch this codebase advertises, `denyAllPending()`,
+      // works by resolving requests that are PENDING. A job on fifteen hosts
+      // has nothing pending WHILE IT RUNS, which is bad enough. A rule has
+      // nothing pending AT ANY MOMENT: it is a row in a JSON file carrying a
+      // human's approval record, and the whole of its behaviour is to wait.
+      // Denying every outstanding approval, revoking every session and stopping
+      // the bridge leaves it untouched, and it fires that night on an alert
+      // nobody would connect back to the agent that wrote it. There is no
+      // pending state for the kill switch to find, ever — not "not while it is
+      // running", not at all.
+      //
+      // It is also a LAUNDERING primitive in a way a job is not. A job needs an
+      // approval minted now; a rule holds one minted once and re-used forever,
+      // so an agent that could create one would be creating a durable consent
+      // record for work no human will be asked about again. That is the same
+      // objection as `approvalLog` above, with a longer fuse.
+      //
+      // Not gated, not asked-for, NOT THERE. See tests/rulesNotExposed.test.ts
+      // for the import-closure half.
+      'RuleEngine',
+      'ruleEngine',
+      'shared/rules',
+      'services/rules',
+      'sanitiseRule',
+      'ruleMatches',
+      'verifyRuleAction',
+      'checkRuleLimit',
+      'ruleCreationConfirmation',
+      'RULE_UNATTENDED_PHRASE',
+      'rules:list',
+      'rules:create',
+      'rules:enable',
+      'rules:remove',
+      'rules:sweep',
       // The access write half — roadmap item 23. It edits authorized_keys, it
       // is the one write in this app that can lock the operator out of the
       // host they would use to undo it, and it is currently GATED OFF pending
