@@ -415,6 +415,17 @@ export interface BroadcastRequest {
   runId: string
   command: string
   timeoutMs?: number
+  /**
+   * The record of what the user was asked and what they answered — B3.
+   *
+   * Required, and checked in main against a fresh `planBroadcast` over this
+   * very request before a single channel is opened. Before B3 the plan was
+   * computed in the renderer's `useMemo` and thrown away, so `broadcast:run`
+   * took a command and a target list and had no idea whether anybody had
+   * agreed to either. See CommandApproval at the foot of this file for why
+   * that stopped being acceptable.
+   */
+  approval: CommandApproval
   targets: {
     serverId: string
     serverName: string
@@ -439,3 +450,264 @@ export const BROADCAST_TIMEOUT_MS = 60_000
 export const BROADCAST_STALL_GRACE_MS = 30_000
 /** Per-host output kept, in characters. A fan-out can produce a lot. */
 export const BROADCAST_OUTPUT_CAP = 20_000
+
+// ===========================================================================
+// B3: the approval record
+// ===========================================================================
+//
+// WHY THIS IS HERE AND NOT ONLY IN jobs.ts. A job is a broadcast that outlives
+// its panel, and B3's whole point is that there is ONE approval model rather
+// than two. jobs.ts imports this file; this file imports nothing. So the record
+// and the check live at the bottom, where both surfaces can reach them, and the
+// only thing each surface supplies is its own re-derived plan — `planBroadcast`
+// for one command against a flat target list, `planJob` for a step list against
+// cohorts.
+//
+// ---------------------------------------------------------------------------
+// REVERSING A SETTLED DECISION, deliberately, and here is the reasoning
+// ---------------------------------------------------------------------------
+// main/index.ts used to state that main does not re-derive the approval model,
+// because "the renderer is where the user is and is not a trust boundary here".
+// Both halves of that were true and the conclusion has stopped being true, for
+// a reason that did not exist when it was written:
+//
+//   The renderer is where the user is. It is also GONE by the time a detached
+//   job needs re-authorising.
+//
+// B2 made a job outlive the process. A job resumed at the next launch is being
+// acted on by a ShellPilot that never showed anybody a dialog, and "the
+// renderer computed a plan" is not a fact that survives a restart — it was
+// never written down anywhere. `BroadcastPlan` was computed in a `useMemo` and
+// thrown away.
+//
+// This is still not an attacker boundary and is not sold as one: anyone driving
+// the renderer already has a shell on these hosts. What it is, is a RECORD and
+// an AGREEMENT CHECK. The record says what a human was asked and what they
+// answered; the check says the thing about to run is still the thing they were
+// asked about. Those two are what a durable job needs and what neither the
+// renderer-only path nor the AI capability gate produces.
+
+/** A host as it appeared in the list the user confirmed. */
+export interface ApprovalTargetRef {
+  serverId: string
+  serverName: string
+  cohort?: string
+}
+
+/**
+ * What a human was asked, and what they answered.
+ *
+ * Written with the job, in the row, so a process that never saw the dialog can
+ * ask "was this authorised, for exactly this?" and answer from rows alone. It
+ * carries the RESOLVED target list rather than a selection rule for the reason
+ * broadcast refuses saved target sets at all: a rule re-evaluated later is a
+ * blast radius that can grow after consent was given.
+ *
+ * `phrase` is the word the user actually typed, kept because "the dialog
+ * demanded RUN" and "the user typed RUN" are two different facts and only the
+ * second one is consent. It is not a secret and is one of three literals, but
+ * it goes through `redactOutput` on its way to the log with everything else,
+ * because a redaction rule with an exception is a redaction rule someone will
+ * eventually widen.
+ */
+export interface CommandApproval {
+  v: 1
+  /** Which surface produced it. Recorded, never used to weaken a check. */
+  surface: 'broadcast' | 'job'
+  /** The command text of every step, in order, exactly as approved. */
+  commands: string[]
+  targets: ApprovalTargetRef[]
+  risk: BroadcastRisk
+  confirmation: BroadcastConfirmation
+  /** The phrase typed, where one was required. Null where none was. */
+  phrase: string | null
+  confirmedAt: number
+}
+
+export type ApprovalVerdict = { ok: true } | { ok: false; reason: string }
+
+export function isCommandApproval(v: unknown): v is CommandApproval {
+  if (typeof v !== 'object' || v === null) return false
+  const a = v as Partial<CommandApproval>
+  return (
+    a.v === 1 &&
+    (a.surface === 'broadcast' || a.surface === 'job') &&
+    Array.isArray(a.commands) &&
+    a.commands.every((c) => typeof c === 'string') &&
+    Array.isArray(a.targets) &&
+    a.targets.every(
+      (t) =>
+        typeof t === 'object' &&
+        t !== null &&
+        typeof (t as ApprovalTargetRef).serverId === 'string' &&
+        typeof (t as ApprovalTargetRef).serverName === 'string'
+    ) &&
+    (a.risk === 'ordinary' || a.risk === 'elevated' || a.risk === 'destructive') &&
+    typeof a.confirmation === 'object' &&
+    a.confirmation !== null &&
+    (a.phrase === null || typeof a.phrase === 'string') &&
+    typeof a.confirmedAt === 'number' &&
+    Number.isFinite(a.confirmedAt) &&
+    a.confirmedAt > 0
+  )
+}
+
+/**
+ * Mint the record at the moment the human answers.
+ *
+ * The plan is passed in rather than derived here, because the two surfaces
+ * derive it differently — see the header — and a mint that re-derived would be
+ * a third copy of the rule.
+ */
+export function approvalFor(o: {
+  surface: 'broadcast' | 'job'
+  commands: string[]
+  targets: ApprovalTargetRef[]
+  plan: { risk: BroadcastRisk; confirmation: BroadcastConfirmation }
+  phrase?: string | null
+  confirmedAt: number
+}): CommandApproval {
+  return {
+    v: 1,
+    surface: o.surface,
+    commands: [...o.commands],
+    // Copied field by field, so a caller's richer object — a whole Server row,
+    // with a host and a username on it — cannot smuggle itself into a record
+    // that is kept for a year and written to a log.
+    targets: o.targets.map((t) => ({
+      serverId: t.serverId,
+      serverName: t.serverName,
+      ...(t.cohort === undefined ? {} : { cohort: t.cohort })
+    })),
+    risk: o.plan.risk,
+    confirmation: o.plan.confirmation,
+    phrase: o.phrase ?? null,
+    confirmedAt: o.confirmedAt
+  }
+}
+
+/** One line of a command, short enough to put in a refusal message. */
+function snippet(s: string): string {
+  const one = s.replace(/\s+/g, ' ').trim()
+  return one.length <= 60 ? one : `${one.slice(0, 57)}…`
+}
+
+function sameConfirmation(a: BroadcastConfirmation, b: BroadcastConfirmation): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'type-to-confirm' && b.kind === 'type-to-confirm') return a.phrase === b.phrase
+  return true
+}
+
+/**
+ * Is the thing about to run still the thing that was approved?
+ *
+ * Answered from the record and from a FRESH re-derivation, never from the
+ * record alone. The three disagreements it exists to catch are the three that
+ * actually happen:
+ *
+ *  - THE COMMAND WAS EDITED under a stored approval. The record's copy of the
+ *    step text is what makes this visible; comparing the spec to itself would
+ *    always agree.
+ *  - A TARGET WAS ADDED. Consent was given for a blast radius, and a radius
+ *    that grows after the fact is the exact accident the whole model exists to
+ *    prevent.
+ *  - THE CLASSIFIER GOT STRICTER. A command that read `elevated` in the build
+ *    that asked and reads `destructive` in the build that resumes was approved
+ *    against a weaker demand than the one now in force. Refusing is the only
+ *    reading of that which does not silently downgrade a safety rule the
+ *    project deliberately tightened.
+ *
+ * SERVER NAMES ARE NOT COMPARED, and that is a decision rather than an
+ * oversight: a rename changes the label on a machine and not the machine, and
+ * refusing to finish an upgrade because somebody tidied up a workspace name
+ * would be friction with no safety behind it. Ids and cohorts are compared,
+ * because those are what gets connected to and what sized the confirmation.
+ */
+export function verifyApproval(
+  approval: unknown,
+  actual: { commands: string[]; targets: ApprovalTargetRef[] },
+  rederived: { risk: BroadcastRisk; confirmation: BroadcastConfirmation }
+): ApprovalVerdict {
+  if (!isCommandApproval(approval)) {
+    return {
+      ok: false,
+      reason:
+        'no usable approval record came with this run. Nothing runs on a confirmation that was ' +
+        'never written down — re-open the panel and confirm it again.'
+    }
+  }
+
+  if (approval.commands.length !== actual.commands.length) {
+    return {
+      ok: false,
+      reason:
+        `the approval covers ${approval.commands.length} step(s) and this run has ` +
+        `${actual.commands.length}. Confirm it again.`
+    }
+  }
+  for (let i = 0; i < actual.commands.length; i++) {
+    if (approval.commands[i] !== actual.commands[i]) {
+      return {
+        ok: false,
+        reason:
+          `step ${i + 1} was approved as \`${snippet(approval.commands[i])}\` and is now ` +
+          `\`${snippet(actual.commands[i])}\`. An edited command needs a fresh confirmation.`
+      }
+    }
+  }
+
+  const approved = new Map(approval.targets.map((t) => [t.serverId, t.cohort ?? '']))
+  const added = actual.targets.filter((t) => !approved.has(t.serverId))
+  if (added.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `${added.map((t) => t.serverName).join(', ')} ${added.length === 1 ? 'was' : 'were'} not in ` +
+        'the target list that was confirmed. A host added after the fact runs on nobody’s ' +
+        'approval.'
+    }
+  }
+  // A SHRUNK list is allowed, and only in this direction. Resuming three of a
+  // job's fifteen hosts is exactly what B2's reclaim does, and every one of
+  // those three was in the list the user confirmed. Growth is the danger;
+  // shrinkage cannot raise a blast radius. It is still reported below when the
+  // cohort a survivor sits in has changed, because that CAN raise one.
+  for (const t of actual.targets) {
+    const cohort = approved.get(t.serverId)
+    if (cohort !== undefined && cohort !== (t.cohort ?? '')) {
+      return {
+        ok: false,
+        reason:
+          `${t.serverName} was confirmed in wave "${cohort || 'all at once'}" and is now in ` +
+          `"${t.cohort ?? 'all at once'}". Moving a host between waves changes how many run at ` +
+          'once, which is what the confirmation was sized against.'
+      }
+    }
+  }
+
+  if (approval.risk !== rederived.risk) {
+    return {
+      ok: false,
+      reason:
+        `this was approved as \`${approval.risk}\` and now classifies as \`${rederived.risk}\`. ` +
+        'The record is held to the stricter reading, so it needs confirming again.'
+    }
+  }
+  if (!sameConfirmation(approval.confirmation, rederived.confirmation)) {
+    return {
+      ok: false,
+      reason:
+        `this was approved with a \`${approval.confirmation.kind}\` step and now requires ` +
+        `\`${rederived.confirmation.kind}\`. Confirm it again.`
+    }
+  }
+  if (approval.confirmation.kind === 'type-to-confirm' && approval.phrase !== approval.confirmation.phrase) {
+    return {
+      ok: false,
+      reason:
+        `this needed the word ${approval.confirmation.phrase} typed, and the record ` +
+        `${approval.phrase === null ? 'has no typed phrase at all' : 'has a different one'}.`
+    }
+  }
+  return { ok: true }
+}

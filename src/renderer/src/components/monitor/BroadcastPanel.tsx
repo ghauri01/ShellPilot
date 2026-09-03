@@ -6,6 +6,7 @@ import { sshHopsFor } from '../../lib/ssh'
 import { clsx } from '../../lib/format'
 import {
   BROADCAST_OUTCOME_LABEL,
+  approvalFor,
   classifyBroadcastResult,
   planBroadcast,
   summariseBroadcast,
@@ -17,9 +18,19 @@ import type { Server } from '../../types'
 
 // Run one command across many servers.
 //
-// The approval model is in shared/broadcast.ts. This is where it is enforced,
-// because this is where the person is: main runs what it is told, and a second
-// copy of the rule there would be a second thing to drift out of step.
+// The approval model is in shared/broadcast.ts. This is where it is ASKED,
+// because this is where the person is — and since B3 it is no longer the only
+// place it is enforced. This panel mints a CommandApproval from the plan it
+// showed and the phrase that was typed, sends it with the run, and main
+// re-derives the same plan over the same request and refuses if the two
+// disagree.
+//
+// That reverses the note this comment used to carry ("a second copy of the rule
+// in main would be a second thing to drift"), and the reasoning is at the foot
+// of shared/broadcast.ts. In short: the renderer is where the user is, and it
+// is also gone by the time a durable job needs re-authorising — so the plan has
+// to become a record rather than a value in a useMemo, and a record nobody
+// checks is a comment.
 
 // The runner classifies; this is the fallback for a result that predates the
 // field, and it keeps the panel from having a second opinion about what a
@@ -136,6 +147,24 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
 
   const start = async (): Promise<void> => {
     if (targets.length === 0 || command.trim() === '') return
+    // B3: the record is minted HERE, from the plan this panel just showed the
+    // user and the phrase they actually typed — before the state that holds
+    // either is cleared. Until B3 this plan was computed in a useMemo, used to
+    // gate a dialog, and thrown away: `broadcast:run` took a command and a
+    // target list, and main had no idea whether anybody had agreed to either.
+    //
+    // Minted from `plan` and `phrase` rather than re-derived, so what is
+    // recorded is what was on screen. Main re-derives it independently and
+    // refuses if the two disagree, which is the check — a record the sender
+    // also grades would grade nothing.
+    const approval = approvalFor({
+      surface: 'broadcast',
+      commands: [command],
+      targets,
+      plan,
+      phrase: plan.confirmation.kind === 'type-to-confirm' ? phrase.trim() : null,
+      confirmedAt: Date.now()
+    })
     setConfirming(false)
     setPhrase('')
     setError(null)
@@ -154,6 +183,7 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
       await window.shellpilot?.broadcast?.run({
         runId: id,
         command,
+        approval,
         targets: chosen.map((s) => ({
           serverId: s.id,
           serverName: s.name,

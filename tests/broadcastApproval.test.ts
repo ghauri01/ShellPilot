@@ -8,7 +8,10 @@ import {
   planBroadcast,
   summariseBroadcast,
   TYPE_ABOVE_HOSTS,
-  type BroadcastHostResult
+  approvalFor,
+  verifyApproval,
+  type BroadcastHostResult,
+  type CommandApproval
 } from '../src/shared/broadcast'
 
 // The approval model, settled before the executor was written.
@@ -316,5 +319,141 @@ describe('the decision not to escalate on a fan-out', () => {
       kind: 'type-to-confirm',
       phrase: 'RUN'
     })
+  })
+})
+
+// ===========================================================================
+// B3: the plan stops being a value in a useMemo and becomes a record
+// ===========================================================================
+//
+// Before B3, `BroadcastPanel` computed a plan, used it to gate a dialog, and
+// threw it away. `broadcast:run` took a run id, a command and a target list,
+// and main had no idea whether anybody had agreed to any of it. Everything
+// below is about closing that: one record type, one verifier, and both surfaces
+// — broadcast and job — calling them rather than growing a second model each.
+
+describe('the approval record, shared with the job engine', () => {
+  const two = targets(2)
+  const mint = (command: string, t = two, phrase: string | null = null): CommandApproval =>
+    approvalFor({
+      surface: 'broadcast',
+      commands: [command],
+      targets: t,
+      plan: planBroadcast(command, t),
+      phrase,
+      confirmedAt: 1_700_000_000_000
+    })
+
+  const check = (a: unknown, command: string, t = two): ReturnType<typeof verifyApproval> =>
+    verifyApproval(a, { commands: [command], targets: t }, planBroadcast(command, t))
+
+  it('accepts a record that still matches the run it came with', () => {
+    expect(check(mint('uptime'), 'uptime')).toEqual({ ok: true })
+  })
+
+  it('refuses a run with no record at all', () => {
+    const v = check(undefined, 'uptime')
+    expect(v.ok).toBe(false)
+    expect(v.ok === false && v.reason).toMatch(/never written down/i)
+  })
+
+  it('refuses a command edited under the record', () => {
+    const v = check(mint('uptime'), 'rm -rf /var/log')
+    expect(v.ok).toBe(false)
+    expect(v.ok === false && v.reason).toMatch(/approved as `uptime` and is now `rm -rf \/var\/log`/)
+  })
+
+  it('refuses a host added after the record was minted', () => {
+    const v = check(mint('uptime', targets(2)), 'uptime', targets(3))
+    expect(v.ok).toBe(false)
+    expect(v.ok === false && v.reason).toMatch(/host-2 was not in the target list that was confirmed/)
+  })
+
+  it('refuses when the record was graded by a laxer classifier', () => {
+    // The disagreement that comparing a request to itself can never see: same
+    // command, same hosts, a risk grade that has since tightened.
+    const stale = { ...mint('rm -rf /srv'), risk: 'ordinary' as const, confirmation: { kind: 'none' as const }, phrase: null }
+    expect(planBroadcast('rm -rf /srv', two).risk, 'or this proves nothing').toBe('destructive')
+    const v = check(stale, 'rm -rf /srv')
+    expect(v.ok).toBe(false)
+    expect(v.ok === false && v.reason).toMatch(/approved as `ordinary` and now classifies as `destructive`/)
+  })
+
+  it('demands the phrase the model asked for, not merely that the model asked', () => {
+    const command = 'rm -rf /srv'
+    expect(planBroadcast(command, two).confirmation).toEqual({ kind: 'type-to-confirm', phrase: 'RUN' })
+    // The dialog demanded RUN and nobody typed it.
+    const unsigned = check(mint(command, two, null), command)
+    expect(unsigned.ok).toBe(false)
+    expect(unsigned.ok === false && unsigned.reason).toMatch(/no typed phrase at all/)
+    expect(check(mint(command, two, 'RUN'), command)).toEqual({ ok: true })
+  })
+})
+
+describe('where the broadcast approval is enforced', () => {
+  // Source assertions, in the style of the closure walk in
+  // tests/jobsNotExposed.test.ts: the handler lives in main/index.ts, which
+  // cannot be constructed in a unit test, and the property being asserted is
+  // that the wiring exists at all.
+  const main = readFileSync(resolve(__dirname, '../src/main/index.ts'), 'utf8')
+  const panel = readFileSync(
+    resolve(__dirname, '../src/renderer/src/components/monitor/BroadcastPanel.tsx'),
+    'utf8'
+  )
+
+  it('main re-derives the plan and refuses before the runner is reached', () => {
+    const handler = main.slice(main.indexOf("ipcMain.handle('broadcast:run'"))
+    const body = handler.slice(0, handler.indexOf('\n})'))
+    // EACH INDEX IS PROVED TO EXIST BEFORE IT IS ORDERED. `indexOf` returns -1
+    // for a string that is not there, and -1 is less than every real index — so
+    // an ordering assertion on its own passes most loudly against the very bug
+    // it was written to catch: a handler with the throw deleted. That failure
+    // mode is not hypothetical here, it is what the first version of this test
+    // did when the refusal was mutated out.
+    const at = (needle: string): number => {
+      const i = body.indexOf(needle)
+      expect(i, `the broadcast:run handler no longer contains ${needle}`).toBeGreaterThanOrEqual(0)
+      return i
+    }
+    expect(body, 'main must re-derive rather than trust the request').toContain('verifyApproval(')
+    const run = at('broadcast.run(req)')
+    expect(at('verifyApproval(')).toBeLessThan(run)
+    expect(at('planBroadcast(')).toBeLessThan(run)
+    // The refusal has to be a THROW, before the runner. A logged disagreement
+    // that still runs the command is not a refusal.
+    expect(at('throw new Error')).toBeLessThan(run)
+    expect(at('!verdict.ok')).toBeLessThan(run)
+  })
+
+  it('main writes the decision to the job approval log, granted or refused', () => {
+    const handler = main.slice(main.indexOf("ipcMain.handle('broadcast:run'"))
+    const body = handler.slice(0, handler.indexOf('\n})'))
+    expect(body).toContain("event: 'refused'")
+    expect(body).toContain("event: 'granted'")
+    // And the writer is the job approval log, NOT the AI audit log — the
+    // argument is in approvalLog.ts and in docs/AI-SECURITY.md.
+    expect(body).toContain('recordJobApproval(')
+    expect(body).not.toContain('recordAudit(')
+  })
+
+  it('the panel mints the record from the plan it showed and the phrase that was typed', () => {
+    expect(panel).toContain('approvalFor({')
+    expect(panel).toMatch(/surface: 'broadcast'/)
+    // Minted from the plan and the phrase state, not re-derived at send time:
+    // what is recorded has to be what was on screen.
+    expect(panel).toMatch(/phrase: plan\.confirmation\.kind === 'type-to-confirm' \? phrase\.trim\(\) : null/)
+    expect(panel).toMatch(/^\s+approval,$/m)
+  })
+
+  it('does not grow a second approval model beside the shared one', () => {
+    // The whole point of B3. If a future change re-implements the check in
+    // main rather than calling the shared one, this is where it shows up.
+    const shared = readFileSync(resolve(__dirname, '../src/shared/broadcast.ts'), 'utf8')
+    expect(shared.match(/export function verifyApproval/g)).toHaveLength(1)
+    expect(main).not.toMatch(/function verifyApproval/)
+    const jobs = readFileSync(resolve(__dirname, '../src/shared/jobs.ts'), 'utf8')
+    // jobs.ts adapts it, it does not restate it.
+    expect(jobs).toContain('return verifyApproval(')
+    expect(jobs).not.toMatch(/export function verifyApproval\s*\(/)
   })
 })

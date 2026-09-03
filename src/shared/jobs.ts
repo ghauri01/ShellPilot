@@ -1,10 +1,18 @@
 import type {
+  ApprovalVerdict,
   BroadcastConfirmation,
   BroadcastHostOutcome,
   BroadcastHostResult,
-  BroadcastRisk
+  BroadcastRisk,
+  CommandApproval
 } from './broadcast'
-import { assessCommand, classifyBroadcastResult, confirmationFor } from './broadcast'
+import {
+  approvalFor,
+  assessCommand,
+  classifyBroadcastResult,
+  confirmationFor,
+  verifyApproval
+} from './broadcast'
 
 // The vocabulary of a job — roadmap item B1.
 //
@@ -52,8 +60,14 @@ import { assessCommand, classifyBroadcastResult, confirmationFor } from './broad
 // `denyAllPending()` resolves requests that are *pending*; it can do nothing
 // about a job already running on fifteen hosts, because nothing is pending.
 
-export type { BroadcastConfirmation, BroadcastRisk } from './broadcast'
-export { assessCommand, confirmationFor } from './broadcast'
+export type {
+  ApprovalTargetRef,
+  ApprovalVerdict,
+  BroadcastConfirmation,
+  BroadcastRisk,
+  CommandApproval
+} from './broadcast'
+export { assessCommand, confirmationFor, isCommandApproval, verifyApproval } from './broadcast'
 
 // ---------------------------------------------------------------- vocabulary
 
@@ -367,6 +381,138 @@ export function planJob(spec: JobSpec, targets: JobTargetRef[]): JobPlan {
   }
 }
 
+// =========================================================================
+// B3: the approval record, on the job side
+// =========================================================================
+//
+// The record and the check are in shared/broadcast.ts, where a broadcast can
+// also reach them — see the header there for why this reverses main/index.ts's
+// settled "main does not re-derive the approval model". These two functions are
+// the job-shaped adapter over them, and they are the ONLY place a job's plan is
+// turned into a record or checked against one, so the two can never drift.
+
+/** The record, minted at the moment the human answers the dialog. */
+export function jobApprovalFor(
+  spec: JobSpec,
+  targets: JobTargetRef[],
+  o: { phrase?: string | null; confirmedAt: number }
+): CommandApproval {
+  return approvalFor({
+    surface: 'job',
+    commands: spec.steps.map((st) => st.command),
+    targets,
+    plan: planJob(spec, targets),
+    phrase: o.phrase ?? null,
+    confirmedAt: o.confirmedAt
+  })
+}
+
+/**
+ * Is this spec, against this target list, still what the record authorised?
+ *
+ * Run at LAUNCH and again at RESUME, against the stored rows both times. The
+ * two callers differ in what a refusal means and not in what it checks — see
+ * JobRunner.run and JobRunner.reclaim.
+ */
+export function verifyJobApproval(
+  approval: unknown,
+  spec: JobSpec,
+  targets: JobTargetRef[]
+): ApprovalVerdict {
+  return verifyApproval(
+    approval,
+    { commands: spec.steps.map((st) => st.command), targets },
+    planJob(spec, targets)
+  )
+}
+
+/**
+ * What a job's approval lifecycle writes down, one row per event.
+ *
+ * NOT the AI audit log. `recordAudit` writes `shellpilot-ai-audit.jsonl`, whose
+ * entries are agent-shaped — `agentName`, `capability`, `approval` — and which
+ * docs/AI-SECURITY.md describes as a record of the MCP bridge specifically. A
+ * job is human-only by construction (durability defeats revocation; see the
+ * header of this file), so every row it wrote there would be an AI-labelled row
+ * that no AI produced, which is how a log stops being trusted. That argument is
+ * already settled in this repository for the local terminal, which writes
+ * `shellpilot-local-sessions.jsonl` for the same reason, and this follows the
+ * precedent rather than reopening it: a third file, same discipline —
+ * append-only, 0600, redacted before it is written.
+ */
+export interface JobApprovalEntry {
+  id: string
+  timestamp: string
+  surface: 'broadcast' | 'job'
+  event: JobApprovalEvent
+  /** The job id, or a broadcast run id. */
+  jobId: string
+  title: string
+  risk: BroadcastRisk
+  /** `none`, `confirm` or `type-to-confirm`. */
+  confirmation: string
+  /** The word the user typed, where one was required. */
+  phrase: string | null
+  confirmedAt: number | null
+  /** Server NAMES, not ids: a year later the id is a uuid nobody can place. */
+  hosts: string[]
+  /** The step commands, redacted. */
+  commands: string[]
+  /** Why it was refused, or why a resumed job may not start new hosts. */
+  reason?: string
+}
+
+/**
+ * The four things that can happen to an approval, and why there are four.
+ *
+ *  - `granted`   — verified at launch, work started.
+ *  - `refused`   — the record and the run disagreed, or there was no record.
+ *                  Nothing ran.
+ *  - `resumed`   — a job adopted after a restart, whose record still verifies,
+ *                  is being followed to the end on the hosts already running.
+ *  - `sealed`    — that same job may NOT start the hosts it never reached. It
+ *                  is a separate row from `resumed` because it is a separate
+ *                  fact, and it is the one an operator asks about afterwards:
+ *                  "why did twelve of these say not run".
+ */
+export type JobApprovalEvent = 'granted' | 'refused' | 'resumed' | 'sealed'
+
+/**
+ * RE-CONSENT ON RESUME, decided.
+ *
+ * A job resumed WITHIN THE SAME PROCESS LIFETIME carries its approval. Nothing
+ * about the world changed between the dialog and the resume: the same process
+ * that showed a human the target list is the one acting on it, and re-asking
+ * would be friction with no fact behind it.
+ *
+ * A job ADOPTED AFTER A RESTART may finish the hosts that are already running,
+ * and may NOT start a host it never reached. Both halves are deliberate:
+ *
+ *  - FINISHING IS NOT AN ACTION. The command is running on that machine whether
+ *    or not ShellPilot is watching; refusing to read its output does not
+ *    un-run it, it only throws away the exit status of something already
+ *    happening. A refusal that destroys the record while leaving the risk is
+ *    the worst of both.
+ *  - STARTING IS AN ACTION, and there is no longer anyone to ask. The dialog is
+ *    minutes or days old, against a target list that may have drifted, and the
+ *    window that produced it is gone. B2's reclaim() already refused this, with
+ *    the reasoning "that would run a destructive command on twelve machines on
+ *    a confirmation this process never saw a human give". B3 makes that refusal
+ *    PRINCIPLED rather than incidental: the record now exists, it is re-checked,
+ *    and the refusal is written down with the record's own timestamp on it.
+ *
+ * The alternative — carrying an approval across a restart — was considered and
+ * rejected. It is defensible for a one-host `uptime` and indefensible for the
+ * case this engine exists for, and a rule that holds only for the harmless half
+ * of its inputs is not a rule.
+ */
+export const JOB_RESUME_NOT_REAUTHORISED = (confirmedAt: number | null): string =>
+  'ShellPilot stopped before this host was reached, and it was not started at the next launch. ' +
+  (confirmedAt === null
+    ? 'The job carries no confirmation this process could check.'
+    : `The confirmation it was authorised with was given at ${new Date(confirmedAt).toISOString()}, ` +
+      'by a window that is gone — a host that never started needs a fresh one.')
+
 // ------------------------------------------------------------------ records
 
 /**
@@ -396,8 +542,23 @@ export interface JobRecord {
    *  today's classifier over yesterday's command and possibly getting a
    *  different answer. */
   confirmation: BroadcastConfirmation
-  /** When the user satisfied that confirmation. B3 makes this authoritative. */
+  /** When the user satisfied that confirmation. Read from `approval` below,
+   *  which is the authority — this column is the queryable summary of it. */
   confirmedAt: number | null
+  /**
+   * The full approval record — B3.
+   *
+   * `risk`, `confirmation` and `confirmedAt` above are a SUMMARY of this, kept
+   * as columns because a list renders them. The record is what a later process
+   * checks: it carries the step text and the resolved target list as confirmed,
+   * so "was this authorised, for exactly this?" is answerable from rows alone
+   * rather than by re-running today's classifier over yesterday's command and
+   * hoping it agrees.
+   *
+   * `null` only for a row written before B3 — and such a row can be read and
+   * displayed but can never be resumed, which is the safe direction.
+   */
+  approval: CommandApproval | null
   state: JobState
   startedAt: number | null
   endedAt: number | null
@@ -498,10 +659,19 @@ export interface JobRunRequest {
   jobId: string
   workspaceId?: string | null
   spec: JobSpec
-  /** Satisfied at plan time in the renderer, where the user is. Persisted with
-   *  the job so the record says what was asked of them. B3 moves the
-   *  enforcement into main. */
-  confirmedAt?: number
+  /**
+   * What the user was asked and what they answered — B3.
+   *
+   * Required. Main re-derives `planJob` over this very spec and target list and
+   * refuses the run if the record disagrees; there is no path that starts a job
+   * on a confirmation nobody wrote down. The renderer mints it with
+   * `jobApprovalFor` at the moment the dialog is satisfied.
+   *
+   * This replaces B1's bare `confirmedAt`, which said WHEN somebody agreed and
+   * nothing about what to. `approval.confirmedAt` is the same timestamp with a
+   * subject attached.
+   */
+  approval: CommandApproval
   targets: {
     serverId: string
     serverName: string

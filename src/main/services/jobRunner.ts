@@ -12,8 +12,11 @@ import type {
   JobRunRequest,
   JobSpec
 } from '../../shared/jobs'
+import type { ApprovalVerdict, CommandApproval, JobApprovalEntry } from '../../shared/jobs'
 import {
   JOB_ABANDONED_ERROR,
+  JOB_RESUME_NOT_REAUTHORISED,
+  verifyJobApproval,
   isJobDetachedHandle,
   isJobHostLive,
   JOB_CLASSIFY_BYTES,
@@ -200,6 +203,17 @@ export interface JobExecUpdate {
 export type JobExecutor = (req: JobExecRequest) => Promise<JobExecResult>
 
 /**
+ * What the worker loop needs, which is deliberately less than a run request.
+ *
+ * `approval` is checked once, at the top of run() and again at the top of
+ * reclaim(), and never consulted again — a per-host re-check would be the same
+ * question asked fifteen times with no new information, and would invite the
+ * mistake of letting one host's answer differ from another's. So the loop takes
+ * the spec, the targets and the ids, and cannot see the record at all.
+ */
+export type JobRunContext = Omit<JobRunRequest, 'approval'>
+
+/**
  * The slice of the store a runner may touch.
  *
  * Structural rather than `HistoryStore`, so nothing here can reach the metric
@@ -242,6 +256,20 @@ export interface JobRunnerDeps {
   schedule?: (fn: () => void) => void
   /** Overridable for tests; see JOB_STALL_GRACE_MS. */
   stallGraceMs?: number
+  /**
+   * Where an approval decision is written down — B3.
+   *
+   * Injected rather than imported, for the reason `store` is: this class must
+   * stay constructible without an Electron `app` object, and the real writer
+   * needs `app.getPath('userData')`. main wires it to `recordJobApproval`, and
+   * a test hands in an array.
+   *
+   * Optional, and a missing one is a missing LOG rather than a missing CHECK.
+   * The refusal below happens either way; what a build without this loses is
+   * the record of it, and a safety rule that could be turned off by not passing
+   * a callback would be no rule at all.
+   */
+  approvalLog?: (entry: Omit<JobApprovalEntry, 'id' | 'timestamp'>) => void
 }
 
 interface RunState {
@@ -302,6 +330,20 @@ export class JobRunner {
   /** Reclaimed jobs still running, so a caller can wait for one without the
    *  startup path having to. See reclaim(). */
   private settling = new Map<string, Promise<void>>()
+
+  // WHERE THE RE-CONSENT RULE ACTUALLY LIVES — B3, and it is not a field.
+  //
+  // The rule (JOB_RESUME_NOT_REAUTHORISED in shared/jobs.ts) is that a job
+  // resumed within one process lifetime carries its approval, and one adopted
+  // after a restart may finish but not start. An earlier draft of this class
+  // held a `Set` of "job ids whose approval this process witnessed" to express
+  // it. That set was written and never read, because the rule is already
+  // STRUCTURAL: run() is the same-lifetime path and starts every host it was
+  // given; reclaim() is the cross-restart path and starts none — it resumes
+  // only hosts whose row already carries a marker handle, and closes the rest.
+  // The set was removed rather than kept as documentation, because a field
+  // that claims to be a mechanism and is read by nothing is how a guard comes
+  // to be believed in without existing.
 
   constructor(private readonly deps: JobRunnerDeps) {}
 
@@ -452,10 +494,10 @@ export class JobRunner {
   /**
    * Pick up detached jobs from a previous run of this app.
    *
-   * FROM THE ROWS ALONE. This instance never saw these jobs start, has no
-   * memory of the dialog that authorised them and no channel to any of them —
-   * it has a marker directory, a byte offset and a step number, which between
-   * them are everything the poller needs. That is the whole claim B2 makes and
+   * FROM THE ROWS ALONE. This instance never saw these jobs start and has no
+   * channel to any of them — it has a marker directory, a byte offset, a step
+   * number and, since B3, the approval record that authorised the whole thing,
+   * which between them are everything the poller needs. That is the whole claim B2 makes and
    * it is why the handle is written to the row before the first poll rather
    * than held in memory.
    *
@@ -465,10 +507,14 @@ export class JobRunner {
    *     hosts are detached and whose remaining twelve are `pending` resumes
    *     three and closes twelve as "not run". Launching them would be running
    *     a destructive command on twelve machines on the strength of a
-   *     confirmation this process never saw a human give — `BroadcastPlan`
-   *     never reaches main, and main deliberately does not re-derive it. That
-   *     is B3's item, and quietly acting as though it were already done would
-   *     make B3 a correction rather than an addition.
+   *     confirmation this process never saw a human give.
+   *
+   *     B2 made this refusal because it had no record to check. B3 gave it
+   *     one, re-checks it here, and KEPT THE REFUSAL — see
+   *     JOB_RESUME_NOT_REAUTHORISED in shared/jobs.ts. The record makes it
+   *     principled rather than incidental: finishing a host is not an action,
+   *     because the command is running on that machine whether or not anyone
+   *     is watching, and starting one is — with nobody left to ask.
    *  2. A HOST WHOSE SERVER IS GONE IS NOT GUESSED AT. If the workspace no
    *     longer has that server there is no way to connect, and the row says so
    *     rather than sitting at `detached` forever.
@@ -494,9 +540,61 @@ export class JobRunner {
       this.active.set(job.id, state)
       const owns = (): boolean => this.active.get(job.id) === state
 
+      // ---- B3: the same re-derivation as at launch, over the STORED rows.
+      //
+      // What a refusal means here is different from what it means in run(),
+      // and the difference is the whole of the re-consent decision written out
+      // at JOB_RESUME_NOT_REAUTHORISED in shared/jobs.ts:
+      //
+      //  - FINISHING IS NOT AN ACTION. The command is running on that machine
+      //    whether or not we watch. Refusing to read its `out` file does not
+      //    un-run it; it throws away the exit status of something already
+      //    happening and leaves the marker directory behind. So a disagreement
+      //    is recorded loudly and the resumable hosts are still followed.
+      //  - STARTING IS AN ACTION, and it is refused unconditionally — see the
+      //    loop below, which closes every host this job never reached whether
+      //    the record verifies or not. That refusal is B2's, and B3 gives it
+      //    its reason and its timestamp.
+      //
+      // The check is against the FULL stored target list, not the resumable
+      // subset: three of fifteen hosts re-derives a smaller blast radius and
+      // therefore a weaker confirmation than the one recorded, and refusing a
+      // partial resume on that basis would punish the job for having been
+      // interrupted.
+      //
+      // Cohorts come from the record rather than from the rows, because there
+      // is nowhere else for them to be: `job_target` has no cohort column, so
+      // nothing can edit one and there is nothing to detect. B4 adds staged
+      // cohorts and the column with them, and this line becomes a read of the
+      // row instead.
+      const cohorts = new Map((job.approval?.targets ?? []).map((t) => [t.serverId, t.cohort]))
+      const verdict: ApprovalVerdict = verifyJobApproval(
+        job.approval,
+        job.spec,
+        job.targets.map((t) => ({
+          serverId: t.serverId,
+          serverName: t.serverName,
+          cohort: cohorts.get(t.serverId)
+        }))
+      )
+      const logReq = { jobId: job.id, spec: job.spec, approval: job.approval, targets: job.targets }
+      if (verdict.ok) {
+        this.logApproval(logReq, 'resumed')
+      } else {
+        this.logApproval(logReq, 'refused', verdict.reason)
+        store.recordEvent(
+          'job-approval-disagreed',
+          null,
+          { jobId: job.id, title: job.title, reason: verdict.reason, hosts: resumable.length },
+          this.now
+        )
+      }
+
       // Everything that was NOT launched is closed before anything is resumed,
       // so the job's own row is honest for the whole of the time it takes.
       const at = this.now
+      const notReauthorised = JOB_RESUME_NOT_REAUTHORISED(job.approval?.confirmedAt ?? job.confirmedAt)
+      let sealed = 0
       for (const t of job.targets) {
         if (reclaimable(t)) continue
         if (t.state === 'running') {
@@ -507,30 +605,37 @@ export class JobRunner {
             endedAt: at
           })
         } else if (t.state === 'pending' || t.state === 'waiting') {
+          sealed++
           store.updateJobTarget(job.id, t.serverId, {
             state: 'skipped',
             outcome: 'cancelled',
-            error:
-              'ShellPilot stopped before this host was reached. It was not started at the next ' +
-              'launch, because the confirmation the job was authorised with does not survive a ' +
-              'restart yet.',
+            error: notReauthorised,
             endedAt: at
           })
         }
       }
+      // A row of its own, because "twelve hosts were never started, and here is
+      // the approval that would have had to authorise them" is the question an
+      // operator asks afterwards and the one a `resumed` row does not answer.
+      if (sealed > 0) this.logApproval(logReq, 'sealed', notReauthorised)
       store.recordEvent(
         'job-reclaimed',
         null,
-        { jobId: job.id, title: job.title, hosts: resumable.length },
+        {
+          jobId: job.id,
+          title: job.title,
+          hosts: resumable.length,
+          sealed,
+          approval: verdict.ok ? 'verified' : 'disagreed'
+        },
         at
       )
       this.emitJob(job.id)
 
-      const req: JobRunRequest = {
+      const req: JobRunContext = {
         jobId: job.id,
         workspaceId: job.workspaceId,
         spec: job.spec,
-        confirmedAt: job.confirmedAt ?? undefined,
         targets: resumable.map((t) => ({
           serverId: t.serverId,
           serverName: t.serverName,
@@ -613,6 +718,42 @@ export class JobRunner {
     return out
   }
 
+  /**
+   * Write one approval decision down — B3.
+   *
+   * Every free-text field is redacted by the WRITER (`recordJobApproval`), not
+   * here, so a build that swaps the writer cannot lose the redaction with it.
+   * What this owes the writer is the right fields, and the awkward one is
+   * `commands`: a job's step text is exactly where an operator pastes a
+   * connection string with a password in it, so it goes through the same rules
+   * as everything else rather than being trusted for being short.
+   */
+  private logApproval(
+    req: { jobId: string; spec: JobSpec; approval?: CommandApproval | null; targets: { serverName: string }[] },
+    event: JobApprovalEntry['event'],
+    reason?: string
+  ): void {
+    const log = this.deps.approvalLog
+    if (!log) return
+    const a = req.approval ?? null
+    log({
+      surface: 'job',
+      event,
+      jobId: req.jobId,
+      title: req.spec.title,
+      // From the RECORD where there is one, and from a fresh derivation where
+      // there is not — a refusal for "no approval record at all" still has to
+      // say how dangerous the thing somebody tried to run reads.
+      risk: a?.risk ?? planJob(req.spec, []).risk,
+      confirmation: a?.confirmation.kind ?? 'none',
+      phrase: a?.phrase ?? null,
+      confirmedAt: a?.confirmedAt ?? null,
+      hosts: req.targets.map((t) => t.serverName),
+      commands: req.spec.steps.map((st) => st.command),
+      ...(reason === undefined ? {} : { reason })
+    })
+  }
+
   /** Resolves when a reclaimed job has finished. Undefined for a job that is
    *  not being reclaimed. */
   whenSettled(jobId: string): Promise<void> | undefined {
@@ -672,6 +813,33 @@ export class JobRunner {
     if (this.active.has(req.jobId)) {
       throw new Error(`a job with id ${req.jobId} is already running`)
     }
+
+    // ---- B3: main re-derives the approval model, and refuses on disagreement.
+    //
+    // This reverses the decision main/index.ts used to state — "main
+    // deliberately does not re-derive it, because the renderer is where the
+    // user is" — and the reasoning is written out at the foot of
+    // shared/broadcast.ts rather than in a commit message, because the original
+    // decision was correct for what it was deciding and it is the PREMISE that
+    // changed: the renderer is where the user is, and it is also gone by the
+    // time a detached job needs re-authorising.
+    //
+    // BEFORE THE ROW IS CREATED, not after. A refused job leaves no `queued`
+    // row for adopt() to find and close as `abandoned`, which would put a job
+    // nobody ever ran into a year-long record as one that was interrupted.
+    const verdict = verifyJobApproval(req.approval, req.spec, req.targets)
+    if (!verdict.ok) {
+      this.logApproval(req, 'refused', verdict.reason)
+      this.deps.store.recordEvent(
+        'job-refused',
+        null,
+        { jobId: req.jobId, title: req.spec.title, reason: verdict.reason },
+        this.now
+      )
+      throw new Error(`This job was not started: ${verdict.reason}`)
+    }
+    this.logApproval(req, 'granted')
+
     const state: RunState = { cancelled: false, disposed: false }
     this.active.set(req.jobId, state)
     // Identity, not `has(jobId)`. Everything after an await asks this before it
@@ -690,11 +858,18 @@ export class JobRunner {
       kind: req.spec.kind,
       spec: req.spec,
       risk: plan.risk,
-      // Recorded as it was demanded rather than re-derived on read. B3 turns
-      // this into a full approval record; persisting the demand now means a job
-      // read back after a restart can say what standard it was held to.
+      // Recorded as it was demanded rather than re-derived on read: a job read
+      // back after a restart says what standard it was held to, rather than
+      // re-running today's classifier over yesterday's command and possibly
+      // getting a different answer.
+      //
+      // From the PLAN and not from the record, even though the check above has
+      // just proved the two agree. Writing the re-derivation is what makes the
+      // agreement a fact about this build rather than a copy of a claim the
+      // caller made about itself.
       confirmation: plan.confirmation,
-      confirmedAt: req.confirmedAt ?? null,
+      confirmedAt: req.approval.confirmedAt,
+      approval: req.approval,
       state: 'queued',
       targets: req.targets.map((t, i) => ({
         serverId: t.serverId,
@@ -830,7 +1005,7 @@ export class JobRunner {
   }
 
   private async runOne(
-    req: JobRunRequest,
+    req: JobRunContext,
     target: JobRunRequest['targets'][number],
     state: RunState,
     owns: () => boolean,

@@ -11,7 +11,14 @@ import {
 import { JobRunner, type JobExecResult, type JobExecutor } from '../src/main/services/jobRunner'
 import { detachedJobExecutor, type JobRunResult } from '../src/main/services/jobDetached'
 import { assessCommand } from '../src/shared/broadcast'
-import type { JobHostCapabilityReport, JobOutput, JobProgress, JobSpec } from '../src/shared/jobs'
+import type {
+  JobHostCapabilityReport,
+  JobOutput,
+  JobProgress,
+  JobRunRequest,
+  JobSpec,
+  JobTargetRef
+} from '../src/shared/jobs'
 import {
   JOB_CMD_PREFIX,
   JOB_LAUNCH_GRACE_MS,
@@ -21,9 +28,24 @@ import {
   buildJobPoll,
   buildJobProbe,
   isJobDetachedHandle,
+  jobApprovalFor,
   nextRetryDelay,
+  planJob,
   restartsTheMachine
 } from '../src/shared/jobs'
+
+/** B3's record, minted from the same planJob the runner re-derives. See the
+ *  fuller note on the twin of this in tests/jobRunner.test.ts. */
+function approved(req: Omit<JobRunRequest, 'approval'>): JobRunRequest {
+  const plan = planJob(req.spec, req.targets as JobTargetRef[])
+  return {
+    ...req,
+    approval: jobApprovalFor(req.spec, req.targets, {
+      phrase: plan.confirmation.kind === 'type-to-confirm' ? plan.confirmation.phrase : null,
+      confirmedAt: 1_700_000_000_000
+    })
+  }
+}
 
 // B2: a job that outlives the connection that started it.
 //
@@ -1128,11 +1150,11 @@ describe('picking a job up after a restart', () => {
       emitOutput: (o) => outputs.push(o),
       schedule: (fn) => ticks.push(fn)
     })
-    const run = runner.run({
+    const run = runner.run(approved({
       jobId: 'j1',
       spec,
       targets: [{ serverId: 'a', serverName: 'web-1', cfg: { id: 'a' } }]
-    })
+    }))
     await first.flush()
     const marker = host.dir
     host.write(marker, 'first half\n')
@@ -1199,14 +1221,14 @@ describe('picking a job up after a restart', () => {
       emitOutput: () => {},
       schedule: () => {}
     })
-    const run = runner.run({
+    const run = runner.run(approved({
       jobId: 'j2',
       spec: { ...spec, concurrency: 1 },
       targets: [
         { serverId: 'a', serverName: 'web-1', cfg: { id: 'a' } },
         { serverId: 'b', serverName: 'web-2', cfg: { id: 'b' } }
       ]
-    })
+    }))
     await first.flush()
     runner.disposeAll()
     await first.tick()
@@ -1231,7 +1253,11 @@ describe('picking a job up after a restart', () => {
     const b = done?.targets.find((t) => t.serverId === 'b')
     expect(b?.state).toBe('skipped')
     expect(b?.outcome).toBe('cancelled')
-    expect(b?.error).toMatch(/does not survive a restart yet/i)
+    // B3 gave this refusal its reason and its timestamp. It is still the same
+    // refusal — B2 made it, and made it for the right reason — but the sentence
+    // now names the confirmation it would have had to run on.
+    expect(b?.error).toMatch(/needs a fresh one/i)
+    expect(b?.error).toMatch(/was not started at the next launch/i)
     expect(host.dirs.size, 'nothing new was launched anywhere').toBe(0)
   })
 
@@ -1246,11 +1272,11 @@ describe('picking a job up after a restart', () => {
       emitOutput: () => {},
       schedule: () => {}
     })
-    const run = runner.run({
+    const run = runner.run(approved({
       jobId: 'j3',
       spec,
       targets: [{ serverId: 'a', serverName: 'web-1', cfg: { id: 'a' } }]
-    })
+    }))
     await first.flush()
     runner.disposeAll()
     await first.tick()
@@ -1287,11 +1313,11 @@ describe('picking a job up after a restart', () => {
       emitOutput: () => {},
       schedule: () => {}
     })
-    void runner.run({
+    void runner.run(approved({
       jobId: 'j4',
       spec,
       targets: [{ serverId: 'a', serverName: 'web-1', cfg: { id: 'a' } }]
-    })
+    }))
     await Promise.resolve()
     runner.disposeAll()
 
@@ -1321,6 +1347,10 @@ describe('picking a job up after a restart', () => {
       risk: 'elevated',
       confirmation: { kind: 'confirm' },
       confirmedAt: null,
+      // A pre-B3 row: no approval record at all. It stays READABLE, which is
+      // the whole of what this test asserts, and reclaim() refuses to resume it
+      // — see tests/jobApproval.test.ts.
+      approval: null,
       state: 'running',
       targets: [{ serverId: 'a', serverName: 'web-1', ord: 0, state: 'pending' }]
     })

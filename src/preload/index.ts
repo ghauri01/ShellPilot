@@ -111,6 +111,12 @@ type ThemeMode = 'dark' | 'light' | 'system'
 const jobsBridge: JobsBridge = {
   list: (limit?: number): Promise<JobRecord[]> => ipcRenderer.invoke('jobs:list', limit),
   get: (jobId: string): Promise<JobDetail | null> => ipcRenderer.invoke('jobs:get', jobId),
+  // The request carries a `CommandApproval` — B3. It is not decoration and the
+  // preload does not check it: main re-derives `planJob` over this very spec
+  // and target list and refuses the run if the record disagrees, so a caller
+  // that forges or omits one gets a sentence back rather than a job. Verifying
+  // it here as well would be a second copy of the rule in the one place that
+  // has no more information than the sender.
   run: (req: JobRunRequest): Promise<JobDetail> => ipcRenderer.invoke('jobs:run', req),
   cancel: (jobId: string): Promise<boolean> => ipcRenderer.invoke('jobs:cancel', jobId),
   // Pushed from the renderer's settings the way ssh.setPoolIdle is, because

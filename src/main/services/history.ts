@@ -13,7 +13,8 @@ import type {
   JobState
 } from '../../shared/jobs'
 import { JOB_OUTPUT_RETENTION_DAYS, JOB_RECORD_RETENTION_DAYS, isJobDetachedHandle } from '../../shared/jobs'
-import type { BroadcastConfirmation, BroadcastRisk } from '../../shared/broadcast'
+import type { BroadcastConfirmation, BroadcastRisk, CommandApproval } from '../../shared/broadcast'
+import { isCommandApproval } from '../../shared/broadcast'
 
 // A durable store for samples, events and facts — roadmap item A.
 //
@@ -171,6 +172,9 @@ export interface NewJob {
   risk: BroadcastRisk
   confirmation: BroadcastConfirmation
   confirmedAt: number | null
+  /** B3's approval record. `null` is accepted so a caller that genuinely has
+   *  none writes a row that says so, rather than one that lies by omission. */
+  approval: CommandApproval | null
   state: JobState
   targets: { serverId: string; serverName: string; ord: number; state: JobHostState }[]
 }
@@ -549,6 +553,21 @@ CREATE TABLE IF NOT EXISTS job (
   risk TEXT NOT NULL,
   confirmation TEXT NOT NULL,
   confirmed_at INTEGER,
+  -- B3's approval record, as JSON: the step text and the resolved target list
+  -- exactly as the user confirmed them, the risk, the confirmation kind, and
+  -- the phrase they actually typed where one was required.
+  --
+  -- The three columns above are a SUMMARY of it and are kept because a list
+  -- renders them; this is what the runner re-checks at launch and at resume.
+  -- Storing the commands and targets a SECOND time, next to spec and
+  -- job_target, is the point rather than a redundancy: comparing the spec to
+  -- itself would always agree, and the whole question is whether the spec has
+  -- moved since somebody agreed to it.
+  --
+  -- One column of JSON rather than three, for the detached column's reason: nothing
+  -- queries inside it, it is read whole by one caller and written whole by one.
+  -- NULL for a row written before B3 — readable, never resumable.
+  approval TEXT,
   state TEXT NOT NULL,
   started_at INTEGER,
   ended_at INTEGER,
@@ -614,7 +633,12 @@ CREATE TABLE IF NOT EXISTS job_output (
 // bumped anyway, because the first change that CANNOT be expressed that way
 // needs to know which shape it is starting from, and a version that only moves
 // when someone remembers is a version nobody can trust.
-const SCHEMA_VERSION = '3'
+// 4 is B3's `job.approval`. Bumped even though `migrateJob` below adds the
+// column by hand for the same reason 3 was: the number is what the first change
+// that CANNOT be expressed as an idempotent ALTER will need in order to know
+// which shape it is starting from, and a version that only moves when someone
+// remembers is a version nobody can trust.
+const SCHEMA_VERSION = '4'
 
 /**
  * The first change that CANNOT be expressed as `CREATE TABLE IF NOT EXISTS`,
@@ -638,6 +662,17 @@ function migrateJobTarget(db: Db): void {
   if (cols.length === 0) return // the table is about to be created with the column
   if (cols.some((c) => String(c.name) === 'detached')) return
   db.exec('ALTER TABLE job_target ADD COLUMN detached TEXT')
+}
+
+/** B3's approval record, added to `job` the same way and for the same reasons.
+ *  A store that already has the table keeps every row it had; the new column is
+ *  NULL on all of them, which reads as "written before approvals were recorded"
+ *  and is exactly what such a row is. */
+function migrateJob(db: Db): void {
+  const cols = db.prepare('PRAGMA table_info(job)').all() as { name?: unknown }[]
+  if (cols.length === 0) return
+  if (cols.some((c) => String(c.name) === 'approval')) return
+  db.exec('ALTER TABLE job ADD COLUMN approval TEXT')
 }
 
 // ---------------------------------------------------------------------------
@@ -839,6 +874,7 @@ function openStore(mod: SqliteModule, path: string): HistoryStore {
   // job_target has to gain the column. On a fresh store the table is not there
   // yet and this is a no-op.
   migrateJobTarget(db)
+  migrateJob(db)
   db.exec(SCHEMA)
   db.exec(`INSERT INTO meta (k, v) VALUES ('schema', '${SCHEMA_VERSION}')
            ON CONFLICT(k) DO UPDATE SET v = excluded.v`)
@@ -1061,16 +1097,16 @@ function buildStore(
     // ---- Jobs -------------------------------------------------------------
     jobInsert: db.prepare(
       'INSERT INTO job (id, created_at, workspace_id, title, kind, spec, risk, confirmation, ' +
-        'confirmed_at, state, started_at, ended_at, cancelled_at) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL) ' +
+        'confirmed_at, approval, state, started_at, ended_at, cancelled_at) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL) ' +
         // A re-run under an id that already exists would otherwise throw and
         // lose the run; replacing the row is the only sane reading of "start
         // this job", and the targets below are replaced with it.
         'ON CONFLICT(id) DO UPDATE SET created_at = excluded.created_at, ' +
         '  workspace_id = excluded.workspace_id, title = excluded.title, kind = excluded.kind, ' +
         '  spec = excluded.spec, risk = excluded.risk, confirmation = excluded.confirmation, ' +
-        '  confirmed_at = excluded.confirmed_at, state = excluded.state, ' +
-        '  started_at = NULL, ended_at = NULL, cancelled_at = NULL'
+        '  confirmed_at = excluded.confirmed_at, approval = excluded.approval, ' +
+        '  state = excluded.state, started_at = NULL, ended_at = NULL, cancelled_at = NULL'
     ),
     jobTargetInsert: db.prepare(
       'INSERT INTO job_target (job_id, server_id, server_name, ord, state, outcome, exit_code, ' +
@@ -1558,6 +1594,7 @@ function buildStore(
           job.risk,
           JSON.stringify(job.confirmation),
           job.confirmedAt,
+          job.approval === null ? null : JSON.stringify(job.approval),
           job.state
         )
         for (const t of job.targets) {
@@ -1824,6 +1861,12 @@ function toJobRecord(r: SqliteRow): JobRecord {
       kind: 'confirm'
     },
     confirmedAt: optNum(r.confirmed_at),
+    // Validated on the way out, not merely parsed, for readHandle's reason: a
+    // record that does not check out is a row from another build or one
+    // somebody edited, and the runner is about to decide whether to start
+    // commands on the strength of it. `null` reads exactly like a pre-B3 row,
+    // which cannot be resumed — the safe direction.
+    approval: readApproval(r.approval),
     // Read back as whatever the row says, NOT narrowed to the states this
     // build knows. A B2 row saying `detached` must come back saying
     // `detached` — a read that silently maps an unknown state onto a known one
@@ -1862,6 +1905,12 @@ function toJobTarget(r: SqliteRow): JobHostResult {
     // attached row — the safe direction.
     detached: readHandle(r.detached)
   }
+}
+
+function readApproval(v: unknown): CommandApproval | null {
+  if (v === null || v === undefined) return null
+  const parsed = safeParse(String(v))
+  return isCommandApproval(parsed) ? parsed : null
 }
 
 function readHandle(v: unknown): JobDetachedHandle | null {

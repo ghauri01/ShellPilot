@@ -72,6 +72,7 @@ import { KubernetesReader } from './services/kubernetes'
 import { buildK8sLogsCommand } from '../shared/kubernetes'
 import type { K8sRolloutTarget } from '../shared/kubernetes'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
+import { planBroadcast, verifyApproval } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
   webhookConfigure,
@@ -195,6 +196,7 @@ import {
   biometricUnlock
 } from './services/biometrics'
 import { listAudit } from './services/auditLog'
+import { recordJobApproval } from './services/approvalLog'
 import { startMcpServer, stopMcpServer, mcpServerStatus, explainSessionAccess } from './services/mcpServer'
 
 const isDev = !app.isPackaged
@@ -668,6 +670,12 @@ function startHistory(): void {
       // the job engine, and that is unchanged. The CONFIG IS NOT STORED WITH
       // THE JOB, deliberately — it can carry an inline credential, and the job
       // store is a year-long record.
+      // B3: reclaim re-derives the approval model over the stored spec and
+      // target list before it resumes anything, and refuses to START a host
+      // this process never saw a human authorise. It still FINISHES the hosts
+      // already running — the command is on that machine either way, and
+      // refusing to read its exit status would discard the record while
+      // leaving the risk.
       const reclaimed = jobRunner.reclaim({
         cfgFor: (serverId) => {
           const server = getCachedServer(serverId)
@@ -845,12 +853,30 @@ ipcMain.handle('fleet:facts', (_e, serverId: string) => fleetSampler.factsFor(se
 
 // ---- Run one command across many servers ----
 //
-// The approval model is in shared/broadcast.ts and is enforced in the renderer,
-// where the user is. Main deliberately does not re-derive it: a second copy of
-// a safety rule is a second thing to drift, and the renderer is not a trust
-// boundary here — anyone driving it already has a terminal on these hosts.
+// THIS COMMENT USED TO SAY THE OPPOSITE, and the reversal is roadmap item B3.
+// What stood here was:
 //
-// What main owns is the part the renderer cannot do safely: bounded
+//     "The approval model ... is enforced in the renderer, where the user is.
+//      Main deliberately does not re-derive it: a second copy of a safety rule
+//      is a second thing to drift, and the renderer is not a trust boundary
+//      here — anyone driving it already has a terminal on these hosts."
+//
+// Every clause of that is still true and the conclusion no longer follows,
+// because the premise it rested on was that the person who approved a run is
+// present for the whole of it. B2 made a job outlive the process. A job resumed
+// at the next launch is being acted on by a ShellPilot that never showed
+// anybody a dialog, and "the renderer computed a plan" was never a fact written
+// down anywhere — `BroadcastPlan` lived in a `useMemo` and was discarded.
+//
+// So main re-derives, and the second copy the old comment feared is avoided the
+// only way it can be: there is ONE implementation of the rule, in
+// shared/broadcast.ts, called from both sides. The renderer calls it to ask the
+// human; main calls it to check that what arrived is what was asked about. It
+// is still not sold as a trust boundary — it is a RECORD and an AGREEMENT
+// CHECK, which is what a durable job needs and what neither the renderer-only
+// path nor the AI capability gate produced.
+//
+// What main owns beyond that is the part the renderer cannot do safely: bounded
 // concurrency, cancellation that actually stops queued hosts, and per-host
 // results.
 //
@@ -872,6 +898,34 @@ const broadcast = new BroadcastRunner({
 })
 
 ipcMain.handle('broadcast:run', async (_e, req: BroadcastRequest) => {
+  // B3: the same check a job gets, over the same shared implementation.
+  //
+  // A broadcast has no store and therefore no row to hold the record — that is
+  // exactly what a JOB is, and duplicating the job store here would be the
+  // second model this item exists to prevent. What it does share is the record
+  // type, the verifier, and the log: one approval model, one file, two
+  // surfaces.
+  const verdict = verifyApproval(
+    req.approval,
+    { commands: [req.command], targets: req.targets },
+    planBroadcast(req.command, req.targets)
+  )
+  const logRow = {
+    surface: 'broadcast' as const,
+    jobId: req.runId,
+    title: 'Broadcast',
+    risk: req.approval?.risk ?? planBroadcast(req.command, req.targets).risk,
+    confirmation: req.approval?.confirmation?.kind ?? 'none',
+    phrase: req.approval?.phrase ?? null,
+    confirmedAt: req.approval?.confirmedAt ?? null,
+    hosts: req.targets.map((t) => t.serverName),
+    commands: [req.command]
+  }
+  if (!verdict.ok) {
+    recordJobApproval({ ...logRow, event: 'refused', reason: verdict.reason })
+    throw new Error(`This broadcast was not started: ${verdict.reason}`)
+  }
+  recordJobApproval({ ...logRow, event: 'granted' })
   // Secrets are resolved per host inside exec, not carried in the request, for
   // the same reason the fleet targets do not carry them.
   return broadcast.run(req)
@@ -986,6 +1040,11 @@ const detachedExec = detachedJobExecutor({
 
 const jobRunner = new JobRunner({
   exec: detachedExec,
+  // B3. Injected rather than imported inside the runner, so the runner stays
+  // constructible without an Electron `app` object and a test can hand in an
+  // array. The refusal happens with or without this; what a missing one loses
+  // is the record of it.
+  approvalLog: recordJobApproval,
   // Sized for the detached path, which deliberately outlives a dropped link:
   // its worst honest case is a full reconnect backoff plus a poll, and the
   // attached executor's own timer fires long before this either way.

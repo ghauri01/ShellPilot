@@ -762,6 +762,20 @@ which would make every job run as root and invert the risk model that assessed t
 as the user typed it; user scope needs lingering, which is a persistent change to the host.
 It belongs later, capability-detected, behind the same interface.
 
+**B3 shipped, and it settled the correction below rather than merely acknowledging it.** The
+approval record is `CommandApproval` in `shared/broadcast.ts`, minted where the human answers and
+stored whole in `job.approval`: the step text and the resolved target list exactly as confirmed, the
+risk, the confirmation kind, and the phrase actually typed. `verifyApproval` re-derives the plan and
+refuses on disagreement, at launch and again at resume, and it is called from BOTH surfaces —
+`BroadcastPanel` no longer computes a plan and throws it away. The re-consent rule is written down
+in `shared/jobs.ts`: a job resumed **within one process lifetime** carries its approval; a job
+adopted **after a restart** finishes the hosts already running and may not start one it never
+reached, because finishing is not an action and starting is. That makes B2's `reclaim()` refusal
+principled rather than incidental. Decisions are written to `shellpilot-job-approvals.jsonl` — a
+third log, not a second caller of `recordAudit`, for the reason the local terminal already has its
+own file, and because `auditLog.ts` sits inside the agent-reachable import closure that
+`tests/jobsNotExposed.test.ts` guards.
+
 **Correcting this document.** An earlier revision justified the estimate with "the approval
 model — the hard half of any executor — is built and tested", naming five files as one
 system. They are **two systems with no shared code**: the human confirmation model lives
@@ -779,7 +793,7 @@ fixing that reverses a settled decision rather than extending one.
 |---|---|---|
 | **B1** | Durable one-command jobs on the existing attached path, the store, and a job list | 1.5–3 wk |
 | **B2** | The detached backend, the four new states, reconnect with backoff, reclaim and reap, the remote-shell matrix | +2–3 wk |
-| **B3** | A persisted approval record, and moving enforcement into main | +1 wk |
+| **B3** | ~~A persisted approval record, and moving enforcement into main~~ **SHIPPED** | +1 wk |
 | **B4** | Stages, the health gate, reboot-and-wait, jump-host exclusion | +1.5–2 wk |
 
 **Size.** **6–9 weeks** for the whole of it, not 1.5–3. B1 alone is the old estimate and is
@@ -1207,7 +1221,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 21b | **Docker reclaim by id** | 60% | monthly | 3 | some | **5** | 1.5–2 wk | podman fixtures | Deferred |
 | C | ~~**Host facts**~~ | 100% | continuous | 4 | strong | **3 / 21** | **SHIPPED** | — | Done |
 | A | ~~**Durable store**~~ | — | — | — | — | **0 / 30** | **SHIPPED** | — | Done |
-| B | ~~**Job engine B1+B2**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | B3, B4 remain | Part done |
+| B | ~~**Job engine B1+B2+B3**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | B4 remains | Part done |
 | 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** (pg+mysql) | mongo/redis remain | Part done |
 | 17 | **Patch management** | 100% | weekly | 5 | strong | **10** | 3.5 wk | A, B, C | Flagship |
 | 5 | **Backups to real targets** | 90% | weekly | 5 | strong | **8** | 3.5 wk | B, scheduler | Invest |

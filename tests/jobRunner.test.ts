@@ -10,7 +10,13 @@ import {
 } from '../src/main/services/history'
 import { JobRunner, splitAtBytes, type JobExecResult } from '../src/main/services/jobRunner'
 import { attachedJobExecutor, type ExecStreamHandlers } from '../src/main/services/jobExec'
-import type { JobOutput, JobProgress, JobSpec } from '../src/shared/jobs'
+import type {
+  JobOutput,
+  JobProgress,
+  JobRunRequest,
+  JobSpec,
+  JobTargetRef
+} from '../src/shared/jobs'
 import {
   JOB_ABANDONED_ERROR,
   JOB_OUTPUT_HEAD,
@@ -20,6 +26,7 @@ import {
   JOB_OUTPUT_TAIL,
   JOB_RECORD_RETENTION_DAYS,
   classifyJobResult,
+  jobApprovalFor,
   planJob
 } from '../src/shared/jobs'
 
@@ -134,6 +141,39 @@ function harness(store: HistoryStore, over: { knownSecrets?: string[] } = {}) {
 }
 
 /**
+ * B3: the approval record main now demands with every run.
+ *
+ * Minted from the same `planJob` the runner re-derives, so the default case is
+ * a record that agrees — which is what lets every test below go on asserting
+ * what it was written to assert. The tests that care about B3 pass an
+ * explicitly WRONG spec or target list and watch the run be refused; nothing
+ * here weakens the check, it only supplies the thing a renderer would.
+ */
+function approved(
+  req: Omit<JobRunRequest, 'approval'>,
+  o: { phrase?: string | null; confirmedAt?: number; spec?: JobSpec; targets?: JobTargetRef[] } = {}
+): JobRunRequest {
+  // The spec and targets the record is minted FROM default to the ones the run
+  // uses, and can be overridden so a test can approve one thing and run
+  // another.
+  const spec = o.spec ?? req.spec
+  const targets = o.targets ?? req.targets
+  const plan = planJob(spec, targets)
+  return {
+    ...req,
+    approval: jobApprovalFor(spec, targets, {
+      phrase:
+        o.phrase !== undefined
+          ? o.phrase
+          : plan.confirmation.kind === 'type-to-confirm'
+            ? plan.confirmation.phrase
+            : null,
+      confirmedAt: o.confirmedAt ?? 1_700_000_000_000
+    })
+  }
+}
+
+/**
  * Drain the microtask queue.
  *
  * A single macrotask, which by definition runs after every pending microtask —
@@ -221,7 +261,7 @@ describe('running a job', () => {
   it('writes the row before the first host is touched', async () => {
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
 
     // The whole of what B1 adds over a broadcast. A crash between "the user
@@ -245,7 +285,7 @@ describe('running a job', () => {
   it('keeps the other hosts when one is unreachable', async () => {
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a', 'b']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a', 'b']) }))
     await settle()
     await h.finish('a', { ok: false, error: 'connect ECONNREFUSED' })
     await h.finish('b')
@@ -262,11 +302,11 @@ describe('running a job', () => {
     // for.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({
+    const p = h.runner.run(approved({
       jobId: 'j1',
       spec: spec({ steps: [{ command: 'apt update' }, { command: 'apt upgrade -y' }] }),
       targets: h.targets(['a'])
-    })
+    }))
     await settle()
     await h.finish('a', { ok: true, code: 1, stderr: 'E: could not get lock\n' })
     const done = await p
@@ -279,7 +319,7 @@ describe('running a job', () => {
   it('fires a terminal event even with no targets at all', async () => {
     const store = await openStore()
     const h = harness(store)
-    await h.runner.run({ jobId: 'j1', spec: spec(), targets: [] })
+    await h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: [] }))
     expect(h.progress.filter((p) => p.done)).toHaveLength(1)
     expect(store.readJob('j1')?.state).toBe('done')
   })
@@ -290,9 +330,9 @@ describe('running a job', () => {
     // delete the other's entry.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
-    await expect(h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['b']) })).rejects.toThrow(
+    await expect(h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['b']) }))).rejects.toThrow(
       /already running/
     )
     await h.finish('a')
@@ -304,11 +344,11 @@ describe('cancelling', () => {
   it('leaves a running host alone and stops the queued ones', async () => {
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({
+    const p = h.runner.run(approved({
       jobId: 'j1',
       spec: spec({ concurrency: 1 }),
       targets: h.targets(['a', 'b', 'c'])
-    })
+    }))
     await settle()
     expect(h.isOpening('a')).toBe(true)
     expect(h.isOpening('b')).toBe(false)
@@ -351,11 +391,11 @@ describe('a job that was running when ShellPilot stopped', () => {
     const first = harness(store)
     // Deliberately not awaited: this run never finishes, which is exactly what
     // a process going away looks like to the rows it left behind.
-    void first.runner.run({
+    void first.runner.run(approved({
       jobId: 'j1',
       spec: spec({ concurrency: 1 }),
       targets: first.targets(['a', 'b'])
-    })
+    }))
     await settle()
     expect(store.readJob('j1')?.state).toBe('running')
     first.runner.disposeAll()
@@ -395,7 +435,7 @@ describe('a job that was running when ShellPilot stopped', () => {
   it('does not touch a job this process is still running', async () => {
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
 
     // adopt() is a startup call, but a caller that runs it twice must not
@@ -417,7 +457,7 @@ describe('output', () => {
     // output is long.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
 
     const half = JOB_OUTPUT_TAIL / 2
@@ -461,7 +501,7 @@ describe('output', () => {
     // path B1 actually ships.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     const ending = 'E: dpkg returned an error\n'
     const stdout = `${'S'.repeat(JOB_OUTPUT_HEAD + JOB_OUTPUT_TAIL + 500_000)}${ending}`
@@ -504,7 +544,7 @@ describe('output', () => {
   it('persists nothing until the head fills, then nothing is lost from the front', async () => {
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     h.feed('a', 'short output\n')
     await h.finish('a', { ok: true, code: 0 })
@@ -521,7 +561,7 @@ describe('output', () => {
     // from being skipped.
     const store = await openStore()
     const h = harness(store, { knownSecrets: ['s3cr3t-vault-value'] })
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     await h.finish('a', {
       ok: true,
@@ -546,7 +586,7 @@ describe('output', () => {
     // executor delivered one chunk; real the moment it streams.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     h.feed('a', 'DB_PASSWORD=')
     h.feed('a', 'hunter2\n')
@@ -570,7 +610,7 @@ describe('output', () => {
     // socket hands over.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     h.feed('a', '-----BEGIN OPENSSH PRIVATE KEY-----\n')
     h.feed('a', 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n')
@@ -599,7 +639,7 @@ describe('output', () => {
     // forever.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
 
     h.feed('a', 'no newline here')
@@ -631,7 +671,7 @@ describe('output', () => {
     // connection string it failed on.
     const store = await openStore()
     const h = harness(store, { knownSecrets: ['s3cr3t-vault-value'] })
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     await h.finish('a', {
       ok: false,
@@ -652,7 +692,7 @@ describe('output', () => {
     // produced no error" — verbatim the failure out_elided exists to prevent.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     await h.finish('a', {
       ok: true,
@@ -676,13 +716,13 @@ describe('output', () => {
     // third never ran, or where one step's output ended and the next began.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({
+    const p = h.runner.run(approved({
       jobId: 'j1',
       spec: spec({
         steps: [{ command: 'apt update' }, { command: 'apt upgrade -y' }, { command: 'reboot' }]
       }),
       targets: h.targets(['a'])
-    })
+    }))
     await settle()
     await h.finish('a', { ok: true, code: 0, stdout: 'Reading package lists...\n' })
     await h.finish('a', { ok: true, code: 100, stderr: 'E: Sub-process dpkg returned an error\n' })
@@ -705,7 +745,7 @@ describe('output', () => {
     // flood, and a flood is indistinguishable from a freeze.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     h.feed('a', 'one\n')
     h.feed('a', 'two\n')
@@ -724,7 +764,7 @@ describe('output', () => {
     // question an error is ever read for.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     // Newline-terminated, like real command output: an unterminated trailing
     // line is held back so a secret split across the chunk seam is redacted as
@@ -747,7 +787,7 @@ describe('output', () => {
     // A gap nobody mentions is how someone concludes the upgrade hung.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
 
     // The clock does not move, so every one of these lands in the same
@@ -770,7 +810,7 @@ describe('output', () => {
   it('lets the next window through', async () => {
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     for (let i = 0; i < JOB_OUTPUT_RATE_PER_SEC; i++) {
       h.feed('a', 'x\n')
@@ -793,7 +833,7 @@ describe('retention', () => {
     // drop it. The summary behind it is tiny and lives twelve times longer.
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     await h.finish('a', { ok: true, code: 0, stdout: 'a lot of dpkg chatter\n' })
     await p
@@ -817,7 +857,7 @@ describe('retention', () => {
   it('drops the job itself only at the far horizon', async () => {
     const store = await openStore()
     const h = harness(store)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     await h.finish('a')
     await p
@@ -841,7 +881,7 @@ describe('retention', () => {
     const h = harness(store)
     const NOW = 1_700_000_000_000
     h.tick(NOW)
-    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     await h.finish('a', { ok: true, code: 0, stdout: 'a lot of dpkg chatter\n' })
     await p
@@ -863,14 +903,14 @@ describe('retention', () => {
     const NOW = 1_700_000_000_000
     const old = harness(store)
     old.tick(NOW - 400 * DAY)
-    const p1 = old.runner.run({ jobId: 'old', spec: spec(), targets: old.targets(['a']) })
+    const p1 = old.runner.run(approved({ jobId: 'old', spec: spec(), targets: old.targets(['a']) }))
     await settle()
     await old.finish('a')
     await p1
 
     const fresh = harness(store)
     fresh.tick(NOW)
-    const p2 = fresh.runner.run({ jobId: 'new', spec: spec(), targets: fresh.targets(['a']) })
+    const p2 = fresh.runner.run(approved({ jobId: 'new', spec: spec(), targets: fresh.targets(['a']) }))
     await settle()
     await fresh.finish('a')
     await p2
@@ -900,11 +940,11 @@ describe('disposal', () => {
     // report.
     const store = await openStore()
     const h = harness(store)
-    void h.runner.run({
+    void h.runner.run(approved({
       jobId: 'j1',
       spec: spec({ concurrency: 1 }),
       targets: h.targets(['a', 'b'])
-    })
+    }))
     await settle()
     h.runner.disposeAll()
     expect(h.runner.isRunning('j1')).toBe(false)
@@ -926,11 +966,11 @@ describe('disposal', () => {
     // on the ordinary path.
     const store = await openStore()
     const h = harness(store)
-    void h.runner.run({
+    void h.runner.run(approved({
       jobId: 'j1',
       spec: spec({ concurrency: 1 }),
       targets: h.targets(['a', 'b'])
-    })
+    }))
     await settle()
     h.runner.disposeAll()
     h.tick(100)
@@ -963,7 +1003,7 @@ describe('disposal', () => {
     // target the same pass then declined to update.
     const store = await openStore()
     const h = harness(store)
-    void h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    void h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
     await settle()
     h.feed('a', 'H'.repeat(JOB_OUTPUT_HEAD))
     // Past the head, so this parks in the tail ring rather than being written
@@ -1055,14 +1095,14 @@ describe('re-running a job id', () => {
     // output under a seq that restarts at zero.
     const store = await openStore()
     const first = harness(store)
-    const p1 = first.runner.run({ jobId: 'j1', spec: spec(), targets: first.targets(['a', 'b']) })
+    const p1 = first.runner.run(approved({ jobId: 'j1', spec: spec(), targets: first.targets(['a', 'b']) }))
     await settle()
     await first.finish('a', { ok: true, code: 0, stdout: 'RUN1-A\n' })
     await first.finish('b', { ok: true, code: 0, stdout: 'RUN1-B\n' })
     await p1
 
     const second = harness(store)
-    const p2 = second.runner.run({ jobId: 'j1', spec: spec(), targets: second.targets(['a']) })
+    const p2 = second.runner.run(approved({ jobId: 'j1', spec: spec(), targets: second.targets(['a']) }))
     await settle()
     await second.finish('a', { ok: true, code: 0, stdout: 'RUN2-ONLY\n' })
     const done = await p2
