@@ -1147,8 +1147,8 @@ a cheap item, and treating it as one is how a quarter disappears.
 
 | # | Item | Reach | Freq | Pain | Moat | **Lev** | **Direct** | Blocked by | Quadrant |
 |---|---|---|---|---|---|---|---|---|---|
-| 19a | **Disk alert** | 100% | continuous | 4 | none | **8** | **0.5 day** | — | Do first |
-| 21a | **Docker itemised disk view** | 60% | monthly | 3 | some | **5** | **3–5 days** | — | Do first |
+| 19a | ~~**Disk alert**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | — | Done |
+| 21a | ~~**Docker itemised disk view**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 21b | **Docker reclaim by id** | 60% | monthly | 3 | some | **5** | 1.5–2 wk | podman fixtures | Deferred |
 | C | **Host facts** | 100% | continuous | 4 | strong | **3 direct / 21 unlocked** | **1.5 wk** | — | Enabler |
 | A | **Durable store** | — | — | — | — | **0 direct / 30 unlocked** | **1.5 wk** | — | Enabler |

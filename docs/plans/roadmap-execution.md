@@ -162,3 +162,40 @@ without background checking these alerts still only fire while someone is lookin
 server. The copy reuses `alertCoverage`'s existing language rather than claiming otherwise.
 
 Revised estimate: 2–3 days.
+
+### Wave 1 outcome — both items shipped
+
+| Item | Commit | Estimate | Actual |
+|---|---|---|---|
+| 19a disk alert | `7f4e1e2` | "half a day" | ~2 days |
+| 21a itemised disk view | `425e031` | 3–5 days | ~1 day |
+
+Suite went 2215 → 2235 passing, 51 tests added, typecheck and lint clean, verified
+independently of the agents that wrote them.
+
+**Three defects fixed that had nothing to do with disk.** The webhook sanitiser was
+discarding unknown alert kinds and writing no error, so the Settings pane reported a
+healthy webhook while dropping every message. Two ternaries mapped store kinds onto webhook
+kinds by asking whether the kind was `cpu` and calling everything else `memory`, so a disk
+alert would have arrived labelled memory. And `resolved` fired on every transition while
+`raised` was throttled, so an oscillating host sent all-clears for alarms the endpoint
+never received. None were visible from the disk feature; all three were on the path it
+happened to walk.
+
+**The estimate that was wrong in the other direction.** 21a came in under its 3–5 days,
+because the research pass established that the compose-label grouping and `system df`
+parsing already existed. The roadmap's own leverage table had it right and the wave log's
+first draft did not.
+
+**Where a brief was wrong and the implementer said so.** The 21a brief asserted that the
+recorded fixture proved a two-or-more-spaces split could not parse `docker system df -v`.
+It did not — every in-cell space in the recording happens to be single, and mutating the
+parser to the naive split passed all 113 tests. Rather than accept the claim, the
+implementer constructed the row that does prove it and labelled in the test comment which
+parts were recorded and which were written to make the point. An instruction that sounds
+authoritative is still a claim, and this one was false.
+
+**Two honest reports worth keeping.** One agent shipped a guard it had determined was
+unreachable-false, and said so rather than presenting it as working. Another dropped a test
+it had written because the test passed with or without the fix. Both are the right
+instinct; both went to the adversarial pass rather than being quietly resolved.
