@@ -337,6 +337,74 @@ describe('what the search admits it cannot ever know', () => {
     expect(r.coverage.noFacts).toEqual([])
   })
 
+  it('keeps the facts gap for a host with facts but no metrics sample yet', () => {
+    // The comment on the never-sampled branch used to justify itself with "the
+    // sampler only probes facts after a successful metrics sample". True of
+    // main. NOT true of the store this function reads: FleetWatcher seeds facts
+    // on mount and "Check now" fetches them directly, while metrics arrive only
+    // from the live subscription with no seed at all. For the first sweep
+    // interval after launch `facts[id]` exists and `hosts[id]` does not — and
+    // this Arch box's "can never report security updates" was silently dropped
+    // from the coverage sentence for exactly that window.
+    const r = searchFleet(
+      input({
+        servers: [{ id: 'a', name: 'arch-01' }],
+        hosts: {},
+        facts: { a: { facts: archFacts(), at: 1 } }
+      }),
+      'x'
+    )
+    // The metrics gap is still reported: nothing has sampled its units or ports.
+    expect(r.coverage.notChecked).toEqual(['arch-01'])
+    // And so is the facts one, which is what we actually know about it.
+    expect(r.coverage.factsSearched).toEqual(['arch-01'])
+    expect(r.coverage.securityUnsupported).toEqual(['arch-01'])
+    expect(coverageSentence(r.coverage)).toContain('can never report security updates')
+  })
+
+  it('treats factsSearched as the denominator, not as a fourth disjoint bucket', () => {
+    // Pinned because the header comment used to claim the four facts fields
+    // were "mutually disjoint ... a host reaches exactly one of them", and a
+    // future edit trusting that would double-count. Only the three GAP buckets
+    // are disjoint; `factsSearched` counts every host that has facts at all and
+    // therefore overlaps both of the "facts collected, but..." buckets.
+    const r = searchFleet(
+      input({
+        servers: [{ id: 'a', name: 'web-01' }, { id: 'b', name: 'arch-01' }],
+        hosts: { a: { host: host(), at: 1 }, b: { host: host(), at: 1 } },
+        facts: {
+          a: {
+            facts: facts({
+              packageManager: null,
+              pendingUpdates: null,
+              securityUpdates: null,
+              sources: sources({
+                'package-manager': 'no-tool',
+                updates: 'no-tool',
+                'security-updates': 'no-tool'
+              })
+            }),
+            at: 1
+          },
+          b: { facts: archFacts(), at: 1 }
+        }
+      }),
+      'x'
+    )
+    expect(r.coverage.factsSearched).toEqual(['web-01', 'arch-01'])
+    expect(r.coverage.noPackageManager).toEqual(['web-01'])
+    expect(r.coverage.securityUnsupported).toEqual(['arch-01'])
+    expect(r.coverage.noFacts).toEqual([])
+    // The three gaps, pairwise disjoint — the property the comment should have
+    // claimed, and the only one a future edit may rely on.
+    const gaps = [
+      r.coverage.noFacts,
+      r.coverage.noPackageManager,
+      r.coverage.securityUnsupported
+    ].flat()
+    expect(new Set(gaps).size).toBe(gaps.length)
+  })
+
   it('names hosts with no package manager, and does not also call them unsupported', () => {
     // The two buckets are disjoint. A host with no package manager cannot
     // report a security count either, but the reason is "there is nothing to

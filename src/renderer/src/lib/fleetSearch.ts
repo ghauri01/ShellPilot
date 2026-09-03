@@ -94,14 +94,23 @@ export interface FleetCoverage {
   // facts, and folding the two together would tell someone their estate had
   // not been checked when it is being checked constantly.
   //
-  // The four below are mutually disjoint and, with `notChecked`, complete: a
-  // host reaches exactly one of them. The chain is deliberate — a host with no
-  // facts cannot also be missing a package manager, because we do not know
-  // whether it has one.
+  // The three GAP buckets below — `noFacts`, `noPackageManager` and
+  // `securityUnsupported` — are pairwise disjoint: a host appears in at most
+  // one of them. The chain is deliberate — a host with no facts cannot also be
+  // reported as missing a package manager, because we do not know whether it
+  // has one, and a host with no package manager is not reported as unsupported,
+  // because there is nothing to ask rather than something that will not answer.
+  //
+  // `factsSearched` is NOT one of them. It is the DENOMINATOR — every host
+  // whose facts were collected at all — and it deliberately overlaps the two
+  // "facts collected, but..." buckets: an Arch box is both searched and unable
+  // to answer the security question. Summing all four would double-count.
   // -------------------------------------------------------------------------
 
   /** Facts were collected, so distro, package manager and the rest were
-   *  searched on this host. The facts counterpart of `searched`. */
+   *  searched on this host. The facts counterpart of `searched`, and a
+   *  denominator rather than a gap: a host here may ALSO be in
+   *  `noPackageManager` or `securityUnsupported`. */
   factsSearched: string[]
   /** No facts yet. Normal for a host added within the last hour, and NOT the
    *  same as "this host has no distribution". */
@@ -230,18 +239,52 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
   // store can ever produce one.
   const seenServers = new Set<string>()
 
+  /**
+   * Bucket one host on the facts axis.
+   *
+   * Lifted out of the loop body because it has to run on BOTH paths below — a
+   * host with no metrics sample can still have facts, and its gaps are just as
+   * real. See the `!entry` branch.
+   */
+  const bucketFacts = (name: string, facts: HostFacts): void => {
+    coverage.factsSearched.push(name)
+    if (facts.packageManager === null) {
+      // No package manager means no update count of any kind, so the security
+      // question never arises here — which is why this is `else if` and not a
+      // second push. The collector reports `no-tool` rather than `unsupported`
+      // for exactly this case; the branch keeps the two buckets disjoint even
+      // if a partial or forged set of facts ever says otherwise.
+      coverage.noPackageManager.push(name)
+    } else if (factSource(facts, 'security-updates').status === 'unsupported') {
+      coverage.securityUnsupported.push(name)
+    }
+  }
+
   for (const server of input.servers) {
     if (seenServers.has(server.id)) continue
     seenServers.add(server.id)
 
     const entry = input.hosts[server.id]
     if (!entry) {
-      // Reported once, here, rather than under `notChecked` AND `noFacts`. The
-      // sampler only probes facts after a successful metrics sample, so a host
-      // nothing has ever sampled has never had facts collected either, and
-      // naming it twice under two gaps says less than naming it once under the
-      // gap that explains both.
       coverage.notChecked.push(server.name)
+      // Bucketed on what is actually KNOWN about this host, not on what the
+      // sampler's ordering implies.
+      //
+      // This branch used to `continue` outright, justified by "the sampler only
+      // probes facts after a successful metrics sample, so a host nothing has
+      // ever sampled has never had facts collected either". That is true of
+      // main. It is NOT true of the renderer store this function reads, which
+      // is fed by two independent channels: facts are seeded on mount and
+      // re-read by "Check now" (FleetWatcher / InventoryPanel), while metrics
+      // arrive only from the live subscription with no seed at all. For the
+      // first sweep interval after launch `facts[id]` exists while `hosts[id]`
+      // does not — and an Arch box's "can never report security updates" was
+      // silently dropped from the coverage sentence for exactly that window.
+      //
+      // With no facts either, the host is still named once: `notChecked` alone
+      // explains both absences and saying it twice says less.
+      const early = input.facts[server.id]?.facts
+      if (early) bucketFacts(server.name, early)
       continue
     }
     const { host, at } = entry
@@ -271,21 +314,8 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
     // and independent of the sample above, so their absence is its own gap and
     // never a claim about the host.
     const facts = input.facts[server.id]?.facts
-    if (!facts) {
-      coverage.noFacts.push(server.name)
-    } else {
-      coverage.factsSearched.push(server.name)
-      if (facts.packageManager === null) {
-        // No package manager means no update count of any kind, so the security
-        // question never arises here — which is why this is `else if` and not a
-        // second push. The collector reports `no-tool` rather than `unsupported`
-        // for exactly this case; the branch keeps the two buckets disjoint even
-        // if a partial or forged set of facts ever says otherwise.
-        coverage.noPackageManager.push(server.name)
-      } else if (factSource(facts, 'security-updates').status === 'unsupported') {
-        coverage.securityUnsupported.push(server.name)
-      }
-    }
+    if (!facts) coverage.noFacts.push(server.name)
+    else bucketFacts(server.name, facts)
 
     // The host itself — so "ubuntu", "rocky", "kvm", "apt" or a hostname finds
     // the box, not just things on it.

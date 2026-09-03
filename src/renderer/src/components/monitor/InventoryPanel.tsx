@@ -238,7 +238,30 @@ export function InventoryPanel({
             </span>
             <span>
               {summary.securityTotal} security update{summary.securityTotal === 1 ? '' : 's'}
+              {/* The same treatment the pending total already had, and the one
+                  whose absence made this line dangerous: a security total with
+                  nothing beside it reads as an estate-wide figure. Three hosts
+                  that all refused the probe produced "0 security updates" and
+                  not one word more, which is the exact sentence a non-root
+                  account must never be shown during the week a CVE lands. */}
+              {summary.securityUnknown > 0 && (
+                <span className="warn"> · {summary.securityUnknown} host
+                  {summary.securityUnknown === 1 ? '' : 's'} could not answer</span>
+              )}
             </span>
+            {/* The counts above are read out of package caches, and a cache
+                nobody has refreshed in six weeks answers confidently and
+                wrongly. Each such cell is marked in the table; this is the
+                estate-level roll-up of how much of the totals rests on one. */}
+            {summary.staleMetadata > 0 && (
+              <span
+                className="warn"
+                title="ShellPilot never refreshes a package cache — refreshing is a network operation and on some package managers it can break the host — so a count read out of an old cache is reported with the cache's age beside it rather than silently presented as current."
+              >
+                {summary.staleMetadata} host{summary.staleMetadata === 1 ? '' : 's'} counted from a
+                stale package cache
+              </span>
+            )}
             {summary.rebootsOwed > 0 && (
               <span className="warn">
                 {summary.rebootsOwed} host{summary.rebootsOwed === 1 ? '' : 's'} awaiting a reboot
@@ -259,6 +282,26 @@ export function InventoryPanel({
               {summary.securityTotal} above. Arch and Alpine have no security channel at all, and
               dnf cannot answer where the repositories publish no updateinfo. Treat those hosts as
               unknown, never as zero.
+            </div>
+          )}
+
+          {/* The other half of the same honesty, and a DIFFERENT sentence.
+              `unsupported` above is a property of the distribution and no
+              amount of waiting or privilege changes it. Everything counted
+              here is a gap that can close — a probe refused for want of
+              privilege, a host whose facts have not been collected yet, a
+              probe that ran and failed. Folding the two into one number would
+              tell an operator that a fixable permission problem is a permanent
+              fact about their estate, and the reverse. */}
+          {summary.securityUnknown > 0 && (
+            <div className="s-desc warn">
+              <ShieldQuestion size={12} /> {summary.securityUnknown} host
+              {summary.securityUnknown === 1 ? '' : 's'} did not answer the security question, so{' '}
+              {summary.securityUnknown === 1 ? 'it is' : 'they are'} not in the{' '}
+              {summary.securityTotal} above. These are gaps that can close: a probe refused for want
+              of privilege answers for an account that has it, and a host whose facts have not been
+              collected yet answers on the next sweep. The Security column says which applies to
+              which host.
             </div>
           )}
 
