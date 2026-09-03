@@ -14,7 +14,7 @@ import {
   unsnoozeAlert,
   useAlerts
 } from '../../store/alerts'
-import { alertCoverageText } from '../settings/alertCoverage'
+import { alertCoverageLines } from '../settings/alertCoverage'
 import { openSettings } from '../../store/nav'
 import { clsx } from '../../lib/format'
 import type { StoredAlertRow } from '../../../../shared/webhook'
@@ -36,10 +36,16 @@ import type { StoredAlertRow } from '../../../../shared/webhook'
 // having been whitelisted twice on the way — once when the renderer decided it
 // and once by main on the way back out.
 
-/** How much of the log to show. The same 500 the store hydrates from, so the
- *  inbox and the suppression state are looking at the same rows — a history
- *  that showed less than the thing deciding whether to speak would be a screen
- *  you could not use to explain the silence. */
+/** The page size the read asks for, and the most rows this list renders.
+ *
+ *  These were the same number for a reason that no longer holds: the inbox and
+ *  the suppression state had to be looking at the same rows, or the history
+ *  could not explain the silence. Hydration is now bounded by TIME rather than
+ *  by a row count — a cap drops the oldest rows, and the oldest rows are the
+ *  chronic alerts — so `alerts:history` may hand back more than this, and the
+ *  suppression state is right to use all of it. The list still stops here,
+ *  because five thousand table rows is not a screen anybody reads, and the note
+ *  under it says so. */
 const LIMIT = 500
 
 /** How each recorded event reads in a list. `stood-down` is the one that is not
@@ -185,13 +191,24 @@ export function AlertsPanel(): React.JSX.Element {
         </button>
       </div>
 
-      {/* The same sentence the settings screen shows, from the same function.
-          Not a paraphrase: alertCoverage.ts exists because this claim was once
-          made from the SWITCH rather than from whether the sampler is actually
-          looping, and a second copy of the wording here is how that comes back.
-          Every kind added by this item inherits it, because every kind added by
-          this item is raised from the same sampler. */}
-      <div className="s-desc">{alertCoverageText(samplerStatus?.running, samplingEnabled)}</div>
+      {/* Coverage, per kind, because the kinds are not produced by the same
+          thing. The first line is the settings screen's own sentence from the
+          same function — not a paraphrase, because alertCoverage.ts exists
+          because that claim was once made from the SWITCH rather than from
+          whether the sampler is actually looping, and a second copy of the
+          wording here is how that comes back.
+
+          The lines after it are the correction. Of the five kinds this item
+          added, only host-unreachable rides the sampler: job-failed rides
+          jobs.onProgress, tunnel-down a ten-second poll, and db-alarm and
+          db-watch exist only because a person opened the Databases page. A
+          panel that showed the sampler's sentence alone claimed background
+          coverage for two kinds that have none at all. */}
+      {alertCoverageLines(samplerStatus?.running, samplingEnabled).map((line) => (
+        <div className="s-desc" key={line.source} data-testid={`alert-coverage-${line.source}`}>
+          <b>{line.kinds.map((k) => LABEL[k]).join(', ')}.</b> {line.text}
+        </div>
+      ))}
       {!alertsEnabled && (
         <div className="s-desc warn">
           Resource alerts are switched off, so nothing new will be added below.{' '}
@@ -343,7 +360,7 @@ export function AlertsPanel(): React.JSX.Element {
       ) : (
         <table className="mini-table">
           <tbody>
-            {rows.map((row, i) => (
+            {rows.slice(0, LIMIT).map((row, i) => (
               <tr key={`${row.at}:${row.serverId}:${row.kind}:${i}`}>
                 <td className={clsx(EVENT_CLASS[row.event])}>{EVENT_WORD[row.event]}</td>
                 <td>{LABEL[row.kind]}</td>
@@ -355,10 +372,12 @@ export function AlertsPanel(): React.JSX.Element {
           </tbody>
         </table>
       )}
-      {rows !== null && rows.length >= LIMIT && (
+      {rows !== null && rows.length > LIMIT && (
         <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
-          Showing the most recent {LIMIT}. Older events are kept for as long as the history store
-          keeps anything, and are not shown here.
+          Showing the most recent {LIMIT} of {rows.length} read back. Older events are kept for as
+          long as the history store keeps anything, and are not shown here — but they are still
+          read, which is what keeps a months-old alert from announcing itself again at every
+          launch.
         </div>
       )}
     </div>

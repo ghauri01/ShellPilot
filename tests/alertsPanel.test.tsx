@@ -212,10 +212,10 @@ describe('what a row is allowed to say it was about', () => {
   })
 })
 
-describe('coverage honesty, which the new kinds inherit', () => {
+describe('coverage honesty, per kind, because the kinds do not share a source', () => {
   it('repeats the settings screen’s sentence rather than a cheerier one', async () => {
-    // Background checking off. Every kind this item added is raised from the
-    // same sampler, so every one of them is foreground-only here.
+    // Background checking off. This line speaks for the sampler-borne kinds —
+    // the five readings and host-unreachable — and for nothing else.
     useApp.getState().setSettings({ fleetSamplingEnabled: false })
     render(<AlertsPanel />)
     await waitFor(() =>
@@ -237,6 +237,53 @@ describe('coverage honesty, which the new kinds inherit', () => {
     useFleetStatus.getState().setStatus({ running: true } as never)
     render(<AlertsPanel />)
     await waitFor(() => expect(screen.getByText(/wherever you are/)).toBeTruthy())
+  })
+
+  it('does not let the sampler’s sentence speak for kinds it does not produce', async () => {
+    // The claim that was false. Of the five kinds item 19b added, exactly one
+    // — host-unreachable — is sampler-borne. job-failed rides jobs.onProgress
+    // and tunnel-down a ten-second poll, both mounted at the app root and both
+    // independent of fleetSamplingEnabled; db-alarm and db-watch are not
+    // produced in the background at all.
+    useApp.getState().setSettings({ fleetSamplingEnabled: true })
+    useFleetStatus.getState().setStatus({ running: true } as never)
+    render(<AlertsPanel />)
+    await waitFor(() => expect(screen.getByText(/wherever you are/)).toBeTruthy())
+
+    // The sampler's line names the kinds it actually speaks for, and does not
+    // name the other four.
+    const sampler = screen.getByTestId('alert-coverage-sampler').textContent ?? ''
+    expect(sampler).toContain('Unreachable')
+    expect(sampler).toContain('CPU')
+    expect(sampler).not.toContain('Job failed')
+    expect(sampler).not.toContain('Database alarm')
+  })
+
+  it('says plainly that a database verdict is only produced when the page is read', async () => {
+    // The one that must never read as covered, in either sampler state.
+    for (const running of [true, false]) {
+      useApp.getState().setSettings({ fleetSamplingEnabled: running })
+      useFleetStatus.getState().setStatus({ running } as never)
+      const view = render(<AlertsPanel />)
+      await waitFor(() =>
+        expect(screen.getByText(/opened the Databases page and read it/)).toBeTruthy()
+      )
+      const db = screen.getByTestId('alert-coverage-read-on-demand').textContent ?? ''
+      expect(db).toContain('Database alarm')
+      expect(db).toContain('Database watch')
+      expect(db).not.toMatch(/wherever you are/)
+      view.unmount()
+    }
+  })
+
+  it('says job failures and tunnels are watched whatever the sampler is doing', async () => {
+    useApp.getState().setSettings({ fleetSamplingEnabled: false })
+    useFleetStatus.getState().setStatus({ running: false } as never)
+    render(<AlertsPanel />)
+    const line = (await screen.findByTestId('alert-coverage-app-root')).textContent ?? ''
+    expect(line).toContain('watched from the moment the app starts')
+    expect(line).toContain('Job failed')
+    expect(line).toContain('Tunnel down')
   })
 
   it('says plainly when alerts themselves are switched off', async () => {

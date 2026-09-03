@@ -291,6 +291,14 @@ export interface StoredAlertRow extends StoredAlertEvent {
  * "because" written for a human, and neither belongs on this path: they are
  * prose assembled from a report, and the summary they would land in is rendered
  * by Slack.
+ *
+ * It also carries item 18's `dbEventMetrics` numbers, and this path deliberately
+ * does not read them. Every `db-alarm` alerts at the levels item 18 already
+ * decided, for the reason directly above: the alert must not hold a second
+ * opinion. The numbers are carried so a future rule — "alert when replication
+ * lag exceeds N", which is a threshold this app does not yet offer anywhere —
+ * can be written without a schema migration. Until it is, they are unused on
+ * purpose.
  */
 export interface StoredDbAlertRow {
   kind: 'db-alarm' | 'db-watch'

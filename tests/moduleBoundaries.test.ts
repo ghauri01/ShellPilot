@@ -266,6 +266,36 @@ describe('what a module may not reach', () => {
     })
   }
 
+  // Fleet Monitor panels that are NOT modules, walked by the same closure.
+  //
+  // AlertsPanel is the one panel in the Fleet Monitor that this file used to
+  // miss, and it misses it for a defensible reason: it is deliberately not a
+  // module, so it has no entry in MODULE_FILES and nothing walked it. Being
+  // outside the registry is not the same as being outside the rule — it renders
+  // in the same shell, beside panels that are checked, and a `store/vault`
+  // import added to it would pass every test in this file.
+  //
+  // A list rather than a directory sweep, so adding a panel here is a decision
+  // somebody made rather than something a glob quietly picked up.
+  const FIXED_PANEL_FILES = ['src/renderer/src/components/monitor/AlertsPanel.tsx']
+
+  for (const f of FIXED_PANEL_FILES) {
+    it(`${f} cannot reach the vault, credentials, secrets or the local terminal`, () => {
+      const abs = join(ROOT, f)
+      expect(existsSync(abs), `${f} is listed as a fixed panel but does not exist`).toBe(true)
+      const reachable = [...closure(abs)].map((r) => relative(ROOT, r))
+      const violations = reachable.filter((r) =>
+        MODULE_FORBIDDEN_IMPORTS.some((forbidden) => r.includes(forbidden))
+      )
+      expect(violations, `${f} reaches: ${violations.join(', ')}`).toEqual([])
+    })
+
+    it(`${f} does not reach them through the preload bridge either`, () => {
+      const offenders = bridgeUses(join(ROOT, f)).map((ns) => `shellpilot.${ns}`)
+      expect(offenders, `${f} reaches: ${offenders.join(', ')}`).toEqual([])
+    })
+  }
+
   it('covers every module in the registry', () => {
     // A module with no entry in MODULE_FILES would be silently unchecked,
     // which is the same as having no boundary at all.

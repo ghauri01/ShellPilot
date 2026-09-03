@@ -215,9 +215,24 @@ const announced = new Map<string, { serverId: string; serverName: string; kind: 
 //                      startup is the correct behaviour and is what happens.
 // ---------------------------------------------------------------------------
 
-/** How many rows the startup read asks for. Two hundred crossings is far more
- *  than a healthy estate produces in the ninety days the store keeps events,
- *  and small enough that the read is not something to think about. */
+/**
+ * The PAGE SIZE of the startup read, which is not the same as its bound.
+ *
+ * It used to be the bound, and a row count was the wrong bound: `alerts:history`
+ * returns rows newest-first, so a cap drops the OLDEST rows — and the oldest
+ * rows are the chronic alerts this whole feature exists for. Six hundred rows of
+ * newer CPU noise, which one busy estate produces in an afternoon because CPU's
+ * repeat window is sixty seconds, pushed a disk that had been at 91% for a month
+ * out of the window; it re-announced itself immediately after every restart,
+ * forever, because the replacement row carries the ORIGINAL `at` and lands
+ * outside the newest-500 window again. That is exactly the "announced itself
+ * once per app start forever" failure the durable half was written to end.
+ *
+ * The bound is now TIME, and it is applied in main — `alerts:history` pages
+ * backwards over a thirty-day window and treats this number as how much to ask
+ * for at a time. It stays 500 because the IPC signature could not grow a
+ * parameter without touching the preload.
+ */
 const HISTORY_LIMIT = 500
 
 /**
