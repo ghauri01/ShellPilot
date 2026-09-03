@@ -582,16 +582,41 @@ export function sanitiseRules(raw: unknown): Rule[] {
 export const RULES_FILE = 'shellpilot-rules.json'
 
 /**
- * How many events one sweep will consume.
+ * How old an alert row may be and still fire a rule.
  *
- * A bound rather than a cadence. After a long shutdown the alert log can hold
- * thousands of rows a rule has never seen, and reading all of them into memory
- * to decide that the rate limit allows one firing is a lot of work for one
- * answer. What is NOT done is skipping them: the sweep processes the oldest
- * ones it read, advances the watermark to exactly where it got to, and the next
- * sweep continues. Nothing is ever stepped over.
+ * A product rule first and a bound second, and it is worth having both ways
+ * round in mind.
+ *
+ * The product rule: a rule does not act on an alert from six hours ago. By then
+ * the condition has been dealt with or it has not, and either way running a
+ * command about it NOW is worse than not — the operator has moved on, the host
+ * may be mid-repair, and the automation would be arguing with a person. This is
+ * the same instinct behind `armedAt`, applied to the engine rather than to the
+ * rule.
+ *
+ * The bound: `readEvents` returns newest-first and pages backwards, so
+ * "everything since the watermark" after a fortnight offline is unbounded work
+ * with no way to start from the oldest end. Anchoring the older end to a fixed
+ * window is what makes the read finite without inventing a forward cursor the
+ * store does not have.
+ */
+export const RULE_STALE_EVENT_MS = 3_600_000
+
+/**
+ * The ceiling on one sweep's read, and it is a ceiling rather than the bound.
+ *
+ * `RULE_STALE_EVENT_MS` is the bound; this is what stops a pathological hour —
+ * an estate raising two thousand alerts in sixty minutes — being loaded whole.
+ * If it is reached the OLDEST rows inside the window are the ones that fall
+ * out, and the engine writes `rule-suppressed`'s sibling row saying so, because
+ * an automation path that discards without saying so is worse than one that
+ * does not exist.
  */
 export const RULE_SWEEP_MAX_EVENTS = 2000
+
+/** One page of the alert log. Small enough that a quiet estate reads one page
+ *  and stops; large enough that a busy hour is a handful of seeks. */
+export const RULE_SWEEP_PAGE = 200
 
 /** How often the engine sweeps. Alerts are written when they happen and a rule
  *  is not a real-time system: a minute is well inside every repeat window in
@@ -603,3 +628,6 @@ export const RULE_SWEEP_INTERVAL_MS = 60_000
 export const RULE_EVENT_FIRED = 'rule-fired'
 export const RULE_EVENT_SUPPRESSED = 'rule-suppressed'
 export const RULE_EVENT_REFUSED = 'rule-refused'
+/** Written when a sweep hit RULE_SWEEP_MAX_EVENTS and rows inside the window
+ *  went unread. Rare, and the one thing a rule engine must never do quietly. */
+export const RULE_EVENT_SKIPPED = 'rule-events-skipped'
