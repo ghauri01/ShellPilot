@@ -18,6 +18,7 @@ import {
   type HostAccess,
   type Sha256
 } from '../src/shared/access'
+import { JOB_KINDS } from '../src/shared/jobs'
 import type { JobSpec, JobTargetRef } from '../src/shared/jobs'
 
 // The write half — roadmap item 23, stage 2.
@@ -219,8 +220,24 @@ describe('rule 2 — nothing is committed without a second, independent session'
     const plan = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP })
     const spec: JobSpec = plan.spec!
     const targets: JobTargetRef[] = plan.targets
-    expect(spec.kind).toBe('command')
+    expect(spec.steps).toHaveLength(1)
     expect(targets).toHaveLength(1)
+  })
+
+  it('is filed as an access change, not as somebody typing a command', async () => {
+    // A key change that came back from history indistinguishable from an ad-hoc
+    // `systemctl restart nginx` would make the audit trail this whole item
+    // exists to produce unfilterable.
+    //
+    // Asserted against the VALUE list rather than against a type annotation:
+    // neither tsconfig includes `tests/`, so a `const k: JobKind = 'access'`
+    // here is erased by esbuild and passes whatever `JobKind` says. JOB_KINDS
+    // is a real array at runtime, so this fails if the kind is dropped from the
+    // union — which is what the assertion is for.
+    const plan = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP })
+    expect(JOB_KINDS).toEqual(['command', 'patch', 'access'])
+    expect(plan.spec!.kind).toBe('access')
+    expect(JOB_KINDS).toContain(plan.spec!.kind)
   })
 
   it('runs one host at a time', async () => {

@@ -1939,7 +1939,21 @@ export interface AccessBlock {
  * that is allowed to import both.
  */
 export interface AccessJobSpec {
-  kind: 'command'
+  /**
+   * `access`, not `command`, and the difference is what a job list is FOR.
+   *
+   * A key change staged by this planner is a change record — this host stopped
+   * trusting that key on the 14th — and a row that could not be told apart
+   * from somebody's ad-hoc `systemctl restart nginx` would make the audit
+   * trail this whole item exists to produce unfilterable. The kind is declared
+   * on the jobs side (`JobKind` in src/shared/jobs.ts) because this file may
+   * not import that one; see the note on this interface.
+   *
+   * It changes nothing about how the job runs, and it does NOT mean the change
+   * is permanent: an `access` job stages, and only a confirmation over an
+   * independent session commits.
+   */
+  kind: 'access'
   title: string
   steps: { command: string }[]
   concurrency?: number
@@ -2124,7 +2138,7 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
         : buildAddKeyCommand({ path: first.path, line: first.blob, token, rollbackSeconds: req.rollbackSeconds })
     commands.push(command)
     spec = {
-      kind: 'command',
+      kind: 'access',
       title:
         req.kind === 'revoke'
           ? `Stage revocation of ${key.slice(0, 22)}… from ${first.t.user}`
