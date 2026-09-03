@@ -36,6 +36,15 @@ import type {
   DockerStatsProbe
 } from '../shared/docker'
 import type {
+  ComposeBridge,
+  ComposeConfigProbe,
+  ComposeEnvProbe,
+  ComposeImageWriteRequest,
+  ComposeImageWriteResult,
+  ComposeListProbe,
+  ComposeProjectRef
+} from '../shared/compose'
+import type {
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -403,6 +412,42 @@ const api = {
       opts?: { sudo?: boolean; timeoutSec?: number }
     ): Promise<DockerActionResult> => ipcRenderer.invoke('docker:act', cfg, action, refs, opts)
   } satisfies DockerBridge,
+  // The file half. `satisfies ComposeBridge` for the same reason as above: a
+  // channel added to the contract and forgotten here becomes a compile error
+  // rather than a method the panel calls and finds undefined.
+  //
+  // There is no `down`, no `rm` and no `stop` on this bridge, and no channel
+  // that returns the contents of an env file. `pull` and `up -d` are absent on
+  // purpose too: they are jobs, and they reach the host through the jobs bridge
+  // so they inherit its approval record rather than growing a second one.
+  compose: {
+    list: (
+      cfg: unknown,
+      opts?: { sudo?: boolean; autoSudo?: boolean; search?: boolean }
+    ): Promise<ComposeListProbe> => ipcRenderer.invoke('compose:list', cfg, opts),
+    config: (
+      cfg: unknown,
+      project: ComposeProjectRef,
+      opts?: { sudo?: boolean; autoSudo?: boolean }
+    ): Promise<ComposeConfigProbe> => ipcRenderer.invoke('compose:config', cfg, project, opts),
+    envNames: (
+      cfg: unknown,
+      paths: string[],
+      opts?: { sudo?: boolean; autoSudo?: boolean }
+    ): Promise<ComposeEnvProbe> => ipcRenderer.invoke('compose:env-names', cfg, paths, opts),
+    readFile: (
+      cfg: unknown,
+      path: string,
+      opts?: { sudo?: boolean }
+    ): Promise<{ ok: boolean; text?: string; error?: string }> =>
+      ipcRenderer.invoke('compose:read-file', cfg, path, opts),
+    writeImageTag: (
+      cfg: unknown,
+      req: ComposeImageWriteRequest,
+      opts?: { sudo?: boolean }
+    ): Promise<ComposeImageWriteResult> =>
+      ipcRenderer.invoke('compose:write-image-tag', cfg, req, opts)
+  } satisfies ComposeBridge,
   cron: {
     collect: (
       targets: { serverId: string; serverName: string; cfg: unknown }[]

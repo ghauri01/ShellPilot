@@ -70,8 +70,10 @@ import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSourceReport } from '../shared/cron'
 import { DockerReader } from './services/docker'
+import { ComposeReader } from './services/compose'
 import { buildDockerLogsCommand } from '../shared/docker'
 import type { DockerAction, DockerLogsOptions } from '../shared/docker'
+import type { ComposeImageWriteRequest, ComposeProjectRef } from '../shared/compose'
 
 // The one refusal worth retrying as root. Deliberately narrow: a container that
 // simply has no logs, or a dead daemon, is not something root fixes.
@@ -1428,6 +1430,60 @@ ipcMain.handle(
     refs: string[],
     opts?: { sudo?: boolean; timeoutSec?: number }
   ) => dockerReader.act(cfg, action, refs, opts ?? {})
+)
+
+// ---- Compose ----
+//
+// The FILE half of docker, and it registers next to it because it shares the
+// module toggle and the same exec. What it does NOT share is a verb: nothing on
+// these channels stops, removes or deletes anything. `pull` and `up -d` are not
+// here at all — they go through the job engine as a `JobSpec`, so they inherit
+// the approval record, the resume check and the audit row rather than growing
+// their own, and this file has no compose channel that runs either one.
+//
+// The one channel that writes is `compose:write-image-tag`, and it writes ONE
+// LINE of ONE file. The service re-reads the file and re-plans the edit against
+// what is on the host, then refuses when that disagrees with what the operator
+// was shown; a plan arriving over IPC is a claim about a file, not a fact about
+// one, and the renderer is not a trust boundary.
+//
+// There is no channel that returns the contents of a `.env`. `compose:env-names`
+// runs an awk program on the remote host that prints variable NAMES, and the
+// values are gone before the SSH channel sees them — so they are not in this
+// process, not in a rejected promise, and cannot reach an error detail. See the
+// header of shared/compose.ts for why that is the whole shape of the feature.
+const composeReader = new ComposeReader({
+  exec: (cfg, command, timeoutMs) =>
+    // allowPrompt true, matching Docker above and for the same reason: this is
+    // one server the operator just chose, not a fan-out, which is the only
+    // moment a trust-on-first-use dialog is answerable.
+    sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs)
+})
+
+ipcMain.handle(
+  'compose:list',
+  (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean; search?: boolean }) =>
+    composeReader.list(cfg, opts ?? {})
+)
+ipcMain.handle(
+  'compose:config',
+  (_e, cfg: unknown, project: ComposeProjectRef, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+    composeReader.config(cfg, project, opts ?? {})
+)
+// Names only. There is no form of this that returns a value; see the builder.
+ipcMain.handle(
+  'compose:env-names',
+  (_e, cfg: unknown, paths: string[], opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+    composeReader.envNames(cfg, paths, opts ?? {})
+)
+ipcMain.handle('compose:read-file', (_e, cfg: unknown, path: string, opts?: { sudo?: boolean }) =>
+  composeReader.readFile(cfg, path, opts ?? {})
+)
+// The only compose channel that changes anything, and it changes one line.
+ipcMain.handle(
+  'compose:write-image-tag',
+  (_e, cfg: unknown, req: ComposeImageWriteRequest, opts?: { sudo?: boolean }) =>
+    composeReader.writeImageTag(cfg, req, opts ?? {})
 )
 
 // ---- What is scheduled across the estate ----
