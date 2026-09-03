@@ -395,6 +395,45 @@ describe('an occurrence that has no recovery to observe', () => {
     expect(raises()).toHaveLength(0)
   })
 
+  it('damps one question without silencing the rest of the database', () => {
+    // db:ops writes a fresh history row stamped Date.now() on EVERY read, and
+    // the Databases page has a manual Refresh button, so five presses against
+    // one standing replication alarm are five distinct occurrences by the
+    // dedupe key. The damp key was connectionId:kind — per connection and
+    // level, not per question — so the fifth press announced "this has
+    // happened 5 times in 6 hours" about something that happened once and was
+    // read five times, and then silenced every OTHER question on that database
+    // for six hours.
+    for (let i = 0; i < 5; i++) {
+      alerts.noteAlertEvent('c1', 'orders-primary', 'db-alarm', 'replication', T0 + i * MINUTE)
+    }
+    expect(raises()).toHaveLength(5)
+    expect(raises()[4].damped).toBe(true)
+
+    posted.length = 0
+    shown.length = 0
+    // A different question goes into alarm on the same database, at the same
+    // level. Nobody damped this one.
+    alerts.noteAlertEvent('c1', 'orders-primary', 'db-alarm', 'autovacuum', T0 + 6 * MINUTE)
+    expect(raises()).toHaveLength(1)
+    expect(raises()[0].summary).toBe('orders-primary: autovacuum is in alarm')
+  })
+
+  it('carries a per-question damp across a restart, and no further', () => {
+    for (let i = 0; i < 5; i++) {
+      alerts.noteAlertEvent('c1', 'orders-primary', 'db-alarm', 'replication', T0 + i * MINUTE)
+    }
+    restart(loggedRows())
+    posted.length = 0
+    // Still damped an hour later — the replay has to reach the same arithmetic
+    // as the live path, on the same key.
+    alerts.noteAlertEvent('c1', 'orders-primary', 'db-alarm', 'replication', T0 + HOUR)
+    expect(raises()).toHaveLength(0)
+    // And still not damped for anything else on that database.
+    alerts.noteAlertEvent('c1', 'orders-primary', 'db-alarm', 'autovacuum', T0 + HOUR)
+    expect(raises()).toHaveLength(1)
+  })
+
   it('says nothing until the durable log has been read back', async () => {
     alerts.resetAlertsForTests()
     // A history read that never settles, which is the window hydration covers.

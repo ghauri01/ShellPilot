@@ -406,6 +406,23 @@ const seenEvents = new Set<string>()
 const eventDedupeKey = (id: string, kind: AlertKind, detail: string, at: number): string =>
   `${id}:${kind}:${detail}:${at}`
 
+/**
+ * The suppression key for an event kind: the connection, the level AND the
+ * question.
+ *
+ * `connectionId:kind` was per database and per level, which is not what any of
+ * the suppression is about. Five reads of one standing replication alarm damped
+ * the whole database, so a genuinely new question going into alarm on it was
+ * silent for six hours — refreshed by every further read, so potentially
+ * forever. A question is the thing a verdict is about, and it is what a damp,
+ * a snooze and an acknowledgement have to be about too.
+ *
+ * It shares the `${id}:` prefix every sweep in onServerForgotten matches on,
+ * so nothing that cleans up by server id has to know about the third segment.
+ */
+const eventKey = (id: string, kind: AlertKind, question: string): string =>
+  `${id}:${kind}:${question}`
+
 /** Whether a kind is one of the "something happened, once" kinds. Read off the
  *  shared list rather than a second literal, so a kind added there cannot be
  *  quietly left behind here. */
@@ -458,7 +475,9 @@ function record(
  */
 export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
   for (const row of [...rows].reverse()) {
-    const k = key(row.serverId, row.kind)
+    const k = isEventKind(row.kind)
+      ? eventKey(row.serverId, row.kind, row.detail ?? '')
+      : key(row.serverId, row.kind)
     if (isEventKind(row.kind)) {
       // An event kind holds no condition and never writes a resolve, so every
       // raise in the log is a separate occurrence rather than the start of one
@@ -472,7 +491,6 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       // occurrence arriving while damped extends the quiet rather than being
       // counted towards a new damp.
       seenEvents.add(eventDedupeKey(row.serverId, row.kind, row.detail ?? '', row.at))
-      if (isSnoozed(k, row.at) || acknowledged.has(k)) continue
       if (isDamped(k, row.at)) dampedUntil.set(k, row.at + FLAP_DAMP_MS)
       else noteCrossing(k, row.at)
       continue
@@ -1126,7 +1144,8 @@ export function noteAlertEvent(
   // launch after a night of alarms would replay all of them.
   const dedupe = eventDedupeKey(id, kind, what, at)
   if (seenEvents.has(dedupe)) return
-  const k = key(id, kind)
+  // Per question, not per database. See eventKey.
+  const k = eventKey(id, kind, what)
   if (!hydrated) {
     // Not marked seen — so the next poll offers it again once the log has been
     // read. Announcing before hydration is exactly what the damping and repeat
@@ -1134,9 +1153,13 @@ export function noteAlertEvent(
     return
   }
   seenEvents.add(dedupe)
-  // A snooze is the user's own period and nothing the estate does may extend
-  // it, so it returns before the damp refresh below rather than through it.
-  if (isSnoozed(k, at) || acknowledged.has(k)) return
+  // There is deliberately no snooze or acknowledgement check here, and the one
+  // that used to be here was dead code: both are set from the inbox's
+  // Outstanding list, that list is built from the status-bar chips, and this
+  // function writes no chip — a kind that cannot observe its own recovery must
+  // not hold one, which is the whole argument in the docblock above. A check
+  // against state nothing can set reads as a feature that exists. The panel
+  // says plainly that a database verdict cannot be snoozed.
   // The occurrence's OWN time drives damping, not the wall clock at the moment
   // we happened to read it. That is what makes the live path and the hydration
   // replay above the same arithmetic on the same rows, rather than two versions

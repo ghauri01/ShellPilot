@@ -170,6 +170,18 @@ export function AlertsPanel(): React.JSX.Element {
       <div className="s-title" style={{ marginTop: 12 }}>
         Outstanding
       </div>
+      {/* Said here rather than left as an absence somebody has to notice.
+          Outstanding is built from the status-bar chips, and a database verdict
+          deliberately holds none: notableDbEvents records alarm and watch and
+          never records ok, so nothing in the store can say a database
+          recovered, and a chip that could never come down would point at a
+          screen that disagreed with it. They are in the history below, and
+          there is nothing to snooze because nothing repeats. */}
+      <div className="s-desc">
+        Database verdicts are not listed here and cannot be snoozed: they are
+        occurrences rather than conditions, so there is no repeat to stop. Every one is in the
+        history below.
+      </div>
       {outstanding.length === 0 ? (
         <div className="faint" style={{ fontSize: 12 }}>
           Nothing is outstanding right now.
