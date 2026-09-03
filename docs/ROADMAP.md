@@ -1205,10 +1205,10 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 19a | ~~**Disk alert**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | — | Done |
 | 21a | ~~**Docker itemised disk view**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 21b | **Docker reclaim by id** | 60% | monthly | 3 | some | **5** | 1.5–2 wk | podman fixtures | Deferred |
-| C | **Host facts** | 100% | continuous | 4 | strong | **3 direct / 21 unlocked** | **1.5 wk** | — | Enabler |
-| A | **Durable store** | — | — | — | — | **0 direct / 30 unlocked** | **1.5 wk** | — | Enabler |
-| B | **Job engine** | — | — | — | — | **0 direct / 38 unlocked** | **2.5 wk** | — | Enabler |
-| 18 | **Database operations** | 70% | weekly | 4 | strong | **8** | 2.5 wk (pg+mysql) | — | Ship alongside |
+| C | ~~**Host facts**~~ | 100% | continuous | 4 | strong | **3 / 21** | **SHIPPED** | — | Done |
+| A | ~~**Durable store**~~ | — | — | — | — | **0 / 30** | **SHIPPED** | — | Done |
+| B | ~~**Job engine B1+B2**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | B3, B4 remain | Part done |
+| 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** (pg+mysql) | mongo/redis remain | Part done |
 | 17 | **Patch management** | 100% | weekly | 5 | strong | **10** | 3.5 wk | A, B, C | Flagship |
 | 5 | **Backups to real targets** | 90% | weekly | 5 | strong | **8** | 3.5 wk | B, scheduler | Invest |
 | 19b | **Alerting, the rest** | 100% | continuous | 4 | none | **8** | 2.5 wk | A | Invest |
