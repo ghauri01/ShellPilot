@@ -437,8 +437,20 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       // Absolute, so it means what it meant when it was set. An expired one is
       // simply over — isSnoozed drops it lazily on the first read.
       if (row.until !== undefined) snoozedUntil.set(k, row.until)
+      // And the acknowledgement it REPLACED, exactly as snoozeAlert does live.
+      // The two are alternatives, not layers, and a replay that only ever added
+      // made a restart the one thing that could put them back on top of each
+      // other: a stale acknowledgement outliving the snooze that replaced it is
+      // silence with no chip and no end, because an acknowledgement only ends
+      // when the condition does.
+      acknowledged.delete(k)
     } else if (row.event === 'acknowledged') {
       acknowledged.add(k)
+      // The other direction, and the same rule: acknowledgeAlert clears the
+      // snooze live, so the replay has to. A stale snooze read back from the
+      // log passes isQuiet before the all-clear is decided, which leaves the
+      // endpoint holding an alarm it will never be told about.
+      snoozedUntil.delete(k)
     } else if (row.event === 'stood-down') {
       // Alerting was switched off with this outstanding. Nothing is owed and
       // nothing is suppressed: the next crossing is a new conversation, which

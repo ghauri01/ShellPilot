@@ -270,6 +270,7 @@ describe('acknowledge', () => {
   it('replaces a snooze rather than layering over it', () => {
     sample(91)
     alerts.snoozeAlert('s1', 'disk', HOUR)
+    vi.setSystemTime(T0 + MINUTE)
     alerts.acknowledgeAlert('s1', 'disk')
     // Long after the snooze would have run out.
     vi.setSystemTime(T0 + 12 * HOUR)
@@ -283,6 +284,7 @@ describe('acknowledge', () => {
     // stale eight-hour snooze nobody can see goes on silencing the next one.
     sample(91)
     alerts.snoozeAlert('s1', 'disk', 8 * HOUR)
+    vi.setSystemTime(T0 + MINUTE)
     alerts.acknowledgeAlert('s1', 'disk')
     vi.setSystemTime(T0 + HOUR)
     sample(40)
@@ -292,11 +294,32 @@ describe('acknowledge', () => {
     expect(raises()).toHaveLength(1)
   })
 
+  it('leaves no snooze behind ACROSS A RESTART either', () => {
+    // The same rule, put through the one thing a person does when an app is
+    // annoying them. The live mutators are mutually exclusive; the replay
+    // branches only ever ADDED, so a restart resurrected the snooze the
+    // acknowledgement had replaced — and then `isQuiet` held the all-clear
+    // back, leaving the endpoint with an alarm nothing will ever close.
+    sample(91)
+    alerts.snoozeAlert('s1', 'disk', 8 * HOUR)
+    vi.setSystemTime(T0 + MINUTE)
+    alerts.acknowledgeAlert('s1', 'disk')
+
+    restart(loggedRows())
+    posted.length = 0
+    // The disk is cleaned an hour later, which is what ends an acknowledgement.
+    vi.setSystemTime(T0 + HOUR)
+    sample(40)
+    expect(resolves()).toHaveLength(1)
+  })
+
   it('is replaced by a snooze, which has an end the acknowledgement did not', () => {
     // The other direction. Snoozing something already acknowledged is a person
     // narrowing an open-ended silence to a period, and the period has to win.
     sample(91)
+    vi.setSystemTime(T0 + MINUTE)
     alerts.acknowledgeAlert('s1', 'disk')
+    vi.setSystemTime(T0 + 2 * MINUTE)
     alerts.snoozeAlert('s1', 'disk', HOUR)
     expect(alerts.useAlerts.getState().active['s1:disk']).toBeUndefined()
     // An hour and a repeat window later it speaks, which it never would have
@@ -304,6 +327,25 @@ describe('acknowledge', () => {
     vi.setSystemTime(T0 + 7 * HOUR)
     sample(91)
     expect(raises()).toHaveLength(2)
+  })
+
+  it('is replaced by a snooze ACROSS A RESTART too', () => {
+    // The mirror of the case above, and the worse half of it: a stale
+    // acknowledgement outlives the snooze that replaced it, and an
+    // acknowledgement only ends when the condition does. Twelve hours later,
+    // on a 91% disk, that is silence with no chip and nothing to un-silence.
+    sample(91)
+    vi.setSystemTime(T0 + MINUTE)
+    alerts.acknowledgeAlert('s1', 'disk')
+    vi.setSystemTime(T0 + 2 * MINUTE)
+    alerts.snoozeAlert('s1', 'disk', HOUR)
+
+    restart(loggedRows())
+    posted.length = 0
+    vi.setSystemTime(T0 + 12 * HOUR)
+    sample(91)
+    expect(raises()).toHaveLength(1)
+    expect(alerts.useAlerts.getState().active['s1:disk']).toBeDefined()
   })
 
   it('is undone by switching alerting off and on, like everything else', () => {
