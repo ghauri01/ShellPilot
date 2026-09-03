@@ -509,15 +509,40 @@ export interface HostAccess {
    *  can be identified without a second round trip. */
   collectedAs: string | null
   /**
-   * The fingerprint of the key THIS session authenticated with, from sshd's own
+   * EVERY key THIS session authenticated with, from sshd's own
    * `SSH_AUTH_INFO_0`.
    *
-   * null when the host would not say — `ExposeAuthInfo` is off by default, and
-   * on most hosts this will be null. That is not a gap to paper over: it is the
-   * difference between "this revoke provably does not remove the key I am on"
-   * and "nobody can tell", and `planAccessChange` treats the two differently.
+   * A LIST, not one value, and that is the finding rather than a generalisation
+   * for its own sake. `AuthenticationMethods publickey,publickey` is a real and
+   * increasingly common configuration, and sshd reports it as one factor PER
+   * LINE in the same variable. Reading only the first line protects only the
+   * first key, and the second one holds the connection open just as hard.
+   *
+   * Empty when the host would not say — `ExposeAuthInfo` is off by default, so
+   * on most hosts this will be empty. See `sessionKeysCertain`, which is what
+   * separates "there is provably no key here to protect" from "nobody can
+   * tell".
    */
-  sessionKeyFingerprint: string | null
+  sessionKeyFingerprints: string[]
+  /**
+   * Whether `sessionKeyFingerprints` may be relied on as THE set of keys
+   * holding this connection open.
+   *
+   * True only when the host named at least one public key for this session and
+   * every one of them was fingerprinted exactly. False when the host said
+   * nothing, and false when it said something this could not turn into a
+   * fingerprint — a blob cut by the collector's own line cap, a key type this
+   * build does not know, a factor in a shape it does not recognise.
+   *
+   * THE TRUNCATION CASE IS WHY THIS IS A SEPARATE FLAG AND NOT `length > 0`.
+   * A fingerprint computed over a cut blob is not a missing answer, it is a
+   * confident wrong one: it matches nothing, so the exact check in
+   * `planAccessChange` silently does not fire — and an empty list that looked
+   * like "the host said nothing" would at least have taken the conservative
+   * branch. So a factor that could not be fingerprinted clears this flag, and
+   * the conservative branch is taken instead.
+   */
+  sessionKeysCertain: boolean
   /** Epoch milliseconds by OUR clock. */
   collectedAt: number
   /** The host's own clock at collection, epoch ms, when it said. Kept because a
@@ -664,7 +689,31 @@ export function buildAccessCommand(opts: AccessCollectOptions = {}): string {
     // which is not the default. So it is asked for, used when it is there, and
     // its ABSENCE is a first-class state that changes what a revoke is allowed
     // to do. See planAccessChange.
-    `sp_val authinfo "$SSH_AUTH_INFO_0"`,
+    // ONE RECORD PER FACTOR, WITH ITS PRE-TRUNCATION LENGTH. Both halves of
+    // that are fixes for a silent bypass, and both are worth naming.
+    //
+    // THE LENGTH. `sp_val` cuts at VALUE_CAP (512), which is generous for a
+    // hostname and not generous at all for a key: `publickey ssh-rsa <blob>` is
+    // 390 characters for RSA-2048 and 562 for RSA-3072. Cut there, the blob
+    // still decodes — it just decodes to a DIFFERENT key — so the fingerprint
+    // came out clean, matched nothing in the file, and rule 1's exact check did
+    // not fire, on the one configuration (`ExposeAuthInfo yes`) where rule 1 is
+    // supposed to be exact. The cap here is KEY_LINE_CAP, the same one an
+    // authorized_keys line gets, so no key anyone actually uses is cut at all;
+    // and the length is carried anyway, because a cap is a cliff and the flag
+    // is what makes going over it safe rather than merely unlikely.
+    //
+    // THE SPLIT. `sp_clean` DELETES control characters, newline included, so
+    // `AuthenticationMethods publickey,publickey` — two factors, one per line
+    // in this variable — flattened into a single corrupt record that parsed as
+    // nothing. Splitting first protects every key the session presented instead
+    // of, at best, the first.
+    'sp_auth() {',
+    `SP_A=$(printf '%s' "$1" | tr '\\011' ' ' | tr -d '\\000-\\037\\177')`,
+    'SP_AN=${#SP_A}',
+    `[ "$SP_AN" -gt 0 ] && printf 'A %s %s\\n' "$SP_AN" "$(printf '%s' "$SP_A" | cut -c1-${KEY_LINE_CAP})"`,
+    '}',
+    `printf '%s\\n' "$SSH_AUTH_INFO_0" | while IFS= read -r SP_AL; do sp_auth "$SP_AL"; done`,
 
     // ---- sshd: where does it actually look for keys? ---------------------
     // First, because it decides whether everything below is the whole story.
@@ -1415,7 +1464,7 @@ export function parseAuthorizedKeyLine(
 
 // ---- The whole collection --------------------------------------------------
 
-const SCALAR_KEYS = ['now', 'tz', 'self', 'keyfile', 'keycmd', 'lltool', 'authinfo'] as const
+const SCALAR_KEYS = ['now', 'tz', 'self', 'keyfile', 'keycmd', 'lltool'] as const
 type ScalarKey = (typeof SCALAR_KEYS)[number]
 
 const USER_FIELDS = ['name', 'uid', 'shell', 'home', 'path', 'keys', 'keys2', 'groups', 'expires'] as const
@@ -1546,6 +1595,9 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
   const keyLines = new Map<number, { line: number; len: number; text: string }[]>()
   const lockStates = new Map<string, string>()
   const loginRows: string[] = []
+  /** One per line of SSH_AUTH_INFO_0, with the length it had before the
+   *  collector's cap. */
+  const authFactors: { len: number; text: string }[] = []
 
   for (const rawLine of body) {
     const line = rawLine.replace(/\r$/, '')
@@ -1582,6 +1634,16 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
       const bucket = keyLines.get(idx) ?? []
       bucket.push({ line: Number(m[2]), len: Number(m[3]), text: m[4] })
       keyLines.set(idx, bucket)
+      continue
+    }
+
+    if (tag === 'A ') {
+      // `A <length-before-truncation> <factor>`, shaped like `K` and for the
+      // same reason: without the length there is no way to tell a factor that
+      // fitted from one that was cut.
+      const m = /^A (\d{1,9}) (.*)$/.exec(line)
+      if (!m) continue
+      authFactors.push({ len: Number(m[1]), text: m[2] })
       continue
     }
 
@@ -1628,16 +1690,44 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
   const selfRaw = (last('self') ?? '').trim()
   const collectedAs = USER_RE.test(selfRaw) ? selfRaw : null
 
-  // `SSH_AUTH_INFO_0` is `<method> [<keytype> <blob>]`, one line per factor.
-  // Fingerprinted through exactly the same path an authorized_keys line takes,
-  // so a match against one is a match on identical terms rather than on two
-  // implementations that agree today.
-  const authInfo = last('authinfo')
-  let sessionKeyFingerprint: string | null = null
-  if (authInfo !== undefined) {
-    const m = /^publickey\s+(\S+\s+\S+)/.exec(authInfo.trim())
-    if (m) sessionKeyFingerprint = parseAuthorizedKeyLine(m[1], 0, deps.sha256)?.fingerprint ?? null
+  // `SSH_AUTH_INFO_0` is `<method> [<keytype> <blob>]`, ONE LINE PER FACTOR.
+  // Fingerprinted through exactly the same path an authorized_keys line takes —
+  // the same parser, the same truncation flag — so a match against one is a
+  // match on identical terms rather than on two implementations that agree
+  // today.
+  //
+  // EVERY FAILURE HERE CLEARS `certain` RATHER THAN BEING SKIPPED. A factor
+  // this cannot read is a key that might be holding the connection open and
+  // cannot be named, which is precisely the state the conservative half of rule
+  // 1 exists for. Dropping it quietly would leave a list that looks complete.
+  const sessionKeyFingerprints: string[] = []
+  let sessionKeysCertain = authFactors.length > 0
+  for (const f of authFactors) {
+    const text = f.text.trim()
+    if (!/^publickey\b/.test(text)) {
+      // A `password` or `keyboard-interactive` factor names no key. It is not a
+      // failure to read one — but it is not a key this can protect either, so
+      // it neither adds to the list nor clears the flag on its own.
+      continue
+    }
+    const m = /^publickey\s+(\S+\s+\S+)\s*$/.exec(text)
+    if (!m) {
+      sessionKeysCertain = false
+      continue
+    }
+    // `f.len > KEY_LINE_CAP` is the flag the authorized_keys path already
+    // passes 60 lines below, and its absence here was the bypass: a cut blob
+    // decodes to a different key rather than to nothing, so the fingerprint
+    // came out looking like an answer.
+    const fp =
+      parseAuthorizedKeyLine(m[1], 0, deps.sha256, f.len > KEY_LINE_CAP)?.fingerprint ?? null
+    if (fp === null) sessionKeysCertain = false
+    else sessionKeyFingerprints.push(fp)
   }
+  // A session the host says used no key at all leaves nothing to compare
+  // against, and the account ShellPilot connects as is not where this build
+  // spends a maybe. Treated as "cannot tell", which is the conservative branch.
+  if (sessionKeyFingerprints.length === 0) sessionKeysCertain = false
 
   // Every directive line seen, in file order, with the directive word stripped.
   const directiveValues = (k: 'keyfile' | 'keycmd'): string[] => {
@@ -1843,7 +1933,8 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
     keyFileIsDefault,
     authorizedKeysCommand,
     collectedAs,
-    sessionKeyFingerprint,
+    sessionKeyFingerprints,
+    sessionKeysCertain,
     collectedAt: now,
     hostNow,
     sources: [
@@ -2109,7 +2200,7 @@ export function accessToFacts(access: HostAccess): Record<string, string> {
 //  1. NEVER REMOVE THE KEY THE CURRENT SESSION IS AUTHENTICATED WITH.
 //     Enforced as a hard block on the plan, not a dialog. Where sshd will say
 //     which key that is (`ExposeAuthInfo`, collected as
-//     `sessionKeyFingerprint`), the check is exact. Where it will not — the
+//     `sessionKeyFingerprints`), the check is exact. Where it will not — the
 //     default on most hosts — the plan says so, and a revoke against the
 //     account this session is running as is blocked outright rather than
 //     attempted on a guess. Revoking a DIFFERENT account's key cannot lock this
@@ -2426,7 +2517,7 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
 
     if (req.kind === 'revoke') {
       const protect = new Set([...(req.protect ?? [])])
-      if (t.access.sessionKeyFingerprint !== null) protect.add(t.access.sessionKeyFingerprint)
+      for (const fp of t.access.sessionKeyFingerprints) protect.add(fp)
 
       // RULE 1, exactly.
       if (protect.has(key)) {
@@ -2439,10 +2530,10 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
       // RULE 1, conservatively. `collectedAs` is the account this session runs
       // as; another account's keys cannot lock this session out, so the refusal
       // is scoped to the one that can.
-      if (t.access.sessionKeyFingerprint === null && t.access.collectedAs === t.user) {
+      if (!t.access.sessionKeysCertain && t.access.collectedAs === t.user) {
         block(
           'session-key-unknown',
-          `${t.serverName} does not report which key this session authenticated with (sshd's ExposeAuthInfo is off), and this would edit the keys of the very account ShellPilot connects as. Without that fact nothing can prove the key being removed is not the one holding this connection open.`
+          `${t.serverName} did not name every key this session authenticated with — either sshd's ExposeAuthInfo is off, or what it said could not be turned into a fingerprint exactly — and this would edit the keys of the very account ShellPilot connects as. Without that fact nothing can prove the key being removed is not the one holding this connection open.`
         )
         continue
       }

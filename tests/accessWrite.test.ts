@@ -106,13 +106,29 @@ const OK_STATUS = [
 /** A collection, through the real parser. Two keys on `ops`, sshd on the
  *  default key file, and by default the host does not say which key we are on —
  *  which is what most hosts actually do. */
-function host(over: { authinfo?: string; self?: string; user?: string; keysStatus?: string } = {}): HostAccess {
+function host(
+  over: {
+    /** One entry per factor, exactly as sshd would put it on its own line. */
+    authinfo?: string[]
+    /** Override the length recorded for every factor, so a truncated blob can
+     *  be staged without generating a 2049-character key. */
+    authinfoLen?: number
+    self?: string
+    user?: string
+    keysStatus?: string
+  } = {}
+): HostAccess {
   const user = over.user ?? 'ops'
   return parseAccessCollection(
     [
       'V tz +0000',
       `V self ${over.self ?? 'ops'}`,
-      ...(over.authinfo ? [`V authinfo ${over.authinfo}`] : []),
+      // `A <length-before-truncation> <factor>`, one per line of
+      // SSH_AUTH_INFO_0, which is the record the collector actually emits. The
+      // length is what tells a factor that fitted from one that was cut, and
+      // passing the real length here is what makes the fixtures below able to
+      // lie about it deliberately.
+      ...(over.authinfo ?? []).map((f) => `A ${over.authinfoLen ?? f.length} ${f}`),
       'V keyfile AuthorizedKeysFile .ssh/authorized_keys',
       `U 1 keys ${over.keysStatus ?? 'ok'} -`,
       `U 1 path /home/${user}/.ssh/authorized_keys`,
@@ -150,7 +166,7 @@ describe('rule 1 — never remove the key this session is on', () => {
   it('refuses when the host says that key is the one we authenticated with', async () => {
     // sshd's own answer, via SSH_AUTH_INFO_0. The only authoritative source, and
     // where it exists the check is exact rather than a guess.
-    const plan = revoke({ targets: [target(host({ authinfo: `publickey ssh-ed25519 ${A}` }))] })
+    const plan = revoke({ targets: [target(host({ authinfo: [`publickey ssh-ed25519 ${A}`] }))] })
     expect(plan.spec).toBeNull()
     expect(plan.blocks.map((b) => b.kind)).toEqual(['is-session-key'])
     expect(plan.blocks[0].reason).toContain('own way back into the host')
@@ -166,7 +182,7 @@ describe('rule 1 — never remove the key this session is on', () => {
     // A rule with an override is a default. `planAccessChange` returns blocks
     // and nothing else: there is no severity, no acknowledgement, no field a
     // caller could set to proceed anyway.
-    const plan = revoke({ targets: [target(host({ authinfo: `publickey ssh-ed25519 ${A}` }))] })
+    const plan = revoke({ targets: [target(host({ authinfo: [`publickey ssh-ed25519 ${A}`] }))] })
     expect(Object.keys(plan.blocks[0]).sort()).toEqual(['kind', 'reason', 'serverId', 'serverName', 'user'])
     expect(plan.targets).toEqual([])
     expect(plan.disarm).toEqual([])
@@ -197,11 +213,43 @@ describe('rule 1 — never remove the key this session is on', () => {
     expect(plan.targets.map((t) => t.serverId)).toEqual(['a'])
   })
 
+  it('refuses when the session key is the SECOND factor the host named', async () => {
+    // `AuthenticationMethods publickey,publickey`. sshd reports one factor per
+    // line of SSH_AUTH_INFO_0, and only the first was ever looked at — so on a
+    // two-factor host the second key was unprotected and revocable.
+    const plan = revoke({
+      fingerprint: B_FP,
+      targets: [
+        target(host({ self: 'root', user: 'ops', authinfo: [`publickey ssh-ed25519 ${A}`, `publickey ssh-ed25519 ${B}`] }), 'ops')
+      ]
+    })
+    expect(plan.blocks.map((b) => b.kind)).toEqual(['is-session-key'])
+    expect(plan.spec).toBeNull()
+  })
+
+  it('refuses conservatively when the key the host named was cut, rather than trusting the stump', async () => {
+    // THE BYPASS, at the level it mattered. A blob cut by the collector still
+    // decodes — to a different key — so `is-session-key` did not fire, and the
+    // list was non-empty so the conservative branch did not fire either. Both
+    // rules stepped aside for the same value.
+    const cut = host({
+      self: 'ops',
+      user: 'ops',
+      authinfo: [`publickey ssh-ed25519 ${A}`],
+      authinfoLen: 9999
+    })
+    expect(cut.sessionKeyFingerprints).toEqual([])
+    expect(cut.sessionKeysCertain).toBe(false)
+    const plan = revoke({ fingerprint: B_FP, targets: [target(cut, 'ops')] })
+    expect(plan.blocks.map((b) => b.kind)).toEqual(['session-key-unknown'])
+    expect(plan.spec).toBeNull()
+  })
+
   it('still refuses that other account when the host names the key and it matches', async () => {
     // The authoritative check is not scoped to the connecting account: a key
     // shared between accounts is still the key this session is on.
     const plan = revoke({
-      targets: [target(host({ self: 'root', user: 'ops', authinfo: `publickey ssh-ed25519 ${A}` }), 'ops')]
+      targets: [target(host({ self: 'root', user: 'ops', authinfo: [`publickey ssh-ed25519 ${A}`] }), 'ops')]
     })
     expect(plan.blocks.map((b) => b.kind)).toEqual(['is-session-key'])
   })
