@@ -31,6 +31,7 @@ import type {
 } from '../shared/jobs'
 import type { LogLine, LogSource, LogTailState, UnitChoice } from '../shared/logtail'
 import type { CronEntry, CronSourceReport } from '../shared/cron'
+import type { CapacityBridge, CapacityReport } from '../shared/capacity'
 import type {
   DockerAction,
   DockerActionResult,
@@ -355,6 +356,16 @@ const api = {
     dbEvents: (limit?: number): Promise<StoredDbAlertRow[]> =>
       ipcRenderer.invoke('alerts:db-events', limit)
   },
+  // Roadmap item 26. One method, taking a host and a window and nothing else,
+  // for the same reason `alerts` above has no filter argument: a general read
+  // surface here is the first step to losing the history store's rule that no
+  // SQL crosses its boundary. `satisfies CapacityBridge` so a channel added to
+  // the contract and forgotten here is a compile error rather than a method the
+  // panel calls at runtime and finds undefined.
+  capacity: {
+    trends: (hostId: string, windowDays: number): Promise<CapacityReport | null> =>
+      ipcRenderer.invoke('capacity:trends', hostId, windowDays)
+  } satisfies CapacityBridge,
   k8s: {
     read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>
       ipcRenderer.invoke('k8s:read', cfg, context, namespace),

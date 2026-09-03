@@ -52,7 +52,18 @@ import {
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { HostFactsReader } from './services/hostFacts'
 import { FleetSampler, fleetCached, setActiveFleetSampler } from './services/fleetSampler'
-import { loadHistory, type EventCursor, type HistoryStore } from './services/history'
+import {
+  RETENTION_FULL_DAYS,
+  RETENTION_HOURLY_DAYS,
+  loadHistory,
+  type EventCursor,
+  type HistoryStore
+} from './services/history'
+import {
+  CAPACITY_THRESHOLDS,
+  buildCapacityReport,
+  type CapacityReport
+} from '../shared/capacity'
 import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
@@ -2052,6 +2063,49 @@ ipcMain.handle('alerts:db-events', (_e, limit?: number): StoredDbAlertRow[] => {
   out.sort((a, b) => b.at - a.at)
   return out.slice(0, n)
 })
+
+// ---- Capacity trends — roadmap item 26 ----
+//
+// One named read and one pure function. No filter argument and no metric
+// argument, for exactly the reason `alerts:history` has none: the history
+// store's rule is named statements only, and "let the caller say which series
+// over which range with which aggregate" is the query surface that rule exists
+// to refuse.
+//
+// What crosses IPC is the ANSWER — a drawable line, and a forecast or the
+// reason there is not one — not the samples behind it. A 90-day window holds
+// about seven thousand points per metric; shipping twenty-one thousand of them
+// to the renderer to be averaged down into eight hundred pixels is how "a query
+// and a chart" turns into the metrics warehouse the roadmap says not to build.
+ipcMain.handle(
+  'capacity:trends',
+  (_e, hostId: unknown, windowDays: unknown): CapacityReport | null => {
+    if (!historyStore) return null
+    // Not a string is not a host. The renderer passes a server id; anything
+    // else is a caller bug and must not read the whole time range.
+    if (typeof hostId !== 'string' || hostId === '') return null
+    // Clamped to what the store actually retains. A window wider than the
+    // horizon would return a quarter of data under a label saying a year, and
+    // the forecast states the window it was drawn from — so the label matters.
+    const days =
+      typeof windowDays === 'number' && Number.isFinite(windowDays)
+        ? Math.max(1, Math.min(RETENTION_HOURLY_DAYS, Math.floor(windowDays)))
+        : 7
+    const now = Date.now()
+    const from = now - days * 86_400_000
+    return buildCapacityReport(hostId, historyStore.readTrends(hostId, from, now), {
+      now,
+      from,
+      to: now,
+      thresholds: CAPACITY_THRESHOLDS,
+      // Carried into the report rather than duplicated in the panel: the
+      // renderer cannot import a main-process constant, and a panel with "7
+      // days" typed into it goes on saying that after the policy changes.
+      fullResolutionDays: RETENTION_FULL_DAYS,
+      retainedDays: RETENTION_HOURLY_DAYS
+    })
+  }
+)
 
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()

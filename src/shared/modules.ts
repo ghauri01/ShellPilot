@@ -27,6 +27,7 @@ export type ModuleId =
   | 'inventory'
   | 'patch'
   | 'access'
+  | 'posture'
 
 export interface ModuleDef {
   id: ModuleId
@@ -105,6 +106,26 @@ export const MODULES: ModuleDef[] = [
     // Every one of those reads is a read a person could do by hand, none of
     // them mutates anything, and no private key is touched anywhere. It is
     // still not something to discover after the fact.
+    defaultEnabled: false
+  },
+  {
+    id: 'posture',
+    label: 'Security posture',
+    detail:
+      'What every host already knows about its own exposure: which firewall is active and the shape of its rules, whether SELinux or AppArmor is enforcing, how sshd compares with a hardening baseline, and how many logins have failed. Read-only, and emphatically not a vulnerability scanner — the pending security update count comes from the Inventory probe, which asks the host\'s own package manager, rather than from a CVE feed. A check that could not run is shown as unread, never as passed.',
+    // OFF by default, and this one's toggle gates the COLLECTION rather than
+    // just the panel — see FleetSamplerDeps.postureEnabled.
+    //
+    // The access module beside it is gated for what its probe DOES on the host.
+    // This one is gated for what it PRODUCES. Every individual read here is one
+    // an operator could do by hand and none of them changes anything; the
+    // assembled result is a fleet-wide table of which host has no firewall,
+    // which still takes passwords over ssh, and which has SELinux switched off
+    // — a map of how to attack the estate, kept fresh in one process's memory
+    // and written into the durable store.
+    //
+    // That is worth having, which is why it exists. It is not worth having
+    // without somebody deciding to have it.
     defaultEnabled: false
   },
   {

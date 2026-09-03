@@ -53,6 +53,16 @@ const MODULE_FILES: Record<string, string[]> = {
   // accounts' authorized_keys with `sudo -n`, which is not a thing to discover
   // in a sudo log. See FleetSamplerDeps.accessEnabled.
   access: ['src/renderer/src/components/monitor/AccessPanel.tsx'],
+  // The collector (src/shared/posture.ts, src/main/services/posture.ts) is not
+  // listed, for the reason hostFacts is not listed under `inventory` and the
+  // access collector is not listed above: it lives in the sampler, not in the
+  // module. Worth writing down here as well as in modules.ts is that this
+  // module's toggle also gates the COLLECTION rather than merely the panel —
+  // and for a different reason from `access`. That probe is gated for what it
+  // does on the host; this one is gated for what it produces, which is a
+  // fleet-wide map of how to attack the estate. See
+  // FleetSamplerDeps.postureEnabled.
+  posture: ['src/renderer/src/components/monitor/PosturePanel.tsx'],
   broadcast: [
     'src/shared/broadcast.ts',
     'src/main/services/broadcast.ts',
