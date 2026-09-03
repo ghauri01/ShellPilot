@@ -330,6 +330,17 @@ describe('the by-host view', () => {
     expect(okCount.textContent).toBe('1')
   })
 
+  it('says authorized_keys2 was unchecked rather than showing nothing', async () => {
+    // The account row is where an operator decides whether they have seen this
+    // account's keys. An account whose second key file could not be looked for
+    // has NOT been fully seen, and a blank cell there says it has.
+    await hosts(
+      collected(['U 1 keys ok root', 'U 1 keys2 unknown', 'U 1 name deploy'])
+    )
+    const chip = await screen.findByTestId('keys2-unknown-deploy')
+    expect(chip.textContent).toContain('unchecked')
+  })
+
   it('warns when a locked password sits next to a live key', async () => {
     // `passwd -l` defeats password authentication and does nothing to key
     // authentication. Locked-plus-key is fully usable by whoever holds the key,

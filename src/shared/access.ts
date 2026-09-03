@@ -411,14 +411,20 @@ export interface AccessAccount {
   /** The path that was read, or would have been. */
   keyPath: string | null
   /**
-   * `~/.ssh/authorized_keys2` exists on this account.
+   * Whether `~/.ssh/authorized_keys2` exists on this account.
    *
    * Reported and NOT read. It has been deprecated since 2001, sshd still
    * consults it by default, and a key hiding in it is exactly the kind of thing
    * this feature exists to surface — so its presence is a finding on its own
    * rather than a silent gap.
+   *
+   * `null` when the collector could not tell: a home directory or `.ssh` this
+   * account cannot traverse, which root could not settle either. NOT false —
+   * false is a claim that it was looked for and is not there, and the whole
+   * point of this field is that a key sshd reads and this does not must never
+   * hide behind a "complete picture" banner.
    */
-  hasLegacyKeyFile: boolean
+  hasLegacyKeyFile: boolean | null
   /** Password state from `passwd -S -a`. null when that could not be read;
    *  `accountStatus` says why. NOT the same as "cannot log in" — see
    *  `passwordLockBlocksKeys`. */
@@ -893,9 +899,39 @@ export function buildAccessCommand(opts: AccessCollectOptions = {}): string {
       'fi'
     ),
     'sp_user "$SP_I" keys "$SP_KS $SP_KW"',
-    // Deprecated since 2001, still consulted by sshd, and a key hiding in it is
-    // exactly what this feature exists to surface. Reported, not read.
-    '[ -n "$SP_HOME" ] && [ -e "$SP_HOME/.ssh/authorized_keys2" ] && sp_user "$SP_I" keys2 present',
+
+    // authorized_keys2: deprecated since 2001, still consulted by sshd, and a
+    // key hiding in it is exactly what this feature exists to surface.
+    // Reported, not read.
+    //
+    // THREE STATES, and the same traversal-first discipline as the main file
+    // above. This used to be a bare `[ -e ]` running as the connecting account,
+    // sitting AFTER the escalation block — so on a 0700 home `sudo -n cat` set
+    // the main file to `ok` (the account IS read, as root) while this test
+    // returned false through a directory the connecting account cannot enter.
+    // `hasLegacyKeyFile` came out false, contributed no uncertainty, and a key
+    // in ~deploy/.ssh/authorized_keys2 was invisible under a banner saying the
+    // picture was complete. "We could not look" is now its own answer.
+    'SP_K2=unknown',
+    'if [ -z "$SP_HOME" ]; then SP_K2=absent',
+    'elif [ ! -d "$SP_HOME" ]; then SP_K2=absent',
+    'elif [ ! -x "$SP_HOME" ]; then SP_K2=unknown',
+    'elif [ ! -d "$SP_HOME/.ssh" ]; then SP_K2=absent',
+    'elif [ ! -x "$SP_HOME/.ssh" ]; then SP_K2=unknown',
+    'elif [ -e "$SP_HOME/.ssh/authorized_keys2" ]; then SP_K2=present',
+    'else SP_K2=absent',
+    'fi',
+    ...ifSudo(
+      // The same escalation the main file gets, for the same reason: root
+      // settles it, so the answer stops being an inference from a permission
+      // bit. `--` because a home path out of /etc/passwd can begin with a dash.
+      'if [ "$SP_K2" = unknown ] && [ "$SP_SUDO" = 1 ] && [ -n "$SP_HOME" ]; then',
+      'if sudo -n ls -d -- "$SP_HOME/.ssh/authorized_keys2" >/dev/null 2>&1; then SP_K2=present',
+      'else SP_K2=absent',
+      'fi',
+      'fi'
+    ),
+    'sp_user "$SP_I" keys2 "$SP_K2"',
     'if [ "$SP_KS" = ok ]; then',
     `printf '%s\\n' "$SP_TXT" | { SP_L=0`,
     'while IFS= read -r SP_LINE; do',
@@ -1718,7 +1754,13 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
       ...(keysStatus === 'ok' ? {} : { keysDetail: ACCESS_STATUS_HELP[keysStatus] }),
       ...(readBy === 'root' ? { keysUsedSudo: true } : {}),
       keyPath: freeText(f.get('path'), 256),
-      hasLegacyKeyFile: f.get('keys2') === 'present',
+      // 'present' → yes, 'unknown' → the host said it could not tell, anything
+      // else → no. A MISSING record reads as no: the collector emits this word
+      // unconditionally for every account it emits at all, so its absence means
+      // a malformed record stream rather than a host declining to answer — and
+      // that case is already reported, loudly, by `keysStatus`.
+      hasLegacyKeyFile:
+        f.get('keys2') === 'present' ? true : f.get('keys2') === 'unknown' ? null : false,
       // `passwordLocked` is null unless the tool actually answered for THIS
       // account. An account missing from `passwd -S -a` output is not an
       // unlocked account.
@@ -1901,10 +1943,20 @@ export function summariseAccess(access: HostAccess): AccessSummary {
       'sshd’s AuthorizedKeysFile setting could not be determined, so it is not known whether this is where it looks'
     )
   }
-  const legacy = access.accounts.filter((a) => a.hasLegacyKeyFile).map((a) => a.user)
+  const legacy = access.accounts.filter((a) => a.hasLegacyKeyFile === true).map((a) => a.user)
   if (legacy.length > 0) {
     uncertainty.push(
       `${legacy.length} account${legacy.length === 1 ? ' has' : 's have'} a legacy .ssh/authorized_keys2 file, which sshd still reads and this collection does not`
+    )
+  }
+  // "We could not look" is a different sentence from "it is there", and it has
+  // to be one of these too: a key in a file sshd reads and this does not, on an
+  // account nobody could check, is exactly what a complete-picture banner over
+  // the top of it would hide.
+  const legacyUnknown = access.accounts.filter((a) => a.hasLegacyKeyFile === null).map((a) => a.user)
+  if (legacyUnknown.length > 0) {
+    uncertainty.push(
+      `${legacyUnknown.length} account${legacyUnknown.length === 1 ? '' : 's'} could not be checked for a legacy .ssh/authorized_keys2 file, which sshd still reads and this collection does not`
     )
   }
   if (unfingerprinted > 0) {
@@ -2026,7 +2078,10 @@ export function accessToFacts(access: HostAccess): Record<string, string> {
       a.passwordLocked === null ? a.accountStatus : String(a.passwordLocked)
     out[`${base}adminGroups`] = a.adminGroups === null ? 'unknown' : a.adminGroups.join(',')
     if (a.expired !== null) out[`${base}expired`] = String(a.expired)
-    if (a.hasLegacyKeyFile) out[`${base}legacyKeyFile`] = 'present'
+    // The status, never a silence. `unknown` in the history is the difference
+    // between "this account had no second key file" and "nobody could tell".
+    out[`${base}legacyKeyFile`] =
+      a.hasLegacyKeyFile === null ? 'unknown' : a.hasLegacyKeyFile ? 'present' : 'absent'
     // Only for accounts that were read. An unread account contributes no key
     // rows at all, so nothing can later be mistaken for "these were removed".
     for (const k of a.keys ?? []) {

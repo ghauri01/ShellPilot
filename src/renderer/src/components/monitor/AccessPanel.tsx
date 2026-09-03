@@ -678,12 +678,24 @@ export function AccessPanel({
                         <td>{h.server.name}</td>
                         <td className="mono" style={{ fontSize: 11 }}>
                           {a.user}
-                          {a.hasLegacyKeyFile && (
+                          {a.hasLegacyKeyFile === true && (
                             <span
                               className="chip warn"
                               title="This account has a .ssh/authorized_keys2 file. sshd still reads it and ShellPilot does not, so this account may trust keys that are not listed here."
                             >
                               authorized_keys2
+                            </span>
+                          )}
+                          {/* Not the same chip and not no chip. "Could not
+                              look" is the state a key sshd reads and this does
+                              not would hide in. */}
+                          {a.hasLegacyKeyFile === null && (
+                            <span
+                              className="inv-na loud"
+                              data-testid={`keys2-unknown-${a.user}`}
+                              title="ShellPilot could not tell whether this account has a .ssh/authorized_keys2 file — the path to it could not be traversed, and root could not settle it either. sshd still reads that file, so this account may trust keys that are not listed here."
+                            >
+                              authorized_keys2 unchecked
                             </span>
                           )}
                         </td>

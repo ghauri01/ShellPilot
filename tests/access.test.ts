@@ -118,6 +118,12 @@ describe('the command the collector sends', () => {
     // sudo in it at all, which is the shape of a guard that checks nothing.
     expect(sudos.length, 'no sudo at all — this assertion checked nothing').toBeGreaterThan(3)
     for (const line of sudos) expect(line, line).toMatch(/sudo -n\b/)
+    // The legacy-key-file probe escalates too. It used to run unprivileged and
+    // AFTER the escalation for the main file, so on a 0700 home the main file
+    // was read as root while this one answered "not there" through a directory
+    // the connecting account could not enter. The harness cannot test a sudo
+    // branch — see the note above the fake host — so this is asserted here.
+    expect(ACCESS_COMMAND).toMatch(/sudo -n ls -d -- "\$SP_HOME\/\.ssh\/authorized_keys2"/)
   })
 
   it('never reads /etc/shadow, and never a private key', () => {
@@ -622,6 +628,30 @@ describe('a collection, and the nulls in it', () => {
     const a = collected(['U 1 keys ok -', 'U 1 keys2 present', 'U 1 name ops'], OK_STATUS)
     expect(a.accounts[0].hasLegacyKeyFile).toBe(true)
     expect(summariseAccess(a).certain).toBe(false)
+  })
+
+  it('says it could not tell about authorized_keys2 rather than saying no', () => {
+    // The `[ -e ]` for authorized_keys2 runs as the connecting account and sits
+    // AFTER the sudo escalation for the main file — so on a 0700 home,
+    // `sudo -n cat` sets the main file to `ok` (the account IS read) while this
+    // test returns false through a directory the connecting account cannot
+    // enter. `hasLegacyKeyFile` came out false, contributed no uncertainty, and
+    // a key sitting in ~deploy/.ssh/authorized_keys2 — which sshd still reads —
+    // was invisible under a "complete picture" banner.
+    const a = collected(
+      ['U 1 keys ok root', 'U 1 keys2 unknown', 'U 1 name deploy'],
+      OK_STATUS
+    )
+    expect(a.accounts[0].hasLegacyKeyFile).toBeNull()
+    const s = summariseAccess(a)
+    expect(s.certain).toBe(false)
+    expect(s.uncertainty.join(' ')).toMatch(/authorized_keys2/)
+  })
+
+  it('says no about authorized_keys2 only when it was checked', () => {
+    const a = collected(['U 1 keys ok -', 'U 1 keys2 absent', 'U 1 name ops'], OK_STATUS)
+    expect(a.accounts[0].hasLegacyKeyFile).toBe(false)
+    expect(summariseAccess(a).certain).toBe(true)
   })
 
   it('derives read-N-of-M rather than trusting the shell to have counted', () => {
@@ -1184,6 +1214,34 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     const a = parse(h.collect())
     expect(accessSource(a, 'sshd-config').status).toBe('ok')
     expect(a.keyFileIsDefault).toBe(true)
+  })
+
+  it('cannot tell about authorized_keys2 through a home it cannot enter', () => {
+    // The same trap as the main key file, in the probe next to it. Reported as
+    // "could not tell" rather than as "not there", and it carries its own
+    // uncertainty so the count above it is not read as an answer.
+    const h = host()
+    h.file('home/ops/.ssh/authorized_keys2', `ssh-ed25519 ${ED25519} hidden\n`)
+    chmodSync(join(h.root, 'home/ops'), 0o000)
+    try {
+      const a = parse(h.collect())
+      expect(acct(a, 'ops').hasLegacyKeyFile).toBeNull()
+      expect(summariseAccess(a).uncertainty.join(' ')).toMatch(/authorized_keys2/)
+    } finally {
+      chmodSync(join(h.root, 'home/ops'), 0o755)
+    }
+  })
+
+  it('checks authorized_keys2 and says no when it really is not there', () => {
+    const a = parse(host().collect())
+    expect(acct(a, 'ops').hasLegacyKeyFile).toBe(false)
+    expect(acct(a, 'deploy').hasLegacyKeyFile).toBe(false)
+  })
+
+  it('finds an authorized_keys2 that is there', () => {
+    const h = host()
+    h.file('home/ops/.ssh/authorized_keys2', `ssh-ed25519 ${ED25519} hidden\n`)
+    expect(acct(parse(h.collect()), 'ops').hasLegacyKeyFile).toBe(true)
   })
 
   it('says no-tool rather than none when the login database has no reader', () => {
