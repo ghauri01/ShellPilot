@@ -1,15 +1,44 @@
-import type { HostMetrics, PortListener, ServiceUnit } from '../../../../shared/ssh'
-import type { FleetError } from '../../store/fleet'
-import type { Server } from '../../types'
+import type { HostMetrics, PortListener, ServiceUnit } from './ssh'
 
 // Turning a fleet of raw metric samples into the answer to one question:
 // is anything broken, where, and what is it.
 //
 // Pure so the ordering and the counting can be pinned by tests — they are the
 // part of this screen that a reader trusts without checking.
+//
+// It lives in shared/ rather than beside the panel that first needed it because
+// the job engine's health gate (roadmap B4) has to evaluate the same predicate
+// in MAIN, before a stage is allowed to proceed. A second implementation of
+// "is this host healthy" in the process that decides whether to keep rolling an
+// estate upgrade is precisely the disagreement `isDiskCritical` was written to
+// end. The renderer path is unchanged: the old module is a re-export.
+
+/**
+ * The connection states a server row can be in.
+ *
+ * A mirror of the renderer's `ServerStatus`, because shared/ may not import
+ * from the renderer. The re-export shim at the old path carries a compile-time
+ * assertion that the two unions are still identical, so drift is a build
+ * failure rather than a silent widening.
+ */
+export type HostStatus = 'online' | 'idle' | 'offline' | 'connecting'
+
+/**
+ * A host the sampler could not reach, and when. Structurally the renderer's
+ * `FleetError`; named for what it is rather than for the store it lives in,
+ * since main now reads it too.
+ */
+export interface HostSampleError {
+  error: string
+  at: number
+}
 
 /** Only the fields the fleet summary needs; keeps the tests free of fixtures. */
-export type ServerRef = Pick<Server, 'id' | 'name' | 'status'>
+export interface ServerRef {
+  id: string
+  name: string
+  status: HostStatus
+}
 
 /**
  * Bar colouring for a percentage. Shared with the metric cards so the attention
@@ -49,7 +78,7 @@ export function isDiskCritical(diskPct: number): boolean {
 export interface HostRow {
   id: string
   name: string
-  status: Server['status']
+  status: HostStatus
   /**
    * Failed units, or null when systemd is not on the host at all. Null is not
    * an empty list: "nothing has failed" and "we cannot see whether anything
@@ -76,7 +105,7 @@ export interface HostRow {
 export interface UnreachableRow {
   id: string
   name: string
-  status: Server['status']
+  status: HostStatus
   /** What the sampler reported, verbatim — e.g. "Connection refused". */
   error: string
   /** When the failure was recorded. */
@@ -161,7 +190,7 @@ function toRow(server: ServerRef, host: HostMetrics): HostRow {
 export function summariseFleetHealth(
   servers: ServerRef[],
   hosts: Record<string, HostMetrics>,
-  errors: Record<string, FleetError> = {}
+  errors: Record<string, HostSampleError> = {}
 ): FleetHealth {
   const attention: HostRow[] = []
   const rest: HostRow[] = []

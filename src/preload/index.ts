@@ -13,6 +13,14 @@ import type {
 import type { HostFacts } from '../shared/hostFacts'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
+import type {
+  JobDetail,
+  JobOutput,
+  JobProgress,
+  JobRecord,
+  JobRunRequest,
+  JobsBridge
+} from '../shared/jobs'
 import type { LogLine, LogSource, LogTailState, UnitChoice } from '../shared/logtail'
 import type { CronEntry, CronSourceReport } from '../shared/cron'
 import type {
@@ -94,6 +102,30 @@ import type {
 
 type WindowAction = 'minimize' | 'toggle-maximize' | 'close'
 type ThemeMode = 'dark' | 'light' | 'system'
+
+// Declared out here rather than inline in `api` so it can carry the JobsBridge
+// annotation. See the comment at `jobs:` below for why the annotation is the
+// point.
+const jobsBridge: JobsBridge = {
+  list: (limit?: number): Promise<JobRecord[]> => ipcRenderer.invoke('jobs:list', limit),
+  get: (jobId: string): Promise<JobDetail | null> => ipcRenderer.invoke('jobs:get', jobId),
+  run: (req: JobRunRequest): Promise<JobDetail> => ipcRenderer.invoke('jobs:run', req),
+  cancel: (jobId: string): Promise<boolean> => ipcRenderer.invoke('jobs:cancel', jobId),
+  onProgress: (fn: (p: JobProgress) => void): (() => void) => {
+    const h = (_e: IpcRendererEvent, p: JobProgress): void => fn(p)
+    ipcRenderer.on('jobs:progress', h)
+    return () => ipcRenderer.removeListener('jobs:progress', h)
+  },
+  // A separate channel from progress, not a variant of it. Output is high
+  // volume and coalesced per tick; job and host transitions are rare and must
+  // never be dropped behind a burst of apt chatter. One channel would make the
+  // state machine share a queue with the noise.
+  onOutput: (fn: (o: JobOutput) => void): (() => void) => {
+    const h = (_e: IpcRendererEvent, o: JobOutput): void => fn(o)
+    ipcRenderer.on('jobs:output', h)
+    return () => ipcRenderer.removeListener('jobs:output', h)
+  }
+}
 
 const api = {
   platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke('app:platform'),
@@ -380,6 +412,18 @@ const api = {
       return () => ipcRenderer.removeListener('broadcast:progress', h)
     }
   },
+  // Roadmap item B1. A broadcast that outlives its panel: the row is in the
+  // store before the first host is touched, so closing the window loses the
+  // view and not the record.
+  //
+  // Annotated against JobsBridge rather than left to `typeof api` to infer.
+  // Main and the preload are two halves of one interface and nothing else
+  // checks that they agree: a handler added in one and forgotten in the other
+  // is `undefined is not a function` the first time someone presses the button,
+  // in a packaged app, with no stack worth reading. With the annotation it is a
+  // compile error in both directions — a missing method fails to satisfy the
+  // interface, an extra one is an excess property.
+  jobs: jobsBridge,
   // Background sampling of the whole estate, scheduled in main so it continues
   // when the monitor is not on screen. `metrics` above is the foreground path:
   // one server, fast cadence, driven by a mounted card.

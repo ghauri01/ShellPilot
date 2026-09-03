@@ -52,6 +52,8 @@ import { HostFactsReader } from './services/hostFacts'
 import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
 import { loadHistory, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
+import { JobRunner, type JobStore } from './services/jobRunner'
+import type { JobRunRequest } from '../shared/jobs'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSourceReport } from '../shared/cron'
@@ -326,6 +328,10 @@ function createWindow(): void {
     // out, so the streams were invisible and unstoppable.
     logTailer.disposeAll()
     broadcast.disposeAll()
+    // Same, and it matters more here: a job outlives its panel by design, so a
+    // window closing is exactly the case where one would keep working through
+    // its queue with nowhere to report. Queued hosts must not start.
+    jobRunner.disposeAll()
   })
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
@@ -624,9 +630,40 @@ function startHistory(): void {
     // Only the CHANGE is recorded, not every refusal. A machine whose clock is
     // permanently wrong runs this four times a day forever, and a store that
     // refuses to age out is not helped by an event every six hours saying so.
+    // Adopt before the first job can be started, and before the retention pass
+    // below could delete what we are about to read. Every job whose rows say it
+    // was running belongs to a process that is gone: on the attached path its
+    // channel died with that process, so the honest close is `abandoned` and
+    // the row says what the SIGHUP may have left behind. Doing this at open —
+    // rather than lazily, when someone happens to look at the job list — is
+    // what makes a stale `running` row impossible to observe.
+    try {
+      const adopted = jobRunner.adopt()
+      if (adopted.length > 0) {
+        console.log(`[jobs] closed ${adopted.length} job(s) abandoned when ShellPilot last stopped`)
+      }
+    } catch (err) {
+      console.error('[jobs] adoption failed:', err)
+    }
+
     let lastSkip: string | null = null
     const pass = (): void => {
       try {
+        // Job output on its own, much shorter horizon: it cannot be
+        // downsampled the way a metric series can — there is no hourly mean of
+        // a dpkg log — so the only honest choices are keep it or drop it. The
+        // job and target rows behind it live twelve times longer, because they
+        // are tiny and they are what a change log reads.
+        try {
+          const jobs = historyStore?.jobRetain()
+          if (jobs && (jobs.outputDropped > 0 || jobs.jobsDropped > 0)) {
+            console.log(
+              `[jobs] retention dropped ${jobs.outputDropped} output row(s) and ${jobs.jobsDropped} job(s)`
+            )
+          }
+        } catch (err) {
+          console.error('[jobs] retention pass failed:', err)
+        }
         const result = historyStore?.retain()
         const skipped = result?.skipped ?? null
         if (skipped !== null && skipped !== lastSkip) {
@@ -645,6 +682,33 @@ function startHistory(): void {
     // Never let the retention timer be the reason the process stays alive.
     historyRetain.unref?.()
   })
+}
+
+/**
+ * The job runner's view of the store.
+ *
+ * Resolved per call, not captured, for exactly the reason the fleet sampler's
+ * `history` accessor is: the runner is constructed at module scope and the
+ * store opens asynchronously after it — and on a machine where history is off
+ * it never opens at all. A captured null would make jobs permanently
+ * unavailable on every machine, including the ones where the store opened two
+ * seconds later.
+ *
+ * The writes are no-ops without a store rather than throws. `jobs:run` refuses
+ * up front with a sentence that says why, so nothing gets as far as here
+ * believing it is being recorded; what these guards cover is the store closing
+ * underneath a job that is already running, which is a shutdown, not an error.
+ */
+const jobStore: JobStore = {
+  createJob: (job) => historyStore?.createJob(job),
+  updateJob: (id, patch) => historyStore?.updateJob(id, patch),
+  updateJobTarget: (id, serverId, patch) => historyStore?.updateJobTarget(id, serverId, patch),
+  appendJobOutput: (id, serverId, lines) => historyStore?.appendJobOutput(id, serverId, lines),
+  listJobs: (limit) => historyStore?.listJobs(limit) ?? [],
+  readJob: (id) => historyStore?.readJob(id) ?? null,
+  readJobOutput: (id, serverId) => historyStore?.readJobOutput(id, serverId) ?? [],
+  unfinishedJobs: () => historyStore?.unfinishedJobs() ?? [],
+  recordEvent: (kind, hostId, payload, at) => historyStore?.recordEvent(kind, hostId, payload, at)
 }
 
 /** Close the store and stop its timer, for the paths that do not go through
@@ -767,6 +831,63 @@ ipcMain.handle('broadcast:run', async (_e, req: BroadcastRequest) => {
   return broadcast.run(req)
 })
 ipcMain.handle('broadcast:cancel', (_e, runId: string) => broadcast.cancel(runId))
+
+// ---- Jobs ----
+//
+// Roadmap item B1: a broadcast that outlives its panel. The row exists in the
+// store before the first host is touched, every transition is written, and a
+// job read back after a restart is the same job rather than a new record
+// describing it.
+//
+// What it deliberately does NOT claim is surviving a dropped connection. B1
+// runs on the attached path, where `sshExec` on timeout resolves and abandons
+// without signalling the remote, and where a dying socket means sshd sends
+// SIGHUP — which apt and dpkg do not ignore. A job that was running when this
+// process stopped is `abandoned`, and adopt() writes that down at the next
+// launch instead of leaving a row claiming it is still going. B2 replaces the
+// executor with a detached launch; nothing else here changes, which is why the
+// executor is an injected strategy rather than a call to sshExec.
+//
+// NOT exposed to the MCP bridge, and the reason is not broadcast's repeated.
+// Durability defeats revocation: `denyAllPending()` resolves requests that are
+// PENDING, and can do nothing about a job already running on fifteen hosts,
+// because nothing is pending. See tests/jobsNotExposed.test.ts.
+const jobRunner = new JobRunner({
+  exec: async ({ cfg, command, timeoutMs, onOutput }) => {
+    // allowPrompt false, for broadcast's reason: a fan-out across hosts with
+    // unknown keys would raise a stack of identical trust dialogs, and a stack
+    // of identical modals is not a decision anyone can reason about.
+    const r = await sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs, false)
+    // The attached executor has no stream to hand over, so the output arrives
+    // in one piece at the end. The runner treats that identically to a
+    // streaming backend — which is the seam B2 resumes through.
+    void onOutput
+    return { ok: r.ok, code: r.code, stdout: r.stdout, stderr: r.stderr, error: r.error, truncated: r.truncated }
+  },
+  store: jobStore,
+  emit: (progress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('jobs:progress', progress)
+  },
+  emitOutput: (output) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('jobs:output', output)
+  }
+})
+
+ipcMain.handle('jobs:list', (_e, limit?: number) => jobRunner.list(limit))
+ipcMain.handle('jobs:get', (_e, jobId: string) => jobRunner.get(jobId))
+ipcMain.handle('jobs:run', async (_e, req: JobRunRequest) => {
+  // A job with no store is not a job: the whole of what B1 adds over a
+  // broadcast is the row. Refusing with a sentence beats running something the
+  // user believes is being recorded and is not.
+  if (!historyStore) {
+    throw new Error(
+      'Jobs need the history store, which is not open on this machine. Run this as a broadcast ' +
+        'instead, or see the console for why history is disabled.'
+    )
+  }
+  return jobRunner.run(req)
+})
+ipcMain.handle('jobs:cancel', (_e, jobId: string) => jobRunner.cancel(jobId))
 
 // ---- Live log tailing across hosts ----
 //
@@ -1542,6 +1663,9 @@ app.on('before-quit', (e) => {
   logTailer.disposeAll()
   // Queued hosts must not start after the window is gone.
   broadcast.disposeAll()
+  // Same for a job. Its rows stay; adopt() closes them as abandoned at the next
+  // launch, which is the truth about what the attached path just did to them.
+  jobRunner.disposeAll()
   sshDisposeAll()
   localDisposeAll()
   sftpDisposeAll()

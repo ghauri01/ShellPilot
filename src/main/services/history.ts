@@ -1,6 +1,18 @@
 import { app } from 'electron'
 import { join } from 'node:path'
 import { chmodSync, copyFileSync, existsSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
+import type {
+  JobDetail,
+  JobHostResult,
+  JobHostState,
+  JobKind,
+  JobOutputLine,
+  JobRecord,
+  JobSpec,
+  JobState
+} from '../../shared/jobs'
+import { JOB_OUTPUT_RETENTION_DAYS, JOB_RECORD_RETENTION_DAYS } from '../../shared/jobs'
+import type { BroadcastConfirmation, BroadcastRisk } from '../../shared/broadcast'
 
 // A durable store for samples, events and facts — roadmap item A.
 //
@@ -146,6 +158,50 @@ export interface RetentionResult {
   skipped?: 'clock-ahead' | 'blast-radius'
 }
 
+/** What createJob is given. The spec and confirmation are stored as JSON;
+ *  everything else is a column. */
+export interface NewJob {
+  id: string
+  createdAt: number
+  workspaceId: string | null
+  title: string
+  kind: JobKind
+  spec: JobSpec
+  risk: BroadcastRisk
+  confirmation: BroadcastConfirmation
+  confirmedAt: number | null
+  state: JobState
+  targets: { serverId: string; serverName: string; ord: number; state: JobHostState }[]
+}
+
+/** A partial job transition. Absent keys are left alone; an explicit `null`
+ *  clears the column, which is how a cancelled job's `ended_at` is set without
+ *  a second method. */
+export interface JobPatch {
+  state?: JobState
+  startedAt?: number | null
+  endedAt?: number | null
+  cancelledAt?: number | null
+}
+
+export interface JobTargetPatch {
+  state?: JobHostState
+  outcome?: JobHostResult['outcome'] | null
+  exitCode?: number | null
+  error?: string | null
+  startedAt?: number | null
+  endedAt?: number | null
+  outOffset?: number
+  outElided?: number
+}
+
+export interface JobRetentionResult {
+  /** job_output rows dropped for being past the output horizon. */
+  outputDropped: number
+  /** Whole jobs dropped — the job row, its targets and any output left. */
+  jobsDropped: number
+}
+
 /**
  * The whole store surface. Six named methods plus the retire half of
  * upsertFact, a retention pass and lifecycle. No SQL crosses this boundary in
@@ -178,8 +234,47 @@ export interface HistoryStore {
   /** Fold anything older than the full-resolution horizon into hourly
    *  avg/min/max, then drop what is past the hourly horizon. */
   retain(now?: number): RetentionResult
+
+  // ---- Jobs (roadmap B1) --------------------------------------------------
+  //
+  // Named methods, like everything else here. The job runner holds no SQL and
+  // cannot pass any in — the escape hatch to better-sqlite3 stays open only
+  // while that is true of every caller, and a runner is exactly the kind of
+  // stateful thing that grows its own queries if you let it.
+
+  /** Write the job row and its targets. One transaction: a job whose targets
+   *  did not land is a job the runner would re-adopt with nothing to run. */
+  createJob(job: NewJob): void
+  /** Move the job's own state on. Only the fields given are written, so a
+   *  transition cannot accidentally blank a timestamp it does not know about. */
+  updateJob(jobId: string, patch: JobPatch): void
+  /** Move one host's state on, same rule. */
+  updateJobTarget(jobId: string, serverId: string, patch: JobTargetPatch): void
+  /** Append output for one host, redacted and capped by the CALLER. The store
+   *  writes what it is given; see appendJobOutput's note on why the cap is not
+   *  applied here. */
+  appendJobOutput(jobId: string, serverId: string, lines: JobOutputLine[]): void
+  /** Newest first. */
+  listJobs(limit?: number): JobRecord[]
+  /** The job and every target, in `ord` order. Null if there is no such job. */
+  readJob(jobId: string): JobDetail | null
+  /** Stored output for one host, in seq order. */
+  readJobOutput(jobId: string, serverId: string): JobOutputLine[]
+  /** Jobs whose rows still say they were running or queued. Read once at
+   *  startup: on the attached path every one of them is over and does not know
+   *  it. */
+  unfinishedJobs(): JobDetail[]
+  /** Drop output past its horizon, then whole jobs past theirs. */
+  jobRetain(now?: number): JobRetentionResult
   /** Rows currently held, for the size arithmetic and for tests. */
-  counts(): { samples: number; hourly: number; events: number; facts: number }
+  counts(): {
+    samples: number
+    hourly: number
+    events: number
+    facts: number
+    jobs: number
+    jobOutput: number
+  }
   close(): void
   readonly path: string
   /** 'wal' normally; 'truncate' on the Windows portable target. */
@@ -416,9 +511,93 @@ CREATE TABLE IF NOT EXISTS facts (
   last_seen INTEGER NOT NULL,
   PRIMARY KEY (host, key)
 ) WITHOUT ROWID;
+
+-- ---------------------------------------------------------------------------
+-- Jobs — roadmap item B1.
+--
+-- Three tables and a deliberate asymmetry between them: the two small ones are
+-- kept for a year and the big one for a month. A job row is a title, a spec and
+-- five timestamps; the output behind it is up to 256 KB per host. "When did we
+-- last upgrade web-2 and did it exit 0" is worth a year of rows and costs
+-- almost nothing; the dpkg chatter that answers "what exactly did it say" is
+-- worth a month and costs everything. See jobRetain().
+--
+-- The id is the caller's own job id (a uuid), not an autoincrement: it is minted
+-- before the job starts, it is what a progress event names, and it must survive
+-- a restart unchanged so a re-adopted job is the SAME job rather than a new row
+-- describing it.
+--
+-- host ids are NOT interned here, unlike samples and facts. A job has a handful
+-- of hosts and is written once; interning buys nothing and costs the ability to
+-- read a job's targets without a join. The server NAME is stored beside the id
+-- for the same reason the broadcast result carries it: a server deleted from
+-- the workspace next month must not turn last month's job into a list of uuids.
+CREATE TABLE IF NOT EXISTS job (
+  id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  workspace_id TEXT,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  spec TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  confirmation TEXT NOT NULL,
+  confirmed_at INTEGER,
+  state TEXT NOT NULL,
+  started_at INTEGER,
+  ended_at INTEGER,
+  cancelled_at INTEGER
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS job_created ON job (created_at);
+-- The adoption query: every job whose rows still say it was running. Read once
+-- at startup, so it is an index on a column with four distinct values purely to
+-- keep that read off a full scan of a year of jobs.
+CREATE INDEX IF NOT EXISTS job_state ON job (state);
+
+-- One row per host. Field names are BroadcastHostResult's, exactly, so the
+-- renderer's existing result type can be pointed at a job without a
+-- translation layer — ord and the four columns after it are the ones only a
+-- persisted run needs.
+CREATE TABLE IF NOT EXISTS job_target (
+  job_id TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  server_name TEXT NOT NULL,
+  ord INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  outcome TEXT,
+  exit_code INTEGER,
+  error TEXT,
+  started_at INTEGER,
+  ended_at INTEGER,
+  -- Bytes of output persisted for this host, and bytes dropped from the middle
+  -- of it. out_elided is not decoration: without it a long output is
+  -- indistinguishable from a short one, which is how a head-only cap turns
+  -- "dpkg failed" into "the command produced no error".
+  out_offset INTEGER NOT NULL DEFAULT 0,
+  out_elided INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (job_id, server_id)
+) WITHOUT ROWID;
+
+-- The output itself, in arrival order per host. seq is the runner's own
+-- counter, so two chunks in the same millisecond keep their order — the same
+-- tie-break the events table needs and for the same reason.
+CREATE TABLE IF NOT EXISTS job_output (
+  job_id TEXT NOT NULL,
+  server_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  at INTEGER NOT NULL,
+  stream TEXT NOT NULL,
+  text TEXT NOT NULL,
+  PRIMARY KEY (job_id, server_id, seq)
+) WITHOUT ROWID;
 `
 
-const SCHEMA_VERSION = '1'
+// 2 adds the three job tables. No migration step is needed and none is written:
+// every statement in SCHEMA is CREATE ... IF NOT EXISTS, so an existing store
+// gains the tables at the next open and keeps every row it had. The number is
+// bumped anyway, because the first change that CANNOT be expressed that way
+// needs to know which shape it is starting from, and a version that only moves
+// when someone remembers is a version nobody can trust.
+const SCHEMA_VERSION = '2'
 
 // ---------------------------------------------------------------------------
 // The event read path.
@@ -831,7 +1010,71 @@ function buildStore(
     newestSample: db.prepare('SELECT max(ts) AS n FROM samples'),
     newestHourly: db.prepare('SELECT max(ts) AS n FROM samples_hourly'),
     doomedHourly: db.prepare('SELECT count(*) AS n FROM samples_hourly WHERE ts < ?'),
-    doomedEvents: db.prepare('SELECT count(*) AS n FROM events WHERE ts < ?')
+    doomedEvents: db.prepare('SELECT count(*) AS n FROM events WHERE ts < ?'),
+
+    // ---- Jobs -------------------------------------------------------------
+    jobInsert: db.prepare(
+      'INSERT INTO job (id, created_at, workspace_id, title, kind, spec, risk, confirmation, ' +
+        'confirmed_at, state, started_at, ended_at, cancelled_at) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL) ' +
+        // A re-run under an id that already exists would otherwise throw and
+        // lose the run; replacing the row is the only sane reading of "start
+        // this job", and the targets below are replaced with it.
+        'ON CONFLICT(id) DO UPDATE SET created_at = excluded.created_at, ' +
+        '  workspace_id = excluded.workspace_id, title = excluded.title, kind = excluded.kind, ' +
+        '  spec = excluded.spec, risk = excluded.risk, confirmation = excluded.confirmation, ' +
+        '  confirmed_at = excluded.confirmed_at, state = excluded.state, ' +
+        '  started_at = NULL, ended_at = NULL, cancelled_at = NULL'
+    ),
+    jobTargetInsert: db.prepare(
+      'INSERT INTO job_target (job_id, server_id, server_name, ord, state, outcome, exit_code, ' +
+        'error, started_at, ended_at, out_offset, out_elided) ' +
+        'VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 0, 0) ' +
+        'ON CONFLICT(job_id, server_id) DO UPDATE SET server_name = excluded.server_name, ' +
+        '  ord = excluded.ord, state = excluded.state, outcome = NULL, exit_code = NULL, ' +
+        '  error = NULL, started_at = NULL, ended_at = NULL, out_offset = 0, out_elided = 0'
+    ),
+    // A full-row write over values merged in JS, rather than a COALESCE-per-
+    // column patch. `null` is a MEANINGFUL value in three of these four columns
+    // — "not started", "not ended", "not cancelled" — so COALESCE cannot tell
+    // "leave it alone" from "clear it", and a patch language that cannot
+    // express clearing is one the cancel path immediately needs to work around.
+    // Reading the row first costs one indexed lookup on a table with a handful
+    // of rows per job.
+    jobUpdate: db.prepare(
+      'UPDATE job SET state = ?2, started_at = ?3, ended_at = ?4, cancelled_at = ?5 WHERE id = ?1'
+    ),
+    jobRead: db.prepare('SELECT * FROM job WHERE id = ?'),
+    jobList: db.prepare('SELECT * FROM job ORDER BY created_at DESC, id DESC LIMIT ?'),
+    jobUnfinished: db.prepare(
+      "SELECT * FROM job WHERE state IN ('queued', 'running') ORDER BY created_at"
+    ),
+    jobTargetUpdate: db.prepare(
+      'UPDATE job_target SET state = ?3, outcome = ?4, exit_code = ?5, error = ?6, ' +
+        'started_at = ?7, ended_at = ?8, out_offset = ?9, out_elided = ?10 ' +
+        'WHERE job_id = ?1 AND server_id = ?2'
+    ),
+    jobTargetRead: db.prepare('SELECT * FROM job_target WHERE job_id = ? ORDER BY ord'),
+    jobTargetOne: db.prepare('SELECT * FROM job_target WHERE job_id = ? AND server_id = ?'),
+    jobOutputInsert: db.prepare(
+      'INSERT INTO job_output (job_id, server_id, seq, at, stream, text) VALUES (?, ?, ?, ?, ?, ?) ' +
+        'ON CONFLICT(job_id, server_id, seq) DO UPDATE SET at = excluded.at, ' +
+        '  stream = excluded.stream, text = excluded.text'
+    ),
+    jobOutputRead: db.prepare(
+      'SELECT server_id, seq, at, stream, text FROM job_output WHERE job_id = ? AND server_id = ? ORDER BY seq'
+    ),
+    // Retention. Output goes on its own, much shorter horizon; the job and
+    // target rows outlive it by a factor of twelve.
+    jobDropOutput: db.prepare(
+      'DELETE FROM job_output WHERE job_id IN (SELECT id FROM job WHERE created_at < ?)'
+    ),
+    jobDropTargets: db.prepare(
+      'DELETE FROM job_target WHERE job_id IN (SELECT id FROM job WHERE created_at < ?)'
+    ),
+    jobDropJobs: db.prepare('DELETE FROM job WHERE created_at < ?'),
+    countJobs: db.prepare('SELECT count(*) AS n FROM job'),
+    countJobOutput: db.prepare('SELECT count(*) AS n FROM job_output')
   }
 
   const metricIds = new Map<Metric, number>(METRICS.map((m, i) => [m, i + 1]))
@@ -1228,13 +1471,155 @@ function buildStore(
       })
     },
 
+    // ---- Jobs -------------------------------------------------------------
+
+    createJob(job) {
+      if (droppedWrite(`job ${job.id}`)) return
+      // One transaction. A job row whose targets did not land is a job the
+      // runner would re-adopt with nothing to run and no way to say why.
+      store.transaction(() => {
+        st.jobInsert.run(
+          job.id,
+          job.createdAt,
+          job.workspaceId,
+          job.title,
+          job.kind,
+          JSON.stringify(job.spec),
+          job.risk,
+          JSON.stringify(job.confirmation),
+          job.confirmedAt,
+          job.state
+        )
+        for (const t of job.targets) {
+          st.jobTargetInsert.run(job.id, t.serverId, t.serverName, t.ord, t.state)
+        }
+      })
+    },
+
+    updateJob(jobId, patch) {
+      if (droppedWrite(`a job transition (${jobId})`)) return
+      const row = st.jobRead.get(jobId) as SqliteRow | undefined
+      // A transition for a job that is not there is dropped rather than
+      // inserted: an UPSERT here would resurrect a job retention just deleted,
+      // as a row with no targets and no spec.
+      if (row === undefined) return
+      const pick = <K extends keyof JobPatch>(key: K, column: string): unknown =>
+        key in patch ? (patch[key] ?? null) : (row[column] ?? null)
+      st.jobUpdate.run(
+        jobId,
+        patch.state ?? String(row.state),
+        pick('startedAt', 'started_at'),
+        pick('endedAt', 'ended_at'),
+        pick('cancelledAt', 'cancelled_at')
+      )
+    },
+
+    updateJobTarget(jobId, serverId, patch) {
+      if (droppedWrite(`a job host transition (${jobId}/${serverId})`)) return
+      const row = st.jobTargetOne.get(jobId, serverId) as SqliteRow | undefined
+      if (row === undefined) return
+      const pick = <K extends keyof JobTargetPatch>(key: K, column: string): unknown =>
+        key in patch ? (patch[key] ?? null) : (row[column] ?? null)
+      st.jobTargetUpdate.run(
+        jobId,
+        serverId,
+        patch.state ?? String(row.state),
+        pick('outcome', 'outcome'),
+        pick('exitCode', 'exit_code'),
+        pick('error', 'error'),
+        pick('startedAt', 'started_at'),
+        pick('endedAt', 'ended_at'),
+        patch.outOffset ?? Number(row.out_offset ?? 0),
+        patch.outElided ?? Number(row.out_elided ?? 0)
+      )
+    },
+
+    appendJobOutput(jobId, serverId, lines) {
+      if (lines.length === 0) return
+      if (droppedWrite(`job output (${jobId}/${serverId})`)) return
+      // The head+tail cap and the redaction both happen in the runner, not
+      // here, and deliberately so. The cap is a decision about what is worth
+      // keeping and needs the whole of a host's output to make; the store sees
+      // one chunk at a time and could only ever apply a prefix rule, which is
+      // the exact mistake the cap exists to correct. Redaction belongs with the
+      // resolved secrets, which are the runner's, not the store's.
+      store.transaction(() => {
+        for (const l of lines) {
+          st.jobOutputInsert.run(jobId, serverId, l.seq, l.at, l.stream, l.text)
+        }
+      })
+    },
+
+    listJobs(limit) {
+      if (closed) return []
+      const n = Math.max(1, Math.min(1000, limit ?? 100))
+      return (st.jobList.all(n) as SqliteRow[]).map(toJobRecord)
+    },
+
+    readJob(jobId) {
+      if (closed) return null
+      const row = st.jobRead.get(jobId) as SqliteRow | undefined
+      if (row === undefined) return null
+      return {
+        ...toJobRecord(row),
+        targets: (st.jobTargetRead.all(jobId) as SqliteRow[]).map(toJobTarget)
+      }
+    },
+
+    readJobOutput(jobId, serverId) {
+      if (closed) return []
+      return (st.jobOutputRead.all(jobId, serverId) as SqliteRow[]).map((r) => ({
+        serverId: String(r.server_id),
+        seq: Number(r.seq),
+        at: Number(r.at),
+        stream: String(r.stream) === 'err' ? ('err' as const) : ('out' as const),
+        text: String(r.text)
+      }))
+    },
+
+    unfinishedJobs() {
+      if (closed) return []
+      return (st.jobUnfinished.all() as SqliteRow[]).map((row) => ({
+        ...toJobRecord(row),
+        targets: (st.jobTargetRead.all(String(row.id)) as SqliteRow[]).map(toJobTarget)
+      }))
+    },
+
+    jobRetain(now = Date.now()) {
+      const nothing: JobRetentionResult = { outputDropped: 0, jobsDropped: 0 }
+      if (closed) return nothing
+      // The clock guards on retain() above do not apply here, and the reason is
+      // that the failure they protect against cannot happen to this table. A
+      // wrong clock aging out samples destroys the only copy of a measurement
+      // nobody can retake. A wrong clock aging out job output destroys a
+      // record whose SUMMARY — the job and target rows, on a horizon twelve
+      // times longer — is still there, and which is regenerable by running the
+      // job again. What it costs is a month of chatter, not a year of history.
+      //
+      // The blast-radius guard is worse than useless here for a second reason:
+      // a store holding two jobs, one of them old, legitimately drops half of
+      // everything on the first pass. That is the normal case, not the alarm.
+      const outputCutoff = now - JOB_OUTPUT_RETENTION_DAYS * DAY_MS
+      const jobCutoff = now - JOB_RECORD_RETENTION_DAYS * DAY_MS
+      return store.transaction(() => {
+        const outputDropped = Number(st.jobDropOutput.run(outputCutoff).changes)
+        // Targets before jobs: the target sweep selects by job id from `job`,
+        // so deleting the parents first would strand every child row.
+        st.jobDropTargets.run(jobCutoff)
+        const jobsDropped = Number(st.jobDropJobs.run(jobCutoff).changes)
+        return { outputDropped, jobsDropped }
+      })
+    },
+
     counts() {
-      if (closed) return { samples: 0, hourly: 0, events: 0, facts: 0 }
+      if (closed) return { samples: 0, hourly: 0, events: 0, facts: 0, jobs: 0, jobOutput: 0 }
       return {
         samples: num(st.countSamples.get()),
         hourly: num(st.countHourly.get()),
         events: num(st.countEvents.get()),
-        facts: num(st.countFacts.get())
+        facts: num(st.countFacts.get()),
+        jobs: num(st.countJobs.get()),
+        jobOutput: num(st.countJobOutput.get())
       }
     },
 
@@ -1301,6 +1686,67 @@ function safeParse(json: string): unknown {
     return JSON.parse(json)
   } catch {
     return json
+  }
+}
+
+/** SQLite gives back `null` for a missing INTEGER; the record type says
+ *  `number | null` and means it. */
+function optNum(v: unknown): number | null {
+  return v === null || v === undefined ? null : Number(v)
+}
+
+function optStr(v: unknown): string | undefined {
+  return v === null || v === undefined ? undefined : String(v)
+}
+
+function toJobRecord(r: SqliteRow): JobRecord {
+  return {
+    id: String(r.id),
+    createdAt: Number(r.created_at),
+    workspaceId: r.workspace_id === null || r.workspace_id === undefined ? null : String(r.workspace_id),
+    title: String(r.title),
+    kind: String(r.kind) as JobKind,
+    // A spec that will not parse is a row written by a build that is not this
+    // one, or a row somebody edited. It becomes an EMPTY spec rather than
+    // throwing: a job list that cannot render because one historical row is
+    // malformed is a worse failure than one job showing no steps.
+    spec: (safeParse(String(r.spec)) as JobSpec | undefined) ?? { kind: 'command', title: '', steps: [] },
+    risk: String(r.risk) as BroadcastRisk,
+    confirmation: (safeParse(String(r.confirmation)) as BroadcastConfirmation | undefined) ?? {
+      kind: 'confirm'
+    },
+    confirmedAt: optNum(r.confirmed_at),
+    // Read back as whatever the row says, NOT narrowed to the states this
+    // build knows. A B2 row saying `detached` must come back saying
+    // `detached` — a read that silently maps an unknown state onto a known one
+    // is a store lying about its own contents to a build that could have
+    // simply displayed the word.
+    state: String(r.state) as JobState,
+    startedAt: optNum(r.started_at),
+    endedAt: optNum(r.ended_at),
+    cancelledAt: optNum(r.cancelled_at)
+  }
+}
+
+function toJobTarget(r: SqliteRow): JobHostResult {
+  const startedAt = optNum(r.started_at)
+  const endedAt = optNum(r.ended_at)
+  return {
+    serverId: String(r.server_id),
+    serverName: String(r.server_name),
+    state: String(r.state) as JobHostState,
+    outcome: optStr(r.outcome) as JobHostResult['outcome'],
+    exitCode: r.exit_code === null || r.exit_code === undefined ? undefined : Number(r.exit_code),
+    error: optStr(r.error),
+    // Derived rather than stored: two timestamps and their difference is one
+    // fact written twice, and the second copy is the one that goes stale.
+    ms: startedAt !== null && endedAt !== null ? endedAt - startedAt : undefined,
+    ord: Number(r.ord),
+    startedAt: startedAt ?? undefined,
+    endedAt: endedAt ?? undefined,
+    outOffset: Number(r.out_offset ?? 0),
+    outElided: Number(r.out_elided ?? 0),
+    truncated: Number(r.out_elided ?? 0) > 0 || undefined
   }
 }
 
