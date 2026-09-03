@@ -15,6 +15,7 @@ import type {
 import type { ApprovalVerdict, CommandApproval, JobApprovalEntry } from '../../shared/jobs'
 import {
   JOB_ABANDONED_ERROR,
+  JOB_GATE_SKIPPED_ERROR,
   JOB_RESUME_NOT_REAUTHORISED,
   verifyJobApproval,
   isJobDetachedHandle,
@@ -30,10 +31,14 @@ import {
   JOB_STEP_TIMEOUT_MS,
   classifyJobResult,
   elisionNotice,
+  jobCohorts,
   planJob,
+  waveLabel,
   stepFailureNote,
   stepNotice
 } from '../../shared/jobs'
+import type { GateHost } from '../../shared/patch'
+import { GATE_POLL_MS, GATE_WAIT_MS, evaluateGate, gateTimeoutReason } from '../../shared/patch'
 import { redactOutput } from './secretRedaction'
 
 // Runs a job — roadmap item B1.
@@ -96,6 +101,17 @@ export interface JobExecRequest {
    *  and `rc` describe one process and two steps sharing them would make the
    *  byte cursor mean two different things. */
   step: number
+  /**
+   * This step was DECLARED to restart the machine — JobStep.reboot.
+   *
+   * Passed to the executor rather than re-derived from the command text,
+   * because the declaration and the guess mean different things and only the
+   * declaration earns the full treatment: an expected disconnect, a vanished
+   * wrapper read as a restart rather than as an orphan, and a check that the
+   * host came back healthy. `restartsTheMachine()` still runs underneath, and
+   * what it earns on its own is the `rebooting` state while the link is down.
+   */
+  reboot?: boolean
   /**
    * A marker this host already has: watch it rather than launching anything.
    *
@@ -270,6 +286,37 @@ export interface JobRunnerDeps {
    * a callback would be no rule at all.
    */
   approvalLog?: (entry: Omit<JobApprovalEntry, 'id' | 'timestamp'>) => void
+  /**
+   * A last refusal before anything is written down — item 17.
+   *
+   * Returns a sentence to refuse the run, or null to allow it. Main wires it
+   * to the reboot-ordering check: a step that restarts a host other servers
+   * route through is a HARD REFUSAL, not a confirmation, and it has to live
+   * here rather than only in the panel that offers the button. A guard that
+   * exists only in the renderer is a guard a resumed job, a second window or
+   * a future caller does not have.
+   *
+   * It runs AFTER the approval check and before the row is created, for
+   * run()'s own reason: a refused job must leave no `queued` row for adopt()
+   * to find and close as `abandoned`.
+   */
+  guard?: (req: JobRunRequest) => string | null
+  /**
+   * The health observations the wave gate reads — B4.
+   *
+   * A SNAPSHOT, not a probe: the runner calls it repeatedly while it waits, and
+   * main answers from the fleet sampler's cache. That is deliberate. A gate
+   * that ran its own SSH probe would be a second health implementation in the
+   * process that decides whether to keep rolling an estate upgrade, which is
+   * exactly the disagreement `hostHealth.ts` was moved into shared/ to end.
+   *
+   * A job whose spec asks for a gate and a runner with no `health` is a HALT,
+   * not a pass. See gateAfterWave.
+   */
+  health?: (serverIds: string[]) => GateHost[]
+  /** Injected so the gate's wait is advanced by the test rather than slept
+   *  through. Same contract as `schedule`. */
+  sleep?: (ms: number) => Promise<void>
 }
 
 interface RunState {
@@ -838,6 +885,27 @@ export class JobRunner {
       )
       throw new Error(`This job was not started: ${verdict.reason}`)
     }
+
+    // ---- Item 17: the reboot-ordering refusal, in MAIN and not only in the UI.
+    //
+    // A hard refusal rather than a confirmation, and the reason is written out
+    // in shared/topology.ts: a question asked fifteen times during a staged
+    // estate upgrade is answered by reflex, and rebooting the machine every
+    // other connection runs through is not a thing to be sure about. It is
+    // enforced here, at the one door every job goes through, because a check
+    // that lives only in the panel is a check the next caller does not have.
+    const refusal = this.deps.guard?.(req) ?? null
+    if (refusal !== null) {
+      this.logApproval(req, 'refused', refusal)
+      this.deps.store.recordEvent(
+        'job-refused',
+        null,
+        { jobId: req.jobId, title: req.spec.title, reason: refusal },
+        this.now
+      )
+      throw new Error(`This job was not started: ${refusal}`)
+    }
+
     this.logApproval(req, 'granted')
 
     const state: RunState = { cancelled: false, disposed: false }
@@ -888,31 +956,65 @@ export class JobRunner {
     )
     this.emitJob(req.jobId)
 
-    const queue = [...req.targets]
-    const workers = Array.from(
-      { length: Math.min(req.spec.concurrency ?? JOB_CONCURRENCY, Math.max(queue.length, 1)) },
-      async () => {
-        for (;;) {
-          if (!owns()) return
-          const next = queue.shift()
-          if (!next) return
-          // Checked at DEQUEUE as well as at entry to runOne, and both are
-          // load-bearing. A cancel landing while an earlier host was still
-          // running has to stop this one before anything opens a channel; a
-          // cancel landing inside runOne's own first await has to stop it
-          // there. One check covers one of those two windows, and the window it
-          // misses is as wide as a host's runtime.
-          if (state.cancelled) {
-            this.markSkipped(req.jobId, next)
-            continue
+    // ---- B4: waves.
+    //
+    // Cohorts run ONE AFTER ANOTHER; the hosts inside one run up to
+    // `concurrency` at a time. A job with no cohorts is exactly one wave, so
+    // B1's behaviour is the degenerate case of this loop rather than a second
+    // path beside it.
+    const waves = jobCohorts(req.targets)
+    /** Set when a wave gate refused to let the run continue. */
+    let halted: { wave: string; reason: string } | null = null
+
+    const runWave = async (targets: JobRunRequest['targets']): Promise<void> => {
+      const queue = [...targets]
+      const workers = Array.from(
+        { length: Math.min(req.spec.concurrency ?? JOB_CONCURRENCY, Math.max(queue.length, 1)) },
+        async () => {
+          for (;;) {
+            if (!owns()) return
+            const next = queue.shift()
+            if (!next) return
+            // Checked at DEQUEUE as well as at entry to runOne, and both are
+            // load-bearing. A cancel landing while an earlier host was still
+            // running has to stop this one before anything opens a channel; a
+            // cancel landing inside runOne's own first await has to stop it
+            // there. One check covers one of those two windows, and the window
+            // it misses is as wide as a host's runtime.
+            if (state.cancelled) {
+              this.markSkipped(req.jobId, next)
+              continue
+            }
+            await this.runOne(req, next, state, owns)
           }
-          await this.runOne(req, next, state, owns)
         }
-      }
-    )
+      )
+      await Promise.all(workers)
+    }
 
     try {
-      await Promise.all(workers)
+      for (let i = 0; i < waves.length; i++) {
+        await runWave(waves[i].targets)
+        if (!owns() || state.cancelled) break
+        // No gate after the LAST wave. There is nothing it could hold back, and
+        // waiting five minutes to verify a wave nothing follows would turn
+        // every staged run into one that appears to hang at the end.
+        if (i === waves.length - 1) break
+        const stop = await this.gateAfterWave(req, waves[i].name, state, owns)
+        if (stop === null) continue
+        halted = stop
+        // Every host in every remaining wave is closed HERE, with the gate's
+        // own sentence on it. Left `pending`, they would be adopted at the next
+        // launch and closed as `abandoned` — which would say the app stopped
+        // underneath them, when in fact the run decided not to touch them.
+        const at = this.now
+        for (const rest of waves.slice(i + 1)) {
+          for (const t of rest.targets) {
+            this.markSkipped(req.jobId, t, JOB_GATE_SKIPPED_ERROR(stop.wave, stop.reason), at)
+          }
+        }
+        break
+      }
     } finally {
       // Only if this run still owns the entry. disposeAll clears the map, and a
       // deletion that does not check identity would drop somebody else's live
@@ -948,14 +1050,22 @@ export class JobRunner {
         // a cancelled job with twelve successful hosts is still a cancelled job,
         // and calling it `done` would lose the only reason the last three never
         // ran.
+        // `halted` is not `cancelled` and not `done`. Nobody stopped this job
+        // and it did not finish: a wave gate would not vouch for the wave that
+        // had just run, so the remaining waves were never started. See
+        // JOB_TERMINAL_STATES.
         store.updateJob(req.jobId, {
-          state: state.cancelled ? 'cancelled' : 'done',
+          state: state.cancelled ? 'cancelled' : halted !== null ? 'halted' : 'done',
           endedAt
         })
         store.recordEvent(
           'job-ended',
           null,
-          { jobId: req.jobId, cancelled: state.cancelled || undefined },
+          {
+            jobId: req.jobId,
+            cancelled: state.cancelled || undefined,
+            halted: halted === null ? undefined : { wave: halted.wave, reason: halted.reason }
+          },
           endedAt
         )
         // A terminal event always fires — on cancel, and on an empty target list
@@ -990,17 +1100,126 @@ export class JobRunner {
    * reads as "we forgot about them". One writer, called from both cancel
    * checks, so the two can never disagree about what a skipped host looks like.
    */
-  private markSkipped(jobId: string, target: { serverId: string; serverName: string }): void {
+  private markSkipped(
+    jobId: string,
+    target: { serverId: string; serverName: string },
+    /**
+     * Why, when there is more to say than "the job was cancelled".
+     *
+     * A wave gate passes its own sentence here rather than getting a second
+     * writer, so a host skipped by a cancel and a host skipped by a gate are
+     * the same ROW SHAPE with different words in it — which is what lets a
+     * reader tell them apart without the store having to model two kinds of
+     * "not run".
+     */
+    error?: string,
+    at = this.now
+  ): void {
     this.deps.store.updateJobTarget(jobId, target.serverId, {
       state: 'skipped',
       outcome: 'cancelled',
-      endedAt: this.now
+      error: error ?? null,
+      endedAt: at
     })
     this.emitHost(jobId, {
       serverId: target.serverId,
       serverName: target.serverName,
       state: 'skipped',
-      outcome: 'cancelled'
+      outcome: 'cancelled',
+      error
+    })
+  }
+
+  /**
+   * The health gate between waves — B4, and the half of item 17 that decides
+   * whether an estate upgrade keeps going.
+   *
+   * Returns null to continue, or the reason the run stops here.
+   *
+   * THREE DECISIONS ARE WRITTEN INTO THIS FUNCTION and each is the one an
+   * implementation gets wrong:
+   *
+   *  1. A SPEC THAT ASKS FOR A GATE AND A RUNNER WITH NO HEALTH SOURCE IS A
+   *     HALT. Not a pass. The operator confirmed a run that checks between
+   *     waves; silently rolling on without checking would deliver a different
+   *     job from the one that was approved, and it would do it invisibly.
+   *  2. STALENESS IS A WAIT, NOT A FAILURE. A sample taken before the wave ran
+   *     cannot say what the wave did — see evaluateGate — so the gate polls
+   *     until a fresh one lands. Past GATE_WAIT_MS it stops, because "we still
+   *     cannot tell" is not permission to continue.
+   *  3. THE CLOCK IS `this.now` AND THE SLEEP IS INJECTED. A gate synchronised
+   *     on a real timer is a test that gets flakier as this grows, and this is
+   *     the piece most likely to grow.
+   */
+  private async gateAfterWave(
+    req: JobRunContext,
+    wave: string,
+    state: RunState,
+    owns: () => boolean
+  ): Promise<{ wave: string; reason: string } | null> {
+    if (req.spec.gate !== 'health') return null
+    const label = waveLabel(wave)
+    const cohorts = jobCohorts(req.targets)
+    const justRan = cohorts.find((c) => c.name === wave)?.targets ?? []
+    if (justRan.length === 0) return null
+    const serverIds = justRan.map((t) => t.serverId)
+
+    const health = this.deps.health
+    if (!health) {
+      const reason =
+        'this build has no health source wired to the job runner, so the check between waves ' +
+        'cannot be performed. A run that was confirmed with a gate does not continue without ' +
+        'one.'
+      this.deps.store.recordEvent('job-gate', null, { jobId: req.jobId, wave, ok: false, reason }, this.now)
+      return { wave: label, reason }
+    }
+
+    // The wave finished NOW; every observation the gate accepts has to be newer
+    // than this instant.
+    const since = this.now
+    const deadline = since + GATE_WAIT_MS
+    let lastStale = ''
+    for (;;) {
+      if (!owns() || state.cancelled) return null
+      const verdict = evaluateGate(health(serverIds), { since })
+      if (verdict.ok) {
+        this.deps.store.recordEvent(
+          'job-gate',
+          null,
+          { jobId: req.jobId, wave, ok: true, note: verdict.note, unverified: verdict.unverified },
+          this.now
+        )
+        return null
+      }
+      if (verdict.kind === 'unhealthy') {
+        this.deps.store.recordEvent(
+          'job-gate',
+          null,
+          { jobId: req.jobId, wave, ok: false, reason: verdict.reason, hosts: verdict.hosts },
+          this.now
+        )
+        return { wave: label, reason: verdict.reason }
+      }
+      lastStale = verdict.reason
+      if (this.now >= deadline) {
+        const reason = gateTimeoutReason(label, lastStale)
+        this.deps.store.recordEvent(
+          'job-gate',
+          null,
+          { jobId: req.jobId, wave, ok: false, reason, hosts: verdict.hosts },
+          this.now
+        )
+        return { wave: label, reason }
+      }
+      await this.sleep(GATE_POLL_MS)
+    }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    if (this.deps.sleep) return this.deps.sleep(ms)
+    return new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, ms)
+      t.unref?.()
     })
   }
 
@@ -1117,6 +1336,7 @@ export class JobRunner {
             serverId,
             serverName,
             step: stepIndex,
+            reboot: step.reboot === true,
             // Only the step the marker names is resumed. A three-step job
             // reclaimed at step 2 launches step 3 normally.
             resume: stepIndex === resumeAt ? resume?.handle : undefined,

@@ -185,7 +185,20 @@ export function isJobHostLive(state: string): boolean {
  * way through an upgrade. Filing that under `timeout` or `unreachable` would
  * claim to know which.
  */
-export type JobHostOutcome = BroadcastHostOutcome | 'abandoned' | 'orphaned'
+/*
+ * Item 17 adds `unhealthy`, and it is the one answer a reboot step can produce
+ * that none of the others describes.
+ *
+ * The command SUCCEEDED — the machine was told to restart and it restarted, its
+ * boot id proves it — and the machine came back with failed units, or with
+ * systemd reporting the system as degraded. `ok` would be a lie about the
+ * estate; `nonzero` would invent an exit code the reboot never produced;
+ * `unreachable` would be false, because the host is answering, and it is the
+ * exact word this item exists to stop being used for a machine that is fine
+ * enough to talk. So: the work was done and the host is not well, said as one
+ * outcome, and it is what the wave gate refuses to roll past.
+ */
+export type JobHostOutcome = BroadcastHostOutcome | 'abandoned' | 'orphaned' | 'unhealthy'
 
 export const JOB_OUTCOME_LABEL: Record<JobHostOutcome, string> = {
   ok: 'ok',
@@ -196,7 +209,8 @@ export const JOB_OUTCOME_LABEL: Record<JobHostOutcome, string> = {
   unreachable: 'unreachable',
   cancelled: 'not run',
   abandoned: 'abandoned when ShellPilot stopped',
-  orphaned: 'ended without recording an exit status'
+  orphaned: 'ended without recording an exit status',
+  unhealthy: 'restarted, and came back with something broken'
 }
 
 /**
@@ -289,22 +303,68 @@ export interface JobHostResult {
   degraded?: string
 }
 
-/** What a job is. Only `command` exists in B1; B4 adds staged kinds. */
-export type JobKind = 'command'
+/**
+ * What a job is.
+ *
+ * `command` is B1's, and is anything a person typed. `patch` is item 17's, and
+ * it is a separate kind rather than a flag because the two are read differently
+ * a year later: a `patch` row is a change record — this host was upgraded on
+ * the 14th and restarted — and a job list that could not tell one from an
+ * ad-hoc `systemctl restart nginx` would be a change log nobody trusts.
+ *
+ * The kind changes nothing about how the job RUNS. The runner switches on
+ * cohorts and on `gate`, never on this.
+ */
+export type JobKind = 'command' | 'patch'
 
 export interface JobStep {
   command: string
   /** Per-host timeout for this step. Defaults to JOB_STEP_TIMEOUT_MS. */
   timeoutMs?: number
+  /**
+   * This step restarts the machine, and the disconnect that follows is
+   * EXPECTED.
+   *
+   * Declared on the step rather than sniffed from the command text at
+   * execution time, and both halves matter. `restartsTheMachine()` still runs
+   * — a step that restarts the machine without saying so must not be treated
+   * as an ordinary one — but a step that DECLARES it gets the full
+   * reboot-and-wait treatment: the drop is `rebooting` rather than
+   * `unreachable`, the vanished wrapper is a restart rather than an
+   * `orphaned` one, and the host is checked for having come back healthy
+   * instead of merely for having come back.
+   *
+   * The declaration is part of the spec, so it is inside the approval record's
+   * command text by construction: the reboot step IS a step, with its own
+   * line in the dialog. Nothing reboots that the operator was not shown.
+   */
+  reboot?: boolean
 }
+
+/** Whether a job holds between waves, and on what. */
+export type JobGate = 'none' | 'health'
 
 export interface JobSpec {
   kind: JobKind
   /** What the user called it. Shown in the list; never parsed. */
   title: string
   steps: JobStep[]
-  /** Simultaneous hosts. Clamped by the runner; see JOB_CONCURRENCY. */
+  /** Simultaneous hosts WITHIN a wave. Clamped by the runner; see
+   *  JOB_CONCURRENCY. */
   concurrency?: number
+  /**
+   * B4's stage gate.
+   *
+   * `health` means the runner will not start wave N+1 until every host in wave
+   * N has a health observation NEWER than the moment that wave finished, and
+   * that observation is clean. Absent or `none` is B1's behaviour: waves still
+   * run in order, and nothing is checked between them.
+   *
+   * A gate is a property of the SPEC and therefore of the approval record: a
+   * job confirmed with a gate cannot be resumed without one, because the two
+   * are different blast radii.
+   */
+  gate?: JobGate
 }
 
 /**
@@ -363,6 +423,25 @@ export function planJob(spec: JobSpec, targets: JobTargetRef[]): JobPlan {
     // Deduped: two `rm -rf` steps are one reason, said once. The dialog is
     // read, and a repeated line reads as noise rather than as emphasis.
     for (const why of a.reasons) if (!reasons.includes(why)) reasons.push(why)
+    // A DECLARED reboot is destructive whatever the text matcher makes of it,
+    // and this is the third departure from planBroadcast — item 17's.
+    //
+    // `assessCommand` is a text rule and is defeatable, which is fine when the
+    // thing it grades is a string somebody typed. A reboot STEP is not that:
+    // it carries a boolean saying what it does, and grading it by re-reading
+    // its own shell would be preferring the guess to the declaration.
+    //
+    // It is not hypothetical. This codebase uses `sudo -n` everywhere,
+    // precisely because that is the only escalation which cannot prompt — and
+    // `assessCommand` recognises `sudo <verb>` but not `sudo -n <verb>`, so
+    // `sudo -n reboot` reads as `elevated`. A patch run would then have asked
+    // for a weaker confirmation to restart a machine than to run a bare
+    // `reboot`, which is exactly backwards. See tests/jobStages.test.ts.
+    if (step.reboot === true && risk !== 'destructive') {
+      risk = 'destructive'
+      const why = 'a step in this job restarts the machine'
+      if (!reasons.includes(why)) reasons.push(why)
+    }
   }
 
   const perCohort = new Map<string, number>()
@@ -523,7 +602,24 @@ export const JOB_RESUME_NOT_REAUTHORISED = (confirmedAt: number | null): string 
  * put a tick next to work nobody knows the end of. It is set at adoption, by
  * the runner reading rows it did not write.
  */
-export type JobState = 'queued' | 'running' | 'done' | 'cancelled' | 'abandoned'
+export type JobState = 'queued' | 'running' | 'done' | 'cancelled' | 'abandoned' | 'halted'
+
+/**
+ * `halted` is item 17's, and it is not `cancelled`.
+ *
+ * A cancelled job was stopped by a person and the row says who. A halted job
+ * stopped itself: a wave finished, the health gate would not vouch for it, and
+ * the remaining waves were never started. Filing that under `cancelled` would
+ * record a human decision nobody made, and filing it under `done` would put a
+ * tick next to an estate upgrade that reached a third of the estate.
+ *
+ * It is TERMINAL, which is what makes it safe to add: `unfinishedJobs()`
+ * selects on queued/running, so a halted row is never adopted or resumed. The
+ * hosts that never started carry `skipped`/`cancelled` with the gate's own
+ * sentence on them, which is the answer to the only question anyone asks
+ * afterwards — "why did nine of these say not run".
+ */
+export const JOB_TERMINAL_STATES: readonly JobState[] = ['done', 'cancelled', 'abandoned', 'halted']
 
 /** The row, without the per-host detail. What a list renders. */
 export interface JobRecord {
@@ -1480,6 +1576,21 @@ export type JobPollPhase =
   | 'orphaned'
   | 'missing'
   | 'failed-launch'
+  /**
+   * The wrapper is gone with no exit status, on a step that was DECLARED to
+   * restart the machine — and the host is answering again.
+   *
+   * Structurally identical to `orphaned`, and that is exactly why it needs its
+   * own name. `orphaned` means nobody knows why the process stopped; here we
+   * asked it to stop, by restarting the machine underneath it. Reporting the
+   * expected outcome of a reboot as "the OOM killer, a kill -9, or the host
+   * going down under it" is the vocabulary getting a fact backwards, which is
+   * the failure item 17 was handed.
+   *
+   * It is NOT proof the host restarted. It is the point at which the runner
+   * goes and checks — see verifyReboot in shared/patch.ts.
+   */
+  | 'rebooted'
 
 export interface JobPollVerdict {
   phase: JobPollPhase
@@ -1515,7 +1626,22 @@ export interface JobPollVerdict {
  */
 export function classifyJobPoll(
   poll: JobPollResult,
-  ctx: { instanceId: string; launchedAt: number; now: number; graceMs?: number }
+  ctx: {
+    instanceId: string
+    launchedAt: number
+    now: number
+    graceMs?: number
+    /**
+     * This step was declared to restart the machine — JobStep.reboot.
+     *
+     * Only that declaration flips `orphaned` to `rebooted`. A step that merely
+     * LOOKS like a reboot to `restartsTheMachine()` still gets `orphaned`,
+     * because a guess is not a reason to withhold the honest answer about a
+     * process that vanished; what the guess earns is the `rebooting` state
+     * while the link is down, which costs nothing if it is wrong.
+     */
+    expectsReboot?: boolean
+  }
 ): JobPollVerdict {
   const foreign = poll.instance !== null && poll.instance !== ctx.instanceId
   if (!poll.present) return { phase: 'missing', foreign: false }
@@ -1525,7 +1651,10 @@ export function classifyJobPoll(
     return { phase: ctx.now - ctx.launchedAt <= grace ? 'starting' : 'failed-launch', foreign }
   }
   if (poll.alive) return { phase: 'running', foreign }
-  return { phase: 'orphaned', foreign }
+  // The pid is gone and no rc was written. On a reboot step that is not an
+  // orphan, it is the machine having done what it was told; the poll that sees
+  // it is by definition one the host answered, so the host is back.
+  return { phase: ctx.expectsReboot === true ? 'rebooted' : 'orphaned', foreign }
 }
 
 // ---------------------------------------------------------------- the signal
@@ -1730,3 +1859,72 @@ export const JOB_ORPHANED_ERROR =
 export const JOB_LAUNCH_FAILED_ERROR =
   'The detached launch left a marker directory but no process ever recorded a pid, so the command ' +
   'never began.'
+
+// =========================================================================
+// B4: waves
+// =========================================================================
+//
+// A "stage" in the roadmap, a "wave" in the vocabulary, and `cohort` on the
+// row because that is the column B1 wrote before either word was chosen. All
+// three mean the same thing and the field name is not going to be churned for
+// a synonym.
+//
+// The runner runs cohorts ONE AFTER ANOTHER, and the hosts inside one cohort up
+// to `concurrency` at a time. That is the whole of the mechanism, and it is why
+// `planJob` sizes the confirmation on the largest cohort rather than the total:
+// blast radius is what is simultaneous.
+
+/**
+ * The cohorts a target list contains, in FIRST-APPEARANCE order.
+ *
+ * Not sorted. `wave-10` sorts before `wave-2` under every string comparison,
+ * and re-ordering an operator's waves because of how they are spelled would be
+ * the kind of bug that only shows up on the tenth wave of a real estate. The
+ * caller's order is the order, and `wavesToTargets` in shared/patch.ts emits
+ * them in it.
+ *
+ * A target with no cohort joins `''`, so a B1 job — every host, no cohorts — is
+ * exactly one wave and the loop below has nothing to special-case.
+ */
+export function jobCohorts<T extends { cohort?: string }>(targets: T[]): { name: string; targets: T[] }[] {
+  const order: string[] = []
+  const byName = new Map<string, T[]>()
+  for (const t of targets) {
+    const key = t.cohort ?? ''
+    if (!byName.has(key)) {
+      byName.set(key, [])
+      order.push(key)
+    }
+    byName.get(key)!.push(t)
+  }
+  return order.map((name) => ({ name, targets: byName.get(name)! }))
+}
+
+/** How a wave is named in a sentence: `wave-2`, or "the only wave". */
+export function waveLabel(name: string): string {
+  return name === '' ? 'the only wave' : name
+}
+
+/**
+ * The error a host carries when a health gate stopped the run before it
+ * started.
+ *
+ * Deliberately NOT `JOB_RESUME_NOT_REAUTHORISED`'s shape and deliberately not
+ * "cancelled": nobody cancelled anything, and the operator's next question is
+ * whether their machine was touched. It was not, and the sentence says so
+ * first.
+ */
+export const JOB_GATE_SKIPPED_ERROR = (wave: string, reason: string): string =>
+  `Nothing was installed on this host. The run stopped after ${waveLabel(wave)} because the ` +
+  `health check between waves would not pass: ${reason}`
+
+/** The error a reboot step carries when the host came back wrong. */
+export const JOB_REBOOT_UNHEALTHY_ERROR = (detail: string): string =>
+  `The reboot was issued and the host came back, but not cleanly: ${detail} The wave gate will ` +
+  'not pass on this host, so nothing after it was started.'
+
+/** The error a reboot step carries when the host never came back. */
+export const JOB_REBOOT_TIMEOUT_ERROR = (ms: number): string =>
+  `The reboot was issued and the host has not answered in ${Math.round(ms / 1000)}s. It is NOT ` +
+  'recorded as unreachable in the ordinary sense — the disconnect was expected and asked for — ' +
+  'but it has now been gone long enough that somebody should look at it.'

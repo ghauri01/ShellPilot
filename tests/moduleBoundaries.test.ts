@@ -35,6 +35,16 @@ const MODULE_FILES: Record<string, string[]> = {
     'src/renderer/src/lib/inventory.ts',
     'src/renderer/src/components/monitor/InventoryPanel.tsx'
   ],
+  // The job engine (src/shared/jobs.ts, src/main/services/job*.ts) is not
+  // listed for the same reason hostFacts is not listed under `inventory`: it
+  // exists on every install and adopts its own rows at launch whether or not
+  // this module is on. What the module owns is the patch vocabulary and the
+  // panel that drives it.
+  patch: [
+    'src/shared/patch.ts',
+    'src/shared/topology.ts',
+    'src/renderer/src/components/monitor/PatchPanel.tsx'
+  ],
   broadcast: [
     'src/shared/broadcast.ts',
     'src/main/services/broadcast.ts',

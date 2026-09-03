@@ -20,6 +20,7 @@ import { FleetHealth } from './FleetHealth'
 import { FleetSearch } from './FleetSearch'
 import { InventoryPanel } from './InventoryPanel'
 import { BroadcastPanel } from './BroadcastPanel'
+import { PatchPanel } from './PatchPanel'
 import { LogTailPanel } from './LogTailPanel'
 import { CronPanel } from './CronPanel'
 import { MODULES, moduleEnabled, type ModuleDef, type ModuleId } from '../../../../shared/modules'
@@ -360,6 +361,12 @@ export function FleetMonitor(): React.JSX.Element {
           <InventoryPanel servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
         </div>
       )}
+      {moduleEnabled(modules, 'patch') && (
+        <div style={show('patch')}>
+          <PatchPanel servers={servers} />
+        </div>
+      )}
+
       {moduleEnabled(modules, 'broadcast') && (
         <div style={show('broadcast')}>
           <BroadcastPanel servers={servers} />

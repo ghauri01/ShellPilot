@@ -18,8 +18,17 @@ import {
   parseJobLaunch,
   parseJobPoll,
   parseJobProbe,
-  restartsTheMachine
+  restartsTheMachine,
+  JOB_REBOOT_TIMEOUT_ERROR,
+  JOB_REBOOT_UNHEALTHY_ERROR
 } from '../../shared/jobs'
+import {
+  JOB_REBOOTING_NOTE,
+  buildRebootVerify,
+  parseRebootBootId,
+  parseRebootVerify,
+  verifyReboot
+} from '../../shared/patch'
 
 // The detached executor — roadmap item B2.
 //
@@ -309,7 +318,30 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
      *  rather than at the next tick. A job producing megabytes drains at
      *  connection speed instead of at one window per poll interval. */
     let immediate = false
-    const expectsReboot = restartsTheMachine(handle.command)
+    // ---- Item 17: reboot-and-wait.
+    //
+    // TWO SEPARATE FACTS, and collapsing them was the temptation worth
+    // resisting.
+    //
+    //  * `looksLikeReboot` is a GUESS off the command text. What it earns is the
+    //    `rebooting` state while the link is down — a cosmetic, reversible
+    //    label that costs nothing if the guess is wrong.
+    //  * `declaredReboot` is the step SAYING so (JobStep.reboot), which means
+    //    the operator confirmed a reboot step by that name. What it earns is
+    //    substantive: a wrapper that vanished without an exit status is read as
+    //    the machine having restarted rather than as an orphan, the wait is
+    //    bounded, and the host is checked for having come back healthy instead
+    //    of merely for having come back.
+    //
+    // A guess must never be enough to suppress `orphaned`. That state is the
+    // honest answer to "the process is gone and nobody knows why", and turning
+    // it off because a command mentioned `reboot` would be exactly the kind of
+    // smoothing-over B2 refused.
+    const declaredReboot = req.reboot === true
+    const looksLikeReboot = declaredReboot || restartsTheMachine(handle.command)
+    /** The boot id the reboot step printed before it went down, scraped from
+     *  the output as it arrives. Null until the step has said it. */
+    let bootIdBefore: string | null = null
     const deadline = handle.launchedAt + req.timeoutMs
 
     const say = (state: 'running' | 'detached' | 'rebooting' | 'foreign', error?: string): void => {
@@ -370,7 +402,30 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
         // restarts the machine is `rebooting`, which is the roadmap's example
         // of today's vocabulary getting a fact exactly backwards.
         attempts++
-        say(expectsReboot ? 'rebooting' : 'detached', r.error)
+        // The row carries the SENTENCE, not just the transport error. "Timed
+        // out connecting" next to a state called `rebooting` reads as a fault
+        // report; the note says the silence was asked for and what happens
+        // next. The transport error is kept behind it, because it is still the
+        // only evidence of how the link actually failed.
+        say(
+          looksLikeReboot ? 'rebooting' : 'detached',
+          looksLikeReboot ? `${JOB_REBOOTING_NOTE}${r.error ? ` (${r.error})` : ''}` : r.error
+        )
+        // A DECLARED reboot is the one case where "not answering" has a
+        // deadline, because it is the one case where we asked for the silence
+        // and therefore know roughly how long it should last. An ordinary
+        // detached job deliberately has no such bound while the link is down —
+        // that is B2's whole point and it is left exactly as it was.
+        if (declaredReboot && now() > deadline) {
+          return {
+            ok: false,
+            code: null,
+            error: JOB_REBOOT_TIMEOUT_ERROR(req.timeoutMs),
+            finalOutcome: 'timeout',
+            mergedOutput: true,
+            detachedHandle: { ...handle }
+          }
+        }
         continue
       }
 
@@ -378,7 +433,14 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
       carry = poll.carry
       attempts = 0
 
-      if (poll.sent > 0 && poll.text !== '') req.onOutput('out', poll.text)
+      if (poll.sent > 0 && poll.text !== '') {
+        req.onOutput('out', poll.text)
+        // Scraped as it goes past, because after the machine restarts there is
+        // no second chance to read what it printed on the way down — and the
+        // boot id it printed there is the only evidence available from here
+        // that it really restarted rather than merely dropped the connection.
+        if (declaredReboot) bootIdBefore = parseRebootBootId(poll.text) ?? bootIdBefore
+      }
       if (poll.sent > 0) {
         handle.readOffset += poll.sent
         persist()
@@ -387,7 +449,8 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
       const verdict = classifyJobPoll(poll, {
         instanceId: deps.instanceId,
         launchedAt: handle.launchedAt,
-        now: now()
+        now: now(),
+        expectsReboot: declaredReboot
       })
 
       if (verdict.foreign) say('foreign', JOB_INSTANCE_NOTE)
@@ -417,6 +480,44 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
             // cannot, because there is no separate stdout to be empty.
             mergedOutput: true,
             detachedHandle: verdict.foreign ? { ...handle } : null
+          }
+        }
+        case 'rebooted': {
+          // The machine did what it was told: the wrapper is gone, no exit
+          // status was ever written — because the kernel took the process with
+          // the rest of userspace — and the host is answering again, which the
+          // poll that produced this verdict has just proved.
+          //
+          // Drain first, exactly as `finished` and `orphaned` do: what the step
+          // printed on its way down includes the boot id this is about to be
+          // compared against.
+          if (poll.size > handle.readOffset) {
+            immediate = true
+            continue
+          }
+          if (!verdict.foreign) await reap(req, handle)
+          // NOW go and look. "The host answered" is not "the host is well", and
+          // this is the point item 17 exists to add: a reboot step that stops
+          // at "it came back" is a reboot step that reports a machine with
+          // eleven failed units as a success.
+          const check = await deps.run(req.cfg, buildRebootVerify(), pollTimeoutMs)
+          const after = check.ok
+            ? parseRebootVerify(check.stdout)
+            : { answered: false, bootId: null, uptimeSeconds: null, unitState: null, failed: null }
+          const rv = verifyReboot(bootIdBefore, after)
+          req.onOutput('out', `\n… ${rv.reason}\n`)
+          if (rv.ok) {
+            return { ok: true, code: 0, mergedOutput: true, detachedHandle: null }
+          }
+          return {
+            ok: false,
+            code: null,
+            error: JOB_REBOOT_UNHEALTHY_ERROR(rv.reason),
+            // `unhealthy` and not `unreachable`: the host is answering. See
+            // JOB_OUTCOME_LABEL.
+            finalOutcome: 'unhealthy',
+            mergedOutput: true,
+            detachedHandle: null
           }
         }
         case 'orphaned': {

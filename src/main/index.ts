@@ -50,14 +50,22 @@ import {
 } from './services/sftp'
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { HostFactsReader } from './services/hostFacts'
-import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
+import { FleetSampler, fleetCached, setActiveFleetSampler } from './services/fleetSampler'
 import { loadHistory, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
 import type { JobHostCapabilityReport, JobRunRequest } from '../shared/jobs'
-import { JOB_DETACHED_STALL_GRACE_MS } from '../shared/jobs'
+import { JOB_DETACHED_STALL_GRACE_MS, jobCohorts, restartsTheMachine } from '../shared/jobs'
+import type { GateHost } from '../shared/patch'
+import {
+  buildTopology,
+  rebootBlockFor,
+  sameWaveDatabaseBlocks,
+  unmatchedHopNote,
+  type RebootBlock
+} from '../shared/topology'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSourceReport } from '../shared/cron'
@@ -154,6 +162,7 @@ import {
   refreshMcpDataCache,
   listCachedWorkspaces,
   listCachedServers,
+  listCachedDatabases,
   getCachedServer,
   serverToSshConfig
 } from './services/mcpDataCache'
@@ -1038,8 +1047,110 @@ const detachedExec = detachedJobExecutor({
   }
 })
 
+/**
+ * The reboot-ordering refusal — item 17, enforced in MAIN.
+ *
+ * A HARD REFUSAL rather than a confirmation. The argument is written out in
+ * shared/topology.ts and it comes down to one sentence: a question asked
+ * fifteen times during a staged estate upgrade is answered by reflex, and
+ * rebooting the machine every other connection runs through is not a thing to
+ * be sure about.
+ *
+ * It lives here, at the door every job goes through, rather than only in the
+ * panel that offers the button. A check that exists only in the renderer is a
+ * check the next caller does not have — and the renderer is, by B2's own
+ * argument, gone by the time a durable job is being acted on.
+ *
+ * BOTH the declared reboot step and a command that merely LOOKS like one are
+ * checked. The declaration is what earns reboot-and-wait; the guess is enough
+ * to earn a refusal, because a refusal costs an operator one deliberate run on
+ * one host and being wrong costs them the bastion.
+ *
+ * The topology hole — hops that name no saved server — is reported in the
+ * refusal text rather than closed. There is nothing here that could close it.
+ */
+function rebootOrderingRefusal(req: JobRunRequest): string | null {
+  const restarts = req.spec.steps.some((s) => s.reboot === true || restartsTheMachine(s.command))
+  if (!restarts) return null
+
+  const topo = buildTopology(
+    listCachedServers().map((srv) => ({ id: srv.id, name: srv.name, route: srv.route })),
+    listCachedDatabases().map((db) => ({
+      id: db.id,
+      name: db.name,
+      kind: db.kind,
+      database: db.database,
+      sshServerId: db.sshServerId
+    }))
+  )
+
+  const blocks: RebootBlock[] = []
+  for (const t of req.targets) {
+    const b = rebootBlockFor(topo, t.serverId)
+    if (b !== null) blocks.push(b)
+  }
+  for (const wave of jobCohorts(req.targets)) {
+    blocks.push(...sameWaveDatabaseBlocks(topo, wave.targets.map((t) => t.serverId)))
+  }
+  if (blocks.length === 0) return null
+
+  const seen = new Set<string>()
+  const lines = blocks
+    .filter((b) => {
+      const k = `${b.kind}:${b.serverId}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+    .map((b) => b.reason)
+  const note = unmatchedHopNote(topo)
+  return [...lines, ...(note === null ? [] : [note])].join(' ')
+}
+
+/**
+ * What the wave gate reads — B4.
+ *
+ * The fleet sampler's cache, shaped for `evaluateGate`, and NOT a probe of its
+ * own. A gate that ran its own SSH health check would be a second
+ * implementation of "is this host healthy" in the process deciding whether to
+ * keep rolling an estate upgrade, which is the disagreement hostHealth.ts was
+ * moved into shared/ to end.
+ *
+ * `sampledAt` is the NEWEST observation of any kind, success or failure, and
+ * that matters: a host that went down during the wave has an `errorAt` and no
+ * new `at`, and a gate reading only the success timestamp would call the
+ * freshest possible evidence of a problem "stale" and wait five minutes for a
+ * success that is never coming.
+ */
+function gateHealthFor(serverIds: string[]): GateHost[] {
+  return serverIds.map((serverId) => {
+    const entry = fleetCached(serverId)?.entry
+    const name = getCachedServer(serverId)?.name ?? serverId
+    const at = entry?.at ?? null
+    const errorAt = entry?.errorAt ?? null
+    const unreachable = entry?.error !== undefined && (errorAt ?? 0) >= (at ?? 0)
+    const services = entry?.host?.services ?? null
+    return {
+      serverId,
+      serverName: name,
+      sampledAt: at === null && errorAt === null ? null : Math.max(at ?? 0, errorAt ?? 0),
+      unreachable,
+      unreachableError: unreachable ? (entry?.error ?? null) : null,
+      // null, not [], when systemd could not be asked. hostHealth.ts's rule,
+      // and here it decides whether the host is `unverified` (reported, not
+      // blocking) rather than healthy.
+      failedUnits:
+        services === null
+          ? null
+          : services.filter((u) => u.active === 'failed' || u.sub === 'failed').map((u) => u.name)
+    }
+  })
+}
+
 const jobRunner = new JobRunner({
   exec: detachedExec,
+  guard: rebootOrderingRefusal,
+  health: gateHealthFor,
   // B3. Injected rather than imported inside the runner, so the runner stays
   // constructible without an Electron `app` object and a test can hand in an
   // array. The refusal happens with or without this; what a missing one loses
