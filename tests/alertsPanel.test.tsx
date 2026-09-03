@@ -182,6 +182,66 @@ describe('coverage honesty, which the new kinds inherit', () => {
   })
 })
 
+describe('what the inbox lets a person do', () => {
+  function outstanding(): void {
+    useAlerts.setState({
+      active: {
+        's1:disk': { serverId: 's1', serverName: 'web-1', kind: 'disk', value: 91, since: T0 }
+      }
+    })
+  }
+
+  it('snoozes for a period and says until when, keeping the chip', async () => {
+    outstanding()
+    render(<AlertsPanel />)
+    await userEvent.click(screen.getByRole('button', { name: '8 hours' }))
+    // The chip stays: the condition has not changed, and a status bar that
+    // disagreed with this screen is what 1a4cfaa was written to end.
+    expect(useAlerts.getState().active['s1:disk']).toBeDefined()
+    // A range, not an equality: userEvent runs under fake timers that advance
+    // real time, so the click lands a few milliseconds after T0. Eight hours
+    // from WHEN IT WAS CLICKED is the claim, and that is what this checks.
+    const until = useAlerts.getState().active['s1:disk'].snoozedUntil ?? 0
+    expect(until).toBeGreaterThanOrEqual(T0 + 8 * 60 * 60_000)
+    expect(until).toBeLessThan(T0 + 8 * 60 * 60_000 + 60_000)
+    await waitFor(() => expect(screen.getByText(/snoozed until/)).toBeTruthy())
+    // And a way back out of it, on the same row.
+    expect(screen.getByRole('button', { name: 'Wake' })).toBeTruthy()
+  })
+
+  it('wakes a snoozed alert again', async () => {
+    outstanding()
+    render(<AlertsPanel />)
+    await userEvent.click(screen.getByRole('button', { name: '1 hour' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Wake' }))
+    expect(useAlerts.getState().active['s1:disk'].snoozedUntil).toBeUndefined()
+    await waitFor(() => expect(screen.getByRole('button', { name: '1 hour' })).toBeTruthy())
+  })
+
+  it('acknowledges, which takes the alert out of the outstanding list entirely', async () => {
+    outstanding()
+    render(<AlertsPanel />)
+    await userEvent.click(screen.getByRole('button', { name: 'Acknowledge' }))
+    expect(useAlerts.getState().active['s1:disk']).toBeUndefined()
+    await waitFor(() =>
+      expect(screen.getByText('Nothing is outstanding right now.')).toBeTruthy()
+    )
+  })
+
+  it('shows a snooze and an acknowledgement in the history as themselves', async () => {
+    historyRows = [
+      { event: 'acknowledged', kind: 'disk', serverId: 's1', serverName: 'web-1', at: T0 - 60_000 },
+      { event: 'snoozed', kind: 'cpu', serverId: 's1', serverName: 'web-1', until: T0 + 60_000, at: T0 - 120_000 }
+    ]
+    render(<AlertsPanel />)
+    await waitFor(() => expect(screen.getByText('Acknowledged')).toBeTruthy())
+    expect(screen.getByText('Snoozed')).toBeTruthy()
+    // Neither is an all-clear, and the log is the only place that difference
+    // can be seen.
+    expect(screen.queryByText('Cleared')).toBeNull()
+  })
+})
+
 describe('the chip is a pointer at the inbox', () => {
   it('opens the Fleet Monitor on the Alerts tab, not on whatever was last open', async () => {
     useNav.setState({ monitorTab: 'overview' })

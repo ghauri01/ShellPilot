@@ -217,9 +217,25 @@ export const DB_ALERT_HISTORY_KINDS = ['db-alarm', 'db-watch'] as const
  * re-cross seconds later must not read as news), and a stand-down ends the
  * conversation entirely, so the next crossing speaks at once.
  */
-export type StoredAlertEventName = AlertEvent | 'stood-down'
+/**
+ * `stood-down`, `snoozed` and `acknowledged` are decisions ABOUT an alert
+ * rather than things the alert did, and they are in the same log for the reason
+ * the log exists: all three change whether the next crossing speaks, so a
+ * restart that replayed the crossings and not the decisions would undo them.
+ *
+ * `snoozed` carries an `until`. `acknowledged` does not, because it is not a
+ * period — it lasts exactly as long as the condition does, and ends when the
+ * condition ends.
+ */
+export type StoredAlertEventName = AlertEvent | 'stood-down' | 'snoozed' | 'acknowledged'
 
-export const STORED_ALERT_EVENTS = ['raised', 'resolved', 'stood-down'] as const
+export const STORED_ALERT_EVENTS = [
+  'raised',
+  'resolved',
+  'stood-down',
+  'snoozed',
+  'acknowledged'
+] as const
 
 export interface StoredAlertEvent {
   event: StoredAlertEventName
@@ -244,6 +260,15 @@ export interface StoredAlertEvent {
    * output today and neither is allowed to become it.
    */
   detail?: string
+  /**
+   * When a `snoozed` row's silence ends. Absent on every other event.
+   *
+   * An absolute timestamp rather than a duration, so a snooze read back from
+   * the log means what it meant when it was set. A duration would restart on
+   * every launch, and "snooze for an hour" would be an hour from whenever the
+   * app next opened.
+   */
+  until?: number
 }
 
 /** A row as it comes back out, with the store's own timestamp. */
@@ -309,6 +334,7 @@ export function sanitiseStoredAlert(raw: unknown): StoredAlertEvent | null {
   // Same character class the store scrubs a name to, applied again here. The
   // store is the only writer today; the whitelist is what makes that a fact
   // about the DATA rather than a fact about the current call sites.
+  if (typeof r.until === 'number' && Number.isFinite(r.until)) out.until = r.until
   if (typeof r.detail === 'string') {
     const detail = r.detail.slice(0, MAX_NAME).replace(/[^A-Za-z0-9 ._@:-]/g, '').trim()
     if (detail !== '') out.detail = detail

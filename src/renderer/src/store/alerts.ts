@@ -46,6 +46,11 @@ export interface ActiveAlert {
   /** A short, already-scrubbed phrase for the tooltip and the inbox. Built from
    *  our words and names the user typed, never from remote output. */
   detail?: string
+  /** When a snooze on this server+kind ends, if one is running. On the chip so
+   *  the inbox can say so — the chip STAYS up during a snooze, because the
+   *  condition is still true and a chip that vanished would put the status bar
+   *  and the Fleet Monitor back into the disagreement 1a4cfaa ended. */
+  snoozedUntil?: number
 }
 
 interface AlertState {
@@ -279,6 +284,42 @@ const raiseTimes = new Map<string, number[]>()
  *  that happens while it is damped. */
 const dampedUntil = new Map<string, number>()
 
+// ---------------------------------------------------------------------------
+// The two things a person can do about an alert, and why they are not one
+// thing with a duration.
+//
+// SNOOZE is a period. "Not for the next eight hours" — the condition is still
+// true, the reader knows, and they will look again after. The chip stays up
+// because the condition has not changed and a chip that disappeared would put
+// the status bar back into disagreement with the screen it links to.
+//
+// ACKNOWLEDGE is not a period, and giving it one is the mistake this pair is
+// split to avoid. "I have seen this and I am dealing with it" lasts exactly as
+// long as the condition does — a disk being cleaned takes as long as it takes,
+// and an acknowledgement that expired after eight hours would start shouting
+// again in the middle of the work it was acknowledging. So it ends when the
+// condition ends, and the chip goes with it: the person has taken the alert,
+// and a status bar still counting it is counting their own inbox back at them.
+//
+// Both are DURABLE, for the same reason the repeat window is. A snooze that
+// died with the renderer would be undone by a restart, which is the one thing
+// somebody does when an app is annoying them.
+//
+// Both are kept apart from `dampedUntil` rather than folded into it, even
+// though the suppression they want is identical, because the refresh is not:
+// a crossing that happens while DAMPED extends the damp to six hours, and a
+// thirty-minute snooze that silently became six hours because the host crossed
+// once more would be the app deciding how long the user meant.
+// ---------------------------------------------------------------------------
+
+/** When each snoozed server+kind may speak again. Set by the user, never
+ *  refreshed by anything the estate does. */
+const snoozedUntil = new Map<string, number>()
+
+/** Server+kinds the user has said they have seen. Cleared when the condition
+ *  clears, not on a clock. */
+const acknowledged = new Set<string>()
+
 /**
  * Whether the condition was true on the last sample, per server+kind.
  *
@@ -320,6 +361,7 @@ function record(
     value?: number
     threshold?: number
     detail?: string
+    until?: number
     at: number
   }
 ): void {
@@ -334,7 +376,8 @@ function record(
       // Written only when there is one. An empty string in the row would be a
       // detail the inbox renders as a blank parenthesis rather than an absent
       // one, and absent is what it is.
-      ...(a.detail ? { detail: a.detail } : {})
+      ...(a.detail ? { detail: a.detail } : {}),
+      ...(a.until === undefined ? {} : { until: a.until })
     },
     a.at
   )
@@ -370,6 +413,7 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       // occurrence arriving while damped extends the quiet rather than being
       // counted towards a new damp.
       seenEvents.add(eventDedupeKey(row.serverId, row.kind, row.detail ?? '', row.at))
+      if (isSnoozed(k, row.at) || acknowledged.has(k)) continue
       if (isDamped(k, row.at)) dampedUntil.set(k, row.at + FLAP_DAMP_MS)
       else noteCrossing(k, row.at)
       continue
@@ -389,6 +433,12 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       // counts as outstanding, at the value the threshold implies.
       lastNotifiedValue.set(k, row.value ?? row.threshold ?? 0)
       announced.set(k, { serverId: row.serverId, serverName: row.serverName, kind: row.kind })
+    } else if (row.event === 'snoozed') {
+      // Absolute, so it means what it meant when it was set. An expired one is
+      // simply over — isSnoozed drops it lazily on the first read.
+      if (row.until !== undefined) snoozedUntil.set(k, row.until)
+    } else if (row.event === 'acknowledged') {
+      acknowledged.add(k)
     } else if (row.event === 'stood-down') {
       // Alerting was switched off with this outstanding. Nothing is owed and
       // nothing is suppressed: the next crossing is a new conversation, which
@@ -399,6 +449,8 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       conditionHeld.delete(k)
       raiseTimes.delete(k)
       dampedUntil.delete(k)
+      snoozedUntil.delete(k)
+      acknowledged.delete(k)
     } else {
       // A resolve leaves the repeat window in place and clears the escalation
       // memory — exactly what evaluate()'s `!over` branch does, for the reason
@@ -408,6 +460,11 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       lastNotifiedValue.delete(k)
       announced.delete(k)
       conditionHeld.delete(k)
+      // An acknowledgement lasts as long as its condition, and this row is the
+      // condition ending. A snooze is a period the user chose and outlives the
+      // thing it was about — otherwise a disk that cleared five minutes into an
+      // eight-hour snooze would be free to shout again for the other seven.
+      acknowledged.delete(k)
     }
   }
 }
@@ -442,6 +499,31 @@ function isDamped(k: string, now: number): boolean {
     return false
   }
   return true
+}
+
+/** Whether the user has snoozed this server+kind. Same lazy expiry, same
+ *  reason. */
+function isSnoozed(k: string, now: number): boolean {
+  const until = snoozedUntil.get(k)
+  if (until === undefined) return false
+  if (now >= until) {
+    snoozedUntil.delete(k)
+    return false
+  }
+  return true
+}
+
+/**
+ * Whether anything at all should be said about this server+kind.
+ *
+ * One predicate over the three reasons for silence, so a code path cannot check
+ * two of them and miss the third. Every "should we speak" gate calls this; the
+ * only places that ask about damping specifically are the two that REFRESH a
+ * damp, because a snooze and an acknowledgement must not be extended by
+ * anything the estate does.
+ */
+function isQuiet(k: string, now: number): boolean {
+  return isDamped(k, now) || isSnoozed(k, now) || acknowledged.has(k)
 }
 
 export function hydrateAlerts(): Promise<void> {
@@ -593,13 +675,20 @@ function evaluate(
 
     conditionHeld.delete(k)
 
-    // Damped: the crossing is real, the chip has already followed it, and the
+    // An acknowledgement ends with the condition it was about, and it is
+    // cleared HERE — before the quiet gate — so the all-clear still goes out.
+    // The person acknowledged the alert on their own screen; an endpoint left
+    // holding an alarm that nothing will ever close is a different lie from the
+    // one acknowledging was meant to stop.
+    acknowledged.delete(k)
+
+    // Damped, snoozed: the crossing is real, the chip has already followed it, and the
     // durable log records it. What is suppressed is the talking, and that has
     // to include the all-clear — half of a flap's noise is all-clears. The
     // outstanding alarm and the escalation memory are left standing on purpose,
     // so the endpoint's view is one raise, then silence, then whichever of a
     // repeat or an all-clear is true when the damp ends.
-    if (isDamped(k, now)) return
+    if (isQuiet(k, now)) return
 
     // The all-clear, once, and only if the endpoint is holding an alarm from
     // us. Without this gate a host crossing the line repeatedly without ever
@@ -636,12 +725,25 @@ function evaluate(
   }
 
   const existing = useAlerts.getState().active[k]
-  useAlerts.setState((s) => ({
-    active: {
-      ...s.active,
-      [k]: { serverId, serverName, kind, value, since: existing?.since ?? now }
-    }
-  }))
+  // An acknowledged alert keeps NO chip. The person has taken it, and a status
+  // bar still counting it is counting their own inbox back at them. Everything
+  // else about the condition goes on: the crossing counter, the durable log,
+  // and the all-clear when it finally clears.
+  if (!acknowledged.has(k)) {
+    useAlerts.setState((s) => ({
+      active: {
+        ...s.active,
+        [k]: {
+          serverId,
+          serverName,
+          kind,
+          value,
+          since: existing?.since ?? now,
+          ...(snoozedUntil.has(k) ? { snoozedUntil: snoozedUntil.get(k) } : {})
+        }
+      }
+    }))
+  }
 
   // Three ways a sample earns a notification, and all three are needed once a
   // window can be six hours long:
@@ -694,7 +796,7 @@ function evaluate(
   // Escalation is the one thing a damp does not stop. A value five points worse
   // than the figure last announced is monotone movement, and monotone movement
   // is the one shape a flap never has.
-  if (!worsened && isDamped(k, now)) return
+  if (!worsened && isQuiet(k, now)) return
   // The crossing that trips the damp is still announced — that message is what
   // tells a person the feature has gone quiet on purpose.
   const tripped = crossing && noteCrossing(k, now)
@@ -820,7 +922,13 @@ export function checkStateAlert(
     }
     if (!hydrated) return
     conditionHeld.delete(k)
-    if (isDamped(k, now)) return
+    // An acknowledgement ends with the condition it was about, and it is
+    // cleared HERE — before the quiet gate — so the all-clear still goes out.
+    // The person acknowledged the alert on their own screen; an endpoint left
+    // holding an alarm that nothing will ever close is a different lie from the
+    // one acknowledging was meant to stop.
+    acknowledged.delete(k)
+    if (isQuiet(k, now)) return
     if (announced.delete(k)) {
       lastNotified.set(k, now)
       void window.shellpilot?.webhook?.notify({
@@ -838,12 +946,22 @@ export function checkStateAlert(
   }
 
   const existing = useAlerts.getState().active[k]
-  useAlerts.setState((s) => ({
-    active: {
-      ...s.active,
-      [k]: { serverId: id, serverName: who, kind, value: null, since: existing?.since ?? now, detail: what }
-    }
-  }))
+  if (!acknowledged.has(k)) {
+    useAlerts.setState((s) => ({
+      active: {
+        ...s.active,
+        [k]: {
+          serverId: id,
+          serverName: who,
+          kind,
+          value: null,
+          since: existing?.since ?? now,
+          detail: what,
+          ...(snoozedUntil.has(k) ? { snoozedUntil: snoozedUntil.get(k) } : {})
+        }
+      }
+    }))
+  }
   if (!hydrated) return
 
   const crossing = !conditionHeld.has(k)
@@ -858,7 +976,7 @@ export function checkStateAlert(
   // So it speaks once per transition and then holds its peace until it
   // resolves — which is stricter than the numeric path, deliberately.
   if (!crossing) return
-  if (isDamped(k, now)) return
+  if (isQuiet(k, now)) return
   const tripped = noteCrossing(k, now)
   lastNotified.set(k, now)
   // `lastNotifiedValue` is deliberately NOT written. It is the escalation
@@ -928,6 +1046,9 @@ export function noteAlertEvent(
     return
   }
   seenEvents.add(dedupe)
+  // A snooze is the user's own period and nothing the estate does may extend
+  // it, so it returns before the damp refresh below rather than through it.
+  if (isSnoozed(k, at) || acknowledged.has(k)) return
   // The occurrence's OWN time drives damping, not the wall clock at the moment
   // we happened to read it. That is what makes the live path and the hydration
   // replay above the same arithmetic on the same rows, rather than two versions
@@ -959,6 +1080,96 @@ export function noteAlertEvent(
     ...(tripped ? { damped: true } : {})
   })
   record(kind, 'raised', { serverId: id, serverName: who, detail: what, at })
+}
+
+// ---------------------------------------------------------------------------
+// What a person can do about an alert, from the inbox.
+// ---------------------------------------------------------------------------
+
+/** The durations the inbox offers. An hour is "I am on it", eight hours is
+ *  "not during this shift", a day is "not until tomorrow". Longer than a day is
+ *  what acknowledging is for. */
+export const SNOOZE_CHOICES: readonly { label: string; ms: number }[] = [
+  { label: '1 hour', ms: 60 * 60 * 1000 },
+  { label: '8 hours', ms: 8 * 60 * 60 * 1000 },
+  { label: '24 hours', ms: 24 * 60 * 60 * 1000 }
+]
+
+/**
+ * Stop talking about this server+kind for a while.
+ *
+ * The chip stays up, and that is the point of the pair rather than an
+ * oversight: the condition has not changed, and a snooze that cleared the chip
+ * would put the status bar back into disagreement with the screen it links to —
+ * the contradiction 1a4cfaa was written to end.
+ *
+ * Escalation still speaks, exactly as it does under flap damping, and for the
+ * same reason: a value five points worse than the figure last announced is
+ * monotone movement, and someone who snoozed a disk at 86% did not snooze it at
+ * 96%.
+ */
+export function snoozeAlert(serverId: string, kind: AlertKind, ms: number): void {
+  const k = key(serverId, kind)
+  const until = Date.now() + Math.max(0, ms)
+  snoozedUntil.set(k, until)
+  // Acknowledging and snoozing are alternatives, not layers. Choosing one
+  // replaces the other rather than stacking a period on top of something that
+  // has none.
+  acknowledged.delete(k)
+  const a = useAlerts.getState().active[k]
+  if (a) useAlerts.setState((s) => ({ active: { ...s.active, [k]: { ...a, snoozedUntil: until } } }))
+  record(kind, 'snoozed', {
+    serverId,
+    serverName: a?.serverName ?? '',
+    detail: a?.detail,
+    until,
+    at: Date.now()
+  })
+}
+
+/** End a snooze early. Written to the log as a zero-length snooze rather than
+ *  as a new event name: "quiet until then" with a `then` in the past is exactly
+ *  what this means, and it replays correctly without teaching the reader a
+ *  fifth verb. */
+export function unsnoozeAlert(serverId: string, kind: AlertKind): void {
+  const k = key(serverId, kind)
+  snoozedUntil.delete(k)
+  const a = useAlerts.getState().active[k]
+  if (a) {
+    const next = { ...a }
+    delete next.snoozedUntil
+    useAlerts.setState((s) => ({ active: { ...s.active, [k]: next } }))
+  }
+  const at = Date.now()
+  record(kind, 'snoozed', { serverId, serverName: a?.serverName ?? '', detail: a?.detail, until: at, at })
+}
+
+/**
+ * "I have seen this and I am dealing with it."
+ *
+ * Not a snooze with a long duration. An acknowledgement lasts exactly as long
+ * as the condition does — cleaning a disk takes as long as it takes, and an
+ * acknowledgement that expired on a clock would start shouting again in the
+ * middle of the work it acknowledged. The chip goes, because the person has
+ * taken the alert; the condition is still tracked, the log still records it,
+ * and the endpoint still gets its all-clear when it really clears.
+ */
+export function acknowledgeAlert(serverId: string, kind: AlertKind): void {
+  const k = key(serverId, kind)
+  acknowledged.add(k)
+  snoozedUntil.delete(k)
+  const a = useAlerts.getState().active[k]
+  useAlerts.setState((s) => {
+    const active = { ...s.active }
+    delete active[k]
+    return { active }
+  })
+  record(kind, 'acknowledged', {
+    serverId,
+    serverName: a?.serverName ?? '',
+    detail: a?.detail,
+    at: Date.now()
+  })
 }
 
 // Failed systemd units, per server.
@@ -1058,6 +1269,12 @@ onServerForgotten((serverId) => {
   for (const k of [...dampedUntil.keys()]) {
     if (k.startsWith(`${serverId}:`)) dampedUntil.delete(k)
   }
+  for (const k of [...snoozedUntil.keys()]) {
+    if (k.startsWith(`${serverId}:`)) snoozedUntil.delete(k)
+  }
+  for (const k of [...acknowledged]) {
+    if (k.startsWith(`${serverId}:`)) acknowledged.delete(k)
+  }
   for (const k of [...conditionHeld]) {
     if (k.startsWith(`${serverId}:`)) conditionHeld.delete(k)
   }
@@ -1095,6 +1312,11 @@ useApp.subscribe((s, prev) => {
     raiseTimes.clear()
     dampedUntil.clear()
     conditionHeld.clear()
+    // The snoozes and acknowledgements too. They are decisions about a
+    // conversation the user has just ended, and a snooze surviving the switch
+    // would silence the first alert after it is turned back on.
+    snoozedUntil.clear()
+    acknowledged.clear()
   }
 })
 
@@ -1193,6 +1415,8 @@ export function resetAlertsForTests(): void {
   announced.clear()
   raiseTimes.clear()
   dampedUntil.clear()
+  snoozedUntil.clear()
+  acknowledged.clear()
   conditionHeld.clear()
   seenEvents.clear()
   failedUnits.clear()

@@ -2,7 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
 import { useApp } from '../../store/app'
 import { useFleetStatus } from '../../store/fleetStatus'
-import { LABEL, chipValue, useAlerts } from '../../store/alerts'
+import {
+  LABEL,
+  SNOOZE_CHOICES,
+  acknowledgeAlert,
+  chipValue,
+  snoozeAlert,
+  unsnoozeAlert,
+  useAlerts
+} from '../../store/alerts'
 import { alertCoverageText } from '../settings/alertCoverage'
 import { openSettings } from '../../store/nav'
 import { clsx } from '../../lib/format'
@@ -38,13 +46,17 @@ const LIMIT = 500
 const EVENT_WORD: Record<StoredAlertRow['event'], string> = {
   raised: 'Raised',
   resolved: 'Cleared',
-  'stood-down': 'Stood down'
+  'stood-down': 'Stood down',
+  snoozed: 'Snoozed',
+  acknowledged: 'Acknowledged'
 }
 
 const EVENT_CLASS: Record<StoredAlertRow['event'], string> = {
   raised: 'warn',
   resolved: 'ok',
-  'stood-down': 'faint'
+  'stood-down': 'faint',
+  snoozed: 'faint',
+  acknowledged: 'faint'
 }
 
 /**
@@ -148,13 +160,52 @@ export function AlertsPanel(): React.JSX.Element {
           <tbody>
             {outstanding.map((a) => (
               <tr key={`${a.serverId}:${a.kind}`}>
-                <td className="warn">{LABEL[a.kind]}</td>
+                <td className={a.snoozedUntil && a.snoozedUntil > now ? 'faint' : 'warn'}>
+                  {LABEL[a.kind]}
+                </td>
                 <td>{a.serverName}</td>
                 <td>
                   {chipValue(a).trim()}
                   {a.detail ? ` ${a.detail}` : ''}
                 </td>
                 <td className="faint">since {when(a.since, now)}</td>
+                <td>
+                  {/* Said out loud rather than shown as absence. A snoozed alert
+                      that simply looked normal would leave a person wondering
+                      why it had gone quiet, which is the failure mode damping
+                      already had to answer for. */}
+                  {a.snoozedUntil && a.snoozedUntil > now ? (
+                    <>
+                      <span className="faint">
+                        snoozed until {new Date(a.snoozedUntil).toLocaleTimeString()}
+                      </span>{' '}
+                      <button
+                        className="btn ghost sm"
+                        onClick={() => unsnoozeAlert(a.serverId, a.kind)}
+                      >
+                        Wake
+                      </button>
+                    </>
+                  ) : (
+                    SNOOZE_CHOICES.map((c) => (
+                      <button
+                        key={c.ms}
+                        className="btn ghost sm"
+                        title={`Say nothing about this for ${c.label}. The chip stays, because the condition has not changed.`}
+                        onClick={() => snoozeAlert(a.serverId, a.kind, c.ms)}
+                      >
+                        {c.label}
+                      </button>
+                    ))
+                  )}{' '}
+                  <button
+                    className="btn ghost sm"
+                    title="You have seen it and are dealing with it. The chip goes and nothing more is said until the condition itself clears — however long that takes."
+                    onClick={() => acknowledgeAlert(a.serverId, a.kind)}
+                  >
+                    Acknowledge
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
