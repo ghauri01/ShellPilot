@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { join } from 'node:path'
 import { chmodSync, copyFileSync, existsSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import type {
+  JobDetachedHandle,
   JobDetail,
   JobHostResult,
   JobHostState,
@@ -11,7 +12,7 @@ import type {
   JobSpec,
   JobState
 } from '../../shared/jobs'
-import { JOB_OUTPUT_RETENTION_DAYS, JOB_RECORD_RETENTION_DAYS } from '../../shared/jobs'
+import { JOB_OUTPUT_RETENTION_DAYS, JOB_RECORD_RETENTION_DAYS, isJobDetachedHandle } from '../../shared/jobs'
 import type { BroadcastConfirmation, BroadcastRisk } from '../../shared/broadcast'
 
 // A durable store for samples, events and facts — roadmap item A.
@@ -193,6 +194,9 @@ export interface JobTargetPatch {
   endedAt?: number | null
   outOffset?: number
   outElided?: number
+  /** B2's marker handle. Undefined leaves the column alone; `null` clears it,
+   *  which is what a reaped marker does. */
+  detached?: JobDetachedHandle | null
 }
 
 export interface JobRetentionResult {
@@ -577,6 +581,16 @@ CREATE TABLE IF NOT EXISTS job_target (
   -- "dpkg failed" into "the command produced no error".
   out_offset INTEGER NOT NULL DEFAULT 0,
   out_elided INTEGER NOT NULL DEFAULT 0,
+  -- B2's marker handle, as JSON: which directory on the host holds this step's
+  -- cmd/pid/out/rc, which instance launched it, and how many bytes of its out
+  -- have been read from it. NULL for every attached row, which is how a reader tells
+  -- the two apart a month later.
+  --
+  -- One column of JSON rather than six columns, because nothing queries inside
+  -- it: it is read whole by exactly one caller (reclaim()) and written whole by
+  -- exactly one (the runner). Six columns would be six migrations the first
+  -- time the wrapper grows a field.
+  detached TEXT,
   PRIMARY KEY (job_id, server_id)
 ) WITHOUT ROWID;
 
@@ -600,7 +614,31 @@ CREATE TABLE IF NOT EXISTS job_output (
 // bumped anyway, because the first change that CANNOT be expressed that way
 // needs to know which shape it is starting from, and a version that only moves
 // when someone remembers is a version nobody can trust.
-const SCHEMA_VERSION = '2'
+const SCHEMA_VERSION = '3'
+
+/**
+ * The first change that CANNOT be expressed as `CREATE TABLE IF NOT EXISTS`,
+ * which is the case SCHEMA_VERSION was bumped for the last time in
+ * anticipation of.
+ *
+ * `job_target.detached` is a new column on a table an existing store already
+ * has, and `CREATE TABLE IF NOT EXISTS` does nothing at all for a table that
+ * exists. So it is added by hand, guarded by reading the table's own shape
+ * rather than by trusting the version — a store restored from a backup taken
+ * mid-upgrade can have a version that disagrees with its columns, and
+ * `ALTER TABLE` on a column that is already there is an error that would take
+ * the whole store down at open.
+ *
+ * Adding a nullable column to a SQLite table is a metadata-only operation: it
+ * does not rewrite a single row, so this costs nothing on a store with a year
+ * of jobs in it.
+ */
+function migrateJobTarget(db: Db): void {
+  const cols = db.prepare('PRAGMA table_info(job_target)').all() as { name?: unknown }[]
+  if (cols.length === 0) return // the table is about to be created with the column
+  if (cols.some((c) => String(c.name) === 'detached')) return
+  db.exec('ALTER TABLE job_target ADD COLUMN detached TEXT')
+}
 
 // ---------------------------------------------------------------------------
 // The event read path.
@@ -796,6 +834,11 @@ function openStore(mod: SqliteModule, path: string): HistoryStore {
   }
 
   const journalMode = applyPragmas(db, path)
+  // BEFORE the schema, not after: `CREATE TABLE IF NOT EXISTS` does nothing for
+  // a table that already exists, so this is the only chance an existing
+  // job_target has to gain the column. On a fresh store the table is not there
+  // yet and this is a no-op.
+  migrateJobTarget(db)
   db.exec(SCHEMA)
   db.exec(`INSERT INTO meta (k, v) VALUES ('schema', '${SCHEMA_VERSION}')
            ON CONFLICT(k) DO UPDATE SET v = excluded.v`)
@@ -1031,11 +1074,15 @@ function buildStore(
     ),
     jobTargetInsert: db.prepare(
       'INSERT INTO job_target (job_id, server_id, server_name, ord, state, outcome, exit_code, ' +
-        'error, started_at, ended_at, out_offset, out_elided) ' +
-        'VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 0, 0) ' +
+        'error, started_at, ended_at, out_offset, out_elided, detached) ' +
+        'VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, 0, 0, NULL) ' +
         'ON CONFLICT(job_id, server_id) DO UPDATE SET server_name = excluded.server_name, ' +
         '  ord = excluded.ord, state = excluded.state, outcome = NULL, exit_code = NULL, ' +
-        '  error = NULL, started_at = NULL, ended_at = NULL, out_offset = 0, out_elided = 0'
+        '  error = NULL, started_at = NULL, ended_at = NULL, out_offset = 0, out_elided = 0, ' +
+        // A re-run under the same id starts a new marker, so the old one must
+        // not survive on the row: a handle pointing at a directory the previous
+        // run reaped would send reclaim() to look for it.
+        '  detached = NULL'
     ),
     // A full-row write over values merged in JS, rather than a COALESCE-per-
     // column patch. `null` is a MEANINGFUL value in three of these four columns
@@ -1054,7 +1101,7 @@ function buildStore(
     ),
     jobTargetUpdate: db.prepare(
       'UPDATE job_target SET state = ?3, outcome = ?4, exit_code = ?5, error = ?6, ' +
-        'started_at = ?7, ended_at = ?8, out_offset = ?9, out_elided = ?10 ' +
+        'started_at = ?7, ended_at = ?8, out_offset = ?9, out_elided = ?10, detached = ?11 ' +
         'WHERE job_id = ?1 AND server_id = ?2'
     ),
     jobTargetRead: db.prepare('SELECT * FROM job_target WHERE job_id = ? ORDER BY ord'),
@@ -1553,7 +1600,16 @@ function buildStore(
         pick('startedAt', 'started_at'),
         pick('endedAt', 'ended_at'),
         patch.outOffset ?? Number(row.out_offset ?? 0),
-        patch.outElided ?? Number(row.out_elided ?? 0)
+        patch.outElided ?? Number(row.out_elided ?? 0),
+        // `undefined` leaves the column alone, `null` clears it. The same
+        // three-way the four timestamp columns above need, and for the same
+        // reason: a reaped marker has to be CLEARABLE, and a patch language
+        // that cannot say "clear this" is one the reap path works around.
+        'detached' in patch
+          ? patch.detached === null || patch.detached === undefined
+            ? null
+            : JSON.stringify(patch.detached)
+          : (row.detached ?? null)
       )
     },
 
@@ -1798,8 +1854,20 @@ function toJobTarget(r: SqliteRow): JobHostResult {
     endedAt: endedAt ?? undefined,
     outOffset: Number(r.out_offset ?? 0),
     outElided: Number(r.out_elided ?? 0),
-    truncated: Number(r.out_elided ?? 0) > 0 || undefined
+    truncated: Number(r.out_elided ?? 0) > 0 || undefined,
+    // Validated on the way out, not merely parsed. A malformed handle is a row
+    // written by a build that is not this one, or one somebody edited, and
+    // handing it to reclaim() would send a `rm -rf` at whatever `dir` says.
+    // `null` for anything that does not check out, which reads exactly like an
+    // attached row — the safe direction.
+    detached: readHandle(r.detached)
   }
+}
+
+function readHandle(v: unknown): JobDetachedHandle | null {
+  if (v === null || v === undefined) return null
+  const parsed = safeParse(String(v))
+  return isJobDetachedHandle(parsed) ? parsed : null
 }
 
 /** Bytes on disk, for the size arithmetic.

@@ -1,7 +1,10 @@
 import type { JobPatch, JobTargetPatch, NewJob } from './history'
 import type {
+  JobDetachedHandle,
   JobDetail,
+  JobHostOutcome,
   JobHostResult,
+  JobHostState,
   JobOutput,
   JobOutputLine,
   JobProgress,
@@ -11,6 +14,7 @@ import type {
 } from '../../shared/jobs'
 import {
   JOB_ABANDONED_ERROR,
+  isJobDetachedHandle,
   JOB_CLASSIFY_BYTES,
   JOB_CONCURRENCY,
   JOB_OUTPUT_HEAD,
@@ -79,6 +83,42 @@ export interface JobExecRequest {
   cfg: unknown
   command: string
   timeoutMs: number
+  /** Which job and host this is, so a detached executor can name a marker
+   *  directory that a different ShellPilot can find from the row alone. */
+  jobId: string
+  serverId: string
+  serverName: string
+  /** 1-based step within the job. Part of the marker name, because `out`, `pid`
+   *  and `rc` describe one process and two steps sharing them would make the
+   *  byte cursor mean two different things. */
+  step: number
+  /**
+   * A marker this host already has: watch it rather than launching anything.
+   *
+   * The reclaim path, and it is the SAME call as a fresh launch on purpose. A
+   * reclaim that went through its own entry point would be a code path
+   * exercised only in the failure people report.
+   */
+  resume?: JobDetachedHandle
+  /**
+   * Something the executor has learned that must be on disk NOW, before it goes
+   * back to waiting.
+   *
+   * The whole claim of a detached job is that an instance which never saw it
+   * start can pick it up, and that claim is only as good as the row. A handle
+   * held in memory until the executor returns is a handle that does not exist
+   * for the one event it is for.
+   */
+  onState?: (u: JobExecUpdate) => void
+  /**
+   * False once this run no longer owns the host — the window closed, or a
+   * second run took the id.
+   *
+   * An attached executor does not need it: its channel dies with the process.
+   * A detached one polls a host that is still working, and without this it
+   * would poll forever into a runner that stopped listening.
+   */
+  alive?: () => boolean
   /**
    * Output as it arrives.
    *
@@ -110,6 +150,50 @@ export interface JobExecResult {
   /** Bytes the EXECUTOR dropped, folded into the host's `out_elided`. See
    *  `truncated`. */
   elided?: number
+  /**
+   * The state this host ends in, when `ok`/`failed` cannot express it.
+   *
+   * B2's `orphaned` is the case: the marker survived, the pid did not, and no
+   * exit status was ever written. That is neither a success nor a failure of
+   * the command — it is the absence of an answer — and calling it `failed`
+   * would report a verdict nobody reached.
+   */
+  finalState?: JobHostState
+  /** The outcome to record, when the executor knows something the classifier
+   *  cannot re-derive from an exit code and two streams. */
+  finalOutcome?: JobHostOutcome
+  /**
+   * The marker to leave on the row, or null to clear it.
+   *
+   * Set when the executor is handing a still-running command back — a disposed
+   * run, or a foreign marker it may read but not reap — so the row keeps what
+   * the next instance needs to find it.
+   */
+  detachedHandle?: JobDetachedHandle | null
+  /**
+   * The executor merged stderr into stdout, so classify from one stream.
+   *
+   * A detached wrapper redirects `2>&1` to keep the two in ORDER, which on a
+   * package operation is the difference between a readable log and two shuffled
+   * halves. The runner therefore classifies from the merged tail rather than
+   * from an stderr buffer that is empty by construction — without this, every
+   * failing detached command would come back `nonzero` and `missing-command`
+   * would be unreachable.
+   */
+  mergedOutput?: boolean
+}
+
+/** What an executor tells the runner mid-flight. Everything here is persisted
+ *  the moment it arrives; see JobExecRequest.onState. */
+export interface JobExecUpdate {
+  state?: JobHostState
+  /** Undefined leaves the row's handle alone; null clears it. */
+  detached?: JobDetachedHandle | null
+  /** This host fell back to the attached path, and why. */
+  degraded?: string
+  /** A note about the CURRENT state — "the vault is locked, polling is
+   *  paused" — not a terminal error. */
+  error?: string
 }
 
 export type JobExecutor = (req: JobExecRequest) => Promise<JobExecResult>
@@ -214,6 +298,10 @@ export class JobRunner {
    */
   private active = new Map<string, RunState>()
 
+  /** Reclaimed jobs still running, so a caller can wait for one without the
+   *  startup path having to. See reclaim(). */
+  private settling = new Map<string, Promise<void>>()
+
   constructor(private readonly deps: JobRunnerDeps) {}
 
   private get now(): number {
@@ -313,6 +401,12 @@ export class JobRunner {
       // startup call, but a caller that runs it twice must not wreck a live
       // run's rows.
       if (this.active.has(job.id)) continue
+      // A job with a detached marker on any host is NOT closed here. There is a
+      // command running on that machine right now and a directory recording
+      // where; writing `abandoned` over it would be this build telling a lie
+      // about a process it can still reach. Left open for reclaim(), which is
+      // called immediately after this and picks it up from the rows alone.
+      if (job.targets.some((t) => reclaimable(t))) continue
       for (const t of job.targets) {
         if (t.state === 'running') {
           this.deps.store.updateJobTarget(job.id, t.serverId, {
@@ -352,6 +446,215 @@ export class JobRunner {
       }
     }
     return adopted
+  }
+
+  /**
+   * Pick up detached jobs from a previous run of this app.
+   *
+   * FROM THE ROWS ALONE. This instance never saw these jobs start, has no
+   * memory of the dialog that authorised them and no channel to any of them —
+   * it has a marker directory, a byte offset and a step number, which between
+   * them are everything the poller needs. That is the whole claim B2 makes and
+   * it is why the handle is written to the row before the first poll rather
+   * than held in memory.
+   *
+   * TWO DELIBERATE REFUSALS.
+   *
+   *  1. HOSTS THAT WERE NEVER REACHED ARE NOT STARTED. A job whose first three
+   *     hosts are detached and whose remaining twelve are `pending` resumes
+   *     three and closes twelve as "not run". Launching them would be running
+   *     a destructive command on twelve machines on the strength of a
+   *     confirmation this process never saw a human give — `BroadcastPlan`
+   *     never reaches main, and main deliberately does not re-derive it. That
+   *     is B3's item, and quietly acting as though it were already done would
+   *     make B3 a correction rather than an addition.
+   *  2. A HOST WHOSE SERVER IS GONE IS NOT GUESSED AT. If the workspace no
+   *     longer has that server there is no way to connect, and the row says so
+   *     rather than sitting at `detached` forever.
+   *
+   * SYNCHRONOUS, and it returns the rows it has taken over rather than the rows
+   * it has finished. A reclaimed upgrade can have forty minutes left to run; a
+   * startup path that awaited it would hold the app's boot open for the
+   * duration. `whenSettled` is how a caller waits for one on purpose.
+   */
+  reclaim(deps: {
+    /** The connection config for a server id, or null if it is no longer in the
+     *  workspace. */
+    cfgFor: (serverId: string) => unknown | null
+  }): JobDetail[] {
+    const store = this.deps.store
+    const out: JobDetail[] = []
+    for (const job of store.unfinishedJobs()) {
+      if (this.active.has(job.id)) continue
+      const resumable = job.targets.filter((t) => reclaimable(t))
+      if (resumable.length === 0) continue
+
+      const state: RunState = { cancelled: false, disposed: false }
+      this.active.set(job.id, state)
+      const owns = (): boolean => this.active.get(job.id) === state
+
+      // Everything that was NOT launched is closed before anything is resumed,
+      // so the job's own row is honest for the whole of the time it takes.
+      const at = this.now
+      for (const t of job.targets) {
+        if (reclaimable(t)) continue
+        if (t.state === 'running') {
+          store.updateJobTarget(job.id, t.serverId, {
+            state: 'failed',
+            outcome: 'abandoned',
+            error: JOB_ABANDONED_ERROR,
+            endedAt: at
+          })
+        } else if (t.state === 'pending' || t.state === 'waiting') {
+          store.updateJobTarget(job.id, t.serverId, {
+            state: 'skipped',
+            outcome: 'cancelled',
+            error:
+              'ShellPilot stopped before this host was reached. It was not started at the next ' +
+              'launch, because the confirmation the job was authorised with does not survive a ' +
+              'restart yet.',
+            endedAt: at
+          })
+        }
+      }
+      store.recordEvent(
+        'job-reclaimed',
+        null,
+        { jobId: job.id, title: job.title, hosts: resumable.length },
+        at
+      )
+      this.emitJob(job.id)
+
+      const req: JobRunRequest = {
+        jobId: job.id,
+        workspaceId: job.workspaceId,
+        spec: job.spec,
+        confirmedAt: job.confirmedAt ?? undefined,
+        targets: resumable.map((t) => ({
+          serverId: t.serverId,
+          serverName: t.serverName,
+          cfg: deps.cfgFor(t.serverId)
+        }))
+      }
+      const queue = [...resumable]
+
+      const workers = Array.from(
+        { length: Math.min(job.spec.concurrency ?? JOB_CONCURRENCY, Math.max(queue.length, 1)) },
+        async () => {
+          for (;;) {
+            if (!owns()) return
+            const next = queue.shift()
+            if (!next) return
+            const handle = next.detached
+            const target = req.targets.find((t) => t.serverId === next.serverId)
+            if (!isJobDetachedHandle(handle) || target === undefined) continue
+            if (target.cfg === null || target.cfg === undefined) {
+              store.updateJobTarget(job.id, next.serverId, {
+                state: 'orphaned',
+                outcome: 'orphaned',
+                error:
+                  'This host is no longer in the workspace, so its job cannot be followed. Its ' +
+                  `marker directory is still on the machine at ${handle.dir} and holds the ` +
+                  'output and exit status.',
+                endedAt: this.now
+              })
+              this.emitHost(job.id, {
+                serverId: next.serverId,
+                serverName: next.serverName,
+                state: 'orphaned',
+                outcome: 'orphaned'
+              })
+              continue
+            }
+            await this.runOne(req, target, state, owns, {
+              handle,
+              startedAt: next.startedAt,
+              outOffset: next.outOffset,
+              outElided: next.outElided,
+              // Continue the output rather than overwriting it: seq is the
+              // primary key of job_output, so restarting at zero would write
+              // this instance's first chunk over the last one from before the
+              // restart.
+              outSeq: store.readJobOutput(job.id, next.serverId).length
+            })
+          }
+        }
+      )
+
+      const settled = (async () => {
+        try {
+          await Promise.all(workers)
+        } finally {
+          const stillOurs = this.active.get(job.id) === state
+          if (stillOurs) {
+            this.active.delete(job.id)
+            const endedAt = this.now
+            store.updateJob(job.id, { state: state.cancelled ? 'cancelled' : 'done', endedAt })
+            store.recordEvent('job-ended', null, { jobId: job.id, reclaimed: true }, endedAt)
+            const final = store.readJob(job.id)
+            this.deps.emit({ jobId: job.id, job: final ?? undefined, done: true })
+          }
+          this.settling.delete(job.id)
+        }
+      })()
+      // Held so nothing is an unhandled rejection and so whenSettled() has
+      // something to hand back. A reclaim that threw would otherwise be
+      // invisible: the rows would sit at `detached` and the only evidence would
+      // be in a console nobody in a packaged app can read.
+      this.settling.set(job.id, settled)
+      void settled.catch(() => {
+        /* the row is closed in the finally above; nothing else to do */
+      })
+
+      const taken = store.readJob(job.id)
+      if (taken) out.push(taken)
+    }
+    return out
+  }
+
+  /** Resolves when a reclaimed job has finished. Undefined for a job that is
+   *  not being reclaimed. */
+  whenSettled(jobId: string): Promise<void> | undefined {
+    return this.settling.get(jobId)
+  }
+
+  /**
+   * Write down something the executor learned mid-flight, and say so.
+   *
+   * Persisted the moment it arrives rather than at the end of the host's run,
+   * because the events this carries are exactly the ones whose value is that
+   * they survive this process: a marker directory that is not on disk before
+   * the first poll is a running command nobody can reclaim.
+   *
+   * Guarded by `owns` like every other post-await write. A detached executor
+   * polls a host for as long as the command runs, which can be past a dispose
+   * and past a second run claiming the id.
+   */
+  private applyUpdate(
+    jobId: string,
+    serverId: string,
+    serverName: string,
+    u: JobExecUpdate,
+    owns: () => boolean
+  ): void {
+    if (!owns()) return
+    const patch: JobTargetPatch = {}
+    if (u.state !== undefined) patch.state = u.state
+    if (u.detached !== undefined) patch.detached = u.detached
+    // A NOTE, not a verdict. `error` on a live row is how "the vault is locked,
+    // so this host is not being polled" reaches a reader; the terminal write at
+    // the end of runOne overwrites it either way.
+    if (u.error !== undefined) patch.error = u.error
+    this.deps.store.updateJobTarget(jobId, serverId, patch)
+    const host: JobHostResult = { serverId, serverName, state: u.state ?? 'running' }
+    if (u.detached !== undefined) host.detached = u.detached
+    if (u.error !== undefined) host.error = u.error
+    // Carried on the event as well as written to the row: the row is what the
+    // next launch reads, and the event is what tells the person watching that
+    // this host has fallen back to the attached path and will not survive the
+    // lid closing. Neither substitutes for the other.
+    if (u.degraded !== undefined) host.degraded = u.degraded
+    this.emitHost(jobId, host)
   }
 
   /**
@@ -529,7 +832,16 @@ export class JobRunner {
     req: JobRunRequest,
     target: JobRunRequest['targets'][number],
     state: RunState,
-    owns: () => boolean
+    owns: () => boolean,
+    /** Set when this host is being RECLAIMED: there is a command already
+     *  running on it and a marker directory recording where. See reclaim(). */
+    resume?: {
+      handle: JobDetachedHandle
+      startedAt?: number
+      outOffset?: number
+      outElided?: number
+      outSeq?: number
+    }
   ): Promise<void> {
     const store = this.deps.store
     const { serverId, serverName } = target
@@ -539,15 +851,29 @@ export class JobRunner {
       return
     }
 
-    const startedAt = this.now
-    store.updateJobTarget(req.jobId, serverId, { state: 'running', startedAt })
-    this.emitHost(req.jobId, { serverId, serverName, state: 'running', startedAt })
+    const startedAt = resume?.startedAt ?? this.now
+    // A reclaimed host keeps the state its row already carries: it is
+    // `detached`, it has been since before this process existed, and writing
+    // `running` over it would claim this instance has a channel to something it
+    // has not polled yet.
+    if (resume === undefined) {
+      store.updateJobTarget(req.jobId, serverId, { state: 'running', startedAt })
+      this.emitHost(req.jobId, { serverId, serverName, state: 'running', startedAt })
+    }
 
+    // A reclaimed host CONTINUES its output rather than starting it again. seq
+    // is the primary key of job_output, so restarting at 0 would overwrite what
+    // was written before the restart; out_offset is what the row already says
+    // this host produced, and resetting it to zero would tell a reader the
+    // upgrade printed nothing for its first forty minutes.
     const out: HostOutput = {
-      seq: 0,
-      bytes: 0,
-      elided: 0,
-      headBytes: 0,
+      seq: resume?.outSeq ?? 0,
+      bytes: resume?.outOffset ?? 0,
+      elided: resume?.outElided ?? 0,
+      // The head budget is per HOST, not per process. A reclaimed host that
+      // reset this would be allowed a second 64 KB head, which is how a job
+      // restarted three times quietly stores four times its cap.
+      headBytes: Math.min(resume?.outOffset ?? 0, JOB_OUTPUT_HEAD),
       tail: [],
       tailBytes: 0,
       pending: [],
@@ -563,6 +889,10 @@ export class JobRunner {
 
     let result: JobExecResult | null = null
     let failure: string | null = null
+    /** The marker this host currently carries, mirrored here so the dispose
+     *  branch below can tell a detached host from an attached one without
+     *  reading the row back. */
+    let handle: JobDetachedHandle | null = resume?.handle ?? null
     /** Which step produced `result`, 1-based, and what it was. */
     let stepIndex = 0
     let stepCommand = ''
@@ -574,9 +904,16 @@ export class JobRunner {
     // something nobody asked for. B1 ships one step; the loop is here because
     // the spec type carries a list and quietly running only the first would be
     // a lie told by the type.
+    // A reclaimed host rejoins at the step its marker names, and the steps
+    // BEFORE it are not re-run. Re-running them would be the worst possible
+    // reading of "resume": step 1 of an upgrade has already happened on that
+    // machine, and doing it twice because ShellPilot restarted is ShellPilot
+    // causing the damage it exists to avoid.
+    const resumeAt = resume?.handle.step ?? 1
     for (const step of req.spec.steps) {
       if (!owns()) break
       stepIndex++
+      if (stepIndex < resumeAt) continue
       stepCommand = step.command
       // A boundary row, in the stream, in order. Without it a three-step job is
       // one wall of text and "which step printed this" has no answer — and the
@@ -600,6 +937,18 @@ export class JobRunner {
             cfg: target.cfg,
             command: step.command,
             timeoutMs,
+            jobId: req.jobId,
+            serverId,
+            serverName,
+            step: stepIndex,
+            // Only the step the marker names is resumed. A three-step job
+            // reclaimed at step 2 launches step 3 normally.
+            resume: stepIndex === resumeAt ? resume?.handle : undefined,
+            alive: owns,
+            onState: (u) => {
+              if (u.detached !== undefined) handle = u.detached
+              this.applyUpdate(req.jobId, serverId, serverName, u, owns)
+            },
             onOutput: (stream, text) => this.pushOutput(req.jobId, serverId, out, stream, text, secrets, owns)
           }),
           timeoutMs + (this.deps.stallGraceMs ?? JOB_STALL_GRACE_MS),
@@ -647,14 +996,28 @@ export class JobRunner {
       // next-launch one cannot disagree. Guarded on `disposed` rather than on
       // `!owns()`: if a LATER run took this id, these rows are its rows now.
       if (state.disposed) {
-        store.updateJobTarget(req.jobId, serverId, {
-          state: 'failed',
-          outcome: 'abandoned',
-          error: JOB_ABANDONED_ERROR,
-          endedAt: this.now,
-          outOffset: out.bytes,
-          outElided: out.elided
-        })
+        if (handle !== null) {
+          // A DETACHED host is not abandoned, and this is the whole of what B2
+          // buys. The command is running in its own session with no controlling
+          // terminal; the window going away reaches nothing. The row keeps
+          // saying `detached` with its marker, the offsets are brought up to
+          // date, and reclaim() picks it up at the next launch and carries on
+          // reading from the byte it had got to.
+          store.updateJobTarget(req.jobId, serverId, {
+            detached: handle,
+            outOffset: out.bytes,
+            outElided: out.elided
+          })
+        } else {
+          store.updateJobTarget(req.jobId, serverId, {
+            state: 'failed',
+            outcome: 'abandoned',
+            error: JOB_ABANDONED_ERROR,
+            endedAt: this.now,
+            outOffset: out.bytes,
+            outElided: out.elided
+          })
+        }
       }
       return
     }
@@ -692,7 +1055,12 @@ export class JobRunner {
             // A non-zero exit is a result, not an error — broadcast's rule,
             // unchanged. `grep` finding nothing exits 1, and calling that a
             // failure would make half the useful commands look broken.
-            state: result?.ok ? 'ok' : 'failed',
+            //
+            // `finalState` overrides it, and only an executor can know when it
+            // applies: `orphaned` is neither a success nor a failure of the
+            // command, it is the absence of an answer, and deriving it from an
+            // exit code that was never written is not possible from here.
+            state: result?.finalState ?? (result?.ok ? 'ok' : 'failed'),
             exitCode: result?.code ?? undefined,
             error: scrub([result?.error, stepNote].filter((x) => x).join(' ')),
             startedAt,
@@ -713,12 +1081,25 @@ export class JobRunner {
     // failing command would classify as `nonzero` — no `missing-command`, no
     // `permission-denied`. A batch executor still wins, because it has the
     // whole of both streams and the buffers only hold the tail.
+    //
+    // `mergedOutput` is the detached path's: its wrapper redirects stderr into
+    // stdout to keep the two in order, so `clsErr` is empty by construction and
+    // the classifier is pointed at the merged tail instead. Without that, every
+    // failing detached command would come back `nonzero` and `missing-command`
+    // would be a category nothing could ever reach.
     host.outcome =
+      result?.finalOutcome ??
       classifyJobResult({
         ...host,
         stdout: result?.stdout || out.clsOut,
-        stderr: result?.stderr || out.clsErr
-      }) ?? undefined
+        stderr: result?.stderr || (result?.mergedOutput ? out.clsOut : out.clsErr)
+      }) ??
+      undefined
+    // `undefined` leaves the row's marker alone; `null` clears it. A finished
+    // detached step clears it because the directory has been reaped and a
+    // handle pointing at nothing would send the next reclaim looking for it.
+    if (result?.detachedHandle !== undefined) handle = result.detachedHandle
+    host.detached = handle
 
     store.updateJobTarget(req.jobId, serverId, {
       state: host.state,
@@ -727,7 +1108,8 @@ export class JobRunner {
       error: host.error ?? null,
       endedAt,
       outOffset: out.bytes,
-      outElided: out.elided
+      outElided: out.elided,
+      detached: handle
     })
     this.emitHost(req.jobId, host)
   }
@@ -1007,6 +1389,19 @@ export class JobRunner {
 function keepTail(text: string, budget: number): string {
   if (Buffer.byteLength(text, 'utf8') <= budget) return text
   return splitAtBytes(text, Buffer.byteLength(text, 'utf8') - budget)[1]
+}
+
+/**
+ * Is this row a detached step somebody can pick up?
+ *
+ * BOTH halves are required. A handle without a live state is a finished host
+ * whose marker was left behind for a foreign instance — re-watching it would
+ * poll a directory this build may not reap. A live state without a handle is
+ * B1's attached row, which adopt() closes as `abandoned` because that is what
+ * really happened to it.
+ */
+function reclaimable(t: JobHostResult): boolean {
+  return isJobDetachedHandle(t.detached) && (t.state === 'detached' || t.state === 'rebooting')
 }
 
 export function splitAtBytes(text: string, budget: number): [string, string] {

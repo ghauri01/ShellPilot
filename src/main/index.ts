@@ -3,8 +3,9 @@
 import './portable'
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, session, Menu, Notification, powerMonitor } from 'electron'
 import { join } from 'node:path'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import {
   sshConnect,
   sshWrite,
@@ -54,7 +55,9 @@ import { loadHistory, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
-import type { JobRunRequest } from '../shared/jobs'
+import { detachedJobExecutor } from './services/jobDetached'
+import type { JobHostCapabilityReport, JobRunRequest } from '../shared/jobs'
+import { JOB_DETACHED_STALL_GRACE_MS } from '../shared/jobs'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSourceReport } from '../shared/cron'
@@ -146,7 +149,13 @@ import { parseSshConfig } from '../shared/sshconfig'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
 import { resolveDbSecrets, resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
-import { refreshMcpDataCache, listCachedWorkspaces, listCachedServers } from './services/mcpDataCache'
+import {
+  refreshMcpDataCache,
+  listCachedWorkspaces,
+  listCachedServers,
+  getCachedServer,
+  serverToSshConfig
+} from './services/mcpDataCache'
 import {
   listGroups,
   createGroup,
@@ -645,6 +654,29 @@ function startHistory(): void {
       if (adopted.length > 0) {
         console.log(`[jobs] closed ${adopted.length} job(s) abandoned when ShellPilot last stopped`)
       }
+      // Then the ones that are STILL RUNNING. adopt() deliberately leaves any
+      // job with a detached marker open, because there is a command in its own
+      // session on that host right now and the marker directory records where —
+      // so this picks it up from the rows alone, resumes reading its output
+      // from the byte it had got to, and finishes it. That is the whole of what
+      // B2 claims over B1.
+      //
+      // The server address comes from the same cache the MCP bridge resolves
+      // names through, which main primes at launch from the persisted data
+      // file. Reading a host's address is not a capability and this is not the
+      // direction the agent boundary guards: nothing agent-reachable can reach
+      // the job engine, and that is unchanged. The CONFIG IS NOT STORED WITH
+      // THE JOB, deliberately — it can carry an inline credential, and the job
+      // store is a year-long record.
+      const reclaimed = jobRunner.reclaim({
+        cfgFor: (serverId) => {
+          const server = getCachedServer(serverId)
+          return server ? serverToSshConfig(server) : null
+        }
+      })
+      if (reclaimed.length > 0) {
+        console.log(`[jobs] resumed ${reclaimed.length} detached job(s) still running on their hosts`)
+      }
     } catch (err) {
       console.error('[jobs] adoption failed:', err)
     }
@@ -848,6 +880,44 @@ ipcMain.handle('broadcast:cancel', (_e, runId: string) => broadcast.cancel(runId
 
 // ---- Jobs ----
 //
+/**
+ * This ShellPilot's id, stable across restarts on this machine.
+ *
+ * STABLE is the requirement, not unique-per-launch. It is what a marker
+ * directory records, and it is how a reclaim tells "this is mine, finish
+ * watching it and reap it" from "another ShellPilot started this, read it and
+ * leave the directory alone". An id minted per launch would make every job
+ * foreign to the instance that started it the moment the app restarted, and
+ * markers would accumulate on every host until the sweep took them.
+ *
+ * A file rather than a machine fingerprint: two ShellPilots on one machine with
+ * separate userData directories — a portable build next to an installed one —
+ * are genuinely two instances and should say so.
+ */
+function shellpilotInstanceId(): string {
+  const file = join(app.getPath('userData'), 'instance-id')
+  try {
+    const existing = readFileSync(file, 'utf8').trim()
+    // Validated, not merely read: it is going into a path on a remote host, and
+    // assertSafeJobId in shared/jobs.ts would refuse it later — at launch time,
+    // per host, which is a worse place to find out.
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(existing)) return existing
+  } catch {
+    /* first run, or an unreadable file: mint a new one below */
+  }
+  const minted = `sp-${randomUUID()}`
+  try {
+    writeFileSync(file, `${minted}\n`, { encoding: 'utf8', mode: 0o600 })
+  } catch (e) {
+    // A machine where userData is not writable still gets a working app; what
+    // it loses is cross-restart ownership of its markers, which degrades to
+    // "every reclaimed job looks foreign" — readable, cancellable, not reaped.
+    console.error('[jobs] could not record an instance id:', e)
+  }
+  return minted
+}
+
+//
 // Roadmap item B1: a broadcast that outlives its panel. The row exists in the
 // store before the first host is touched, every transition is written, and a
 // job read back after a restart is the same job rather than a new record
@@ -866,15 +936,60 @@ ipcMain.handle('broadcast:cancel', (_e, runId: string) => broadcast.cancel(runId
 // Durability defeats revocation: `denyAllPending()` resolves requests that are
 // PENDING, and can do nothing about a job already running on fifteen hosts,
 // because nothing is pending. See tests/jobsNotExposed.test.ts.
+// The executor is a module, not a lambda: see the header of jobExec.ts. It
+// streams rather than buffering, because `sshExec` stops appending at 200 KB
+// and drops the rest — which put the ceiling BELOW the runner's own head+tail
+// budget and made a 3 MB upgrade read back as complete.
+const attachedExec = attachedJobExecutor({
+  stream: (cfg, command, handlers, allowPrompt) =>
+    sshExecStream(resolveChainSecrets(cfg as SshConnectConfig), command, handlers, allowPrompt)
+})
+
+/**
+ * The Settings switch, held here and read per launch.
+ *
+ * Defaults ON, because the attached path is not a safer version of this — it is
+ * the one that leaves dpkg interrupted on every host when the lid closes. Off
+ * is for the operator who wants nothing whatsoever written to their machines,
+ * and it is honestly labelled as the weaker behaviour rather than as the
+ * cautious one. Pushed from the renderer at startup like sshMasterIdleMinutes;
+ * until it arrives this default applies.
+ */
+let jobsDetachedEnabled = true
+const jobCapabilities = new Map<string, JobHostCapabilityReport>()
+
+const detachedExec = detachedJobExecutor({
+  // allowPrompt false, for broadcast's reason: a fan-out across hosts with
+  // unknown keys would raise a stack of identical trust dialogs.
+  run: async (cfg, command, timeoutMs) => {
+    const r = await sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs, false)
+    return { ok: r.ok, code: r.code, stdout: r.stdout, stderr: r.stderr, error: r.error }
+  },
+  instanceId: shellpilotInstanceId(),
+  attached: attachedExec,
+  enabled: () => jobsDetachedEnabled,
+  // A vault that does not exist is not a locked vault — fleetSampler's rule,
+  // and the same one-liner. What differs is the consequence: a parked SAMPLE
+  // loses a data point, while a parked POLL loses nothing at all, because the
+  // byte cursor makes the next one pick up exactly where this would have.
+  vaultUnlocked: () => {
+    const st = vaultStatus()
+    return !st.exists || st.unlocked
+  },
+  onCapability: (report) => {
+    jobCapabilities.set(report.serverId, report)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('jobs:capability', report)
+    }
+  }
+})
+
 const jobRunner = new JobRunner({
-  // The executor is a module, not a lambda: see the header of jobExec.ts. It
-  // streams rather than buffering, because `sshExec` stops appending at 200 KB
-  // and drops the rest — which put the ceiling BELOW the runner's own head+tail
-  // budget and made a 3 MB upgrade read back as complete.
-  exec: attachedJobExecutor({
-    stream: (cfg, command, handlers, allowPrompt) =>
-      sshExecStream(resolveChainSecrets(cfg as SshConnectConfig), command, handlers, allowPrompt)
-  }),
+  exec: detachedExec,
+  // Sized for the detached path, which deliberately outlives a dropped link:
+  // its worst honest case is a full reconnect backoff plus a poll, and the
+  // attached executor's own timer fires long before this either way.
+  stallGraceMs: JOB_DETACHED_STALL_GRACE_MS,
   store: jobStore,
   emit: (progress) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('jobs:progress', progress)
@@ -899,6 +1014,10 @@ ipcMain.handle('jobs:run', async (_e, req: JobRunRequest) => {
   return jobRunner.run(req)
 })
 ipcMain.handle('jobs:cancel', (_e, jobId: string) => jobRunner.cancel(jobId))
+ipcMain.handle('jobs:setDetached', (_e, enabled: boolean) => {
+  jobsDetachedEnabled = enabled !== false
+})
+ipcMain.handle('jobs:capabilities', () => [...jobCapabilities.values()])
 
 // ---- Live log tailing across hosts ----
 //

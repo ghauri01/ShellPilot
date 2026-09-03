@@ -15,6 +15,7 @@ import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '.
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type {
   JobDetail,
+  JobHostCapabilityReport,
   JobOutput,
   JobProgress,
   JobRecord,
@@ -112,6 +113,15 @@ const jobsBridge: JobsBridge = {
   get: (jobId: string): Promise<JobDetail | null> => ipcRenderer.invoke('jobs:get', jobId),
   run: (req: JobRunRequest): Promise<JobDetail> => ipcRenderer.invoke('jobs:run', req),
   cancel: (jobId: string): Promise<boolean> => ipcRenderer.invoke('jobs:cancel', jobId),
+  // Pushed from the renderer's settings the way ssh.setPoolIdle is, because
+  // that is where the switch the user flicks lives. Main holds the value and
+  // the detached executor reads it per LAUNCH, so turning it off never
+  // interferes with a job already running — and a job being reclaimed after a
+  // restart is followed to its end either way, because there is a real process
+  // on that host whatever this switch now says.
+  setDetached: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke('jobs:setDetached', enabled),
+  capabilities: (): Promise<JobHostCapabilityReport[]> => ipcRenderer.invoke('jobs:capabilities'),
   onProgress: (fn: (p: JobProgress) => void): (() => void) => {
     const h = (_e: IpcRendererEvent, p: JobProgress): void => fn(p)
     ipcRenderer.on('jobs:progress', h)
