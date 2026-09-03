@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { RuleEngine } from '../src/main/services/rules'
-import type { RuleDraft, RuleEngineDeps, RuleJobLaunch, RulesFile } from '../src/main/services/rules'
+import type { RuleEngineDeps, RuleJobLaunch, RulesFile } from '../src/main/services/rules'
+import type { RuleDraftWire as RuleDraft } from '../src/shared/rules'
 import type { EventFilter, HistoryEvent } from '../src/main/services/history'
 import { ALERT_HISTORY_KIND } from '../src/shared/webhook'
 import type { StoredAlertEvent } from '../src/shared/webhook'

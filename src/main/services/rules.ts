@@ -1,5 +1,5 @@
 import type { EventCursor, EventFilter, HistoryEvent } from './history'
-import type { CommandApproval, JobSpec, JobTargetRef } from '../../shared/jobs'
+import type { CommandApproval, JobSpec } from '../../shared/jobs'
 import { ALERT_HISTORY_KIND, sanitiseStoredAlert } from '../../shared/webhook'
 import type { StoredAlertRow } from '../../shared/webhook'
 import {
@@ -18,7 +18,7 @@ import {
   sanitiseRules,
   verifyRuleAction
 } from '../../shared/rules'
-import type { Rule, RuleFilter, RuleLimit, RuleStatus, RuleTrigger } from '../../shared/rules'
+import type { Rule, RuleDraftWire, RuleStatus, RuleView } from '../../shared/rules'
 
 // The rule engine — roadmap item 27, main-process half.
 //
@@ -100,13 +100,6 @@ export interface RuleEngineDeps {
   version(): string
 }
 
-export interface RuleView extends Rule {
-  status: RuleStatus
-  /** The current verdict on the rule's authority, re-derived on every read so
-   *  the panel cannot show a stale "armed" against a record that has drifted. */
-  verdict: { ok: boolean; reason?: string }
-}
-
 export interface RuleSweepResult {
   /** Alert rows this sweep looked at. */
   read: number
@@ -115,16 +108,6 @@ export interface RuleSweepResult {
   refused: number
   /** Rows inside the window the read could not reach. Never silent. */
   skipped: number
-}
-
-export interface RuleDraft {
-  name: string
-  trigger: RuleTrigger
-  filter?: RuleFilter
-  limit?: Partial<RuleLimit>
-  action:
-    | { type: 'notify' }
-    | { type: 'job'; spec: JobSpec; targets: JobTargetRef[]; approval: CommandApproval }
 }
 
 const emptyStatus = (ruleId: string): RuleStatus => ({ ruleId, fired: [], suppressed: 0 })
@@ -224,7 +207,7 @@ export class RuleEngine {
    * could be created already armed into the past would fire on the backlog the
    * moment it was written, which is the one thing a rule must never do.
    */
-  create(draft: RuleDraft): RuleView | null {
+  create(draft: RuleDraftWire): RuleView | null {
     this.load()
     const rule: Rule = {
       id: this.deps.newId(),

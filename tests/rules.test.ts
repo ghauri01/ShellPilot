@@ -316,12 +316,12 @@ describe('what a rule is authorised to run', () => {
     // standing authorisation is a different thing being agreed to, so the
     // creation gate is stricter than the run gate for the same job.
     expect(ruleJobPlan(jobAction()).confirmation).toEqual({ kind: 'confirm' })
-    expect(ruleCreationConfirmation(jobAction())).toEqual({
+    expect(ruleCreationConfirmation('job')).toEqual({
       kind: 'type-to-confirm',
       phrase: 'UNATTENDED'
     })
     expect(RULE_UNATTENDED_PHRASE).toBe('UNATTENDED')
-    expect(ruleCreationConfirmation({ type: 'notify' })).toEqual({ kind: 'confirm' })
+    expect(ruleCreationConfirmation('notify')).toEqual({ kind: 'confirm' })
   })
 })
 

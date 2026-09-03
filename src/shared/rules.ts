@@ -381,8 +381,8 @@ export function ruleMatches(rule: Rule, row: StoredAlertRow): boolean {
  * prints when the rule is written AND what the engine compares against when it
  * fires, so the two can never be different numbers.
  */
-export function ruleJobPlan(action: RuleJobAction): JobPlan {
-  return planJob(action.spec, action.targets)
+export function ruleJobPlan(pinned: { spec: JobSpec; targets: JobTargetRef[] }): JobPlan {
+  return planJob(pinned.spec, pinned.targets)
 }
 
 /**
@@ -418,8 +418,8 @@ export function verifyRuleAction(rule: Rule): ApprovalVerdict {
  */
 export const RULE_UNATTENDED_PHRASE = 'UNATTENDED'
 
-export function ruleCreationConfirmation(action: RuleAction): BroadcastConfirmation {
-  if (action.type !== 'job') return { kind: 'confirm' }
+export function ruleCreationConfirmation(type: RuleAction['type']): BroadcastConfirmation {
+  if (type !== 'job') return { kind: 'confirm' }
   return { kind: 'type-to-confirm', phrase: RULE_UNATTENDED_PHRASE }
 }
 
@@ -580,6 +580,50 @@ export function sanitiseRules(raw: unknown): Rule[] {
 }
 
 export const RULES_FILE = 'shellpilot-rules.json'
+
+// ---------------------------------------------------------------------------
+// What crosses the IPC boundary
+// ---------------------------------------------------------------------------
+
+export interface RuleVerdict {
+  ok: boolean
+  reason?: string
+}
+
+/** A rule as the panel sees it: the rule, its ledger, and a FRESHLY re-derived
+ *  verdict on its authority. The verdict is not stored — a panel showing a
+ *  cached "armed" against a record that has since drifted is the one thing this
+ *  screen must never do. */
+export interface RuleView extends Rule {
+  status: RuleStatus
+  verdict: RuleVerdict
+}
+
+/** What the panel sends to create one. No `id`, no `armedAt` and no `enabled`:
+ *  a caller that could set those could arm a rule into the past, which is the
+ *  one thing a rule must never be. Main fills all three. */
+export interface RuleDraftWire {
+  name: string
+  trigger: RuleTrigger
+  filter?: RuleFilter
+  limit?: Partial<RuleLimit>
+  action: RuleAction
+}
+
+/**
+ * The four channels, annotated in both halves so main and the preload cannot
+ * disagree — the argument written at `jobs:` in src/preload/index.ts.
+ *
+ * There is deliberately no `run` and no `test`. A button that fires a rule on
+ * demand would be a way to run a pinned job without the dialog that pins it,
+ * which is the whole authorisation model with a shortcut through it.
+ */
+export interface RulesBridge {
+  list(): Promise<RuleView[]>
+  create(draft: RuleDraftWire): Promise<RuleView | null>
+  setEnabled(id: string, enabled: boolean): Promise<boolean>
+  remove(id: string): Promise<boolean>
+}
 
 /**
  * How old an alert row may be and still fire a rule.
