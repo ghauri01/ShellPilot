@@ -174,6 +174,20 @@ const dfOk = (): string =>
     'Images          31        9         12.71GB   8.216GB (64%)'
   ].join('\n')
 
+// The itemised form of the same read. The engine block is included because it
+// is part of the same round trip, and a runtime that cannot answer it must not
+// cost the listing.
+const dfvOk = (): string =>
+  [
+    DOCKER_MARKERS.engine,
+    '2021-06-02T11:54:33.000000000+00:00',
+    DOCKER_MARKERS.dfDetail,
+    'Images space usage:',
+    '',
+    'REPOSITORY   TAG       IMAGE ID       CREATED       SIZE      SHARED SIZE   UNIQUE SIZE   CONTAINERS',
+    'nginx        1.25      206af11251e4   6 hours ago   142MB     0B            142MB         1'
+  ].join('\n')
+
 const inspectOk = (): string =>
   [
     DOCKER_MARKERS.health,
@@ -207,6 +221,7 @@ const statsOk = (): string =>
 describe('every read gets the same failover, not just the list', () => {
   const cases: { name: string; ok: () => string; call: (r: DockerReader) => Promise<{ ok: boolean }> }[] = [
     { name: 'disk', ok: dfOk, call: (r) => r.disk({}) },
+    { name: 'diskDetail', ok: dfvOk, call: (r) => r.diskDetail({}) },
     { name: 'inspect', ok: inspectOk, call: (r) => r.inspect({}, 'web') },
     { name: 'stats', ok: statsOk, call: (r) => r.stats({}, ['web']) }
   ]

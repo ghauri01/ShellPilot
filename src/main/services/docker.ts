@@ -1,6 +1,7 @@
 import type {
   DockerAction,
   DockerActionResult,
+  DockerDiskDetailProbe,
   DockerDiskProbe,
   DockerFailure,
   DockerInspectProbe,
@@ -11,10 +12,12 @@ import {
   SUDO_PROBE,
   buildDockerActionCommand,
   buildDockerDiskCommand,
+  buildDockerDiskDetailCommand,
   buildDockerInspectCommand,
   buildDockerListCommand,
   buildDockerStatsCommand,
   parseDockerActionOutput,
+  parseDockerDiskDetailOutput,
   parseDockerDiskOutput,
   parseDockerInspectOutput,
   parseDockerOutput,
@@ -224,6 +227,35 @@ export class DockerReader {
         cfg,
         (sudo) => buildDockerDiskCommand({ sudo }),
         parseDockerDiskOutput,
+        (detail) => ({ ok: false, reason: 'unknown', detail }),
+        opts,
+        DF_TIMEOUT_MS
+      )
+      return result.ok && usedSudo ? { ...result, usedSudo: true } : result
+    } catch (e) {
+      return { ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  /**
+   * The same disk, itemised: which image, which volume, which container.
+   *
+   * A second read rather than a widening of `disk`, because `-v` walks every
+   * image and volume on the host and prints a page of output for what is
+   * usually a paragraph of question. The panel asks for it when the operator
+   * asks for it.
+   *
+   * READ-ONLY, and that is not an omission to be tidied up later. Nothing this
+   * returns is a handle on anything: it is the list the operator takes into a
+   * shell, and tests/dockerOps.test.ts holds every builder here to that — this
+   * one included.
+   */
+  async diskDetail(cfg: unknown, opts: DockerListOptions = {}): Promise<DockerDiskDetailProbe> {
+    try {
+      const { result, usedSudo } = await this.readWithFailover<DockerDiskDetailProbe>(
+        cfg,
+        (sudo) => buildDockerDiskDetailCommand({ sudo }),
+        parseDockerDiskDetailOutput,
         (detail) => ({ ok: false, reason: 'unknown', detail }),
         opts,
         DF_TIMEOUT_MS

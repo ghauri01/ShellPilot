@@ -18,6 +18,7 @@ import type {
   DockerAction,
   DockerActionResult,
   DockerBridge,
+  DockerDiskDetailProbe,
   DockerDiskProbe,
   DockerInspectProbe,
   DockerLogsOptions,
@@ -310,6 +311,10 @@ const api = {
       ipcRenderer.invoke('docker:logs', cfg, ref, lines, opts),
     disk: (cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerDiskProbe> =>
       ipcRenderer.invoke('docker:disk', cfg, opts),
+    diskDetail: (
+      cfg: unknown,
+      opts?: { sudo?: boolean; autoSudo?: boolean }
+    ): Promise<DockerDiskDetailProbe> => ipcRenderer.invoke('docker:disk-detail', cfg, opts),
     inspect: (
       cfg: unknown,
       ref: string,

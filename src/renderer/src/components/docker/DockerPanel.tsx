@@ -17,6 +17,7 @@ import { sshHopsFor } from '../../lib/ssh'
 import { clsx } from '../../lib/format'
 import {
   DOCKER_FAILURE_HELP,
+  formatDockerEngineAge,
   groupByComposeProject,
   planDockerAction,
   validateContainerRef,
@@ -25,6 +26,7 @@ import {
   type DockerActionResult,
   type DockerBridge,
   type DockerContainer,
+  type DockerDiskDetailProbe,
   type DockerDiskProbe,
   type DockerInspectProbe,
   type DockerProbe,
@@ -108,6 +110,11 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
 
   const [disk, setDisk] = useState<DockerDiskProbe | null>(null)
   const [diskLoading, setDiskLoading] = useState(false)
+  // The itemised form, asked for separately: `docker system df -v` walks every
+  // image and volume on the host, so an operator who only wanted the four
+  // category totals should not pay for it.
+  const [diskItems, setDiskItems] = useState<DockerDiskDetailProbe | null>(null)
+  const [diskItemsLoading, setDiskItemsLoading] = useState(false)
   const [stats, setStats] = useState<Record<string, DockerStat> | null>(null)
   const [statsError, setStatsError] = useState<string | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
@@ -153,6 +160,7 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   const clearReads = (): void => {
     setLogs(null)
     setDisk(null)
+    setDiskItems(null)
     setStats(null)
     setStatsError(null)
     setDetail(null)
@@ -216,6 +224,21 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
       setDisk({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
     } finally {
       setDiskLoading(false)
+    }
+  }
+
+  const loadDiskItems = async (): Promise<void> => {
+    if (!server) return
+    setDiskItemsLoading(true)
+    try {
+      const r = await bridge()?.diskDetail?.(cfgFor(server), { sudo: useSudo })
+      setDiskItems(
+        r ?? { ok: false, reason: 'unknown', detail: 'The itemised disk view is not wired up in this build.' }
+      )
+    } catch (e) {
+      setDiskItems({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setDiskItemsLoading(false)
     }
   }
 
@@ -499,7 +522,13 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
             <>
               <div className="row muted" style={{ fontSize: 11, marginTop: 8 }}>
                 <span className="grow">Disk usage</span>
-                <button className="btn ghost sm" onClick={() => setDisk(null)}>
+                <button
+                  className="btn ghost sm"
+                  onClick={() => {
+                    setDisk(null)
+                    setDiskItems(null)
+                  }}
+                >
                   Close
                 </button>
               </div>
@@ -523,6 +552,31 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
                   is a judgement a button cannot make for you.
                 </div>
               )}
+
+              {/* The itemised view.
+                  The four rows above say WHICH CATEGORY is big. They cannot say
+                  which image, and "images: 12.71GB" is not something an operator
+                  can act on. It is a second read rather than a wider first one
+                  because `-v` walks every image and volume on the host. */}
+              {diskItems === null && (
+                <div className="row" style={{ marginTop: 6, gap: 8, alignItems: 'center' }}>
+                  <button className="btn ghost sm" disabled={diskItemsLoading} onClick={() => void loadDiskItems()}>
+                    <HardDrive size={12} className={clsx(diskItemsLoading && 'spin')} /> Itemise
+                  </button>
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    Every image, container, volume and cache entry, largest first. Read-only.
+                  </span>
+                </div>
+              )}
+              {diskItems && !diskItems.ok && (
+                <div className="s-desc danger">
+                  <TriangleAlert size={12} /> {DOCKER_FAILURE_HELP[diskItems.reason]}
+                  <div className="mono" style={{ marginTop: 4, opacity: 0.8 }}>
+                    {diskItems.detail}
+                  </div>
+                </div>
+              )}
+              {diskItems?.ok && <DiskItems probe={diskItems} onClose={() => setDiskItems(null)} />}
             </>
           )}
 
@@ -819,5 +873,152 @@ function InspectDetail({ probe }: { probe: DockerInspectProbe | null }): React.J
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * The disk, item by item — and NOTHING that removes any of it.
+ *
+ * The summary above answers "which category is big". This answers "which one",
+ * which is the question an operator actually has at 2am, and it answers it by
+ * handing over a list they take into a shell. There is no delete button here
+ * and its absence is a decision: what is safe to remove depends on which
+ * containers happen to be stopped right now, and a list rendered thirty seconds
+ * ago cannot know that.
+ *
+ * THE NUMBER THIS COMPONENT DOES NOT COMPUTE: a total. Image SIZE counts layers
+ * shared with other images, so adding the rows up overstates the disk, often by
+ * a multiple — and it looks right in any fixture, because a fixture has no
+ * shared layers. The headline stays with `docker system df`, which did the
+ * arithmetic on the host and knows about the sharing.
+ */
+function DiskItems({
+  probe,
+  onClose
+}: {
+  probe: Extract<DockerDiskDetailProbe, { ok: true }>
+  onClose: () => void
+}): React.JSX.Element {
+  const d = probe.disk
+  // Largest first, per kind. Sorting is most of the reason to itemise at all:
+  // the answer is nearly always in the first two rows.
+  const images = [...d.images].sort((a, b) => (b.uniqueSizeBytes ?? 0) - (a.uniqueSizeBytes ?? 0))
+  const containers = [...d.containers].sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0))
+  const volumes = [...d.volumes].sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0))
+  const cache = [...d.buildCache].sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0))
+
+  const heading = (text: string, count: number): React.JSX.Element => (
+    <div className="row muted" style={{ fontSize: 11, marginTop: 8 }}>
+      <span className="grow">
+        {text} ({count})
+      </span>
+    </div>
+  )
+
+  return (
+    <>
+      <div className="row muted" style={{ fontSize: 11, marginTop: 8, alignItems: 'center' }}>
+        <span className="grow">By item</span>
+        {/* Absolute, and computed on the host rather than looked up in a table
+            of release dates that would need an owner and would eventually be
+            wrong. Absent on a runtime that will not answer — podman's docker
+            shim fails `.Server.*` templates outright — and saying nothing is
+            the honest form of that. */}
+        {probe.engine && <span className="faint">{formatDockerEngineAge(probe.engine, Date.now())}</span>}
+        <button className="btn ghost sm" onClick={onClose}>
+          Close
+        </button>
+      </div>
+
+      <div className="faint" style={{ fontSize: 11 }}>
+        Nothing on this list can be removed from here. It is the list to take into a shell.
+      </div>
+
+      {images.length > 0 && heading('Images', images.length)}
+      {images.map((i) => (
+        <div key={`${i.id}:${i.repository}:${i.tag}`} className="cron-row">
+          <span className="mono cron-when">
+            {i.repository}:{i.tag}
+          </span>
+          <span className="faint cron-desc">
+            {i.id} · {i.created}
+          </span>
+          <span className="grow" />
+          {/* An untagged image with nothing running off it is the classic
+              leftover — a previous build's layers, orphaned by the next one. */}
+          {i.dangling && <span className="chip warn">dangling</span>}
+          <span className={clsx('chip', i.containers === 0 && 'warn')}>
+            {i.containers ?? '?'} container{i.containers === 1 ? '' : 's'}
+          </span>
+          {/* UNIQUE SIZE, not SIZE. SIZE includes layers other images share, so
+              it is the number that makes a 300MB image look like 900MB. */}
+          <span className="mono" title={`${i.size} including shared layers`}>
+            {i.uniqueSize === '' ? i.size : i.uniqueSize}
+          </span>
+        </div>
+      ))}
+
+      {containers.length > 0 && heading('Containers', containers.length)}
+      {containers.map((c) => (
+        <div key={c.id} className="cron-row">
+          <span className="mono cron-when">{c.name}</span>
+          <span className="faint cron-desc">{c.image}</span>
+          <span className="grow" />
+          <span className={clsx('chip', stateTone(c.state))}>{c.status}</span>
+          {/* The writable layer only. The image's bytes are in the table above,
+              and adding the two together would count them twice. */}
+          <span className="mono" title="Writable layer, not the image">
+            {c.size}
+          </span>
+        </div>
+      ))}
+
+      {volumes.length > 0 && heading('Volumes', volumes.length)}
+      {volumes.map((v) => (
+        <div key={v.name} className="cron-row">
+          {/* A generated 64-hex name is unreadable at full length and its first
+              twelve characters are what `docker volume ls` shows anyway. A name
+              a person typed is shown whole. */}
+          <span className="mono cron-when" title={v.name}>
+            {v.anonymous ? v.name.slice(0, 12) : v.name}
+          </span>
+          <span className="faint cron-desc">{v.anonymous ? 'anonymous' : 'named'}</span>
+          <span className="grow" />
+          {/* No links is not the same as unwanted: an anonymous volume with no
+              links is usually rubbish, a NAMED one with no links is usually the
+              database of something that happens to be stopped. */}
+          {v.links === 0 && <span className={clsx('chip', v.anonymous && 'warn')}>no containers</span>}
+          {(v.links ?? 0) > 0 && <span className="chip">{v.links} linked</span>}
+          <span className="mono">{v.size}</span>
+        </div>
+      ))}
+
+      {cache.length > 0 && heading('Build cache', cache.length)}
+      {cache.map((c) => (
+        <div key={c.id} className="cron-row">
+          <span className="mono cron-when">{c.id}</span>
+          <span className="faint cron-desc">
+            {c.type} · last used {c.lastUsed === '' ? 'never' : c.lastUsed}
+          </span>
+          <span className="grow" />
+          <span className="mono">{c.size}</span>
+        </div>
+      ))}
+
+      {/* Absent and empty are different sentences, and only one of them is
+          about this host. podman has historically not printed a build cache
+          table at all. */}
+      {!d.sections.buildCache && (
+        <div className="faint" style={{ fontSize: 11 }}>
+          This runtime did not report a build cache.
+        </div>
+      )}
+      {d.unreadable > 0 && (
+        <div className="faint" style={{ fontSize: 11 }}>
+          {d.unreadable} row{d.unreadable === 1 ? '' : 's'} of this listing could not be read, so
+          {d.unreadable === 1 ? ' it is' : ' they are'} missing above rather than guessed at.
+        </div>
+      )}
+    </>
   )
 }

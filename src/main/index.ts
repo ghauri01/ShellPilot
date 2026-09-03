@@ -844,6 +844,11 @@ ipcMain.handle(
 ipcMain.handle('docker:disk', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
   dockerReader.disk(cfg, opts ?? {})
 )
+// The itemised form of the same read. Still read-only: it lists what is on the
+// disk, and nothing on this channel or below it can remove any of it.
+ipcMain.handle('docker:disk-detail', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+  dockerReader.diskDetail(cfg, opts ?? {})
+)
 ipcMain.handle(
   'docker:inspect',
   (_e, cfg: unknown, ref: string, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
