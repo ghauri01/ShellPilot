@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type {
   AccessCollectOptions,
   AccessCommitOutcome,
+  AccessCommitReport,
   AccessVerifyResult,
   HostAccess,
   Sha256
@@ -212,19 +213,6 @@ export interface AccessCommitRequest {
    *  the verifying session having authenticated after this. */
   stagedAt: number
   rollbackSeconds?: number
-}
-
-export interface AccessCommitReport {
-  serverId: string
-  serverName: string
-  user: string
-  token: string
-  outcome: AccessCommitOutcome
-  /** One sentence, already written for a person. */
-  detail: string
-  /** Where the previous file is, whichever way this went. */
-  backupPath: string
-  at: number
 }
 
 export class AccessCommitter {

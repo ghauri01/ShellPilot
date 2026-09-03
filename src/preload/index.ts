@@ -10,7 +10,12 @@ import type {
   MetricsResult,
   SshCloseInfo
 } from '../shared/ssh'
-import type { HostAccess } from '../shared/access'
+import type {
+  AccessChangePreview,
+  AccessRunRequest,
+  AccessRunResult,
+  HostAccess
+} from '../shared/access'
 import type { HostFacts } from '../shared/hostFacts'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
@@ -536,6 +541,25 @@ const api = {
       serverId: string
     ): Promise<{ access?: HostAccess; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
       ipcRenderer.invoke('fleet:access', serverId),
+    // Changing who can get in — roadmap item 23, the write half.
+    //
+    // TWO CALLS AND NOT ONE, on purpose. `accessPlan` asks main what a change
+    // would do and what it refuses to do; `accessRun` carries back the command
+    // text the operator was shown, and main will not touch a host unless that
+    // matches what it derives for itself. A single "revoke this key" call would
+    // have nothing to compare, which is precisely the state broadcast was in
+    // before B3.
+    //
+    // `accessRun` is a WRITE and the only one on this bridge that edits an
+    // authorized_keys file. It stages behind the host's own rollback and
+    // confirms over a session that authenticated afterwards; a host that never
+    // gets that confirmation puts its previous file back by itself. The three
+    // outcomes it can report are not two — see AccessCommitOutcome.
+    accessPlan: (
+      req: Omit<AccessRunRequest, 'token' | 'confirmedCommand'>
+    ): Promise<AccessChangePreview> => ipcRenderer.invoke('access:plan', req),
+    accessRun: (req: AccessRunRequest): Promise<AccessRunResult> =>
+      ipcRenderer.invoke('access:run', req),
     onSample: (cb: (event: FleetSampleEvent) => void): (() => void) => {
       const h = (_e: IpcRendererEvent, event: FleetSampleEvent): void => cb(event)
       ipcRenderer.on('fleet:sample', h)

@@ -17,7 +17,8 @@ import {
   poolList,
   poolClose,
   sshExec,
-  sshExecStream
+  sshExecStream,
+  sshOpenFresh
 } from './services/ssh'
 import type { KeyboardRequest } from './services/ssh'
 import {
@@ -56,7 +57,17 @@ import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
-import { AccessReader } from './services/access'
+import { AccessCommitter, AccessReader } from './services/access'
+import type {
+  AccessChangePreview,
+  AccessChangeTarget,
+  AccessCommitReport,
+  AccessRefusal,
+  AccessRunRequest,
+  AccessRunResult,
+  AccessStagingFailure
+} from '../shared/access'
+import { ACCESS_ROLLBACK_SECONDS, planAccessChange } from '../shared/access'
 import type { JobHostCapabilityReport, JobRunRequest } from '../shared/jobs'
 import { JOB_DETACHED_STALL_GRACE_MS, jobCohorts, restartsTheMachine } from '../shared/jobs'
 import type { GateHost } from '../shared/patch'
@@ -908,6 +919,201 @@ ipcMain.handle('fleet:facts', (_e, serverId: string) => fleetSampler.factsFor(se
 // reason 'fleet:facts' does not. There is exactly one thing deciding how often
 // every home directory on every host gets stat'ed, and it is the sampler.
 ipcMain.handle('fleet:access', (_e, serverId: string) => fleetSampler.accessFor(serverId))
+
+// ---- Changing who can get in — roadmap item 23, the write half ----
+//
+// The most consequential write this app makes, and the only one built as a
+// protocol rather than as a command. shared/access.ts argues the three rules in
+// full; what lives here is the part that cannot live there.
+//
+// MAIN RE-DERIVES THE PLAN. The renderer says which key and which servers; it
+// does not say what will run. Everything that decides — which accounts were
+// read, whether sshd reads the file being edited, whether the key is the one
+// this session is on — comes from the collection MAIN holds, and the command is
+// built here from it. What the renderer sends back is the command text it
+// showed the operator, and if that does not match what main derived, nothing
+// runs. Same shape as `broadcast:run`, for the same reason B3 gave: a plan
+// computed in a `useMemo` and thrown away is not a record of anybody agreeing
+// to anything.
+//
+// NOT EXPOSED TO THE MCP BRIDGE, and this is the clearest case in the app for
+// that line. An agent gets `execute_command` gated per server; editing
+// authorized_keys across a selection is a different consent story entirely, and
+// the answer to "should an agent be able to revoke a key from twelve hosts" is
+// no, not "not yet".
+//
+// ONE ACCOUNT: THE ONE SHELLPILOT CONNECTS AS. The staged write resolves
+// `$HOME/.ssh/authorized_keys` on the host, so one approved command text covers
+// a whole selection — which also means it can only ever edit the connecting
+// account's file. `planAccessChange` permits a target on another account,
+// because another account's keys cannot lock this session out and rule 1 has no
+// reason to block it; the COMMAND cannot serve one. So the refusal is here, as
+// that file's own comment says it must be. Without it a revoke aimed at
+// `deploy` would back up and rewrite `ops`'s file instead — it would fail the
+// count check and change nothing, and it would report the wrong reason for
+// having done nothing, which on an access review is its own kind of lie.
+const accessCommitter = new AccessCommitter({
+  // The ONLY thing in this app that opens a connection which cannot be the one
+  // that wrote the file. See sshOpenFresh and rule 2.
+  openFresh: (cfg) => sshOpenFresh(resolveChainSecrets(cfg as SshConnectConfig))
+})
+
+/** How long one host's staged write is given. Longer than a read probe: it
+ *  copies a file, filters it, counts it and arms a watchdog. */
+const ACCESS_STAGE_TIMEOUT_MS = 45_000
+
+/** A preview may not be confirmed forever. The token IS the plan's clock, so
+ *  an old one is an old collection — and a command approved against last
+ *  week's inventory is exactly the stale-write this feature refuses. */
+const ACCESS_PREVIEW_MAX_AGE_MS = 10 * 60_000
+
+function deriveAccessPlan(
+  req: Pick<AccessRunRequest, 'kind' | 'fingerprint' | 'targets'>,
+  now: number
+): { plan: ReturnType<typeof planAccessChange>; refusals: AccessRefusal[] } {
+  const refusals: AccessRefusal[] = []
+  const targets: AccessChangeTarget[] = []
+  for (const t of req.targets) {
+    const held = fleetSampler.accessFor(t.serverId)
+    if (!held?.access) {
+      refusals.push({
+        serverId: t.serverId,
+        serverName: t.serverName,
+        user: t.user,
+        reason: `${t.serverName} has no collected authorized_keys to edit. A change is always an edit to a file that was READ, never to one that was assumed — collect it first.`
+      })
+      continue
+    }
+    if (held.access.collectedAs !== t.user) {
+      refusals.push({
+        serverId: t.serverId,
+        serverName: t.serverName,
+        user: t.user,
+        reason: `the change would run as ${held.access.collectedAs} on ${t.serverName} and can only edit that account's own authorized_keys, not ${t.user}'s. Connect as ${t.user} to change ${t.user}'s keys.`
+      })
+      continue
+    }
+    targets.push({
+      serverId: t.serverId,
+      serverName: t.serverName,
+      access: held.access,
+      user: t.user
+    })
+  }
+  return {
+    plan: planAccessChange({
+      kind: req.kind,
+      fingerprint: req.fingerprint,
+      targets,
+      now
+    }),
+    refusals
+  }
+}
+
+ipcMain.handle('access:plan', (_e, req: Omit<AccessRunRequest, 'token' | 'confirmedCommand'>): AccessChangePreview => {
+  if (!accessModuleOn) throw new Error('Key and access management is switched off in Settings.')
+  const now = Date.now()
+  const { plan, refusals } = deriveAccessPlan(req, now)
+  return {
+    token: plan.token,
+    command: plan.spec?.steps[0].command ?? '',
+    hosts: plan.targets.map((t) => ({
+      serverId: t.serverId,
+      serverName: t.serverName,
+      user: req.targets.find((x) => x.serverId === t.serverId)?.user ?? ''
+    })),
+    blocks: plan.blocks,
+    refusals,
+    rollbackSeconds: plan.rollbackSeconds
+  }
+})
+
+ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRunResult> => {
+  if (!accessModuleOn) throw new Error('Key and access management is switched off in Settings.')
+
+  const at = Number(req.token)
+  if (!Number.isFinite(at) || !/^\d{10,16}$/.test(req.token)) {
+    throw new Error('This change was not started: its plan could not be identified.')
+  }
+  if (Date.now() - at > ACCESS_PREVIEW_MAX_AGE_MS) {
+    throw new Error(
+      'This change was not started: the plan it was confirmed against is more than ten minutes old, and the estate may have changed since. Look at it again.'
+    )
+  }
+
+  const { plan, refusals } = deriveAccessPlan(req, at)
+  const command = plan.spec?.steps[0].command ?? ''
+  if (command === '' || command !== req.confirmedCommand) {
+    // Not a warning and not a retry. What was agreed to is not what this would
+    // run, and there is no version of that worth resolving automatically.
+    throw new Error(
+      'This change was not started: what would run on the hosts is not what was confirmed. The collection has changed since the plan was shown, so look at it again.'
+    )
+  }
+
+  const notStaged: AccessStagingFailure[] = []
+  const reports: AccessCommitReport[] = []
+
+  // ONE HOST AT A TIME, as the plan asks. A key change rolled across a
+  // selection in parallel is the case where a mistake reaches every machine
+  // before the first failure is visible; serialised, the second host is still
+  // reachable while the first is being looked at.
+  for (const target of plan.targets) {
+    const t = req.targets.find((x) => x.serverId === target.serverId)
+    const account = fleetSampler
+      .accessFor(target.serverId)
+      ?.access?.accounts.find((a) => a.user === t?.user)
+    if (!t || !account?.keyPath) {
+      notStaged.push({
+        serverId: target.serverId,
+        serverName: target.serverName,
+        detail: 'the collection for this host changed while the change was being confirmed.'
+      })
+      continue
+    }
+
+    const staged = await sshExec(
+      resolveChainSecrets(t.cfg as SshConnectConfig),
+      command,
+      ACCESS_STAGE_TIMEOUT_MS,
+      // allowPrompt false. A key change must never be what raises a host-key
+      // trust dialog: a host this app has not connected to before is a host
+      // whose authorized_keys it has not read either.
+      false
+    )
+    // The moment the file changed on the host, as closely as this side can
+    // know it. Everything about rule 2 turns on the verifying session having
+    // authenticated after this, so it is taken here and not a line later.
+    const stagedAt = Date.now()
+    if (!staged.ok || staged.code !== 0) {
+      notStaged.push({
+        serverId: target.serverId,
+        serverName: target.serverName,
+        detail:
+          (staged.stderr || staged.error || `the host exited ${String(staged.code)}`)
+            .trim()
+            .split('\n')[0]
+            .slice(0, 200) || 'the staged write did not run'
+      })
+      continue
+    }
+
+    reports.push(
+      await accessCommitter.confirm(t.cfg, {
+        serverId: target.serverId,
+        serverName: target.serverName,
+        user: t.user,
+        token: plan.token,
+        keyPath: account.keyPath,
+        stagedAt,
+        rollbackSeconds: plan.rollbackSeconds ?? ACCESS_ROLLBACK_SECONDS
+      })
+    )
+  }
+
+  return { blocks: plan.blocks, refusals, notStaged, reports }
+})
 
 // ---- Run one command across many servers ----
 //

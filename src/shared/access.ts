@@ -2572,3 +2572,75 @@ export function describeAccessOutcome(o: {
 export function accessBackupPath(keyPath: string, token: string): string {
   return `${keyPath}.shellpilot-${token}.bak`
 }
+
+/**
+ * What one host's key change came to, ready to be shown to a person.
+ *
+ * Here rather than beside the thing that produces it, because the renderer has
+ * to render it and the renderer cannot import from `main/`.
+ */
+export interface AccessCommitReport {
+  serverId: string
+  serverName: string
+  user: string
+  token: string
+  outcome: AccessCommitOutcome
+  /** One sentence, already written. See describeAccessOutcome. */
+  detail: string
+  /** Where the previous file is, whichever way this went. */
+  backupPath: string
+  at: number
+}
+
+/** A target this run would not touch, and why. Distinct from an AccessBlock:
+ *  a block is the planner refusing, this is the caller refusing before the
+ *  planner is asked. */
+export interface AccessRefusal {
+  serverId: string
+  serverName: string
+  user: string
+  reason: string
+}
+
+/** A host where the staged write itself did not land. Nothing was changed
+ *  there and there is nothing to confirm, which is a fourth thing and not one
+ *  of the three outcomes. */
+export interface AccessStagingFailure {
+  serverId: string
+  serverName: string
+  /** What the host said, first line, as it said it. */
+  detail: string
+}
+
+export interface AccessChangePreview {
+  /** The token this plan is named by. Passed back with the run so main derives
+   *  the same command the operator agreed to. */
+  token: string
+  /** Exactly what will run on every host. Empty when nothing will. */
+  command: string
+  hosts: { serverId: string; serverName: string; user: string }[]
+  blocks: AccessBlock[]
+  refusals: AccessRefusal[]
+  rollbackSeconds: number
+}
+
+export interface AccessRunRequest {
+  kind: AccessChangeKind
+  /** For a revoke. */
+  fingerprint?: string
+  /** The token from the preview the operator was shown. */
+  token: string
+  /** The command text they were shown, checked in main against a freshly
+   *  derived one before a single host is touched — the shape `broadcast:run`
+   *  uses, for the same reason: a plan computed in the renderer and thrown
+   *  away is not a record of anybody agreeing to anything. */
+  confirmedCommand: string
+  targets: { serverId: string; serverName: string; user: string; cfg: unknown }[]
+}
+
+export interface AccessRunResult {
+  blocks: AccessBlock[]
+  refusals: AccessRefusal[]
+  notStaged: AccessStagingFailure[]
+  reports: AccessCommitReport[]
+}

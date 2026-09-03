@@ -323,3 +323,193 @@ describe('before anything has been collected', () => {
     expect(await screen.findByText(/No authorized_keys have been collected yet/)).toBeTruthy()
   })
 })
+
+// ---------------------------------------------------------------------------
+// The write half — roadmap item 23, rule 2, in the panel
+// ---------------------------------------------------------------------------
+//
+// The three outcomes are the whole reason this section exists. A staged key
+// change can end three ways and only one of them is a fault, and a panel that
+// rendered the other two the same way would teach an operator that the
+// dead-man's switch is a failure — which is the fastest route to somebody
+// wanting it turned off.
+
+type Preview = {
+  token: string
+  command: string
+  hosts: { serverId: string; serverName: string; user: string }[]
+  blocks: { serverId: string; serverName: string; user: string; kind: string; reason: string }[]
+  refusals: { serverId: string; serverName: string; user: string; reason: string }[]
+  rollbackSeconds: number
+}
+
+const PREVIEW: Preview = {
+  token: '1800000000000',
+  command: 'SP_F="$HOME/.ssh/authorized_keys"\ngrep -v -F',
+  hosts: [{ serverId: 'a', serverName: 'web-1', user: 'ops' }],
+  blocks: [],
+  refusals: [],
+  rollbackSeconds: 300
+}
+
+function mountWrite(
+  over: {
+    preview?: Partial<Preview>
+    run?: unknown
+    onRun?: (req: Record<string, unknown>) => void
+    planThrows?: string
+  } = {}
+): void {
+  stubBridge({
+    fleet: {
+      access: async () => ({ access: complete(), at: 1, intervalMs: 3_600_000 }),
+      sampleNow: async () => undefined,
+      accessPlan: async () => {
+        if (over.planThrows) throw new Error(over.planThrows)
+        return { ...PREVIEW, ...over.preview }
+      },
+      accessRun: async (req: Record<string, unknown>) => {
+        over.onRun?.(req)
+        return over.run ?? { blocks: [], refusals: [], notStaged: [], reports: [] }
+      }
+    }
+  })
+  render(<AccessPanel servers={[server('a', 'web-1')]} />)
+}
+
+const report = (outcome: string, detail: string): Record<string, unknown> => ({
+  serverId: 'a',
+  serverName: 'web-1',
+  user: 'ops',
+  token: '1800000000000',
+  outcome,
+  detail,
+  backupPath: '/home/ops/.ssh/authorized_keys.shellpilot-1800000000000.bak',
+  at: 1
+})
+
+describe('revoking a key', () => {
+  it('shows no revoke control at all when the bridge cannot write', async () => {
+    // The module gate lives in main. A build where it is off must show no
+    // button rather than one that fails when pressed.
+    mount([server('a', 'web-1')], { a: { access: complete(), at: 1 } })
+    await screen.findByText(ED25519_FP)
+    expect(screen.queryByTestId(`revoke-${ED25519_FP}`)).toBeNull()
+  })
+
+  it('asks before anything is written, and says the change is staged rather than applied', async () => {
+    mountWrite()
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    const confirm = await screen.findByTestId('revoke-confirm')
+    expect(confirm.textContent).toContain('This is staged, not applied')
+    expect(confirm.textContent).toContain('arms its OWN rollback')
+    expect(confirm.textContent).toContain('300 seconds')
+    expect(confirm.textContent).toContain('web-1')
+  })
+
+  it('sends back the command it displayed, so main can refuse a change nobody agreed to', async () => {
+    let sent: Record<string, unknown> | null = null
+    mountWrite({ onRun: (r) => (sent = r) })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    await userEvent.click(await screen.findByTestId('revoke-go'))
+    await waitFor(() => expect(sent).not.toBeNull())
+    expect(sent!.confirmedCommand).toBe(PREVIEW.command)
+    expect(sent!.token).toBe(PREVIEW.token)
+    expect(sent!.fingerprint).toBe(ED25519_FP)
+  })
+
+  it('names every host it will not touch, in the same dialog as the ones it will', async () => {
+    // A host quietly left out of a fleet-wide revocation is the exact failure
+    // the read half exists to prevent.
+    mountWrite({
+      preview: {
+        blocks: [
+          {
+            serverId: 'b',
+            serverName: 'db-1',
+            user: 'ops',
+            kind: 'session-key-unknown',
+            reason: 'db-1 does not report which key this session authenticated with.'
+          }
+        ],
+        refusals: [
+          {
+            serverId: 'c',
+            serverName: 'cache-1',
+            user: 'deploy',
+            reason: 'the change would run as ops on cache-1.'
+          }
+        ]
+      }
+    })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    const blocked = await screen.findByTestId('revoke-blocked')
+    expect(blocked.textContent).toContain('2 left out, and not by choice')
+    expect(blocked.textContent).toContain('does not report which key this session authenticated with')
+    expect(blocked.textContent).toContain('the change would run as ops on cache-1')
+  })
+
+  it('renders the three outcomes as three different things', async () => {
+    mountWrite({
+      run: {
+        blocks: [],
+        refusals: [],
+        notStaged: [],
+        reports: [
+          { ...report('committed', 'Committed on web-1.'), serverId: 'a' },
+          { ...report('reverted-verification-failed', 'Reverted on db-1: the check failed.'), serverId: 'b' },
+          { ...report('reverted-unconfirmed', 'Reverted on cache-1: nothing confirmed it in time.'), serverId: 'c' }
+        ]
+      }
+    })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    await userEvent.click(await screen.findByTestId('revoke-go'))
+
+    const committed = await screen.findByTestId('outcome-a')
+    const failed = await screen.findByTestId('outcome-b')
+    const unconfirmed = await screen.findByTestId('outcome-c')
+
+    expect(committed.textContent).toContain('Committed')
+    expect(failed.textContent).toContain('Reverted — the host would not let a new session in')
+    expect(unconfirmed.textContent).toContain('Reverted — nothing confirmed it in time')
+
+    // Three labels, three chips, three classes. The one that is not a fault is
+    // not dressed as one.
+    const chip = (el: Element): Element => el.querySelector('.chip')!
+    expect(chip(committed).className).toContain('ok')
+    expect(chip(failed).className).toContain('loud')
+    expect(chip(unconfirmed).className).toContain('warn')
+    expect(chip(unconfirmed).className).not.toContain('loud')
+    expect(
+      new Set([chip(committed).textContent, chip(failed).textContent, chip(unconfirmed).textContent]).size
+    ).toBe(3)
+  })
+
+  it('keeps a host whose staged write never landed apart from all three', async () => {
+    // Nothing happened there at all: no backup, no watchdog, no change. It is a
+    // fourth thing, and calling it "reverted" would say a file was put back
+    // that was never replaced.
+    mountWrite({
+      run: {
+        blocks: [],
+        refusals: [],
+        notStaged: [{ serverId: 'b', serverName: 'db-1', detail: 'authorized_keys is not writable by this account' }],
+        reports: []
+      }
+    })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    await userEvent.click(await screen.findByTestId('revoke-go'))
+    const row = await screen.findByTestId('not-staged-b')
+    expect(row.textContent).toContain('Nothing was changed on db-1')
+    expect(row.textContent).toContain('not writable by this account')
+    expect(row.textContent).not.toContain('Reverted')
+  })
+
+  it('says nothing was changed when main refuses the run', async () => {
+    mountWrite({ planThrows: 'the collection has changed since the plan was shown' })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    const problem = await screen.findByTestId('access-problem')
+    expect(problem.textContent).toContain('Nothing was changed')
+    expect(problem.textContent).toContain('the collection has changed since the plan was shown')
+  })
+})
