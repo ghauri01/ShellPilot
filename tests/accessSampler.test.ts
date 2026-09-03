@@ -347,12 +347,17 @@ describe('what reaches the durable store', () => {
     // Otherwise a complete inventory is re-retired thirty times an hour.
     const h = harness()
     await vi.advanceTimersByTimeAsync(0)
-    const after = h.store.upserts.length
+    // Snapshotted, not aliased. `keysOf(h)` re-reads the same push-only array,
+    // so comparing it to itself after ten more sweeps — which is what stood
+    // here — is `x.length === x.length`, and `>= its own earlier value` on an
+    // array nothing ever removes from is true by construction.
+    const afterFirstSweep = [...keysOf(h)]
+    const probeCallsAfterFirstSweep = h.accessCalls.length
+    expect(afterFirstSweep.length).toBeGreaterThan(0)
     await vi.advanceTimersByTimeAsync(10 * 120_000)
-    expect(h.store.upserts.filter((u) => u.key.startsWith(ACCESS_FACT_PREFIX)).length).toBe(
-      keysOf(h).length
-    )
-    expect(h.store.upserts.length).toBeGreaterThanOrEqual(after)
+    // Not one more access fact, and not one more probe, across ten sweeps.
+    expect(keysOf(h)).toEqual(afterFirstSweep)
+    expect(h.accessCalls.length).toBe(probeCallsAfterFirstSweep)
     // Exactly one retirement per read account plus the host-level source sweep,
     // and only from the ONE sweep the probe was due on. Ten metrics-only sweeps
     // later there must be no more of them: each extra pass would re-retire a

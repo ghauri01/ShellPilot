@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   ACCESS_COMMAND,
+  ACCESS_SOURCE_IDS,
   ACCESS_STATUS_MARKER,
   KEY_LINE_CAP,
   accessKeyPrefix,
@@ -521,6 +522,11 @@ describe('a collection, and the nulls in it', () => {
 
   it('reports every source as unknown when the status block never arrived', () => {
     const a = parseAccessCollection('U 1 keys ok -\nU 1 name ops', { sha256, now: 1 })
+    // The list is asserted to be COMPLETE before it is walked. A bare
+    // `for (const s of a.sources)` over an empty array is a test that asserts
+    // nothing, and `sources: []` is exactly what a refactor that stopped
+    // reporting sources at all would produce.
+    expect(a.sources.map((s) => s.id).sort()).toEqual([...ACCESS_SOURCE_IDS].sort())
     for (const s of a.sources) expect(s.status, s.id).toBe('unknown')
   })
 })

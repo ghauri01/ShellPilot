@@ -417,6 +417,17 @@ describe('what a change refuses to be', () => {
       .command
     expect(command).not.toMatch(/\bsudo\b/)
     expect(accessDisarmCommand('/x', '1')).not.toMatch(/\bsudo\b/)
+    // The ADD path, which this test never fed to the regex — so prefixing
+    // `sudo -n true; ` to buildAddKeyCommand's staged write passed it, and
+    // passed every other test in this file too. Both builders are reached
+    // directly rather than through a plan, because the plan is one `if` away
+    // from only ever producing the revoke half.
+    expect(
+      buildAddKeyCommand({ path: '/x', line: `ssh-ed25519 ${B} added`, token: '1' })
+    ).not.toMatch(/\bsudo\b/)
+    expect(
+      buildRevokeKeyCommand({ path: '/x', blob: B, token: '1', expectRemoved: 1 })
+    ).not.toMatch(/\bsudo\b/)
   })
 })
 

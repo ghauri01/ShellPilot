@@ -250,9 +250,19 @@ describe('the by-host view', () => {
       return r
     })
     expect(denied.textContent).toContain('not permitted')
-    expect(denied.querySelector('.mono')?.textContent).not.toBe('0')
-    // And the account that WAS read still shows its real count.
-    expect(document.querySelector('tr[data-user="ops"]')!.textContent).toContain('1')
+    // The COUNT cell, addressed as the count cell. `.mono` used to be read
+    // here and `.mono` is the username — so this compared "deploy" to "0",
+    // which is unequal for every possible rendering including the literal `0`
+    // this test exists to forbid. The count lives in `td.num`.
+    const deniedCount = denied.querySelector('td.num')!
+    expect(deniedCount.textContent).not.toBe('0')
+    expect(deniedCount.textContent).not.toMatch(/\d/)
+    // And the account that WAS read still shows its real count — read out of
+    // the same cell, not matched against the whole row. `toContain('1')` over
+    // the row text matched the server name `web-1`, so hard-coding every count
+    // to 0 passed.
+    const okCount = document.querySelector('tr[data-user="ops"] td.num')!
+    expect(okCount.textContent).toBe('1')
   })
 
   it('warns when a locked password sits next to a live key', async () => {
