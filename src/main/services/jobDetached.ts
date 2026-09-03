@@ -285,7 +285,7 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
     // launch and the first write would leave a running command with nothing
     // recording where its marker is — reclaimable by nobody, swept a week
     // later, its output lost. The write costs one row.
-    req.onState?.({ state: 'detached', detached: handle })
+    req.onState?.({ state: 'detached', detached: { ...handle } })
     return await watch(req, handle)
   }
 
@@ -425,6 +425,24 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
             continue
           }
           if (!verdict.foreign) await reap(req, handle)
+          // A process that is gone BECAUSE WE SIGNALLED IT is not an orphan.
+          // `orphaned` means nobody knows why it stopped, and here we do: the
+          // step ran past its deadline and this code sent it a TERM. Reporting
+          // that as an orphan would hide our own hand in it, and it is the
+          // difference between "raise the timeout" and "go and look at that
+          // machine".
+          if (signalled) {
+            return {
+              ok: false,
+              code: null,
+              error:
+                `Command timed out after ${req.timeoutMs}ms. SIGTERM was sent to the remote ` +
+                `process and it has gone, without recording an exit status.`,
+              finalOutcome: 'timeout',
+              mergedOutput: true,
+              detachedHandle: null
+            }
+          }
           return {
             ok: false,
             code: null,

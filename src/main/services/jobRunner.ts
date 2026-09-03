@@ -15,6 +15,7 @@ import type {
 import {
   JOB_ABANDONED_ERROR,
   isJobDetachedHandle,
+  isJobHostLive,
   JOB_CLASSIFY_BYTES,
   JOB_CONCURRENCY,
   JOB_OUTPUT_HEAD,
@@ -1004,6 +1005,12 @@ export class JobRunner {
           // date, and reclaim() picks it up at the next launch and carries on
           // reading from the byte it had got to.
           store.updateJobTarget(req.jobId, serverId, {
+            // `detached` is the truth as of this instant: the command is
+            // running and nothing is watching it any more. The row said
+            // `running` while this process was polling, which was also true,
+            // and the difference between the two is the only thing that tells
+            // an operator whether anyone can currently see their upgrade.
+            state: 'detached',
             detached: handle,
             outOffset: out.bytes,
             outElided: out.elided
@@ -1394,14 +1401,21 @@ function keepTail(text: string, budget: number): string {
 /**
  * Is this row a detached step somebody can pick up?
  *
- * BOTH halves are required. A handle without a live state is a finished host
- * whose marker was left behind for a foreign instance — re-watching it would
- * poll a directory this build may not reap. A live state without a handle is
- * B1's attached row, which adopt() closes as `abandoned` because that is what
- * really happened to it.
+ * BOTH halves are required. A handle without a live state is a FINISHED host
+ * whose marker was deliberately left behind — a foreign instance's — and
+ * re-watching it would poll a directory this build may not reap. A live state
+ * without a handle is B1's attached row, which adopt() closes as `abandoned`
+ * because that is what really happened to it.
+ *
+ * `running` counts as live here, and that is not sloppiness. A clean shutdown
+ * writes `detached` on the way past, but a `kill -9` or a power cut writes
+ * nothing at all — and those rows say `running` with a perfectly good marker
+ * beside them. Requiring the tidy state would mean the ONE case where the app
+ * did not get to tidy up is the case that cannot be reclaimed, which is the
+ * exact shape of failure this item exists to remove.
  */
 function reclaimable(t: JobHostResult): boolean {
-  return isJobDetachedHandle(t.detached) && (t.state === 'detached' || t.state === 'rebooting')
+  return isJobDetachedHandle(t.detached) && isJobHostLive(t.state)
 }
 
 export function splitAtBytes(text: string, budget: number): [string, string] {

@@ -1118,7 +1118,15 @@ export interface JobPollResult {
   size: number
   /** Bytes this poll carried. The cursor advances by exactly this. */
   sent: number
-  /** More output was waiting than one poll may carry. */
+  /**
+   * The window came back FULL, so there is probably more waiting.
+   *
+   * A hint, not the answer. The authority is `size` against the caller's own
+   * cursor — this parser does not know the offset the poll was built with, and
+   * a `more` derived from `size - sent` would be wrong by exactly the offset
+   * every time. The poller checks both, so a small window and a full one are
+   * both drained at connection speed.
+   */
   more: boolean
   /** The output itself, already decoded. */
   text: string
@@ -1231,7 +1239,7 @@ export function parseJobPoll(
     pidCheck: f.get('pidcheck') === 'strong' ? 'strong' : 'weak',
     size,
     sent,
-    more: size > 0 && sent > 0 && size - sent > 0 && sent >= JOB_POLL_BYTES,
+    more: sent >= JOB_POLL_BYTES,
     text,
     carry
   }
