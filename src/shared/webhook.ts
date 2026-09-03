@@ -47,6 +47,15 @@ export interface AlertPayload {
   threshold?: number
   // How long it has been in this state, when known.
   minutes?: number
+  // Set on the one raise that trips flap damping — see store/alerts.ts.
+  //
+  // The endpoint needs this more than the desktop does. A person who stops
+  // getting notifications about a host still has the app in front of them; an
+  // endpoint that stops receiving has no way to tell a damped alert from a
+  // ShellPilot that died, and "we went quiet on purpose, here is when we will
+  // speak again" is the difference between a working integration and a silent
+  // one.
+  damped?: boolean
   // Present for unit-failed: systemd unit NAMES only.
   //
   // Not descriptions, and not journal output. A name is enough to act on, and

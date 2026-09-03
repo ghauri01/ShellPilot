@@ -146,6 +146,11 @@ export function sanitisePayload(raw: unknown): AlertPayload | null {
   if (value !== undefined) out.value = value
   if (threshold !== undefined) out.threshold = threshold
   if (minutes !== undefined) out.minutes = minutes
+  // A boolean, checked as one. `if (r.damped)` would let any truthy value
+  // through and write `damped: true` for a string the sender never meant as a
+  // flag — the same reason `num()` refuses a non-finite number rather than
+  // coercing it.
+  if (r.damped === true) out.damped = true
 
   if (Array.isArray(r.units)) {
     out.units = r.units

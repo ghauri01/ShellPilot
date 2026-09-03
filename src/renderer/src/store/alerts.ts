@@ -170,16 +170,77 @@ const HISTORY_LIMIT = 500
 let hydrated = true
 let hydrating: Promise<void> | null = null
 
-/**
- * How far back the flap counter looks. Stage 2's damping rule is stated at
- * `damped()`; this is only how much history it is allowed to see, and it is
- * also what bounds the list, so a host that genuinely oscillates for a week
- * does not accumulate a week of timestamps.
- */
-const FLAP_WINDOW_MS = 60 * 60 * 1000
+// ---------------------------------------------------------------------------
+// Flap damping.
+//
+// RECOVER_MARGIN handles a host sitting ON the line: a resolve only registers
+// five points below it, so an alert cannot oscillate on the noise in a single
+// reading. Nothing handled a host that crosses CLEANLY and repeatedly — down
+// through the whole recovery margin and back over the line, over and over. Each
+// of those crossings is, correctly, a new incident by every rule 19a wrote, and
+// forty of them overnight is the outcome the roadmap says would be worse than
+// not shipping the feature at all, because the only defence left to the reader
+// is the mute button.
+//
+// THE RULE. Five clean crossings of one server+kind within six hours means the
+// signal is oscillating rather than reporting. The fifth says so out loud and is
+// the last thing said about that server+kind until it has gone six hours
+// without crossing the line again.
+//
+// Why it is written that way, one clause at a time:
+//
+//  * Only CLEAN CROSSINGS count — a sample where the condition became true
+//    having been false. The "still going" repeats do not, and that distinction
+//    is load-bearing rather than tidy: CPU's repeat window is sixty seconds, so
+//    counting repeats would damp a genuinely pegged processor after five
+//    minutes. Flapping is defined as crossing repeatedly, so crossings are
+//    literally what is counted.
+//  * A crossing is read off the CONDITION, not off whether we spoke. Reading it
+//    off the notification state would stop the counter the moment damping began
+//    — a damped host would look like it had settled — and the whole rule needs
+//    to keep watching a host it has stopped talking about.
+//  * FIVE, because a crossing is already expensive to earn: a full round trip
+//    through the five-point recovery margin plus the kind's MIN_GAP floor. Four
+//    in six hours is a host having a bad afternoon; five is a signal that has
+//    stopped tracking anything a person can act on.
+//  * QUIET UNTIL SIX HOURS WITHOUT A CROSSING, rather than a fixed six hours
+//    from the trip. A fixed period is a metronome: forty crossings overnight
+//    become one burst of five every six hours, which is ten messages rather
+//    than forty and still nothing anybody wants. Refreshing on each crossing
+//    makes the damp end when the flapping ends, which is the honest condition,
+//    and turns forty overnight into five.
+//
+// The cost, stated rather than hidden: a host that crosses five times and then
+// settles into a genuinely sustained problem is silent for six hours. It keeps
+// its status-bar chip, every crossing is in the inbox, and escalation still
+// speaks — a value five points worse than the figure last announced is monotone
+// movement, which is the one shape a flap never has. That is the trade the
+// roadmap asks for, in the direction it asks for it.
+// ---------------------------------------------------------------------------
 
-/** Raise timestamps per server+kind, oldest first. Bounded by FLAP_WINDOW_MS. */
+const FLAP_WINDOW_MS = 6 * 60 * 60 * 1000
+const FLAP_CROSSINGS = 5
+const FLAP_DAMP_MS = 6 * 60 * 60 * 1000
+
+/** Clean-crossing timestamps per server+kind, oldest first. Bounded by
+ *  FLAP_WINDOW_MS, and emptied when a damp trips. */
 const raiseTimes = new Map<string, number[]>()
+
+/** When each damped server+kind may speak again. Refreshed by every crossing
+ *  that happens while it is damped. */
+const dampedUntil = new Map<string, number>()
+
+/**
+ * Whether the condition was true on the last sample, per server+kind.
+ *
+ * The crossing detector, and deliberately not the status-bar chip even though
+ * the two move together: the chip is in-memory on purpose, so at startup it
+ * says nothing held, and a chronically full disk would look like it crossed
+ * afresh at every launch. This set is seeded from the durable outstanding
+ * alarms instead, so a disk that was full when the app closed and is full when
+ * it opens has not crossed anything.
+ */
+const conditionHeld = new Set<string>()
 
 function record(
   kind: AlertKind,
@@ -200,27 +261,29 @@ function record(
 }
 
 /**
- * Rebuild the maps from the log. Rows are newest-first.
+ * Rebuild the maps from the log.
  *
- * Only the NEWEST row per server+kind decides the outstanding state, because
- * that is what the maps hold: one entry each. Older rows are read only for the
- * flap counter, which is a count over a window rather than a latest-wins fact.
+ * A chronological REPLAY rather than a latest-row-wins scan, because two of the
+ * five things being rebuilt are not latest-wins facts. The flap counter is a
+ * count of clean crossings over a window, and whether a crossing was clean
+ * depends on what preceded it — so the rows have to be walked in the order they
+ * happened, applying exactly the transitions evaluate() applies. Rows arrive
+ * newest-first; reversing preserves the store's tie-break inside one
+ * millisecond, which a raise followed immediately by a stand-down produces.
  *
- * Exported for the restart tests, which are the only way to prove this without
- * relaunching an app.
+ * Exported for the restart tests, which are the only way to prove any of this
+ * without relaunching an app.
  */
 export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
-  const seen = new Set<string>()
-  for (const row of rows) {
+  for (const row of [...rows].reverse()) {
     const k = key(row.serverId, row.kind)
     if (row.event === 'raised') {
-      const times = raiseTimes.get(k)
-      if (times) times.unshift(row.at)
-      else raiseTimes.set(k, [row.at])
-    }
-    if (seen.has(k)) continue
-    seen.add(k)
-    if (row.event === 'raised') {
+      // A crossing is CLEAN when nothing was outstanding — the same test
+      // evaluate() calls `reRaised`, and for the same reason: a "still going"
+      // repeat is not a crossing, and counting repeats would damp a sustained
+      // alert rather than a flapping one.
+      if (!conditionHeld.has(k)) noteCrossing(k, row.at)
+      conditionHeld.add(k)
       lastNotified.set(k, row.at)
       // `undefined` here is the re-raise bypass, so a raise whose value did not
       // survive the whitelist must NOT land as "nothing outstanding" — it would
@@ -236,6 +299,9 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       lastNotified.delete(k)
       lastNotifiedValue.delete(k)
       announced.delete(k)
+      conditionHeld.delete(k)
+      raiseTimes.delete(k)
+      dampedUntil.delete(k)
     } else {
       // A resolve leaves the repeat window in place and clears the escalation
       // memory — exactly what evaluate()'s `!over` branch does, for the reason
@@ -244,38 +310,41 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       lastNotified.set(k, row.at)
       lastNotifiedValue.delete(k)
       announced.delete(k)
+      conditionHeld.delete(k)
     }
-  }
-  // Oldest first, and only as far back as the counter is allowed to look. The
-  // newest row in the log is the clock here rather than Date.now(): a log read
-  // at launch is history, and an hour "ago" measured from now would throw away
-  // the very crossings that prove a host was flapping when the app closed.
-  const newest = rows.length > 0 ? Math.max(...rows.map((r) => r.at)) : 0
-  for (const [k, times] of raiseTimes) {
-    const kept = times.filter((t) => newest - t < FLAP_WINDOW_MS).sort((a, b) => a - b)
-    if (kept.length === 0) raiseTimes.delete(k)
-    else raiseTimes.set(k, kept)
   }
 }
 
 /**
- * Read the durable state back. Called once, from FleetWatcher.
+ * Count one clean crossing. Returns true if this is the one that trips the damp.
  *
- * Until it settles, evaluate() updates chips but says nothing out loud: a
- * notification sent before the log is read is a notification that ignores it,
- * and the whole point is that a six-hour window survives a restart. Nothing is
- * lost by waiting — an alert still over the line is still over the line on the
- * next sample, and `due` will be true then.
- *
- * It settles on failure too. A build with no bridge, or a machine where the
- * history store is disabled, must alert exactly as it did before this existed.
+ * The list is trimmed to the window on the way in, so a host that oscillates
+ * for a week does not accumulate a week of timestamps, and emptied on a trip,
+ * so the six hours of quiet are counted from the trip rather than from whatever
+ * happened to still be in the list.
  */
-/** Remember that we raised, for the flap counter. Trimmed to the window so the
- *  list cannot grow with the uptime of a host that genuinely oscillates. */
-function noteRaise(k: string, now: number): void {
+function noteCrossing(k: string, now: number): boolean {
   const times = (raiseTimes.get(k) ?? []).filter((t) => now - t < FLAP_WINDOW_MS)
   times.push(now)
-  raiseTimes.set(k, times)
+  if (times.length < FLAP_CROSSINGS) {
+    raiseTimes.set(k, times)
+    return false
+  }
+  raiseTimes.delete(k)
+  dampedUntil.set(k, now + FLAP_DAMP_MS)
+  return true
+}
+
+/** Whether this server+kind is currently damped. Expiry is lazy: a damp read
+ *  back from a log three days old is simply over. */
+function isDamped(k: string, now: number): boolean {
+  const until = dampedUntil.get(k)
+  if (until === undefined) return false
+  if (now >= until) {
+    dampedUntil.delete(k)
+    return false
+  }
+  return true
 }
 
 export function hydrateAlerts(): Promise<void> {
@@ -388,6 +457,16 @@ function evaluate(
     // yet know whether we hold. One sample later the answer is on hand.
     if (!hydrated) return
 
+    conditionHeld.delete(k)
+
+    // Damped: the crossing is real, the chip has already followed it, and the
+    // durable log records it. What is suppressed is the talking, and that has
+    // to include the all-clear — half of a flap's noise is all-clears. The
+    // outstanding alarm and the escalation memory are left standing on purpose,
+    // so the endpoint's view is one raise, then silence, then whichever of a
+    // repeat or an all-clear is true when the damp ends.
+    if (isDamped(k, now)) return
+
     // The all-clear, once, and only if the endpoint is holding an alarm from
     // us. Without this gate a host crossing the line repeatedly without ever
     // earning a new raise posts a "resolved" on each crossing — a stream of
@@ -454,6 +533,23 @@ function evaluate(
   // up, which is the part that must not wait.
   if (!hydrated) return
 
+  // The crossing counter, which runs whether or not anything is said. See the
+  // damping rule above for why it is read off the condition rather than off the
+  // notification state: a damped host that is still flapping has to go on
+  // looking like a damped host that is still flapping.
+  //
+  // Refreshing an existing damp happens HERE, before any of the gates below,
+  // because a damped host that goes on crossing has to keep the damp alive
+  // even though nothing is said about it. Counting the crossing towards a NEW
+  // damp waits until we know we are actually going to speak — a crossing
+  // swallowed by MIN_GAP was never announced, and a rule that counted it could
+  // trip a damp whose own announcement nobody ever saw.
+  const crossing = !conditionHeld.has(k)
+  if (crossing) {
+    conditionHeld.add(k)
+    if (isDamped(k, now)) dampedUntil.set(k, now + FLAP_DAMP_MS)
+  }
+
   const last = lastNotified.get(k) ?? 0
   const said = lastNotifiedValue.get(k)
   const reRaised = said === undefined
@@ -461,17 +557,32 @@ function evaluate(
   const due = now - last >= REPEAT[kind]
   if (!reRaised && !worsened && !due) return
   if (now - last < MIN_GAP[kind]) return
+  // Escalation is the one thing a damp does not stop. A value five points worse
+  // than the figure last announced is monotone movement, and monotone movement
+  // is the one shape a flap never has.
+  if (!worsened && isDamped(k, now)) return
+  // The crossing that trips the damp is still announced — that message is what
+  // tells a person the feature has gone quiet on purpose.
+  const tripped = crossing && noteCrossing(k, now)
   lastNotified.set(k, now)
   lastNotifiedValue.set(k, value)
   announced.set(k, { serverId, serverName, kind })
-  noteRaise(k, now)
   record(kind, 'raised', { serverId, serverName, value, threshold, at: now })
 
   const mins = existing ? Math.round((now - existing.since) / 60000) : 0
   const forHow = mins >= 1 ? ` for ${mins} min` : ''
+  // Damping is announced, never silent. A feature that quietly stops talking is
+  // indistinguishable from one that has broken, and the person who needs to
+  // know an alert is being damped is exactly the person about to mute it.
+  const dampHours = Math.round(FLAP_DAMP_MS / 3_600_000)
+  const quiet = tripped
+    ? ` This has crossed the line ${FLAP_CROSSINGS} times in ${dampHours} hours, so nothing further ` +
+      `will be said about it until it has gone ${dampHours} hours without crossing again. ` +
+      `The Alerts tab still lists every crossing.`
+    : ''
   void window.shellpilot?.notify.show(
     `${serverName}: ${LABEL[kind]} at ${fmt(value)}%`,
-    `${SUBJECT[kind]} has been ${OVER_WORD[kind]} ${threshold}%${forHow}.`
+    `${SUBJECT[kind]} has been ${OVER_WORD[kind]} ${threshold}%${forHow}.${quiet}`
   )
   // Same repeat window as the desktop notification, so the endpoint sees the
   // same cadence a person does rather than one message per sample.
@@ -485,7 +596,11 @@ function evaluate(
     at: new Date(now).toISOString(),
     value: fmt(value),
     threshold,
-    ...(mins >= 1 ? { minutes: mins } : {})
+    ...(mins >= 1 ? { minutes: mins } : {}),
+    // The endpoint has to be told too, and for a stronger reason than the
+    // desktop does: an endpoint that stops receiving has no way to tell "damped"
+    // from "ShellPilot died".
+    ...(tripped ? { damped: true } : {})
   })
 }
 
@@ -583,6 +698,12 @@ onServerForgotten((serverId) => {
   for (const k of [...raiseTimes.keys()]) {
     if (k.startsWith(`${serverId}:`)) raiseTimes.delete(k)
   }
+  for (const k of [...dampedUntil.keys()]) {
+    if (k.startsWith(`${serverId}:`)) dampedUntil.delete(k)
+  }
+  for (const k of [...conditionHeld]) {
+    if (k.startsWith(`${serverId}:`)) conditionHeld.delete(k)
+  }
 })
 
 // Switching alerts off has to take the chips with it.
@@ -615,6 +736,8 @@ useApp.subscribe((s, prev) => {
     lastNotifiedValue.clear()
     announced.clear()
     raiseTimes.clear()
+    dampedUntil.clear()
+    conditionHeld.clear()
   }
 })
 
@@ -669,6 +792,8 @@ export function resetAlertsForTests(): void {
   lastNotifiedValue.clear()
   announced.clear()
   raiseTimes.clear()
+  dampedUntil.clear()
+  conditionHeld.clear()
   failedUnits.clear()
   hydrated = true
   hydrating = null
