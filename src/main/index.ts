@@ -1554,7 +1554,7 @@ const jobRunner = new JobRunner({
 // "When this alert fires, run that job, then call that webhook."
 //
 // Constructed HERE and nowhere else, the same single-construction-site rule
-// tests/jobsNotExposed.test.ts asserts about `new JobRunner(` — a second engine
+// tests/jobsNotExposed.test.ts asserts about the job runner — a second engine
 // would be a second idea of what a rule may do. Everything it acts with is
 // injected, so the engine itself holds no executor, no credential and no
 // webhook URL:
