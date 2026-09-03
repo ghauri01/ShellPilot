@@ -498,3 +498,14 @@ from the one being recorded.
 Not rewritten. Another agent was mid-task on this branch when the finding landed, and
 rewriting history under a live worker risks destroying real work to fix a bisect boundary.
 The tip is green; the record of the mistake is more useful than a tidy history.
+
+**Audited rather than assumed.** "Probably only that one" is not a safe inference about a
+failure mode that was invisible to every check being run, so every commit on this branch was
+built from a scratch clone at that commit — the method described above, applied. Twenty-five
+of twenty-six compile clean on both the node and web configurations; `1f9bef5` is the only
+one that does not, and nothing was hiding behind it. The damage is one bisect boundary rather
+than a stretch of history.
+
+The audit is cheap enough to keep: clone at the commit, symlink `node_modules`, run the two
+typechecks. About twenty seconds each, and it is the only check that measures the artifact
+being recorded rather than the one on disk.
