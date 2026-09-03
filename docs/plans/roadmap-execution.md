@@ -199,3 +199,18 @@ authoritative is still a claim, and this one was false.
 unreachable-false, and said so rather than presenting it as working. Another dropped a test
 it had written because the test passed with or without the fix. Both are the right
 instinct; both went to the adversarial pass rather than being quietly resolved.
+
+### The CI bump, verified rather than assumed
+
+Moving the workflows from Node 20 to 24 was a prerequisite for the store — `node:sqlite`
+does not exist before 22.5 — but it was a config change made blind, since this machine
+runs 22.23.1 and nothing in the repository exercises a Node 24 toolchain.
+
+Checked properly against Node 26.7.0, which is a stronger test than 24 and was already on
+the machine: `node:sqlite` exports the same surface, the full suite passes (2235 passed,
+31 skipped), and `npm run build` completes clean through electron-vite and the esbuild CLI
+bundle. The only output is the pre-existing set of dynamic-versus-static import warnings,
+which are unchanged from Node 22.
+
+That closes the risk. A version bump in a workflow file is invisible until a release fails,
+and this one gated the whole of wave 2.
