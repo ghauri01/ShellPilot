@@ -77,6 +77,15 @@ function ActorIcon({ actor }: { actor: ChangeLogActor }): React.JSX.Element {
 }
 
 export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.Element {
+  // The store keeps a server ID on an event and nothing else, and a year later
+  // a uuid is not a host. Main does not hold the workspace's server list — the
+  // renderer does — so the name is resolved here, and a host that has since
+  // been removed falls back to the id rather than to nothing. An empty cell
+  // would read as "no host", which is the wrong fact.
+  const nameOf = useCallback(
+    (id: string): string => servers.find((s) => s.id === id)?.name ?? id,
+    [servers]
+  )
   const [windowId, setWindowId] = useState('7d')
   const [actor, setActor] = useState<ChangeLogActor | 'any'>('any')
   const [kind, setKind] = useState<ChangeLogKind | 'any'>('any')
@@ -254,7 +263,12 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
                   <div className="col grow" style={{ gap: 2 }}>
                     <div>
                       <b>{ACTOR_LABEL[e.actor]}</b> · {e.summary}
-                      {e.hosts.length > 0 && <span className="faint"> · {e.hosts.join(', ')}</span>}
+                      {(e.hosts.length > 0 || e.hostId !== null) && (
+                        <span className="faint">
+                          {' '}
+                          · {(e.hosts.length > 0 ? e.hosts : [nameOf(e.hostId!)]).join(', ')}
+                        </span>
+                      )}
                     </div>
                     {e.detail.length > 0 && (
                       <div className="mono faint" style={{ fontSize: 11 }}>

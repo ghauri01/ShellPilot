@@ -228,6 +228,24 @@ describe('the timeline', () => {
     expect(text).toContain('systemctl restart nginx')
   })
 
+  it('names a host the store only knew by id, and falls back to the id when it is gone', async () => {
+    // main does not hold the workspace's server list, so a history event
+    // reaches the panel with a uuid on it. Rendering the uuid is bad; rendering
+    // nothing is worse, because an empty cell reads as "no host".
+    stub(() =>
+      page({
+        entries: [
+          entry({ id: 'known', actor: 'system', summary: 'host-unreachable', hostId: 'srv-2' }),
+          entry({ id: 'gone', actor: 'system', summary: 'host-recovered', hostId: 'srv-removed' })
+        ]
+      })
+    )
+    render(<ChangeLogPanel servers={SERVERS} />)
+    const text = (await screen.findByTestId('changelog-entries')).textContent ?? ''
+    expect(text).toContain('host-unreachable · db-01')
+    expect(text).toContain('host-recovered · srv-removed')
+  })
+
   it('says when a host filter hid rows that name no host', async () => {
     stub(() => page({ entries: [entry()], hostFilterHidUnattributed: 3 }))
     render(<ChangeLogPanel servers={SERVERS} />)
