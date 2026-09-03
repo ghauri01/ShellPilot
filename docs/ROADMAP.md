@@ -1105,6 +1105,24 @@ non-negotiable: never remove the key the current session is authenticated with, 
 second independent session succeeds before committing the change, and always leave a timestamped
 backup of the previous file on the host.
 
+**Shipped, and narrower than the item's title.** The read half answers the question this
+item exists for across the whole estate. The write half does not: the staged write resolves
+`$HOME/.ssh/authorized_keys` on the host, so one approved command covers a selection — and can
+therefore only ever edit the **connecting account's** file. A revoke aimed at another account
+is refused rather than silently rewriting the wrong file, which would fail the count check,
+change nothing, and report the wrong reason for having done nothing.
+
+Combined with rule 1, which needs sshd to report the session key, revoke works on the
+connecting account on hosts with `ExposeAuthInfo` enabled. That is a real capability and it is
+not "fleet key management" in the sense the panel's title suggests. Widening it means a
+per-account staged write and therefore a per-account approval, which is a different shape of
+job, not a bigger loop.
+
+Two follow-ons, both small and both named so they are decisions rather than oversights: the
+panel must state the scope before an operator selects a target, and a key revoke — the most
+audit-worthy write in the application — currently leaves **no approval-log row**, because
+`recordJobApproval`'s surface vocabulary has no value for it.
+
 **Size.** 2–3 weeks, of which the read half is one.
 
 ---
