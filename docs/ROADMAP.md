@@ -695,9 +695,12 @@ someone's disk fills. A tool that alerts on disk pressure must not become a caus
 
 Measured, not estimated: the naive schema is 730 MB a year, and 1.27 GB if a separate
 index is added. Seven days at full resolution plus eighty-three days of hourly
-average/min/max, then dropped, holds **20.7 MB in steady state and never grows**. Ship the
-retention pass on day one; a store that only gains a retention rule after someone complains
-has already written the year of rows.
+average/min/max, then dropped, holds **~16 MB in the database in steady state and never
+grows** — 19.1 bytes a row, measured on the checkpointed primary, times 843,840 rows. Call
+it **~32 MB on disk**: a full `.bak` is taken at every clean launch, so the steady state is
+the database twice, and `historyBytes()` counts both because that is what the user's disk
+gives up. Ship the retention pass on day one; a store that only gains a retention rule after
+someone complains has already written the year of rows.
 
 The `localPty.ts` discipline still applies even without a native module: import lazily
 behind an interface, keep a kill switch, and let a machine where the store will not open

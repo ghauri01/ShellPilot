@@ -46,11 +46,16 @@ type Sampler = (key: string, cfg: FleetTarget['cfg']) => Promise<{ ok: boolean; 
  * tests hand over nothing.
  */
 export interface HistoryWriter {
-  transaction<T>(fn: () => T): T
+  transaction<T>(fn: () => T & (T extends PromiseLike<unknown> ? never : unknown)): T
   recordSamples(hostId: string, at: number, values: Record<string, number>): void
   upsertFact(hostId: string, key: string, value: string, at: number): unknown
   retireFacts(hostId: string, at: number, prefix: string, keep: Iterable<string>): number
   recordEvent(kind: string, hostId: string | null, payload?: unknown, at?: number): void
+  /** Read, because reachability has to survive a restart — see seedReachable.
+   *  Optional: this interface is the WRITE slice the sampler needs, and a
+   *  double that only records is still a valid one. A writer without it simply
+   *  starts each session with no memory of who was down. */
+  readEvents?(filter: { hostId?: string; kind?: string; limit?: number }): { ts: number }[]
 }
 
 /**
@@ -225,6 +230,11 @@ export class FleetSampler {
   private cfg: FleetSamplerConfig = { enabled: false, intervalMs: FLEET_INTERVAL_MIN_MS, targets: [] }
   private timer: ReturnType<typeof setTimeout> | null = null
   private sweeping = false
+  // The sweep currently in flight, so dispose() can hand a caller something to
+  // wait on. A sweep persists in its finally, and main/index.ts closes the
+  // store right after dispose() returns — without this the last sweep of every
+  // session lands after the close and is dropped.
+  private inFlight: Promise<void> | null = null
   // Set when a scheduled run was refused because a sweep was already going.
   // Without it, that refusal loses the obligation to reschedule and the loop
   // stops for good. See sweep().
@@ -246,8 +256,48 @@ export class FleetSampler {
   // question that turns a permanent failure into one event instead of one per
   // sweep forever. Bounded by the same target list.
   private reachable = new Map<string, boolean>()
+  // Servers whose last known reachability has already been looked up in the
+  // store. Once per server per process: the in-memory map is the answer after
+  // that, and a lookup on every sweep would be two reads per host forever.
+  private seeded = new Set<string>()
 
   constructor(private readonly deps: FleetSamplerDeps) {}
+
+  /**
+   * Recover what the last session knew about one server's reachability.
+   *
+   * `reachable` is in-memory, so without this the sequence "host goes down, app
+   * restarts, host is still down" raises host-unreachable a second time — and,
+   * because the transition it thinks it saw is undefined->false rather than
+   * true->false, never emits the matching host-recovered when the host comes
+   * back. An alert that can be raised twice and closed never.
+   *
+   * Best-effort by construction, like every other use of the store here: a
+   * missing or throwing store leaves the map exactly as it was.
+   */
+  private seedReachable(serverId: string): void {
+    if (this.seeded.has(serverId)) return
+    this.seeded.add(serverId)
+    try {
+      const store = this.deps.history?.()
+      if (!store) {
+        // Not seeded after all — the store may open later in this session.
+        this.seeded.delete(serverId)
+        return
+      }
+      if (!store.readEvents) return
+      const last = (kind: string): number | undefined =>
+        store.readEvents?.({ hostId: serverId, kind, limit: 1 })[0]?.ts
+      const down = last('host-unreachable')
+      const up = last('host-recovered')
+      if (down === undefined) return
+      // A recovery newer than the outage means it was up when we last looked;
+      // no recovery at all, or an older one, means it was down.
+      this.reachable.set(serverId, up !== undefined && up > down)
+    } catch (err) {
+      console.error('[fleet] could not read last known reachability (not fatal):', err)
+    }
+  }
 
   private get now(): number {
     return (this.deps.now ?? Date.now)()
@@ -368,9 +418,15 @@ export class FleetSampler {
    */
   private persist(writes: PendingWrite[]): void {
     if (writes.length === 0) return
-    const store = this.deps.history?.()
-    if (!store) return
     try {
+      // Inside the try, not above it. persist() is called from the sweep's
+      // finally, before `sweeping = false` and before the reschedule — so a
+      // resolver that throws (any future provider that can fail) aborts the
+      // finally, leaves `sweeping` true forever and stops sampling for good
+      // while status() goes on reporting `running`. That is the silent-death
+      // mode the long comment in sweep() exists to prevent, through a new door.
+      const store = this.deps.history?.()
+      if (!store) return
       store.transaction(() => {
         for (const w of writes) {
           if (!w.host) {
@@ -435,6 +491,10 @@ export class FleetSampler {
     this.restartPending = false
     const gen = this.generation
     this.sweeping = true
+    // Published before the first await so a dispose() arriving mid-sweep has
+    // something to hand back to a caller that must not close the store yet.
+    let finished = (): void => undefined
+    this.inFlight = new Promise<void>((resolve) => (finished = resolve))
     const started = this.now
     // Buffered, not written per host: the whole sweep goes into the store in
     // one BEGIN/COMMIT below. Fifteen hosts is ~120 sample rows plus facts, and
@@ -461,6 +521,7 @@ export class FleetSampler {
           // Read BEFORE remember() overwrites it: reachability is a transition,
           // and an event per sweep for a host that has been down since Tuesday
           // is 720 rows a day saying the same thing.
+          if (!this.reachable.has(t.serverId)) this.seedReachable(t.serverId)
           const wasReachable = this.reachable.get(t.serverId)
           if (res.ok && res.data) {
             const host = res.data as HostMetrics
@@ -511,10 +572,25 @@ export class FleetSampler {
           this.schedule(0)
         }
       }
+      this.inFlight = null
+      // Last, so anything awaiting dispose() sees a sweep that has finished
+      // persisting AND finished deciding whether to reschedule.
+      finished()
     }
   }
 
-  dispose(): void {
+  /**
+   * Stop sampling. The returned promise settles once any in-flight sweep has
+   * finished writing what it had already collected.
+   *
+   * Callers that only want the loop stopped can ignore it, exactly as before.
+   * A caller that is about to close the store must await it: dispose() marks
+   * the sweep abandoned, but the sweep still persists what it learned in its
+   * finally, and a store closed before that lands drops those writes — which is
+   * precisely what the comment above historyStore.close() in main/index.ts says
+   * must not happen.
+   */
+  dispose(): Promise<void> {
     this.disposed = true
     this.generation++
     this.stopTimer()
@@ -522,6 +598,8 @@ export class FleetSampler {
     for (const t of this.cfg.targets) this.deps.release(fleetKey(t.serverId))
     this.samples.clear()
     this.reachable.clear()
+    this.seeded.clear()
     if (active === this) active = null
+    return this.inFlight ?? Promise.resolve()
   }
 }

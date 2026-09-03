@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { join } from 'node:path'
-import { chmodSync, copyFileSync, existsSync, renameSync, rmSync, statSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
 
 // A durable store for samples, events and facts — roadmap item A.
 //
@@ -37,10 +37,12 @@ import { chmodSync, copyFileSync, existsSync, renameSync, rmSync, statSync } fro
 // Why retention ships on day one
 // ----------------------------------------------------------------------------
 // Measured: the naive schema is 730 MB a year and climbing. Seven days at full
-// resolution plus eighty-three days of hourly avg/min/max holds ~20 MB in
-// steady state and never grows. A tool that alerts on disk pressure must not
-// become a cause of it, and a store that only gains a retention rule after
-// someone complains has already written the year of rows.
+// resolution plus eighty-three days of hourly avg/min/max holds ~16 MB in the
+// primary at steady state and never grows — call it ~32 MB on disk, because a
+// full .bak is taken at every clean launch and historyBytes counts it. A tool
+// that alerts on disk pressure must not become a cause of it, and a store that
+// only gains a retention rule after someone complains has already written the
+// year of rows.
 //
 // ----------------------------------------------------------------------------
 // Its own file
@@ -76,6 +78,26 @@ export type Facts = Record<string, string>
 export interface SeriesPoint {
   ts: number
   v: number
+  /** Which tier this point came from. A 30-day query returns hourly means and
+   *  two-minute instantaneous readings in one array, and a consumer that cannot
+   *  tell them apart is drawing a mean of thirty samples as if it were a
+   *  reading. 'full' points carry no min/max; there is nothing to average. */
+  res: 'full' | 'hourly'
+  /** Hourly only: the extremes inside the bucket, and how many samples are
+   *  behind the average. Capacity forecasting and threshold backtesting are
+   *  both questions about the max, and the roll-up has always written these —
+   *  they were simply not readable. */
+  min?: number
+  max?: number
+  n?: number
+}
+
+/** Where a page of events ended, so the next page can start there. Two events
+ *  in the same millisecond is what one sweep produces, so a timestamp alone
+ *  either repeats a row forever or skips one; the row id breaks the tie. */
+export interface EventCursor {
+  ts: number
+  id: number
 }
 
 export interface HistoryEvent {
@@ -83,6 +105,8 @@ export interface HistoryEvent {
   kind: string
   hostId: string | null
   payload: unknown
+  /** This row's own position, to be handed back as EventFilter.cursor. */
+  cursor: EventCursor
 }
 
 export interface EventFilter {
@@ -91,6 +115,9 @@ export interface EventFilter {
   from?: number
   to?: number
   limit?: number
+  /** Continue after this row. Events are newest-first, so a cursor means
+   *  "strictly older than this one". */
+  cursor?: EventCursor
 }
 
 export interface HistoryFact {
@@ -115,6 +142,8 @@ export interface RetentionResult {
   hourlyDropped: number
   /** Events dropped for being past the horizon. */
   eventsDropped: number
+  /** Set when the pass refused to run and deleted nothing. See retain(). */
+  skipped?: 'clock-ahead' | 'blast-radius'
 }
 
 /**
@@ -135,8 +164,17 @@ export interface HistoryStore {
    *  "could not see", which is not the same as "there are none". */
   retireFacts(hostId: string, at: number, prefix: string, keep: Iterable<string>): number
   /** One BEGIN/COMMIT around fn. A sweep writes ~120 rows; without this that
-   *  is 120 fsyncs instead of one, and a crash can leave half a sweep. */
-  transaction<T>(fn: () => T): T
+   *  is 120 fsyncs instead of one, and a crash can leave half a sweep.
+   *
+   *  The intersection in the parameter type is what stops `async () => {}`
+   *  compiling. Nothing here awaits, so an async callback would BEGIN, receive
+   *  a pending promise, COMMIT an empty transaction and return — every write
+   *  inside it landing afterwards in autocommit, one fsync each, with no error
+   *  and nothing failing. Worse, `depth` would be back to 0 before the body
+   *  ran, so a nested transaction() inside it would issue a fresh BEGIN and
+   *  commit a partial slice. It is checked again at runtime, because a JS
+   *  caller and a cast both get past the type. */
+  transaction<T>(fn: () => T & (T extends PromiseLike<unknown> ? never : unknown)): T
   /** Fold anything older than the full-resolution horizon into hourly
    *  avg/min/max, then drop what is past the hourly horizon. */
   retain(now?: number): RetentionResult
@@ -147,7 +185,13 @@ export interface HistoryStore {
   /** 'wal' normally; 'truncate' on the Windows portable target. */
   readonly journalMode: string
   readonly sqliteVersion: string
-  /** Set when the primary was unreadable at open: what we did about it. */
+  /** Set when the primary was unreadable at open: what we did about it.
+   *
+   *  main/index.ts both logs this and, when it is not 'none', writes a
+   *  'history-recovery' event into the store itself — a console line in a
+   *  packaged app is not somewhere a user can look, and "why does this fleet
+   *  have no past" is a question the store should be able to answer about
+   *  itself. */
   readonly recovery: 'none' | 'restored-from-backup' | 'started-empty'
   /** Resolves when the .bak taken at open has finished, true if it succeeded.
    *  Startup deliberately does not wait on this; it exists so a caller that
@@ -166,6 +210,38 @@ const DAY_MS = 86_400_000
 export const RETENTION_FULL_DAYS = 7
 /** Hourly buckets are kept for this long in total, then dropped. */
 export const RETENTION_HOURLY_DAYS = 90
+
+// ---------------------------------------------------------------------------
+// Two guards on the retention pass, because every horizon above is derived from
+// wall-clock `now` and a wrong clock is not a rare machine.
+//
+// A VM restored from a snapshot, a dual-boot box with RTC skew, or a dead CMOS
+// battery starts with Date.now() a year ahead, and main/index.ts runs a pass
+// seconds after launch — typically before NTP has stepped the clock back. One
+// committed transaction later the store is empty: no error, no log, and nothing
+// on the next launch to say it happened. The .bak is a pre-session snapshot and
+// does not help. Backwards steps are harmless — earlier cutoffs delete less.
+//
+// So: refuse a pass whose `now` is far ahead of the newest row the store can
+// see, AND refuse one whose deletions would take most of what is there. Both,
+// not either: the first is blind once the sampler has written a single row at
+// the bogus time, and the second cannot tell a small store from a wrong one.
+// ---------------------------------------------------------------------------
+
+/** How far ahead of the newest row `now` may be before a pass is refused. */
+export const RETENTION_CLOCK_GRACE_MS = 2 * 86_400_000
+/** Below this many hourly+event rows the blast-radius guard does not apply: a
+ *  store this small is not the disaster the guard exists for, and a legitimate
+ *  first pass on a nearly-empty store routinely clears most of it. */
+export const RETENTION_GUARD_MIN_ROWS = 1000
+/** Above the floor, one pass may not delete more than this share of the hourly
+ *  and event rows. Steady state drops about a ninetieth of the hourly tier a
+ *  day; anything near half in one pass is a clock, not a horizon.
+ *
+ *  The roll-up is deliberately NOT counted here. Folding samples into hourly
+ *  buckets is what the pass is FOR, and an app that has not run for a fortnight
+ *  legitimately rolls up its whole full-resolution tier on the next launch. */
+export const RETENTION_MAX_DROP_FRACTION = 0.5
 
 /**
  * Steady-state row counts for a given estate, so a test can assert the
@@ -344,6 +420,96 @@ CREATE TABLE IF NOT EXISTS facts (
 
 const SCHEMA_VERSION = '1'
 
+// ---------------------------------------------------------------------------
+// The event read path.
+//
+// `(?1 IS NULL OR e.host = ?1)` looks like one query plan for four filters and
+// is: SCAN e USING INDEX events_ts, for all four. A comparison that might mean
+// "match everything" is not sargable, so events_host_ts was never used by any
+// query in this file — pure write cost — and readEvents({hostId}) walked the
+// whole ts index until it had collected `limit` matches, or the entire table
+// when there were none. Measured, both plans:
+//
+//   old  SCAN e USING INDEX events_ts
+//   new  SEARCH e USING INDEX events_host_ts (host=? AND ts>? AND ts<?)
+//
+// So: four fixed WHERE shapes, each prepared twice (with and without a cursor),
+// and the caller selects one. Every fragment here is a literal in this file —
+// nothing is concatenated from caller input — so the rule that no SQL crosses
+// the boundary is untouched, and the index earns its keep.
+// ---------------------------------------------------------------------------
+
+/** The four filter shapes, in the order readEvents selects them:
+ *  host+kind, host, kind, neither. */
+const EVENT_WHERE = [
+  'e.host = ?1 AND e.kind = ?2',
+  'e.host = ?1',
+  'e.kind = ?2',
+  '1 = 1'
+] as const
+
+/** Wider than any real timestamp, so "no bound" is still a sargable range
+ *  rather than a NULL check. These are the ends of the JS Date range. */
+const TS_MIN = -8_640_000_000_000_000
+const TS_MAX = 8_640_000_000_000_000
+
+function eventQuery(where: string, cursor: boolean): string {
+  return (
+    'SELECT e.ts AS ts, e.rowid AS id, e.kind AS kind, h.host_key AS host_key, e.payload AS payload ' +
+    'FROM events e LEFT JOIN hosts h ON h.id = e.host ' +
+    `WHERE ${where} AND e.ts >= ?3 AND e.ts <= ?4` +
+    // The cursor's timestamp is also folded into ?4 by the caller, so the range
+    // stays sargable and this pair only breaks the tie inside one millisecond.
+    (cursor ? ' AND (e.ts < ?6 OR e.rowid < ?7)' : '') +
+    ' ORDER BY e.ts DESC, e.rowid DESC LIMIT ?5'
+  )
+}
+
+/** Read-only, for the query-plan guard in tests/history.test.ts. Exporting the
+ *  text of this module's own statements is not a query surface: nothing here
+ *  lets a caller pass SQL in, which is the property the better-sqlite3 escape
+ *  hatch depends on. */
+export const EVENT_QUERIES_FOR_TESTS: readonly string[] = EVENT_WHERE.map((w) => eventQuery(w, false))
+
+/** A prefix sweep as a primary-key range rather than a LIKE.
+ *
+ *  Two reasons, and the correctness one is the important one. SQLite's LIKE is
+ *  ASCII case-insensitive while retireFacts' own keep-check is case-sensitive,
+ *  so a `PKG:x` sitting alongside a `pkg:x` matched a `pkg:` sweep, missed the
+ *  keep set that holds `pkg:x`, and was deleted — the wrong row, silently. And
+ *  the plans, measured: LIKE gives `SEARCH facts USING PRIMARY KEY (host=?)`,
+ *  which reads every key that host has, against
+ *  `SEARCH facts USING PRIMARY KEY (host=? AND key>? AND key<?)`. A range is
+ *  case-sensitive like the keep-check, and needs no escaping. */
+const FACTS_PREFIX_QUERY =
+  'SELECT key, value FROM facts WHERE host = ? AND key >= ? AND key < ? ORDER BY key'
+
+/** Read-only, for the same query-plan guard. */
+export const FACTS_PREFIX_QUERY_FOR_TESTS = FACTS_PREFIX_QUERY
+
+/** The exclusive upper bound of every key starting with `prefix`.
+ *
+ *  SQLite compares TEXT byte-wise by default and UTF-8 preserves code-point
+ *  order, so incrementing the prefix's last code point is greater than every
+ *  string that starts with it and less than everything that does not. */
+function prefixUpperBound(prefix: string): string {
+  const cps = Array.from(prefix)
+  const last = cps.length > 0 ? cps[cps.length - 1].codePointAt(0) : undefined
+  if (last === undefined || last >= 0x10ffff) return `${prefix}\u{10FFFF}`
+  // Skip the surrogate range: a lone surrogate has no valid UTF-8 encoding.
+  const next = last + 1 >= 0xd800 && last + 1 <= 0xdfff ? 0xe000 : last + 1
+  return cps.slice(0, -1).join('') + String.fromCodePoint(next)
+}
+
+/** How long a run of changes to one fact is treated as one flapping incident.
+ *
+ *  A unit in a restart loop alternates activating/auto-restart and
+ *  failed/failed, so every sweep is a change: ~65,000 events over ninety days
+ *  for ONE unit, every one of them the same fact saying the same thing. Inside
+ *  this window the changes are folded into the event already written, with a
+ *  count, so the incident is recorded once and its size is not lost. */
+const FLAP_WINDOW_MS = 3_600_000
+
 /**
  * Open the store. NEVER throws: a machine where this will not work gets a null
  * and an app that behaves exactly as it does today.
@@ -370,7 +536,19 @@ function openStore(mod: SqliteModule, path: string): HistoryStore {
   const bak = `${path}.bak`
   let recovery: HistoryStore['recovery'] = 'none'
 
-  let db = mod.DatabaseSync ? new mod.DatabaseSync(path) : null
+  // Every open goes through here so the 0600 lands BEFORE the first write.
+  // The -wal and -shm are created by that write — inside applyPragmas, long
+  // before the old chmod site below the schema — so on the run that CREATES
+  // the store they took the default umask and stayed world-readable for the
+  // whole session. Measured on that path: db 0600, wal 0644, shm 0644, with
+  // the WAL holding megabytes of the same inventory the 0600 is for.
+  const open = (p: string): Db => {
+    const d = new mod.DatabaseSync(p)
+    restrictStore(p)
+    return d
+  }
+
+  let db = mod.DatabaseSync ? open(path) : null
   if (!db) throw new Error('node:sqlite did not return a database')
 
   if (!checkIntegrity(db)) {
@@ -398,7 +576,7 @@ function openStore(mod: SqliteModule, path: string): HistoryStore {
     if (existsSync(bak)) {
       try {
         copyFileSync(bak, path)
-        const retry = new mod.DatabaseSync(path)
+        const retry = open(path)
         if (checkIntegrity(retry)) {
           db = retry
           restored = true
@@ -419,9 +597,10 @@ function openStore(mod: SqliteModule, path: string): HistoryStore {
     }
 
     if (!restored) {
-      // The last rung. An empty store is a real outcome, recorded so a caller
-      // can say so out loud rather than quietly showing a fleet with no past.
-      db = new mod.DatabaseSync(path)
+      // The last rung. An empty store is a real outcome, and main/index.ts
+      // both logs it and records a 'history-recovery' event, rather than
+      // quietly showing a fleet with no past.
+      db = open(path)
       recovery = 'started-empty'
     }
   }
@@ -436,7 +615,8 @@ function openStore(mod: SqliteModule, path: string): HistoryStore {
   const seedMetric = db.prepare('INSERT OR IGNORE INTO metric_names (id, name) VALUES (?, ?)')
   for (let i = 0; i < METRICS.length; i++) seedMetric.run(i + 1, METRICS[i])
 
-  restrictPermissions(path)
+  // Again, now that the journal mode has created the sidecars.
+  restrictStore(path)
 
   const sqliteVersion = String(
     (db.prepare('SELECT sqlite_version() AS v').get() as { v?: string } | undefined)?.v ?? 'unknown'
@@ -534,6 +714,14 @@ function restrictPermissions(file: string): void {
   }
 }
 
+/** The database and both sidecars. The WAL is not a lesser file: between
+ *  checkpoints it holds the same rows, and it is measured in megabytes. */
+function restrictStore(path: string): void {
+  restrictPermissions(path)
+  restrictPermissions(`${path}-wal`)
+  restrictPermissions(`${path}-shm`)
+}
+
 function buildStore(
   db: Db,
   info: {
@@ -557,19 +745,17 @@ function buildStore(
       'SELECT ts, v FROM samples WHERE host = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts'
     ),
     hourlyRead: db.prepare(
-      'SELECT ts, v_avg AS v FROM samples_hourly WHERE host = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts'
+      'SELECT ts, v_avg AS v, v_min AS mn, v_max AS mx, n AS n FROM samples_hourly ' +
+        'WHERE host = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts'
     ),
     eventInsert: db.prepare('INSERT INTO events (ts, kind, host, payload) VALUES (?, ?, ?, ?)'),
-    // One statement, not a builder: every filter field is expressed as a
-    // NULL-means-any comparison so there is exactly one query plan and no
-    // string concatenation anywhere near user input.
-    eventRead: db.prepare(
-      'SELECT e.ts AS ts, e.kind AS kind, h.host_key AS host_key, e.payload AS payload ' +
-        'FROM events e LEFT JOIN hosts h ON h.id = e.host ' +
-        'WHERE (?1 IS NULL OR e.host = ?1) AND (?2 IS NULL OR e.kind = ?2) ' +
-        'AND (?3 IS NULL OR e.ts >= ?3) AND (?4 IS NULL OR e.ts <= ?4) ' +
-        'ORDER BY e.ts DESC LIMIT ?5'
-    ),
+    // Rewrites the event a run of flapping is being folded into. See
+    // FLAP_WINDOW_MS.
+    eventRewrite: db.prepare('UPDATE events SET ts = ?, payload = ? WHERE rowid = ?'),
+    // Eight fixed statements — four filter shapes, with and without a cursor —
+    // built from literals in this file. See the note above EVENT_WHERE.
+    eventRead: EVENT_WHERE.map((w) => db.prepare(eventQuery(w, false))),
+    eventReadFrom: EVENT_WHERE.map((w) => db.prepare(eventQuery(w, true))),
     factGet: db.prepare('SELECT value, first_seen FROM facts WHERE host = ? AND key = ?'),
     factInsert: db.prepare(
       'INSERT INTO facts (host, key, value, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)'
@@ -579,11 +765,10 @@ function buildStore(
     factsRead: db.prepare(
       'SELECT key, value, first_seen, last_seen FROM facts WHERE host = ? ORDER BY key'
     ),
-    factsByPrefix: db.prepare(
-      // LIKE with an explicit ESCAPE: a unit named "foo_bar" would otherwise
-      // match on the underscore wildcard and be retired by accident.
-      "SELECT key, value FROM facts WHERE host = ? AND key LIKE ? ESCAPE '\\'"
-    ),
+    factsByPrefix: db.prepare(FACTS_PREFIX_QUERY),
+    // An empty prefix means "every fact for this host", which has no upper
+    // bound to compute.
+    factsAll: db.prepare('SELECT key, value FROM facts WHERE host = ? ORDER BY key'),
     factDelete: db.prepare('DELETE FROM facts WHERE host = ? AND key = ?'),
     // Retention.
     rollup: db.prepare(
@@ -605,7 +790,13 @@ function buildStore(
     countSamples: db.prepare('SELECT count(*) AS n FROM samples'),
     countHourly: db.prepare('SELECT count(*) AS n FROM samples_hourly'),
     countEvents: db.prepare('SELECT count(*) AS n FROM events'),
-    countFacts: db.prepare('SELECT count(*) AS n FROM facts')
+    countFacts: db.prepare('SELECT count(*) AS n FROM facts'),
+    // The retention guards: the newest row this store can see, and how much a
+    // pass would actually delete. Both answered before anything is written.
+    newestSample: db.prepare('SELECT max(ts) AS n FROM samples'),
+    newestHourly: db.prepare('SELECT max(ts) AS n FROM samples_hourly'),
+    doomedHourly: db.prepare('SELECT count(*) AS n FROM samples_hourly WHERE ts < ?'),
+    doomedEvents: db.prepare('SELECT count(*) AS n FROM events WHERE ts < ?')
   }
 
   const metricIds = new Map<Metric, number>(METRICS.map((m, i) => [m, i + 1]))
@@ -634,6 +825,28 @@ function buildStore(
 
   let closed = false
   let depth = 0
+  let droppedAfterClose = 0
+
+  /** A write that arrives after close() is dropped — the last sweep of a
+   *  session routinely does, because dispose() hands the store back before the
+   *  in-flight sweep has finished. It is allowed to be dropped. It is not
+   *  allowed to be dropped in silence: that is the difference between a known
+   *  cost and a mystery gap at the end of every session. */
+  const droppedWrite = (what: string): boolean => {
+    if (!closed) return false
+    droppedAfterClose++
+    // Capped, so a sampler that keeps writing cannot flood the log.
+    if (droppedAfterClose <= 3) {
+      console.error(
+        `[history] ${what} arrived after the store was closed and was dropped` +
+          `${droppedAfterClose === 3 ? ' (further drops will not be logged)' : ''}`
+      )
+    }
+    return true
+  }
+
+  /** Only ever grows to the number of facts changing inside one window. */
+  const flapping = new Map<string, { id: number; since: number; from: string; count: number }>()
 
   const store: HistoryStore = {
     path: info.path,
@@ -643,7 +856,7 @@ function buildStore(
     backupReady: info.backupReady,
 
     recordSamples(hostId, at, values) {
-      if (closed) return
+      if (droppedWrite('a sample')) return
       const host = internHost(hostId)
       // Snapped to the second. Two sweeps cannot then collide on the primary
       // key unless they are genuinely the same instant, and the ts column
@@ -668,19 +881,36 @@ function buildStore(
       // Anything older than the full-resolution horizon lives in the hourly
       // tier. A caller asking for a 30-day range gets one series, not a hole
       // where the downsampling starts — that hole is exactly the bug a
-      // two-table store invites.
-      const hourly = st.hourlyRead.all(host, m, from, to) as { ts: number; v: number }[]
+      // two-table store invites. Each point says which tier it came from, and
+      // an hourly point carries the min, max and sample count behind its mean:
+      // all three are written on every roll-up and were simply not readable.
+      const hourly = st.hourlyRead.all(host, m, from, to) as {
+        ts: number
+        v: number
+        mn: number
+        mx: number
+        n: number
+      }[]
       const seen = new Set(full.map((r) => Number(r.ts)))
-      const merged = [
-        ...hourly.filter((r) => !seen.has(Number(r.ts))).map((r) => ({ ts: Number(r.ts), v: Number(r.v) })),
-        ...full.map((r) => ({ ts: Number(r.ts), v: Number(r.v) }))
+      const merged: SeriesPoint[] = [
+        ...hourly
+          .filter((r) => !seen.has(Number(r.ts)))
+          .map((r) => ({
+            ts: Number(r.ts),
+            v: Number(r.v),
+            res: 'hourly' as const,
+            min: Number(r.mn),
+            max: Number(r.mx),
+            n: Number(r.n)
+          })),
+        ...full.map((r) => ({ ts: Number(r.ts), v: Number(r.v), res: 'full' as const }))
       ]
       merged.sort((a, b) => a.ts - b.ts)
       return merged
     },
 
     recordEvent(kind, hostId, payload, at) {
-      if (closed) return
+      if (droppedWrite(`a '${kind}' event`)) return
       const host = hostId === null || hostId === undefined ? null : internHost(hostId)
       let json: string | null = null
       if (payload !== undefined) {
@@ -700,23 +930,47 @@ function buildStore(
       // A hostId that was never recorded means "no events for it", not "every
       // event". Returning the whole table there would be a quiet lie.
       if (filter.hostId !== undefined && host === null) return []
-      const rows = st.eventRead.all(
-        host,
-        filter.kind ?? null,
-        filter.from ?? null,
-        filter.to ?? null,
-        Math.max(1, Math.min(10_000, filter.limit ?? 500))
-      ) as { ts: number; kind: string; host_key: string | null; payload: string | null }[]
+      // Which of the four fixed statements answers this filter.
+      const byHost = host !== null
+      const byKind = filter.kind !== undefined
+      const which = byHost && byKind ? 0 : byHost ? 1 : byKind ? 2 : 3
+      const limit = Math.max(1, Math.min(10_000, filter.limit ?? 500))
+      const to = filter.to ?? TS_MAX
+      const from = filter.from ?? TS_MIN
+      const cursor = filter.cursor
+      const rows = (
+        cursor
+          ? // The cursor's timestamp narrows the range bound as well as
+            // breaking the tie, so paging stays one index seek rather than
+            // re-reading everything newer than the cursor each time.
+            st.eventReadFrom[which].all(
+              host,
+              filter.kind ?? null,
+              from,
+              Math.min(to, cursor.ts),
+              limit,
+              cursor.ts,
+              cursor.id
+            )
+          : st.eventRead[which].all(host, filter.kind ?? null, from, to, limit)
+      ) as {
+        ts: number
+        id: number
+        kind: string
+        host_key: string | null
+        payload: string | null
+      }[]
       return rows.map((r) => ({
         ts: Number(r.ts),
         kind: String(r.kind),
         hostId: r.host_key ?? null,
-        payload: r.payload === null ? undefined : safeParse(r.payload)
+        payload: r.payload === null ? undefined : safeParse(r.payload),
+        cursor: { ts: Number(r.ts), id: Number(r.id) }
       }))
     },
 
     upsertFact(hostId, key, value, at) {
-      if (closed) return 'unchanged'
+      if (droppedWrite(`a fact (${key})`)) return 'unchanged'
       const host = internHost(hostId)
       const existing = st.factGet.get(host, key) as
         | { value?: string; first_seen?: number }
@@ -735,7 +989,45 @@ function buildStore(
         return 'unchanged'
       }
       st.factChange.run(value, at, host, key)
-      st.eventInsert.run(at, 'fact-changed', host, JSON.stringify({ key, from: existing.value, to: value }))
+
+      // A run of changes to one fact inside FLAP_WINDOW_MS is one incident.
+      // Without this, a unit stuck in a restart loop writes an event on nearly
+      // every sweep — ~65,000 of them over ninety days, all saying the same
+      // thing — and the events table stops being readable by a human.
+      const flapKey = `${host}\u0000${key}`
+      const incident = flapping.get(flapKey)
+      if (incident && at >= incident.since && at - incident.since <= FLAP_WINDOW_MS) {
+        const count = incident.count + 1
+        const rewritten = Number(
+          st.eventRewrite.run(
+            at,
+            JSON.stringify({ key, from: incident.from, to: value, flaps: count }),
+            incident.id
+          ).changes
+        )
+        // Zero rows means retention dropped the event under us; fall through
+        // and start a new incident rather than losing the record entirely.
+        if (rewritten > 0) {
+          incident.count = count
+          return 'changed'
+        }
+        flapping.delete(flapKey)
+      }
+
+      const id = Number(
+        st.eventInsert.run(
+          at,
+          'fact-changed',
+          host,
+          JSON.stringify({ key, from: existing.value, to: value })
+        ).lastInsertRowid
+      )
+      // Bounded: entries are only interesting inside the window, so a sweep
+      // over a large estate cannot grow this without limit.
+      if (flapping.size > 4096) {
+        for (const [k, v] of flapping) if (at - v.since > FLAP_WINDOW_MS) flapping.delete(k)
+      }
+      flapping.set(flapKey, { id, since: at, from: String(existing.value ?? ''), count: 1 })
       return 'changed'
     },
 
@@ -758,11 +1050,15 @@ function buildStore(
     },
 
     retireFacts(hostId, at, prefix, keep) {
-      if (closed) return 0
+      if (droppedWrite('a fact retirement')) return 0
       const host = lookupHost(hostId)
       if (host === null) return 0
       const kept = keep instanceof Set ? keep : new Set(keep)
-      const rows = st.factsByPrefix.all(host, `${escapeLike(prefix)}%`) as {
+      const rows = (
+        prefix === ''
+          ? st.factsAll.all(host)
+          : st.factsByPrefix.all(host, prefix, prefixUpperBound(prefix))
+      ) as {
         key: string
         value: string
       }[]
@@ -777,15 +1073,32 @@ function buildStore(
       return removed
     },
 
-    transaction<T>(fn: () => T): T {
-      if (closed) return fn()
+    transaction<T>(fn: () => T & (T extends PromiseLike<unknown> ? never : unknown)): T {
+      // The type above stops this at compile time; this stops a cast and a
+      // plain-JS caller. Nothing here awaits, so an async callback would BEGIN,
+      // receive a pending promise, COMMIT nothing, and let every write inside
+      // it land afterwards in autocommit — one fsync each, silently, with
+      // `depth` already back to 0 so a nested transaction() would issue its own
+      // BEGIN and commit a partial slice.
+      const sync = (out: T): T => {
+        if (out !== null && typeof out === 'object' && typeof (out as { then?: unknown }).then === 'function') {
+          throw new Error(
+            'history.transaction() was given an async callback. It does not await, so ' +
+              'the transaction would commit before any of the writes inside it ran. ' +
+              'Collect the awaited work first, then call transaction() with a synchronous callback.'
+          )
+        }
+        return out
+      }
+
+      if (closed) return sync(fn())
       // Nested calls join the outer transaction rather than issuing a second
       // BEGIN, which SQLite refuses. A caller should not have to know whether
       // it is the outermost one.
       if (depth > 0) {
         depth++
         try {
-          return fn()
+          return sync(fn())
         } finally {
           depth--
         }
@@ -793,7 +1106,7 @@ function buildStore(
       db.exec('BEGIN')
       depth = 1
       try {
-        const out = fn()
+        const out = sync(fn())
         db.exec('COMMIT')
         return out
       } catch (err) {
@@ -809,9 +1122,60 @@ function buildStore(
     },
 
     retain(now = Date.now()) {
-      if (closed) return { rolledUp: 0, hourlyRows: 0, hourlyDropped: 0, eventsDropped: 0 }
+      const nothing: RetentionResult = { rolledUp: 0, hourlyRows: 0, hourlyDropped: 0, eventsDropped: 0 }
+      if (closed) return nothing
       const fullCutoff = now - RETENTION_FULL_DAYS * DAY_MS
       const hourlyCutoff = now - RETENTION_HOURLY_DAYS * DAY_MS
+
+      // Guard one: a clock that has stepped forward.
+      //
+      // main/index.ts runs a pass seconds after launch, which on a VM restored
+      // from a snapshot or a machine with a dead CMOS battery is before NTP has
+      // corrected anything. Every cutoff above is then a year in the future and
+      // one committed transaction empties the store. The newest row the store
+      // can see is the only second opinion available about what time it is.
+      //
+      // Samples and hourly buckets only, NOT events: the caller records a
+      // 'retention-skipped' event when this refuses, and an event written at
+      // the bogus time would become the newest row and disarm the guard on the
+      // very next pass. A guard that its own log entry defeats is not a guard.
+      // The second opinion has to come from data somebody else wrote.
+      const newest = Math.max(num(st.newestSample.get()), num(st.newestHourly.get()))
+      if (newest > 0 && now - newest > RETENTION_CLOCK_GRACE_MS) {
+        console.error(
+          `[history] retention skipped: the clock says ${new Date(now).toISOString()} but the ` +
+            `newest row is ${new Date(newest).toISOString()}. Refusing to age out data against a ` +
+            `clock that far ahead. The pass runs normally once new samples land at the current time.`
+        )
+        return { ...nothing, skipped: 'clock-ahead' }
+      }
+
+      // Guard two: a pass that would take most of what is here.
+      //
+      // Once the sampler has written one row at a bogus time, the newest row IS
+      // that time and guard one has nothing left to notice. Only the deletions
+      // are counted, not the roll-up: folding samples into hourly buckets is
+      // what the pass is for, and an app that has not run for a fortnight
+      // legitimately folds its whole full-resolution tier on the next launch.
+      //
+      // The known cost, deliberately taken: an app that has not been opened for
+      // more than a quarter really does have most of its hourly tier past the
+      // horizon, and this refuses that pass too. It keeps rows it could have
+      // dropped — the safe direction — says so every time, and starts dropping
+      // again as new buckets accumulate. Bailing out rather than deleting a
+      // capped slice is the same choice: a cap that deletes a little every pass
+      // still empties the store against a wrong clock, just over a day.
+      const doomed = num(st.doomedHourly.get(hourlyCutoff)) + num(st.doomedEvents.get(hourlyCutoff))
+      const base = num(st.countHourly.get()) + num(st.countEvents.get())
+      if (base >= RETENTION_GUARD_MIN_ROWS && doomed > base * RETENTION_MAX_DROP_FRACTION) {
+        console.error(
+          `[history] retention skipped: one pass would drop ${doomed} of ${base} hourly and event ` +
+            `rows (over ${Math.round(RETENTION_MAX_DROP_FRACTION * 100)}%). That is a wrong clock, ` +
+            `not a horizon — nothing was deleted.`
+        )
+        return { ...nothing, skipped: 'blast-radius' }
+      }
+
       return store.transaction(() => {
         const before = num(st.countHourly.get())
         st.rollup.run(fullCutoff)
@@ -858,7 +1222,20 @@ function buildStore(
         //
         // A crash skips this, which is exactly right: the WAL is then the
         // record of what was in flight and SQLite replays it at the next open.
-        db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+        const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as
+          | { busy?: number; log?: number; checkpointed?: number }
+          | undefined
+        // exec() threw the answer away. Measured with a real reader holding the
+        // database, this blocks for the full busy_timeout — 5,349 ms — returns
+        // busy=1, throws nothing, and leaves the whole 4 MB WAL behind. A
+        // five-second stall on quit deserves a line saying what it was.
+        if (row && Number(row.busy) === 1) {
+          console.error(
+            `[history] WAL checkpoint on close was blocked by another reader after the busy ` +
+              `timeout; ${Number(row.log ?? -1)} pages are still in the WAL and will be replayed ` +
+              `at the next launch.`
+          )
+        }
       } catch {
         /* a database that is already gone, or in TRUNCATE mode, has nothing to
            checkpoint — not a reason to skip the close below */
@@ -884,10 +1261,6 @@ function buildStore(
   return store
 }
 
-function escapeLike(s: string): string {
-  return s.replace(/([\\%_])/g, '\\$1')
-}
-
 function safeParse(json: string): unknown {
   try {
     return JSON.parse(json)
@@ -896,12 +1269,17 @@ function safeParse(json: string): unknown {
   }
 }
 
-/** Bytes on disk, for the size arithmetic. Counts the WAL alongside the db,
- *  because a WAL that has not checkpointed is still space the user's disk is
- *  giving up. */
+/** Bytes on disk, for the size arithmetic.
+ *
+ *  Counts the WAL, because a WAL that has not checkpointed is still space the
+ *  user's disk is giving up, and counts the .bak, because a full copy taken at
+ *  every clean launch is a second file of very nearly the same size — the
+ *  steady state is ~2x the primary, and a function that reported half of what
+ *  the disk gave up would be the wrong number in the one feature justified by
+ *  "must not become a cause of disk pressure". */
 export function historyBytes(path: string): number {
   let total = 0
-  for (const f of [path, `${path}-wal`, `${path}-shm`]) {
+  for (const f of [path, `${path}-wal`, `${path}-shm`, `${path}.bak`]) {
     try {
       if (existsSync(f)) total += statSync(f).size
     } catch {
@@ -909,4 +1287,33 @@ export function historyBytes(path: string): number {
     }
   }
   return total
+}
+
+/**
+ * Every file the store can leave in `dir`: the database, both journal
+ * sidecars, the backup the recovery ladder restores from, and any timestamped
+ * copies that ladder moved aside.
+ *
+ * Exported because backup.ts's "delete all data" and its import both have to
+ * remove them, and the list of what the store writes belongs next to the code
+ * that writes it — a second copy of these suffixes somewhere else is how the
+ * database came to be missing from ALL_DATA_FILES in the first place.
+ */
+export function historyFiles(dir: string): string[] {
+  const base = join(dir, HISTORY_FILE)
+  const files = [base, `${base}-wal`, `${base}-shm`, `${base}.bak`]
+  try {
+    for (const name of readdirSync(dir)) {
+      if (name.startsWith(`${HISTORY_FILE}.corrupt-`)) files.push(join(dir, name))
+    }
+  } catch {
+    /* an unreadable directory has nothing for us to delete */
+  }
+  return files
+}
+
+/** Remove all of them. The caller must have closed the store first: unlinking
+ *  an open database is EBUSY on Windows. */
+export function removeHistoryFiles(dir: string): void {
+  for (const f of historyFiles(dir)) rmSync(f, { force: true })
 }

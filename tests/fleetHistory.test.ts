@@ -128,7 +128,9 @@ describe('a sweep against a real store', () => {
     await vi.advanceTimersByTimeAsync(0)
     s.dispose()
 
-    expect(store.readSeries('a', 'cpu', 0, Infinity)).toEqual([{ ts: 1_700_000_000_000, v: 12 }])
+    expect(store.readSeries('a', 'cpu', 0, Infinity)).toEqual([
+      { ts: 1_700_000_000_000, v: 12, res: 'full' }
+    ])
     expect(store.readSeries('a', 'diskPct', 0, Infinity)[0].v).toBe(56)
     expect(store.counts().samples).toBe(8)
 
@@ -136,7 +138,21 @@ describe('a sweep against a real store', () => {
     expect(facts.map((f) => f.key)).toContain(`${UNIT_FACT_PREFIX}nginx.service`)
     expect(facts.map((f) => f.key)).toContain(`${PORT_FACT_PREFIX}tcp/0.0.0.0:443`)
     // A first sighting is a change, and every one of them is an event.
-    expect(store.readEvents({ hostId: 'a', kind: 'fact-added' })).toHaveLength(facts.length)
+    //
+    // The expected count is written out rather than taken from facts.length:
+    // deriving it from the implementation's own output means an upsertFact that
+    // wrote nothing at all passes as 0 === 0.
+    expect(facts.map((f) => f.key).sort()).toEqual([
+      'cores',
+      'diskTotal',
+      'hostname',
+      'kernel',
+      'listenerSource',
+      'memTotal',
+      `${PORT_FACT_PREFIX}tcp/0.0.0.0:443`,
+      `${UNIT_FACT_PREFIX}nginx.service`
+    ])
+    expect(store.readEvents({ hostId: 'a', kind: 'fact-added' })).toHaveLength(8)
   })
 
   it('writes facts once and only re-writes what changed', async () => {
@@ -295,5 +311,143 @@ describe('the store never breaks a sweep', () => {
     // warn people about filling.
     expect(transactions).toBe(2)
     expect(samples).toBe(4)
+  })
+})
+
+describe('the store never stops the sampler', () => {
+  let dir: string
+  let store: HistoryStore
+
+  beforeEach(async () => {
+    vi.useFakeTimers()
+    resetHistoryModuleForTests()
+    dir = mkdtempSync(join(tmpdir(), 'shellpilot-fleethist2-'))
+    store = (await loadHistory(dir))!
+  })
+
+  afterEach(() => {
+    store?.close()
+    vi.useRealTimers()
+    resetHistoryModuleForTests()
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      /* a leftover temp dir is not worth failing a test over */
+    }
+  })
+
+  it('survives a history resolver that throws', async () => {
+    // `const store = this.deps.history?.()` sits OUTSIDE persist()'s try, and
+    // persist() is called from the sweep's finally BEFORE `sweeping = false`
+    // and before the reschedule. So a resolver that throws aborts the finally:
+    // `sweeping` stays true forever, sampling stops permanently, and status()
+    // goes on reporting `running`. That is the exact silent-death mode the long
+    // comment above sweep() was written to prevent, through a different door.
+    const calls: string[] = []
+    const s = new FleetSampler({
+      sample: async (key) => {
+        calls.push(key)
+        return { ok: true, data: metrics() }
+      },
+      release: () => undefined,
+      emit: () => undefined,
+      vaultUnlocked: () => true,
+      history: () => {
+        throw new Error('history resolver blew up')
+      },
+      now: () => 1000
+    })
+    s.configure({ enabled: true, intervalMs: 120_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(120_000)
+    await vi.advanceTimersByTimeAsync(120_000)
+    s.dispose()
+    expect(calls).toEqual(['fleet:a', 'fleet:a', 'fleet:a'])
+  })
+
+  it('does not re-raise an alert that was already raised in a previous session', async () => {
+    // `reachable` is in-memory only. A host that went down, the app restarted,
+    // the host still down: the new sampler has no memory of the outage, raises
+    // host-unreachable a second time, and — because the transition it thinks it
+    // saw is undefined→false rather than true→false — never emits the matching
+    // host-recovered. An alert that can be raised twice and closed never.
+    store.recordEvent('host-unreachable', 'a', { error: 'timeout' }, 500)
+
+    let ok = false
+    const s = new FleetSampler({
+      sample: async () => (ok ? { ok: true, data: metrics() } : { ok: false, error: 'timeout' }),
+      release: () => undefined,
+      emit: () => undefined,
+      vaultUnlocked: () => true,
+      history: () => store,
+      now: () => 1000
+    })
+    s.configure({ enabled: true, intervalMs: 120_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.readEvents({ hostId: 'a', kind: 'host-unreachable' })).toHaveLength(1)
+
+    ok = true
+    await vi.advanceTimersByTimeAsync(120_000)
+    s.dispose()
+    expect(store.readEvents({ hostId: 'a', kind: 'host-recovered' })).toHaveLength(1)
+  })
+
+  it('lets a caller wait for the sweep it interrupted', async () => {
+    // dispose() is synchronous and does not await the in-flight sweep, so the
+    // last sweep of every session reaches persist() after the store has already
+    // been closed and is dropped by the `closed` guard — which is exactly what
+    // the comment above historyStore.close() in main/index.ts says must not
+    // happen.
+    let release = (): void => undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const s = new FleetSampler({
+      sample: async (key) => {
+        if (key === 'fleet:b') await gate
+        return { ok: true, data: metrics() }
+      },
+      release: () => undefined,
+      emit: () => undefined,
+      vaultUnlocked: () => true,
+      history: () => store,
+      now: () => 1000
+    })
+    s.configure({ enabled: true, intervalMs: 120_000, targets: [target('a'), target('b')] })
+    await vi.advanceTimersByTimeAsync(0)
+
+    const settled = s.dispose()
+    // Nothing is on disk yet: the sweep is parked inside the second host.
+    expect(store.counts().samples).toBe(0)
+    release()
+    await settled
+    // Host a's eight series were collected before the interruption and must
+    // reach the store before a caller that awaited dispose() closes it.
+    expect(store.counts().samples).toBe(8)
+  })
+
+  it('keeps a sampler-written sweep across a close and reopen', async () => {
+    // The whole point of the store is that it outlives the process. Nothing
+    // asserted that a sweep written by the sampler survives one.
+    const s = new FleetSampler({
+      sample: async () => ({ ok: true, data: metrics() }),
+      release: () => undefined,
+      emit: () => undefined,
+      vaultUnlocked: () => true,
+      history: () => store,
+      now: () => 1_700_000_000_000
+    })
+    s.configure({ enabled: true, intervalMs: 120_000, targets: [target('a')] })
+    await vi.advanceTimersByTimeAsync(0)
+    await s.dispose()
+    await store.backupReady
+    store.close()
+
+    resetHistoryModuleForTests()
+    const reopened = (await loadHistory(dir))!
+    store = reopened
+    expect(reopened.recovery).toBe('none')
+    expect(reopened.readSeries('a', 'cpu', 0, Infinity)).toEqual([
+      { ts: 1_700_000_000_000, v: 12, res: 'full' }
+    ])
+    expect(reopened.readFacts('a').map((f) => f.key)).toContain(`${UNIT_FACT_PREFIX}nginx.service`)
   })
 })

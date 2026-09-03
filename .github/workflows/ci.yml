@@ -47,6 +47,16 @@ jobs:
       - name: Engine build scripts parse
         run: bash -n scripts/lib/net-retry.sh scripts/build-openvpn.sh scripts/fetch-wintun.sh scripts/build-frpc.sh scripts/build-sidecar.sh
       - run: npm run test
+      # tests/historyCapability.test.ts guards the one risk the node:sqlite
+      # decision carries: the SQLite version is whatever Electron bundles and
+      # nothing in package.json pins it. Under `npm test` that file runs in the
+      # runner's Node, where an Electron bump changes nothing about what it
+      # executes — it would stay green through the exact regression it exists to
+      # catch. This runs the same file inside Electron's bundled Node
+      # (ELECTRON_RUN_AS_NODE, no display needed), which is the runtime that
+      # ships.
+      - name: Capability guard under Electron's Node
+        run: npm run test:capability
 
   # CI has always been ubuntu-only and has never run electron-builder, so
   # nothing here proved that a PACKAGED app could load a native module or exec a

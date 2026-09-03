@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 import { randomBytes, scrypt, createCipheriv, createDecipheriv } from 'node:crypto'
 import { exportSecrets, importSecrets } from './secrets'
+import { removeHistoryFiles } from './history'
 import type { BackupPayload, BackupResult, BackupSummary } from '../../shared/backup'
 
 // A backup is a single passphrase-encrypted file containing everything needed
@@ -160,7 +161,11 @@ export async function backupInspect(password: string, path?: string): Promise<Ba
 
 // Replaces local state with the bundle's contents, then restarts so every
 // service re-reads its files from a consistent starting point.
-export async function backupImport(password: string, path: string): Promise<BackupResult> {
+export async function backupImport(
+  password: string,
+  path: string,
+  closeHistory?: () => void
+): Promise<BackupResult> {
   try {
     const payload = await decryptFile(path, password)
     const summary = summarise(payload)
@@ -169,6 +174,20 @@ export async function backupImport(password: string, path: string): Promise<Back
     if (payload.vault !== null) writeJson('shellpilot-vault.json', payload.vault)
     if (payload.workspaceLocks !== null) writeJson('shellpilot-wslocks.json', payload.workspaceLocks)
     if (payload.knownHosts !== null) writeJson('shellpilot-known-hosts.json', payload.knownHosts)
+
+    // The bundle carries connections, credentials and vault. It does not carry
+    // history, and the history already on this machine belongs to a different
+    // estate: keep it and the previous estate's hostnames, units and ports sit
+    // underneath the restored ones in one table with nothing marking which is
+    // which, and every "first seen" answer it gives is about somebody else's
+    // server. So the store is cleared, exactly as deleteAllData clears it —
+    // closed first, because unlinking an open database is EBUSY on Windows.
+    //
+    // After the writes above, not before: a bundle that fails to decrypt must
+    // leave this machine exactly as it was, and by this line the local state
+    // has already been replaced.
+    closeHistory?.()
+    removeHistoryFiles(app.getPath('userData'))
 
     const sealed = importSecrets(payload.secrets ?? {})
     if (!sealed) {
@@ -195,11 +214,17 @@ export function relaunchApp(): void {
   app.exit(0)
 }
 
-// Every file ShellPilot writes to userData — connections, credentials, vault,
-// workspace locks, trusted host keys, and the AI/MCP bridge's own config,
-// sessions, access-group policy and audit log. Deliberately exhaustive:
+// Every JSON file ShellPilot writes to userData — connections, credentials,
+// vault, workspace locks, trusted host keys, and the AI/MCP bridge's own
+// config, sessions, access-group policy and audit log. Deliberately exhaustive:
 // leaving one behind after a "delete everything" is worse than deleting one
 // that never existed, which unlinkSync's own try/catch already tolerates.
+//
+// The history database is NOT in this list because it is not one file: it is
+// the database, two journal sidecars, a .bak and any number of timestamped
+// corrupt copies. history.ts owns that list — see removeHistoryFiles — because
+// a second copy of those suffixes over here is exactly how the database came to
+// be missing from a delete that called itself exhaustive.
 const ALL_DATA_FILES = [
   'shellpilot-data.json',
   'shellpilot-secrets.json',
@@ -215,12 +240,24 @@ const ALL_DATA_FILES = [
 // The renderer only calls this once a fresh backup exists (`!backupDirty`),
 // so this function itself does not re-check that — it only guards against
 // leaving a partially-deleted mess if one file fails to unlink.
-export function deleteAllData(): BackupResult {
+//
+// `closeHistory` is not optional in practice, only in signature: relaunchApp()
+// uses app.exit(0), which does NOT emit 'before-quit', so the teardown that
+// closes the store never runs on this path. The store has to be closed here or
+// the unlink below hits an open handle — EBUSY on Windows — and the app
+// relaunches on a database it just told the user was deleted.
+export function deleteAllData(closeHistory?: () => void): BackupResult {
   try {
+    closeHistory?.()
     for (const name of ALL_DATA_FILES) {
       const p = userFile(name)
       if (existsSync(p)) unlinkSync(p)
     }
+    // The database holds every hostname, kernel version, systemd unit and
+    // listening port in the estate, for ninety days. history.ts chmods it 0600
+    // because it is sensitive; a "delete all data" that leaves it behind and
+    // then goes on appending to it is that same judgement made backwards.
+    removeHistoryFiles(app.getPath('userData'))
     return { ok: true }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }

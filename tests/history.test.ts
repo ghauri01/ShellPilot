@@ -12,6 +12,8 @@ import {
   loadHistory,
   resetHistoryModuleForTests,
   steadyStateRows,
+  EVENT_QUERIES_FOR_TESTS,
+  FACTS_PREFIX_QUERY_FOR_TESTS,
   type HistoryStore
 } from '../src/main/services/history'
 
@@ -83,7 +85,7 @@ describe('open', () => {
       expect(s.journalMode).toBe('truncate')
       // And it still works, which is the actual requirement.
       s.recordSamples('h1', 1000, { cpu: 5 })
-      expect(s.readSeries('h1', 'cpu', 0, 2000)).toEqual([{ ts: 1000, v: 5 }])
+      expect(s.readSeries('h1', 'cpu', 0, 2000)).toEqual([{ ts: 1000, v: 5, res: 'full' }])
     } finally {
       delete process.env.PORTABLE_EXECUTABLE_DIR
     }
@@ -154,9 +156,9 @@ describe('samples round-trip', () => {
     // A range is a range: the ends are inclusive and nothing outside it leaks.
     const window = s.readSeries('web-1', 'cpu', 3 * 60_000, 5 * 60_000)
     expect(window).toEqual([
-      { ts: 180_000, v: 30 },
-      { ts: 240_000, v: 40 },
-      { ts: 300_000, v: 50 }
+      { ts: 180_000, v: 30, res: 'full' },
+      { ts: 240_000, v: 40, res: 'full' },
+      { ts: 300_000, v: 50, res: 'full' }
     ])
 
     // Series do not bleed across hosts or metrics.
@@ -197,7 +199,7 @@ describe('samples round-trip', () => {
     // A wrong metric id silently corrupts a series forever, which is far worse
     // than dropping a value nobody has defined yet.
     s.recordSamples('h1', 1000, { cpu: 4, bogus: 9 } as never)
-    expect(s.readSeries('h1', 'cpu', 0, 2000)).toEqual([{ ts: 1000, v: 4 }])
+    expect(s.readSeries('h1', 'cpu', 0, 2000)).toEqual([{ ts: 1000, v: 4, res: 'full' }])
     expect(s.counts().samples).toBe(1)
   })
 
@@ -205,7 +207,7 @@ describe('samples round-trip', () => {
     const s = await open()
     s.recordSamples('h1', 1000, { cpu: NaN, memPct: Infinity, diskPct: 50 })
     expect(s.counts().samples).toBe(1)
-    expect(s.readSeries('h1', 'diskPct', 0, 2000)).toEqual([{ ts: 1000, v: 50 }])
+    expect(s.readSeries('h1', 'diskPct', 0, 2000)).toEqual([{ ts: 1000, v: 50, res: 'full' }])
   })
 })
 
@@ -299,12 +301,14 @@ describe('events', () => {
     expect(s.readEvents({ from: 2000, to: 3000 }).map((e) => e.ts)).toEqual([3000, 2000])
     expect(s.readEvents({ limit: 1 }).map((e) => e.ts)).toEqual([4000])
     // An estate-level event has no host and must survive the round trip as null.
-    expect(s.readEvents({ kind: 'retention' })[0]).toEqual({
+    expect(s.readEvents({ kind: 'retention' })[0]).toMatchObject({
       ts: 4000,
       kind: 'retention',
       hostId: null,
       payload: { dropped: 5 }
     })
+    // And every row carries its own position, so an inbox can page from it.
+    expect(s.readEvents({ kind: 'retention' })[0].cursor.ts).toBe(4000)
   })
 
   it('an unknown host filter returns nothing, not everything', async () => {
@@ -354,7 +358,9 @@ describe('retention', () => {
     const values = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     s.transaction(() => {
       values.forEach((v, i) => s.recordSamples('h1', bucket + i * 60_000, { cpu: v }))
-      // And one recent sample that must survive untouched.
+      // And one recent sample that must survive untouched. It is also what
+      // tells the pass that `now` is a plausible time: retention refuses to
+      // age out data against a clock far ahead of the newest row it can see.
       s.recordSamples('h1', now - HOUR, { cpu: 7 })
     })
     expect(s.counts().samples).toBe(11)
@@ -366,11 +372,13 @@ describe('retention', () => {
     // Full resolution past the horizon is gone; inside it, untouched.
     expect(s.counts().samples).toBe(1)
     expect(s.counts().hourly).toBe(1)
-    expect(s.readSeries('h1', 'cpu', now - 2 * HOUR, now)).toEqual([{ ts: now - HOUR, v: 7 }])
+    expect(s.readSeries('h1', 'cpu', now - 2 * HOUR, now)).toEqual([
+      { ts: now - HOUR, v: 7, res: 'full' }
+    ])
 
     // The hourly bucket carries the right numbers.
     const rolled = s.readSeries('h1', 'cpu', bucket, bucket + HOUR)
-    expect(rolled).toEqual([{ ts: bucket, v: 55 }]) // avg of 10..100
+    expect(rolled).toEqual([{ ts: bucket, v: 55, res: 'hourly', min: 10, max: 100, n: 10 }])
 
     // readSeries stitches the two tiers together. A 30-day query must not have
     // a hole where the downsampling starts — that hole is exactly the bug a
@@ -387,6 +395,9 @@ describe('retention', () => {
     s.recordSamples('h1', bucket, { cpu: 0 })
     s.recordSamples('h1', bucket + 60_000, { cpu: 0 })
     s.recordSamples('h1', bucket + 120_000, { cpu: 0 })
+    // The sample the live sampler would have just written, which is what makes
+    // `now` a plausible clock as far as the retention guard is concerned.
+    s.recordSamples('h1', now - 60_000, { cpu: 1 })
     s.retain(now)
 
     // A late-arriving sample for the same hour rolls up on the next pass.
@@ -395,7 +406,9 @@ describe('retention', () => {
 
     // Averaging averages would give 50. Weighted by n it is 25, which is the
     // real mean of [0, 0, 0, 100].
-    expect(s.readSeries('h1', 'cpu', bucket, bucket + HOUR)).toEqual([{ ts: bucket, v: 25 }])
+    expect(s.readSeries('h1', 'cpu', bucket, bucket + HOUR)).toEqual([
+      { ts: bucket, v: 25, res: 'hourly', min: 0, max: 100, n: 4 }
+    ])
   })
 
   it('drops hourly rows and events past the quarter horizon', async () => {
@@ -408,18 +421,27 @@ describe('retention', () => {
     s.recordSamples('h1', ancient, { cpu: 1 })
     s.recordEvent('fact-added', 'h1', { key: 'unit:x' }, ancient)
     const soonAfter = ancient + (RETENTION_FULL_DAYS + 1) * DAY
+    // Each pass is anchored by a sample at its own "now": a pass whose clock is
+    // days ahead of everything in the store is refused, deliberately.
+    s.recordSamples('h1', soonAfter, { cpu: 1 })
     s.retain(soonAfter)
-    expect(s.counts().samples).toBe(0)
+    // The anchor is inside the full-resolution window, so it stays a sample.
+    expect(s.counts().samples).toBe(1)
     expect(s.counts().hourly).toBe(1)
     expect(s.counts().events).toBe(1)
 
     // Now walk past the quarter horizon.
     const later = ancient + (RETENTION_HOURLY_DAYS + 1) * DAY
     s.recordEvent('fact-added', 'h1', { key: 'unit:y' }, later - DAY)
+    s.recordSamples('h1', later, { cpu: 1 })
     const result = s.retain(later)
     expect(result.hourlyDropped).toBe(1)
     expect(result.eventsDropped).toBe(1)
-    expect(s.counts().hourly).toBe(0)
+    // The ancient bucket is gone. The one hourly row left is the anchor sample
+    // from the first pass, which has itself just aged past the full-resolution
+    // horizon — a store in steady state always has both tiers occupied.
+    expect(s.counts().hourly).toBe(1)
+    expect(s.readSeries('h1', 'cpu', 0, ancient + HOUR)).toEqual([])
     // The recent event survives; the ancient one does not.
     expect(s.readEvents().map((e) => e.ts)).toEqual([later - DAY])
   })
@@ -431,7 +453,9 @@ describe('retention', () => {
     // the whole reason facts are a table rather than a snapshot. A retention
     // pass that shortened it would silently rewrite the answer.
     s.upsertFact('h1', 'unit:x', 'active/running', ancient)
-    s.retain(ancient + (RETENTION_HOURLY_DAYS + 10) * DAY)
+    const now = ancient + (RETENTION_HOURLY_DAYS + 10) * DAY
+    s.recordSamples('h1', now, { cpu: 1 })
+    s.retain(now)
     expect(s.readFacts('h1')).toEqual([
       { key: 'unit:x', value: 'active/running', firstSeen: ancient, lastSeen: ancient }
     ])
@@ -441,11 +465,14 @@ describe('retention', () => {
     const s = await open()
     // The roadmap's reference estate: fifteen hosts, two-minute cadence, eight
     // metrics. 15 * 8 * 30/hour = 3,600 rows an hour, 86,400 a day.
+    // Literals, not the implementation's own formula retyped: writing
+    // `15 * 8 * 30 * 24 * RETENTION_FULL_DAYS` here asserts that multiplication
+    // works, and passes for any horizon anybody later changes.
     const expected = steadyStateRows(15, 120_000)
-    expect(expected.samples).toBe(15 * 8 * 30 * 24 * RETENTION_FULL_DAYS)
     expect(expected.samples).toBe(604_800)
-    expect(expected.hourly).toBe(15 * 8 * 24 * (RETENTION_HOURLY_DAYS - RETENTION_FULL_DAYS))
     expect(expected.hourly).toBe(239_040)
+    expect(RETENTION_FULL_DAYS).toBe(7)
+    expect(RETENTION_HOURLY_DAYS).toBe(90)
     expect(METRICS.length).toBe(8)
 
     // Writing 604,800 rows in a unit test is a minute of CI for a number that
@@ -488,19 +515,41 @@ describe('retention', () => {
     expect(s.counts().samples).toBe(after.samples)
 
     // The measured size of one host's steady-state week, and what fifteen
-    // extrapolates to. Reported so the roadmap's 20.7 MB is a number somebody
-    // can check rather than one somebody remembered.
-    const bytes = historyBytes(s.path)
-    const perRow = bytes / (after.samples + after.hourly)
+    // extrapolates to. Reported so the headline figure is a number somebody can
+    // check rather than one somebody remembered.
+    //
+    // Measured on the primary AFTER the close checkpoints the WAL back into it.
+    // Measuring while a WAL that the retention pass has just inflated is still
+    // on disk mixes a transient into a steady-state number.
+    await expect(s.backupReady).resolves.toBe(true)
+    s.close()
+    const primary = statSync(s.path).size
+    const rows = after.samples + after.hourly
+    const perRow = primary / rows
     console.log(
-      `[history] 1 host, 7d full + 1d hourly: ${after.samples + after.hourly} rows, ` +
-        `${(bytes / 1024 / 1024).toFixed(2)} MB on disk, ${perRow.toFixed(1)} bytes/row. ` +
-        `15-host steady state extrapolates to ${((perRow * steadyStateRows(15, cadence).total) / 1024 / 1024).toFixed(1)} MB.`
+      `[history] 1 host, 7d full + 1d hourly: ${rows} rows, ` +
+        `${(primary / 1024 / 1024).toFixed(2)} MB in the primary, ${perRow.toFixed(1)} bytes/row. ` +
+        `15-host steady state extrapolates to ${((perRow * steadyStateRows(15, cadence).total) / 1024 / 1024).toFixed(1)} MB, ` +
+        `about twice that on disk once the .bak is counted.`
     )
     // The whole retention argument is that 15 hosts fit in tens of megabytes,
-    // not hundreds. A regression that makes a row cost 200 bytes would put the
-    // steady state past 160 MB and must fail here.
-    expect(perRow).toBeLessThan(60)
+    // not hundreds. A band, not a ceiling with 2.3x of slack in it: measured at
+    // 19.1 bytes/row in the checkpointed primary (the 25.6 quoted elsewhere was
+    // measured with a retention pass's WAL still on disk), so a doubling has to
+    // fail here rather than pass with room to spare — and a collapse means rows
+    // stopped being written at all.
+    expect(perRow).toBeGreaterThan(12)
+    expect(perRow).toBeLessThan(30)
+
+    // And what the disk actually gives up. The .bak is a full second copy taken
+    // at every clean launch, so the steady state is ~2x the primary — stated
+    // here rather than left as a surprise, because this feature's whole
+    // justification is that it must not become a cause of disk pressure.
+    resetHistoryModuleForTests()
+    const relaunched = await open()
+    await expect(relaunched.backupReady).resolves.toBe(true)
+    expect(statSync(`${relaunched.path}.bak`).size).toBeGreaterThan(primary * 0.9)
+    expect(historyBytes(relaunched.path)).toBeGreaterThan(primary * 1.9)
   })
 })
 
@@ -541,7 +590,7 @@ describe('corruption recovery', () => {
     // Losing samples is survivable. Refusing to launch is not.
     expect(s.recovery).toBe('started-empty')
     s.recordSamples('h1', 1000, { cpu: 3 })
-    expect(s.readSeries('h1', 'cpu', 0, 9999)).toEqual([{ ts: 1000, v: 3 }])
+    expect(s.readSeries('h1', 'cpu', 0, 9999)).toEqual([{ ts: 1000, v: 3, res: 'full' }])
   })
 
   it('never throws out of loadHistory, whatever is on disk', async () => {
@@ -555,5 +604,367 @@ describe('corruption recovery', () => {
 
     // And a directory that does not exist at all.
     await expect(loadHistory(join(dir, 'nope', 'deeper'))).resolves.toBeNull()
+  })
+})
+
+describe('a clock that steps forward', () => {
+  // Every horizon in retain() is derived from wall-clock `now`. A VM restored
+  // from a snapshot, a dual-boot machine with RTC skew or a dead CMOS battery
+  // starts the app with Date.now() a year ahead, and index.ts runs a retention
+  // pass seconds after launch — typically before NTP has stepped the clock
+  // back. One committed transaction later the store is empty, with no error, no
+  // log, and nothing on the next launch to say it happened. The .bak is a
+  // pre-session snapshot and does not help.
+  //
+  // Backwards steps are benign: earlier cutoffs delete less. Only forward
+  // destroys.
+  async function stocked(now: number): Promise<HistoryStore> {
+    const s = await open()
+    s.transaction(() => {
+      for (let t = now - 8 * DAY; t < now; t += 600_000) s.recordSamples('web-1', t, { cpu: 5 })
+      s.recordEvent('fact-added', 'web-1', { key: 'unit:nginx.service' }, now - DAY)
+    })
+    return s
+  }
+
+  it('refuses a pass whose now is far ahead of the newest row it can see', async () => {
+    const now = 400 * DAY
+    const s = await stocked(now)
+    const before = s.counts()
+    expect(before.samples).toBeGreaterThan(0)
+
+    const result = s.retain(now + 365 * DAY)
+
+    expect(result.skipped).toBe('clock-ahead')
+    expect(s.counts()).toEqual(before)
+  })
+
+  it('caps how much one pass may delete, even when the clock check passes', async () => {
+    // The second line of defence. Once the sampler has written a single row at
+    // the bogus time, the newest row IS the bogus now and the clock check has
+    // nothing left to notice — so a pass that would drop the entire hourly tier
+    // and every event has to refuse on the size of the deletion alone.
+    const now = 400 * DAY
+    const s = await open()
+    s.transaction(() => {
+      // 150 hours x 8 metrics = 1,200 hourly rows once folded. All of it well
+      // past the seven-day full-resolution horizon, so one pass folds the lot.
+      for (let h = 0; h < 150; h++) {
+        s.recordSamples('web-1', now - (400 - h) * HOUR, {
+          cpu: 1, memPct: 2, memUsed: 3, diskPct: 4, diskUsed: 5, netRx: 6, netTx: 7, uptime: 8
+        })
+      }
+      s.recordSamples('web-1', now, { cpu: 1 })
+    })
+    s.retain(now)
+    expect(s.counts().hourly).toBe(1200)
+
+    const jumped = now + 365 * DAY
+    // The row the sampler writes at the bogus time, which is what blinds the
+    // clock check: the newest row IS the wrong clock now.
+    s.recordSamples('web-1', jumped, { cpu: 1 })
+    const result = s.retain(jumped)
+
+    expect(result.skipped).toBe('blast-radius')
+    expect(s.counts().hourly).toBe(1200)
+  })
+
+  it('cannot be disarmed by the record of its own refusal', async () => {
+    // main/index.ts writes a 'retention-skipped' event when a pass refuses, so
+    // that a store which quietly stopped ageing out says so about itself. That
+    // event is written at the wrong clock's time — so if the guard treated
+    // events as evidence of what time it is, the note it made about refusing
+    // would be exactly what let the next pass through.
+    const now = 400 * DAY
+    const s = await stocked(now)
+    const jumped = now + 365 * DAY
+    expect(s.retain(jumped).skipped).toBe('clock-ahead')
+
+    s.recordEvent('retention-skipped', null, { reason: 'clock-ahead' }, jumped)
+    const before = s.counts()
+    expect(s.retain(jumped).skipped).toBe('clock-ahead')
+    expect(s.counts()).toEqual(before)
+  })
+
+  it('still runs a normal pass, and a backwards step is a no-op rather than a refusal', async () => {
+    const now = 400 * DAY
+    const s = await stocked(now)
+    const forward = s.retain(now)
+    expect(forward.skipped).toBeUndefined()
+    expect(forward.rolledUp).toBeGreaterThan(0)
+
+    // A clock that steps BACK makes every cutoff earlier, so the pass deletes
+    // nothing. It must not be reported as refused — nothing was at risk.
+    const after = s.counts()
+    const backwards = s.retain(now - 30 * DAY)
+    expect(backwards.skipped).toBeUndefined()
+    expect(backwards.rolledUp).toBe(0)
+    expect(s.counts()).toEqual(after)
+  })
+})
+
+describe('file permissions', () => {
+  it('restricts the WAL and shm on the run that creates them, not the one after', async () => {
+    // The 0600 on the primary exists because this file holds an inventory of
+    // every host, unit and open port in the estate. The WAL holds the same rows
+    // — megabytes of them between checkpoints — and is created by the first
+    // write, which happens before the chmod on the creating run. Measured on
+    // HEAD: db 0600, wal 0644, shm 0644.
+    if (process.platform === 'win32') return
+    const s = await open()
+    s.recordSamples('web-1', 1000, { cpu: 1 })
+    const mode = (f: string): number => (existsSync(f) ? statSync(f).mode & 0o777 : 0o600)
+    expect(mode(s.path)).toBe(0o600)
+    expect(mode(`${s.path}-wal`)).toBe(0o600)
+    expect(mode(`${s.path}-shm`)).toBe(0o600)
+    await s.backupReady
+    expect(mode(`${s.path}.bak`)).toBe(0o600)
+  })
+})
+
+describe('the event read path', () => {
+  it('uses the (host, ts) index instead of scanning the ts index', async () => {
+    // `(?1 IS NULL OR e.host = ?1)` is not sargable: SQLite cannot use an index
+    // for a comparison that might be "match everything". Measured on HEAD, the
+    // shipped statement plans as `SCAN e USING INDEX events_ts` — so
+    // events_host_ts is never used by any query in the file (pure write cost)
+    // and readEvents({hostId}) walks the whole ts index until it has collected
+    // `limit` matches, or the entire table when there are none.
+    const s = await open()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(s.path)
+    try {
+      const plan = (sql: string): string =>
+        (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[])
+          .map((r) => r.detail)
+          .join(' | ')
+      const plans = EVENT_QUERIES_FOR_TESTS.map(plan)
+      // host+kind, host, kind, neither — the first two must reach the events
+      // by host, and none of the four may scan the table itself.
+      expect(plans[0]).toContain('events_host_ts')
+      expect(plans[1]).toContain('events_host_ts')
+      for (const p of plans) expect(p).not.toMatch(/SCAN events\b/)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('pages with a cursor rather than only a bigger limit', async () => {
+    const s = await open()
+    s.transaction(() => {
+      for (let i = 1; i <= 10; i++) s.recordEvent('host-unreachable', 'web-1', { i }, i * 1000)
+    })
+    const first = s.readEvents({ limit: 4 })
+    expect(first.map((e) => e.ts)).toEqual([10_000, 9000, 8000, 7000])
+
+    const second = s.readEvents({ limit: 4, cursor: first[first.length - 1].cursor })
+    expect(second.map((e) => e.ts)).toEqual([6000, 5000, 4000, 3000])
+
+    const third = s.readEvents({ limit: 4, cursor: second[second.length - 1].cursor })
+    expect(third.map((e) => e.ts)).toEqual([2000, 1000])
+  })
+
+  it('pages past events that share a timestamp', async () => {
+    // Two events in the same millisecond is what a sweep produces. A cursor
+    // that is only a timestamp either repeats them forever or skips one.
+    const s = await open()
+    s.transaction(() => {
+      for (let i = 0; i < 6; i++) s.recordEvent('fact-added', 'web-1', { i }, 5000)
+    })
+    const seen: unknown[] = []
+    let cursor = undefined as ReturnType<typeof s.readEvents>[number]['cursor'] | undefined
+    for (let page = 0; page < 4; page++) {
+      const rows = s.readEvents({ limit: 2, cursor })
+      if (rows.length === 0) break
+      seen.push(...rows.map((r) => (r.payload as { i: number }).i))
+      cursor = rows[rows.length - 1].cursor
+    }
+    expect(seen.sort()).toEqual([0, 1, 2, 3, 4, 5])
+  })
+})
+
+describe('the series read path', () => {
+  it('carries min, max and the sample count through the hourly tier', async () => {
+    // v_min/v_max/n are written on every roll-up and, on HEAD, unreadable:
+    // hourlyRead selects v_avg alone, so anything older than a week has no
+    // min/max through the interface at all. Capacity forecasting and threshold
+    // backtesting are both questions about the max.
+    const s = await open()
+    const now = 30 * DAY
+    const bucket = Math.floor((now - 10 * DAY) / HOUR) * HOUR
+    s.transaction(() => {
+      ;[10, 20, 30, 40].forEach((v, i) => s.recordSamples('h1', bucket + i * 60_000, { cpu: v }))
+      s.recordSamples('h1', now, { cpu: 0 })
+    })
+    s.retain(now)
+
+    const rolled = s.readSeries('h1', 'cpu', bucket, bucket + HOUR)
+    expect(rolled).toEqual([{ ts: bucket, v: 25, res: 'hourly', min: 10, max: 40, n: 4 }])
+  })
+
+  it('marks which resolution every point came from', async () => {
+    // A 30-day query returns hourly means and two-minute instantaneous
+    // readings in one flat array. Without a marker nothing downstream can tell
+    // a mean of thirty samples from a single reading.
+    const s = await open()
+    const now = 30 * DAY
+    const old = Math.floor((now - 10 * DAY) / HOUR) * HOUR
+    s.recordSamples('h1', old, { cpu: 90 })
+    s.recordSamples('h1', now - HOUR, { cpu: 7 })
+    s.retain(now)
+
+    const points = s.readSeries('h1', 'cpu', 0, now)
+    expect(points.map((p) => p.res)).toEqual(['hourly', 'full'])
+    expect(points[1]).toEqual({ ts: now - HOUR, v: 7, res: 'full' })
+  })
+})
+
+describe('transaction', () => {
+  it('refuses an async callback instead of committing nothing', async () => {
+    // `transaction` never awaits: BEGIN, call fn, get back a pending promise,
+    // COMMIT, return. Every write inside then lands afterwards in autocommit —
+    // one fsync each, the whole reason this method exists gone, with no error
+    // and no test failure. Worse, `depth` is back to 0 before the async body
+    // runs, so a nested transaction() inside it issues a fresh BEGIN and
+    // commits a partial slice.
+    const s = await open()
+    expect(() =>
+      s.transaction((() => Promise.resolve('nope')) as never)
+    ).toThrow(/async|promise/i)
+    // And the BEGIN it opened is not left dangling: the next transaction works.
+    s.transaction(() => s.recordSamples('h1', 1000, { cpu: 1 }))
+    expect(s.readSeries('h1', 'cpu', 0, 9999)).toHaveLength(1)
+  })
+})
+
+describe('a unit in a restart loop', () => {
+  it('records the flapping once with a count, not once per sweep', async () => {
+    // A unit stuck in a restart loop alternates activating/auto-restart and
+    // failed/failed, so upsertFact reports 'changed' on nearly every sweep:
+    // ~65,000 events over ninety days for ONE unit, all of them the same fact.
+    const s = await open()
+    const start = 1_000_000
+    s.upsertFact('web-1', 'unit:flap.service', 'activating/auto-restart', start)
+    s.transaction(() => {
+      for (let i = 1; i <= 100; i++) {
+        s.upsertFact(
+          'web-1',
+          'unit:flap.service',
+          i % 2 === 0 ? 'activating/auto-restart' : 'failed/failed',
+          start + i * 120_000
+        )
+      }
+    })
+    const events = s.readEvents({ hostId: 'web-1' })
+    // One 'fact-added' plus a bounded number of coalesced 'fact-changed' rows:
+    // the sweep cadence is two minutes, so 100 sweeps is 3h20m of flapping.
+    expect(events.filter((e) => e.kind === 'fact-added')).toHaveLength(1)
+    const changed = events.filter((e) => e.kind === 'fact-changed')
+    expect(changed.length).toBeLessThanOrEqual(5)
+    expect(changed.length).toBeGreaterThan(0)
+    // And the count is not lost — the event says how many times it flapped.
+    expect(
+      changed.reduce((n, e) => n + Number((e.payload as { flaps?: number }).flaps ?? 1), 0)
+    ).toBe(100)
+    // The fact itself still tracks the latest value exactly.
+    expect(s.readFacts('web-1')[0].value).toBe('activating/auto-restart')
+  })
+
+  it('still records two genuinely separate changes separately', async () => {
+    const s = await open()
+    s.upsertFact('web-1', 'unit:nginx.service', 'active/running', 1000)
+    s.upsertFact('web-1', 'unit:nginx.service', 'failed/failed', 2000)
+    // A day later, not a sweep later: this is a different incident.
+    s.upsertFact('web-1', 'unit:nginx.service', 'active/running', 2000 + DAY)
+    expect(s.readEvents({ hostId: 'web-1', kind: 'fact-changed' })).toHaveLength(2)
+  })
+})
+
+describe('retiring facts by prefix', () => {
+  it('does not retire a key that differs only in case', async () => {
+    // SQLite's LIKE is ASCII case-insensitive; retireFacts' own keep-check is
+    // case-sensitive. So `PKG:x` matched the `pkg:` sweep, missed the keep set
+    // that holds `pkg:x`, and was deleted — the wrong row, silently.
+    const s = await open()
+    s.upsertFact('h1', 'pkg:openssl', '3.0.2', 1000)
+    s.upsertFact('h1', 'PKG:openssl', '3.0.2', 1000)
+    expect(s.retireFacts('h1', 2000, 'pkg:', ['pkg:openssl'])).toBe(0)
+    expect(s.readFacts('h1').map((f) => f.key)).toEqual(['PKG:openssl', 'pkg:openssl'])
+  })
+
+  it('uses the primary key rather than a LIKE that cannot use it', async () => {
+    const s = await open()
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(s.path)
+    try {
+      const detail = (db.prepare(`EXPLAIN QUERY PLAN ${FACTS_PREFIX_QUERY_FOR_TESTS}`).all() as {
+        detail: string
+      }[])
+        .map((r) => r.detail)
+        .join(' | ')
+      // The host= half was always index-led; it is the KEY half that LIKE
+      // could not use. Measured on the shipped SQL:
+      // `SEARCH facts USING PRIMARY KEY (host=?)` — every key that host has.
+      expect(detail).toContain('SEARCH facts USING PRIMARY KEY')
+      expect(detail).toMatch(/key>\?/)
+      expect(detail).not.toMatch(/SCAN facts\b/)
+    } finally {
+      db.close()
+    }
+  })
+})
+
+describe('writes after close', () => {
+  it('says so rather than dropping them in silence', async () => {
+    const s = await open()
+    await s.backupReady
+    s.close()
+    const errors: string[] = []
+    const original = console.error
+    console.error = (...args: unknown[]): void => {
+      errors.push(args.map(String).join(' '))
+    }
+    try {
+      s.recordSamples('h1', 1000, { cpu: 1 })
+      s.recordEvent('host-unreachable', 'h1', undefined, 1000)
+      s.upsertFact('h1', 'k', 'v', 1000)
+    } finally {
+      console.error = original
+    }
+    // A sweep that lands after close is the LAST sweep of every session. It is
+    // allowed to be dropped; it is not allowed to be dropped quietly.
+    expect(errors.join('\n')).toMatch(/closed/i)
+  })
+})
+
+describe('two samples in the same second', () => {
+  it('keeps the later value, deterministically', async () => {
+    // Timestamps are snapped to the second, so two sweeps 400 ms apart collide
+    // on the primary key. Nothing pinned which value won; ON CONFLICT DO UPDATE
+    // means the later write does, and a caller reading a series is entitled to
+    // know that rather than discover it.
+    const s = await open()
+    s.recordSamples('h1', 1000, { cpu: 1 })
+    s.recordSamples('h1', 1400, { cpu: 2 })
+    expect(s.readSeries('h1', 'cpu', 0, 9999)).toEqual([{ ts: 1000, v: 2, res: 'full' }])
+    expect(s.counts().samples).toBe(1)
+  })
+})
+
+describe('historyBytes', () => {
+  it('counts the .bak, because the disk does', async () => {
+    // The .bak is a full second copy taken on every clean launch — roughly a
+    // doubling at steady state. A size function that omits it reports half of
+    // what the user's disk gave up, and it is the function the headline number
+    // is computed from.
+    const s = await open()
+    s.transaction(() => {
+      for (let i = 0; i < 5000; i++) s.recordSamples('h1', i * 60_000, { cpu: i % 100 })
+    })
+    await expect(s.backupReady).resolves.toBe(true)
+    s.close()
+    const bak = statSync(`${s.path}.bak`).size
+    expect(bak).toBeGreaterThan(0)
+    expect(historyBytes(s.path)).toBeGreaterThanOrEqual(statSync(s.path).size + bak)
   })
 })

@@ -586,30 +586,78 @@ ipcMain.handle('metrics:disconnect', (_e, key: string) => metricsDisconnect(key)
 // is visible next to everything else main owns. It runs once shortly after open
 // and then every six hours: full resolution for a week, hourly means for a
 // quarter, then dropped. Measured at ~20 MB steady state versus 730 MB a year
-// unmanaged — a tool that alerts on disk pressure must not cause it.
+// unmanaged — and about twice that on disk, because a full .bak is taken at
+// every clean launch. A tool that alerts on disk pressure must not cause it.
 let historyStore: HistoryStore | null = null
 let historyRetain: ReturnType<typeof setInterval> | null = null
 const HISTORY_RETAIN_INTERVAL_MS = 6 * 60 * 60 * 1000
+/** How long 'before-quit' waits for an in-flight sweep to finish writing before
+ *  closing the store anyway. Inside the 4s teardown cap, with room to spare. */
+const HISTORY_LAST_SWEEP_MS = 1500
 
-void loadHistory().then((store) => {
-  historyStore = store
-  if (!store) return
-  console.log(
-    `[history] open at ${store.path} (journal=${store.journalMode}, sqlite=${store.sqliteVersion}` +
-      `${store.recovery === 'none' ? '' : `, recovery=${store.recovery}`})`
-  )
-  const pass = (): void => {
-    try {
-      historyStore?.retain()
-    } catch (err) {
-      console.error('[history] retention pass failed:', err)
+// Called from app.whenReady(), NOT at module scope.
+//
+// Module evaluation is synchronous, so the single-instance decision below is
+// made first either way — but loadHistory() awaits an import, so the open, the
+// integrity_check, the pragmas, the schema and the backup all happen in a later
+// turn, racing app.quit() on the instance that lost the lock. That second
+// process would open the same file and its backup call would overwrite the
+// RUNNING instance's .bak with a copy taken from a concurrently-written
+// database, then die without ever closing. A truncated .bak silently downgrades
+// the primary's recovery ladder from "restore from backup" to "start empty".
+// Only the winning instance reaches whenReady, so only it opens the store.
+function startHistory(): void {
+  void loadHistory().then((store) => {
+    historyStore = store
+    if (!store) return
+    console.log(
+      `[history] open at ${store.path} (journal=${store.journalMode}, sqlite=${store.sqliteVersion}` +
+        `${store.recovery === 'none' ? '' : `, recovery=${store.recovery}`})`
+    )
+    // Recorded in the store as well as logged. `recovery` is the answer to
+    // "why does this fleet have no past", and a console line in a packaged app
+    // is not somewhere a user can look — an event survives to be shown.
+    if (store.recovery !== 'none') {
+      store.recordEvent('history-recovery', null, { recovery: store.recovery })
     }
+    // Only the CHANGE is recorded, not every refusal. A machine whose clock is
+    // permanently wrong runs this four times a day forever, and a store that
+    // refuses to age out is not helped by an event every six hours saying so.
+    let lastSkip: string | null = null
+    const pass = (): void => {
+      try {
+        const result = historyStore?.retain()
+        const skipped = result?.skipped ?? null
+        if (skipped !== null && skipped !== lastSkip) {
+          // retain() has already said why on the console. Recording it means a
+          // store that quietly stopped ageing out is visible in the store
+          // itself rather than only in a log nobody kept.
+          historyStore?.recordEvent('retention-skipped', null, { reason: skipped })
+        }
+        lastSkip = skipped
+      } catch (err) {
+        console.error('[history] retention pass failed:', err)
+      }
+    }
+    pass()
+    historyRetain = setInterval(pass, HISTORY_RETAIN_INTERVAL_MS)
+    // Never let the retention timer be the reason the process stays alive.
+    historyRetain.unref?.()
+  })
+}
+
+/** Close the store and stop its timer, for the paths that do not go through
+ *  'before-quit' — deleteAllData and backupImport both delete the database out
+ *  from under this process, and relaunchApp()'s app.exit(0) emits no
+ *  'before-quit' at all. */
+function closeHistoryNow(): void {
+  if (historyRetain) {
+    clearInterval(historyRetain)
+    historyRetain = null
   }
-  pass()
-  historyRetain = setInterval(pass, HISTORY_RETAIN_INTERVAL_MS)
-  // Never let the retention timer be the reason the process stays alive.
-  historyRetain.unref?.()
-})
+  historyStore?.close()
+  historyStore = null
+}
 
 // ---- Fleet sampling ----
 //
@@ -1117,8 +1165,10 @@ ipcMain.handle('notify:show', (_e, title: string, body: string) => {
 // ---- Backup ----
 ipcMain.handle('backup:export', (_e, password: string) => backupExport(password))
 ipcMain.handle('backup:inspect', (_e, password: string, path?: string) => backupInspect(password, path))
-ipcMain.handle('backup:import', (_e, password: string, path: string) => backupImport(password, path))
-ipcMain.handle('backup:deleteAll', () => deleteAllData())
+ipcMain.handle('backup:import', (_e, password: string, path: string) =>
+  backupImport(password, path, closeHistoryNow)
+)
+ipcMain.handle('backup:deleteAll', () => deleteAllData(closeHistoryNow))
 ipcMain.handle('backup:relaunch', () => relaunchApp())
 
 // ---- Updater ----
@@ -1467,12 +1517,26 @@ app.on('before-quit', (e) => {
   sshDisposeAll()
   localDisposeAll()
   sftpDisposeAll()
-  fleetSampler.dispose()
   // After the sampler, which is the only writer: closing the database out from
   // under an in-flight sweep would be a caught-and-logged failure rather than a
   // crash, but it would also silently drop the sweep the user just paid for.
+  //
+  // dispose() stops the loop synchronously and hands back the sweep that was
+  // already in flight. That sweep persists what it collected in its own
+  // finally, AFTER dispose() returns, so closing here without waiting drops the
+  // last sweep of every session — the exact thing the paragraph above says must
+  // not happen.
+  //
+  // Bounded, though. An in-flight sweep can be parked on an SSH exec against a
+  // host that has stopped answering, and quitting must not wait on the network:
+  // after HISTORY_LAST_SWEEP_MS the store closes anyway, and a sweep that lands
+  // later is dropped by the store's own guard, which says so on the console.
+  // Closing is what folds the WAL back into the primary, so it has to happen on
+  // every quit rather than only on the fast ones.
+  const lastSweep = fleetSampler.dispose().catch(() => undefined)
   if (historyRetain) clearInterval(historyRetain)
-  historyStore?.close()
+  const sweepDeadline = new Promise<void>((resolve) => setTimeout(resolve, HISTORY_LAST_SWEEP_MS))
+  const historyClosed = Promise.race([lastSweep, sweepDeadline]).then(() => historyStore?.close())
   metricsDisposeAll()
   dbDisposeAll()
   tunnelDisposeAll()
@@ -1484,7 +1548,10 @@ app.on('before-quit', (e) => {
   // child must never be able to hold the app open — an orphan is reaped on the
   // next launch, an app that will not quit is a support ticket.
   const cap = new Promise<void>((resolve) => setTimeout(resolve, 4000))
-  void Promise.race([vpnDisposeAll().catch(() => undefined), cap]).finally(() => app.exit(0))
+  void Promise.race([
+    Promise.all([vpnDisposeAll().catch(() => undefined), historyClosed]),
+    cap
+  ]).finally(() => app.exit(0))
 })
 
 // Safety net: never let a stray async error (e.g. a failed child_process
@@ -1554,6 +1621,10 @@ if (!app.requestSingleInstanceLock()) {
 
 app.whenReady().then(() => {
   installCsp()
+  // Only the instance that won the single-instance lock gets here, which is the
+  // whole reason the store is opened from inside whenReady rather than at
+  // module scope. See startHistory.
+  startHistory()
   createWindow()
   installMenu()
   // Primed once at launch so the MCP bridge can resolve server/workspace
