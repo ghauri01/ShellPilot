@@ -214,3 +214,34 @@ which are unchanged from Node 22.
 
 That closes the risk. A version bump in a workflow file is invisible until a release fails,
 and this one gated the whole of wave 2.
+
+### The gap neither wave was looking for: the renderer cannot be tested
+
+Two of the eight fixes in the itemised-disk review shipped without an automated test, and
+not because anyone chose to skip them. `vitest.config.ts` runs `environment: 'node'` and
+there is no jsdom, no happy-dom and no testing-library anywhere in the dependency tree. **No
+React component in this application can be rendered in a test.**
+
+That is why the cross-server leak — a read left in flight when the operator changes server,
+rendering one host's image and container names under another host's name — is covered only
+by having been read carefully. Same for the dead-end error state. Both are real defects that
+were found by a human-style review of the code and fixed on the same basis.
+
+It also explains a pattern visible across both waves. Every renderer defect found so far was
+found by reading: the alert chip stranded above the attention list, the status bar rendering
+a disk alert as "Memory", the itemise button hidden precisely when it was needed. The main
+process has 2280 tests. The renderer has assertions about renderer *source text* — the panel
+suites read `.tsx` files with `readFileSync` and match regexes against them, which is an
+honest workaround and is not the same thing.
+
+The two failure patterns this repository already names are "main-process work the renderer
+never calls" and "tests that assert literals and pass against the bug they were written to
+catch". Source-text assertions are the second pattern with better manners: they are literal
+by construction, and they cannot fail for a component that renders the wrong thing.
+
+**This belongs on the roadmap.** The stated goal is a tool stable enough to daily-drive with
+good UI, and the half of the codebase the operator actually touches has no behavioural test
+coverage at all. Adding jsdom plus testing-library is a day; the value is that every
+subsequent UI defect becomes catchable rather than reviewable. It should land before the job
+engine's job list and item C's inventory table, which are the two largest new surfaces on the
+plan — writing them first and retrofitting tests afterwards is how the gap gets permanent.

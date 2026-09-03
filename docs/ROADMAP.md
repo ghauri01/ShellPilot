@@ -1269,6 +1269,30 @@ exist, each of those items is a rewrite of the same missing plumbing.
 
 ---
 
+### 29. A renderer that can be tested
+
+**Found while fixing something else, which is how this kind of gap is always found.** Two
+defects in the itemised disk view shipped without a test — a stale read rendering one host's
+containers under another host's name, and an error state with no way out — because there is
+no jsdom, no happy-dom and no testing-library in the tree. `vitest` runs in the node
+environment. **No component in this application can be rendered in a test.**
+
+**What exists.** 2280 tests, almost all of the main process, and a genuine workaround in the
+panel suites: they read `.tsx` files with `readFileSync` and assert regexes against the
+source. That catches "somebody added a second call site" and cannot catch "this renders the
+wrong thing".
+
+**Why it ranks where it does.** Every renderer defect found across both waves so far was
+found by reading code, not by running it. The operator only ever touches the renderer, the
+stated goal is a tool stable enough to daily-drive, and the two largest new surfaces on this
+plan — the job list and the inventory table — are both renderer work. Retrofitting tests
+after those ship is how the gap becomes permanent.
+
+**Size.** A day for jsdom, testing-library and the first real component test. Then it is
+per-feature cost like any other test, rather than a project.
+
+---
+
 ## The plan — six months, one focused person
 
 Weeks are sequential because the constraint is one person, not one team. Where two items could be
