@@ -33,7 +33,6 @@ import {
   type Sha256
 } from '../src/shared/access'
 import { JOB_KINDS } from '../src/shared/jobs'
-import type { JobSpec, JobTargetRef } from '../src/shared/jobs'
 
 describe('the gate that keeps the write half out of this build', () => {
   // GATED OFF, deliberately, and this block is what makes that a property
@@ -106,6 +105,12 @@ const A = 'AAAAC3NzaC1lZDI1NTE5AAAAIJp0kFqDkGDMEnCH7mFY3sBRb+tSVEyKvJhLhZ+SHDdw'
 const A_FP = 'SHA256:wVlk8sEGn2qqP1yFjdkoYGu+eWPmKJ/koiL8zATTjxI'
 const B = 'AAAAC3NzaC1lZDI1NTE5AAAAIN+Qq8Z0mHqxr4RMlBFPHU6JmsFvNzZYuHkWkQrgnJ2s'
 const B_FP = 'SHA256:Kh/dB+J46zzk3b+72O1DqnLW16xNkYitzUOrofTSSL8'
+/** A certificate issued over A, from `ssh-keygen -s`. `ssh-keygen -l` prints
+ *  A_FP for it, because the identity a certificate carries is the key inside
+ *  it — which is what makes one account trusting a key both ways two lines for
+ *  one fingerprint. */
+const A_CERT =
+  'AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIE5sEAlyPV1++W59JEopEdVFkHQoYhIBHwPFqhLWRsG8AAAAIJp0kFqDkGDMEnCH7mFY3sBRb+tSVEyKvJhLhZ+SHDdwAAAAAAAAAAAAAAABAAAABWFsaWNlAAAABwAAAANvcHMAAAAAAAAAAP//////////AAAAAAAAAIIAAAAVcGVybWl0LVgxMS1mb3J3YXJkaW5nAAAAAAAAABdwZXJtaXQtYWdlbnQtZm9yd2FyZGluZwAAAAAAAAAWcGVybWl0LXBvcnQtZm9yd2FyZGluZwAAAAAAAAAKcGVybWl0LXB0eQAAAAAAAAAOcGVybWl0LXVzZXItcmMAAAAAAAAAAAAAADMAAAALc3NoLWVkMjU1MTkAAAAgC1t8okOlkmDdbBmTjonaV3e1b/UQXSOqXUeUB1CLC6EAAABTAAAAC3NzaC1lZDI1NTE5AAAAQL7SnZp8XxA+3UK/Er7VX+slWP8Cl8Fm2rF2PJaXKixm8fFVC36Rv9iYu6vhJJIcv5BfSxQ7FZ9Fnw96EiddVwY='
 
 const OK_STATUS = [
   'accounts ok -',
@@ -191,14 +196,14 @@ describe('rule 1 — never remove the key this session is on', () => {
     // sshd's own answer, via SSH_AUTH_INFO_0. The only authoritative source, and
     // where it exists the check is exact rather than a guess.
     const plan = revoke({ targets: [target(host({ authinfo: [`publickey ssh-ed25519 ${A}`] }))] })
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
     expect(plan.blocks.map((b) => b.kind)).toEqual(['is-session-key'])
     expect(plan.blocks[0].reason).toContain('own way back into the host')
   })
 
   it('refuses a fingerprint the caller named as protected', async () => {
     const plan = revoke({ protect: [A_FP] })
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
     expect(plan.blocks.map((b) => b.kind)).toEqual(['is-session-key'])
   })
 
@@ -218,7 +223,7 @@ describe('rule 1 — never remove the key this session is on', () => {
     // holding the connection open — so the account ShellPilot connects as is
     // off limits.
     const plan = revoke({ fingerprint: B_FP, targets: [target(host({ self: 'ops' }), 'ops')] })
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
     expect(plan.blocks.map((b) => b.kind)).toEqual(['session-key-unknown'])
     expect(plan.blocks[0].reason).toContain('ExposeAuthInfo')
   })
@@ -233,7 +238,7 @@ describe('rule 1 — never remove the key this session is on', () => {
       targets: [target(host({ self: 'root', user: 'ops' }), 'ops')]
     })
     expect(plan.blocks).toEqual([])
-    expect(plan.spec).not.toBeNull()
+    expect(plan.write).not.toBeNull()
     expect(plan.targets.map((t) => t.serverId)).toEqual(['a'])
   })
 
@@ -248,7 +253,7 @@ describe('rule 1 — never remove the key this session is on', () => {
       ]
     })
     expect(plan.blocks.map((b) => b.kind)).toEqual(['is-session-key'])
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
   })
 
   it('refuses conservatively when the key the host named was cut, rather than trusting the stump', async () => {
@@ -266,7 +271,7 @@ describe('rule 1 — never remove the key this session is on', () => {
     expect(cut.sessionKeysCertain).toBe(false)
     const plan = revoke({ fingerprint: B_FP, targets: [target(cut, 'ops')] })
     expect(plan.blocks.map((b) => b.kind)).toEqual(['session-key-unknown'])
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
   })
 
   it('still refuses that other account when the host names the key and it matches', async () => {
@@ -357,7 +362,7 @@ describe('rule 2 — nothing is committed without a second, independent session'
 
   it('puts nothing permanent in the job the engine would run', async () => {
     const plan = revoke({ targets: [target(host({ self: 'root' }))] , fingerprint: B_FP })
-    const command = plan.spec!.steps[0].command
+    const command = plan.write!.command
     expect(command).not.toContain(accessCommitMarker(plan.token) + '"\n: >')
     // The job stages and arms. The only thing that makes the change permanent
     // is the marker, and the job never creates it.
@@ -375,8 +380,7 @@ describe('rule 2 — nothing is committed without a second, independent session'
     // this test could not see: the launch was a bare line whose failure was
     // discarded. So the `mv` must also come after the check that the watchdog
     // wrote its arming sentinel.
-    const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).spec!.steps[0]
-      .command
+    const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).write!.command
     const backup = command.indexOf('cp -p "$SP_F" "$SP_B"')
     const launch = command.indexOf('$SP_L sh -c')
     const proof = command.indexOf('[ -f "$SP_ARM" ] || {')
@@ -393,48 +397,28 @@ describe('rule 2 — nothing is committed without a second, independent session'
   })
 
   it('tells the operator in the job output that the change is not permanent', async () => {
-    const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).spec!.steps[0]
-      .command
+    const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).write!.command
     expect(command).toContain('STAGED:')
     expect(command).toContain('will be put back automatically')
     expect(command).toContain(`${ACCESS_ROLLBACK_SECONDS}s`)
   })
 
-  it('is a real JobSpec, checked here because access.ts may not import one', async () => {
-    // src/shared/access.ts declares the spec shape structurally: it is reached
-    // from the fleet sampler, which the MCP bridge reads, and
-    // tests/jobsNotExposed.test.ts fails if anything in that closure imports the
-    // job engine. This file is allowed to import both, so the two shapes are
-    // reconciled here — a drift between them is a compile error rather than a
-    // spec the runner would reject at three in the morning.
-    const plan = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP })
-    const spec: JobSpec = plan.spec!
-    const targets: JobTargetRef[] = plan.targets
-    expect(spec.steps).toHaveLength(1)
-    expect(targets).toHaveLength(1)
-  })
-
-  it('is filed as an access change, not as somebody typing a command', async () => {
-    // A key change that came back from history indistinguishable from an ad-hoc
-    // `systemctl restart nginx` would make the audit trail this whole item
-    // exists to produce unfilterable.
-    //
-    // Asserted against the VALUE list rather than against a type annotation:
-    // neither tsconfig includes `tests/`, so a `const k: JobKind = 'access'`
-    // here is erased by esbuild and passes whatever `JobKind` says. JOB_KINDS
-    // is a real array at runtime, so this fails if the kind is dropped from the
-    // union — which is what the assertion is for.
-    const plan = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP })
-    expect(JOB_KINDS).toEqual(['command', 'patch', 'access'])
-    expect(plan.spec!.kind).toBe('access')
-    expect(JOB_KINDS).toContain(plan.spec!.kind)
-  })
-
   it('runs one host at a time', async () => {
     // A key change rolled across a selection in parallel is the case where a
-    // mistake reaches every machine before the first failure is visible.
-    const plan = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP })
-    expect(plan.spec!.concurrency).toBe(1)
+    // mistake reaches every machine before the first failure is visible;
+    // serialised, the second host is still reachable while the first is being
+    // looked at.
+    //
+    // Asserted against main rather than against a `concurrency: 1` on a spec no
+    // runner was ever handed. The serialisation is a `for` loop with an `await`
+    // in it, and the thing that would break it is somebody reaching for
+    // `Promise.all` — which is what this sees.
+    const main = await readFile(resolve(__dirname, '..', 'src/main/index.ts'), 'utf8')
+    const at = main.indexOf("ipcMain.handle('access:run'")
+    const body = main.slice(at, main.indexOf('ipcMain.handle(', at + 10))
+    expect(body).toContain('for (const target of plan.targets)')
+    expect(body).toContain('await sshExec(')
+    expect(body).not.toMatch(/Promise\.(all|allSettled|race)/)
   })
 
   it('is one command for the whole job, so the approval record can be compared', async () => {
@@ -448,9 +432,8 @@ describe('rule 2 — nothing is committed without a second, independent session'
         { ...target(host({ self: 'root' })), serverId: 'b', serverName: 'web-2' }
       ]
     })
-    expect(plan.spec!.steps).toHaveLength(1)
-    expect(plan.spec!.steps[0].command).toContain('SP_F="$HOME/.ssh/authorized_keys"')
-    expect(plan.spec!.steps[0].command).not.toContain('/home/ops')
+    expect(plan.write!.command).toContain('SP_F="$HOME/.ssh/authorized_keys"')
+    expect(plan.write!.command).not.toContain('/home/ops')
     expect(plan.targets.map((t) => t.serverId)).toEqual(['a', 'b'])
   })
 })
@@ -461,8 +444,7 @@ describe('rule 2 — nothing is committed without a second, independent session'
 
 describe('rule 3 — always leave a timestamped backup on the host', () => {
   it('copies the file before anything else touches it', async () => {
-    const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).spec!.steps[0]
-      .command
+    const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).write!.command
     const backup = command.indexOf('cp -p "$SP_F" "$SP_B"')
     expect(backup).toBeGreaterThan(-1)
     expect(backup).toBeLessThan(command.indexOf('grep -v -F'))
@@ -480,7 +462,7 @@ describe('rule 3 — always leave a timestamped backup on the host', () => {
 describe('what a change refuses to be', () => {
   it('refuses to edit an account whose file was not read', async () => {
     const plan = revoke({ targets: [target(host({ self: 'root', keysStatus: 'denied' }))] })
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
     expect(plan.blocks.map((b) => b.kind)).toEqual(['not-read'])
   })
 
@@ -515,7 +497,7 @@ describe('what a change refuses to be', () => {
     expect(a.readsTheFileWeRead).toBe(false)
     const plan = revoke({ fingerprint: B_FP, targets: [target(a)] })
     expect(plan.blocks.map((b) => b.kind)).toEqual(['not-the-file-sshd-reads'])
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
   })
 
   it('refuses a host whose sshd config could only be read in part', async () => {
@@ -526,7 +508,7 @@ describe('what a change refuses to be', () => {
     expect(a.readsTheFileWeRead).toBeNull()
     const plan = revoke({ fingerprint: B_FP, targets: [target(a)] })
     expect(plan.blocks.map((b) => b.kind)).toEqual(['not-the-file-sshd-reads'])
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
   })
 
   it('refuses an account that has a legacy authorized_keys2 sshd also reads', async () => {
@@ -564,7 +546,7 @@ describe('what a change refuses to be', () => {
       targets: [target(host({ self: 'root', keys2: 'present', keyfile: '.ssh/authorized_keys' }))]
     })
     expect(plan.blocks).toEqual([])
-    expect(plan.spec).not.toBeNull()
+    expect(plan.write).not.toBeNull()
   })
 
   it('leaves out a host the key is not on rather than counting it as revoked', async () => {
@@ -573,7 +555,36 @@ describe('what a change refuses to be', () => {
       targets: [target(host({ self: 'root' }))]
     })
     expect(plan.blocks.map((b) => b.kind)).toEqual(['not-present'])
-    expect(plan.spec).toBeNull()
+    expect(plan.write).toBeNull()
+  })
+
+  it('refuses a key trusted both plainly and through a certificate, and says which', async () => {
+    // A certificate line fingerprints to the key INSIDE it and deliberately
+    // keeps no body, so an account trusting a key both ways has two lines for
+    // one fingerprint and one removable body. Removing the plain line would
+    // leave the certificate — and the key still trusted — while the report said
+    // revoked.
+    const a = parseAccessCollection(
+      [
+        'V self root',
+        'V keyfile AuthorizedKeysFile .ssh/authorized_keys',
+        'U 1 keys ok -',
+        'U 1 path /home/ops/.ssh/authorized_keys',
+        'U 1 name ops',
+        `K 1 1 90 ssh-ed25519 ${A} alice@laptop`,
+        `K 1 2 700 ssh-ed25519-cert-v01@openssh.com ${A_CERT} alice@laptop`,
+        ACCESS_STATUS_MARKER,
+        ...OK_STATUS
+      ].join('\n'),
+      { sha256, now: 1 }
+    )
+    // The fixture is only worth anything if both lines really do carry the one
+    // fingerprint.
+    expect(a.accounts[0].keys!.map((k) => k.fingerprint)).toEqual([A_FP, A_FP])
+    const plan = revoke({ targets: [target(a)] })
+    expect(plan.write).toBeNull()
+    expect(plan.blocks[0].reason).toContain('certificate')
+    expect(plan.blocks[0].reason).not.toContain('not in a form')
   })
 
   it('refuses to add a key that is already there', async () => {
@@ -600,7 +611,7 @@ describe('what a change refuses to be', () => {
         targets: [target(host({ self: 'root' }))],
         now: 1
       })
-      expect(plan.spec, bad).toBeNull()
+      expect(plan.write, bad).toBeNull()
       expect(plan.blocks[0].kind, bad).toBe('not-read')
     }
   })
@@ -610,19 +621,62 @@ describe('what a change refuses to be', () => {
     // throws rather than returning a plan, because a caller that got here has a
     // bug and a bug that writes authorized_keys should not degrade quietly.
     expect(() =>
-      buildRevokeKeyCommand({ path: '/x', blob: "AAAA'; rm -rf /; '", token: '1', expectRemoved: 1 })
+      buildRevokeKeyCommand({ path: '/x', blob: "AAAA'; rm -rf /; '", token: '1' })
     ).toThrow(/unvalidated/)
     expect(() => buildAddKeyCommand({ path: '/x', line: 'ssh-ed25519 $(id) x', token: '1' })).toThrow(
       /unvalidated/
     )
   })
 
+  it('refuses to build a write from a token it has not validated', async () => {
+    // The token is interpolated into four paths in a command that replaces
+    // `authorized_keys`. `TOKEN_RE` was applied to the two READ-ONLY commands
+    // and not to the two that write, which is precisely backwards: the doc
+    // comment argues for validating it and then guards the harmless pair.
+    for (const bad of ["1; rm -rf ~", '../../../etc/ssh/x', 'a b', '', 'x'.repeat(33)]) {
+      expect(() => buildRevokeKeyCommand({ path: '/x', blob: B, token: bad }), bad).toThrow(
+        /unvalidated/
+      )
+      expect(
+        () => buildAddKeyCommand({ path: '/x', line: `ssh-ed25519 ${B} n`, token: bad }),
+        bad
+      ).toThrow(/unvalidated/)
+    }
+  })
+
+  it('reports the window it actually armed, not the default one', async () => {
+    // A caller passing `rollbackSeconds` would otherwise have every deadline
+    // judgement made against 300 — wrong by an order of magnitude, and the
+    // deadline is what decides whether a change may be confirmed at all.
+    const plan = revoke({
+      targets: [target(host({ self: 'root' }))],
+      fingerprint: B_FP,
+      rollbackSeconds: 30
+    })
+    expect(plan.rollbackSeconds).toBe(30)
+    expect(plan.write!.command).toContain('sleep 30')
+    expect(revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).rollbackSeconds).toBe(
+      ACCESS_ROLLBACK_SECONDS
+    )
+  })
+
+  it('is not a job, and there is no job kind pretending it is one', async () => {
+    // NOTHING ever created a job of kind `access`: `access:run` issues the
+    // staged write itself, in a hand-rolled serial loop, because the protocol
+    // needs a fresh session per host between the write and the confirmation and
+    // the job engine cannot provide one. A kind in the vocabulary that nothing
+    // produces is a filter that never matches and an audit trail that never
+    // fills.
+    expect(JOB_KINDS).toEqual(['command', 'patch'])
+    const plan = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP })
+    expect(Object.keys(plan.write!).sort()).toEqual(['command', 'title'])
+  })
+
   it('uses no sudo anywhere in a write', async () => {
     // The read half escalates because reading another account's key file is
     // normal. An escalated WRITE is one nobody watching the sudo log can tell
     // from an attacker with the same access.
-    const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).spec!.steps[0]
-      .command
+    const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).write!.command
     expect(command).not.toMatch(/\bsudo\b/)
     expect(accessDisarmCommand('/x', '1')).not.toMatch(/\bsudo\b/)
     // The ADD path, which this test never fed to the regex — so prefixing
@@ -634,7 +688,7 @@ describe('what a change refuses to be', () => {
       buildAddKeyCommand({ path: '/x', line: `ssh-ed25519 ${B} added`, token: '1' })
     ).not.toMatch(/\bsudo\b/)
     expect(
-      buildRevokeKeyCommand({ path: '/x', blob: B, token: '1', expectRemoved: 1 })
+      buildRevokeKeyCommand({ path: '/x', blob: B, token: '1' })
     ).not.toMatch(/\bsudo\b/)
   })
 })
@@ -720,7 +774,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
   it('removes exactly the key asked for and leaves a backup of the old file', async () => {
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 't1', expectRemoved: 1, rollbackSeconds: 60 })
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 't1', rollbackSeconds: 60 })
     )
     expect(r.code).toBe(0)
     expect(h.read()).toContain(B)
@@ -734,7 +788,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     // RULE 2, watched rather than asserted. This is the only property that
     // survives ShellPilot being the thing that is locked out.
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
-    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't2', expectRemoved: 1, rollbackSeconds: 1 }))
+    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't2', rollbackSeconds: 1 }))
     expect(h.read()).not.toContain(A)
     await sleep(2500)
     expect(h.read()).toContain(A)
@@ -745,7 +799,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
 
   it('leaves the change alone once a confirmation lands', async () => {
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
-    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't3', expectRemoved: 1, rollbackSeconds: 1 }))
+    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't3', rollbackSeconds: 1 }))
     const d = h.run(accessDisarmCommand(h.file, 't3'))
     expect(d.code).toBe(0)
     expect(d.out).toContain('COMMITTED')
@@ -770,17 +824,49 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     expect(lines[1]).toContain(B)
   })
 
+  it('removes every line carrying the key, however many this host has', async () => {
+    // The expected count is computed ON THE HOST now. It used to be taken from
+    // the FIRST target in the selection and baked into the one command every
+    // host runs, so the order the operator happened to select hosts in decided
+    // what ran on all of them — and a host holding the key on two lines failed
+    // a count check about a different machine.
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${A} alice@second-machine`, `ssh-ed25519 ${B} bob`, ''])
+    const r = h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't5', rollbackSeconds: 60 }))
+    expect(r.code).toBe(0)
+    expect(h.read()).not.toContain(A)
+    expect(h.read()).toContain(B)
+  })
+
+  it('refuses when the key is not in the file this host actually has', async () => {
+    // A collection that has gone stale, where the key is already gone. That
+    // used to surface as "the new file has 2 lines and 1 was expected", which
+    // is the truth about the wrong thing.
+    const h = fakeHome([`ssh-ed25519 ${B} bob@desktop`, ''])
+    const before = h.read()
+    const r = h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't5b', rollbackSeconds: 60 }))
+    expect(r.code).toBe(4)
+    expect(r.out).toMatch(/that key is not in this account/)
+    expect(h.read()).toBe(before)
+    expect(h.backups()).toEqual([])
+  })
+
   it('changes nothing when the resulting file is the wrong size', async () => {
     // The count is checked BEFORE the replacement, so a filter that did
-    // something nobody asked for never becomes the live file at all.
-    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${A} alice@second-machine`, ''])
+    // something nobody asked for never becomes the live file at all. Forced
+    // here with a `grep` whose `-v` drops one line more than its `-c` counted,
+    // because with the host doing its own counting the two now have to be made
+    // to disagree deliberately.
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const before = h.read()
-    const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 't5', expectRemoved: 1, rollbackSeconds: 60 })
-    )
+    const r = h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't5c', rollbackSeconds: 60 }), {
+      shim: {
+        grep: 'if [ "$1" = "-v" ]; then shift 3; /usr/bin/grep -v -F -- "$@" | tail -n +2; exit 0; fi\nexec /usr/bin/grep "$@"'
+      }
+    })
     expect(r.code).toBe(4)
     expect(r.out).toContain('nothing was changed')
     expect(h.read()).toBe(before)
+    expect(h.backups()).toEqual([])
   })
 
   it('revokes the last key on an account, leaving it trusting nobody', async () => {
@@ -790,7 +876,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     // would have caught a real problem never runs.
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, ''])
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 't9', expectRemoved: 1, rollbackSeconds: 60 })
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 't9', rollbackSeconds: 60 })
     )
     expect(r.code).toBe(0)
     expect(h.read().trim()).toBe('')
@@ -814,7 +900,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const before = h.read()
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w1', expectRemoved: 1, rollbackSeconds: 60 }),
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w1', rollbackSeconds: 60 }),
       { shim: { nohup: 'exit 127', setsid: 'exit 127', 'systemd-run': 'exit 127' } }
     )
     expect(r.code).not.toBe(0)
@@ -835,7 +921,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const before = h.read()
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w2', expectRemoved: 1, rollbackSeconds: 60 }),
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w2', rollbackSeconds: 60 }),
       { shim: { nohup: 'exit 0', setsid: 'exit 0', 'systemd-run': 'exit 0' } }
     )
     expect(r.code).not.toBe(0)
@@ -847,7 +933,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const before = h.read()
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w3', expectRemoved: 1, rollbackSeconds: 60 }),
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w3', rollbackSeconds: 60 }),
       { onlyShim: true }
     )
     expect(r.code).not.toBe(0)
@@ -862,7 +948,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     // survives a logind kill from a `nohup` that only survives SIGHUP.
     const h = fakeHome([`ssh-ed25519 ${A} a`, `ssh-ed25519 ${B} b`, ''])
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w4', expectRemoved: 1, rollbackSeconds: 60 })
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'w4', rollbackSeconds: 60 })
     )
     expect(r.code).toBe(0)
     expect(r.out).toMatch(/STAGED:/)
@@ -887,13 +973,13 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
   it('refuses to stage a second change while the first is still waiting', async () => {
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const first = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x1', expectRemoved: 1, rollbackSeconds: 2 })
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x1', rollbackSeconds: 2 })
     )
     expect(first.code).toBe(0)
     const after = h.read()
 
     const second = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: B, token: 'x2', expectRemoved: 1, rollbackSeconds: 2 })
+      buildRevokeKeyCommand({ path: h.file, blob: B, token: 'x2', rollbackSeconds: 2 })
     )
     expect(second.code).not.toBe(0)
     expect(second.out).toMatch(/still waiting for its rollback window/)
@@ -908,13 +994,13 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     // The refusal has to be temporary, or one failed change would lock a host
     // out of this feature for good.
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
-    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x3', expectRemoved: 1, rollbackSeconds: 1 }))
+    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x3', rollbackSeconds: 1 }))
     await sleep(2500)
     // The host put it back by itself and cleaned up after the change.
     expect(h.read()).toContain(A)
     expect(h.backups()).toEqual([])
     const again = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: B, token: 'x4', expectRemoved: 1, rollbackSeconds: 60 })
+      buildRevokeKeyCommand({ path: h.file, blob: B, token: 'x4', rollbackSeconds: 60 })
     )
     expect(again.code).toBe(0)
     expect(again.out).toContain('STAGED:')
@@ -923,15 +1009,15 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
   it('leaves no backup behind when it refuses after writing one', async () => {
     // A backup left by a change that did not happen would refuse every future
     // change on the host under the rule above, for ever.
-    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${A} alice@second-machine`, ''])
-    const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x5', expectRemoved: 1, rollbackSeconds: 60 })
-    )
-    expect(r.code).toBe(4)
+    const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
+    const r = h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x5', rollbackSeconds: 60 }), {
+      shim: { chmod: 'exit 1' }
+    })
+    expect(r.code).toBe(3)
     expect(h.backups()).toEqual([])
     // And the next change is not refused because of it.
     const next = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x6', expectRemoved: 2, rollbackSeconds: 60 })
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'x6', rollbackSeconds: 60 })
     )
     expect(next.code).toBe(0)
   })
@@ -942,7 +1028,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     chmodSync(join(h.home, '.ssh'), 0o500)
     try {
       const r = h.run(
-        buildRevokeKeyCommand({ path: h.file, blob: A, token: 't6', expectRemoved: 1, rollbackSeconds: 60 })
+        buildRevokeKeyCommand({ path: h.file, blob: A, token: 't6', rollbackSeconds: 60 })
       )
       expect(r.code).toBe(3)
       expect(r.out).toContain('nothing was changed')
@@ -960,7 +1046,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const before = h.read()
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c1', expectRemoved: 1, rollbackSeconds: 60 }),
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c1', rollbackSeconds: 60 }),
       { shim: { cp: 'head -c 20 "$2" > "$3" 2>/dev/null || head -c 20 "$1" > "$2"' } }
     )
     expect(r.code).toBe(3)
@@ -993,7 +1079,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     rmSync(h.file)
     symlinkSync(real, h.file)
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c3', expectRemoved: 1, rollbackSeconds: 60 })
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c3', rollbackSeconds: 60 })
     )
     expect(r.code).toBe(3)
     expect(r.out).toMatch(/symbolic link/)
@@ -1009,7 +1095,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const before = h.read()
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c4', expectRemoved: 1, rollbackSeconds: 60 }),
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c4', rollbackSeconds: 60 }),
       { shim: { chmod: 'exit 1' } }
     )
     expect(r.code).toBe(3)
@@ -1023,7 +1109,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     // original with `cp -p`; the revoke path has to do it deliberately.
     const h = fakeHome([`ssh-ed25519 ${A} a`, `ssh-ed25519 ${B} b`, ''])
     const r = h.run(
-      `umask 002\n${buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c5', expectRemoved: 1, rollbackSeconds: 60 })}`
+      `umask 002\n${buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c5', rollbackSeconds: 60 })}`
     )
     expect(r.code).toBe(0)
     expect((statSync(h.file).mode & 0o777).toString(8)).toBe('600')
@@ -1033,7 +1119,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     const h = fakeHome([`ssh-ed25519 ${A} x`, ''])
     rmSync(h.file)
     const r = h.run(
-      buildRevokeKeyCommand({ path: h.file, blob: A, token: 't7', expectRemoved: 1, rollbackSeconds: 60 })
+      buildRevokeKeyCommand({ path: h.file, blob: A, token: 't7', rollbackSeconds: 60 })
     )
     expect(r.code).toBe(3)
     expect(existsSync(h.file)).toBe(false)
@@ -1041,7 +1127,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
 
   it('leaves the new file private', async () => {
     const h = fakeHome([`ssh-ed25519 ${A} a`, `ssh-ed25519 ${B} b`, ''])
-    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't8', expectRemoved: 1, rollbackSeconds: 60 }))
+    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't8', rollbackSeconds: 60 }))
     const mode = execFileSync('/bin/sh', ['-c', `ls -l "${h.file}" | cut -c1-10`], { encoding: 'utf8' }).trim()
     expect(mode).toBe('-rw-------')
   })

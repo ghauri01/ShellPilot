@@ -339,7 +339,7 @@ export interface JobHostResult {
  * can check what the kinds ARE, and a kind added here without being added to
  * the list is not a kind.
  */
-export const JOB_KINDS = ['command', 'patch', 'access'] as const
+export const JOB_KINDS = ['command', 'patch'] as const
 
 export type JobKind = (typeof JOB_KINDS)[number]
 

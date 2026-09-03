@@ -2457,41 +2457,32 @@ export interface AccessBlock {
 }
 
 /**
- * A `JobSpec` and a `JobTargetRef`, declared structurally rather than imported.
+ * WHAT RUNS ON EVERY HOST IN THIS PLAN, AND IT IS NOT A JOB.
  *
- * NOT a style choice. tests/jobsNotExposed.test.ts walks the import closure of
- * everything the MCP bridge and the CLI can reach and fails if any of it
- * imports the job engine — because `denyAllPending()`, the stop-all-AI-access
- * switch, works by resolving PENDING requests, and a job already running on
- * fifteen hosts has nothing pending. This file is reached from the fleet
- * sampler, which the bridge reads, so importing `./jobs` for two type aliases
- * would put the job vocabulary inside that closure for the sake of a compiler
- * convenience.
+ * This used to be an `AccessJobSpec` carrying `kind: 'access'`, `steps` and
+ * `concurrency`, declared structurally so this file would not have to import
+ * the job engine — and NOTHING EVER CREATED ONE. `access:run` issues the staged
+ * write itself, in a hand-rolled serial loop, and it has to: the protocol needs
+ * a session that authenticated AFTER each host's write, between that write and
+ * its confirmation, and the job engine cannot provide one. Its steps share a
+ * pooled transport, and a detached job's whole point is that it outlives the
+ * process — which is the opposite of what a change held open by a 300-second
+ * dead-man's switch needs.
  *
- * The shapes are still checked against the real ones: tests/accessWrite.test.ts
- * assigns a produced spec to a `JobSpec` and a produced target list to
- * `JobTargetRef[]`, so a drift between the two is a compile error in a place
- * that is allowed to import both.
+ * So the kind is gone from `JOB_KINDS` too. A kind in the vocabulary that
+ * nothing produces is a filter that never matches and an audit trail that never
+ * fills, and it read as a promise that key changes appear in the job list. They
+ * do not. They appear as `AccessCommitReport`s, which say something a job row
+ * cannot: which of the three outcomes each host reached.
  */
-export interface AccessJobSpec {
-  /**
-   * `access`, not `command`, and the difference is what a job list is FOR.
-   *
-   * A key change staged by this planner is a change record — this host stopped
-   * trusting that key on the 14th — and a row that could not be told apart
-   * from somebody's ad-hoc `systemctl restart nginx` would make the audit
-   * trail this whole item exists to produce unfilterable. The kind is declared
-   * on the jobs side (`JobKind` in src/shared/jobs.ts) because this file may
-   * not import that one; see the note on this interface.
-   *
-   * It changes nothing about how the job runs, and it does NOT mean the change
-   * is permanent: an `access` job stages, and only a confirmation over an
-   * independent session commits.
-   */
-  kind: 'access'
+export interface AccessStagedWrite {
+  /** Exactly what runs, on every host in this plan. ONE command for the whole
+   *  selection, so what the operator agreed to can be compared against what
+   *  main derives — which is why the path is resolved from `$HOME` on the host
+   *  rather than interpolated per host. */
+  command: string
+  /** What to call it in front of a person. Never parsed. */
   title: string
-  steps: { command: string }[]
-  concurrency?: number
 }
 
 export interface AccessJobTarget {
@@ -2500,8 +2491,8 @@ export interface AccessJobTarget {
 }
 
 export interface AccessChangePlan {
-  /** The job, or null when every target was blocked. */
-  spec: AccessJobSpec | null
+  /** What will run, or null when every target was blocked. */
+  write: AccessStagedWrite | null
   targets: AccessJobTarget[]
   blocks: AccessBlock[]
   /** Per host, what the disarm would be. Returned separately from the job on
@@ -2544,7 +2535,7 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
   const key = req.kind === 'revoke' ? (req.fingerprint ?? '') : ''
   // Blobs, per host: the same key can be written with different comments on
   // different hosts, and the removal matches the BLOB.
-  const perHost: { t: AccessChangeTarget; blob: string; path: string; count: number }[] = []
+  const perHost: { t: AccessChangeTarget; blob: string; path: string }[] = []
 
   for (const t of req.targets) {
     const account = t.access.accounts.find((a) => a.user === t.user)
@@ -2638,18 +2629,31 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
         )
         continue
       }
-      // The blob is recovered from the line the read half kept. Validated
-      // before it goes anywhere near a command; the character class is why no
-      // quoting question arises.
-      const blob = blobOf(account, key)
-      if (blob === null || !BLOB_RE.test(blob)) {
+      // The body to match on, recovered from the line the read half kept.
+      // EVERY line carrying the fingerprint is looked at, not the first, and
+      // the reasons a removal cannot be built from them are told apart — the
+      // block is the only thing the operator will read, and "not in a form this
+      // can match" is the wrong sentence for a key that is trusted twice.
+      const certified = matches.some((k) => k.certificate)
+      const bodies = matches.map(blobOfLine).filter((b): b is string => b !== null)
+      if (matches.length > 1 || bodies.length !== 1) {
+        block(
+          'not-read',
+          certified
+            ? `that key is trusted on ${t.user}@${t.serverName} both as a plain key and through a certificate, which is ${matches.length} lines for one fingerprint. A certificate carries no body this can match on, so removing the plain line would leave the key trusted and the change would be reported as a revocation.`
+            : `that key is on ${matches.length} line${matches.length === 1 ? '' : 's'} of ${t.user}@${t.serverName}'s authorized_keys and ${bodies.length} of them can be matched exactly, so the removal could not be made precise. Nothing approximate is run against an authorized_keys file.`
+        )
+        continue
+      }
+      const blob = bodies[0]
+      if (!BLOB_RE.test(blob)) {
         block(
           'not-read',
           `the stored copy of that key on ${t.serverName} is not in a form this can match exactly, so the removal could not be made precise. Nothing approximate is run against an authorized_keys file.`
         )
         continue
       }
-      perHost.push({ t, blob, path: account.keyPath, count: matches.length })
+      perHost.push({ t, blob, path: account.keyPath })
     } else {
       const line = (req.keyLine ?? '').trim()
       // A constant hash, because only the SHAPE of the line is being checked
@@ -2676,7 +2680,7 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
         )
         continue
       }
-      perHost.push({ t, blob: line, path: account.keyPath, count: 0 })
+      perHost.push({ t, blob: line, path: account.keyPath })
     }
   }
 
@@ -2694,7 +2698,7 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
   // step resolves `$HOME` on the host instead. A selection spanning accounts
   // with different home directories is still one command, and a selection
   // spanning different ACCOUNTS is refused by construction — see the caller.
-  let spec: AccessJobSpec | null = null
+  let write: AccessStagedWrite | null = null
   if (perHost.length > 0) {
     const first = perHost[0]
     const command =
@@ -2703,53 +2707,36 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
             path: first.path,
             blob: first.blob,
             token,
-            expectRemoved: first.count,
             rollbackSeconds: req.rollbackSeconds
           })
         : buildAddKeyCommand({ path: first.path, line: first.blob, token, rollbackSeconds: req.rollbackSeconds })
     commands.push(command)
-    spec = {
-      kind: 'access',
+    write = {
+      command,
       title:
         req.kind === 'revoke'
           ? `Stage revocation of ${key.slice(0, 22)}… from ${first.t.user}`
-          : `Stage a new key for ${first.t.user}`,
-      steps: [{ command }],
-      // One host at a time. A key change rolled across a selection in parallel
-      // is the case where a mistake reaches every machine before the first
-      // failure is visible; serialised, the second host is still reachable
-      // while the first is being looked at.
-      concurrency: 1
+          : `Stage a new key for ${first.t.user}`
     }
   }
 
-  return { spec, targets, blocks, disarm, token, rollbackSeconds: ACCESS_ROLLBACK_SECONDS }
+  // The window this plan ACTUALLY armed. Returning the module default while
+  // the command said something else would make every deadline judgement wrong
+  // by whatever the caller passed — and the deadline is what decides whether a
+  // change may be confirmed at all.
+  return {
+    write,
+    targets,
+    blocks,
+    disarm,
+    token,
+    rollbackSeconds: req.rollbackSeconds ?? ACCESS_ROLLBACK_SECONDS
+  }
 }
 
 /** The base64 body of one stored key, for an exact-match removal. */
 function blobOfLine(k: AuthorizedKey): string | null {
   return k.blob
-}
-
-/**
- * The body to match on for one fingerprint, or null when there is not exactly
- * one.
- *
- * EVERY line carrying the fingerprint is checked, not the first. A certificate
- * line fingerprints to the key inside it and deliberately keeps no body — so an
- * account trusting a key both plainly and through a certificate has two lines
- * for one fingerprint and only one body, and taking the first one would build a
- * removal that deletes one line while the plan's count expects two. The host
- * would catch it and roll back, which is safe and reads as a mystery. Refusing
- * here makes it a block with a sentence instead.
- */
-function blobOf(account: AccessAccount, fingerprint: string): string | null {
-  const bodies: (string | null)[] = []
-  for (const k of account.keys ?? []) {
-    if (k.fingerprint === fingerprint) bodies.push(blobOfLine(k))
-  }
-  if (bodies.length !== 1) return null
-  return bodies[0]
 }
 
 /**
@@ -2767,7 +2754,6 @@ export function buildRevokeKeyCommand(o: {
   path: string
   blob: string
   token: string
-  expectRemoved: number
   rollbackSeconds?: number
 }): string {
   if (!BLOB_RE.test(o.blob)) throw new Error('refusing to build a removal from an unvalidated key body')
@@ -2785,10 +2771,23 @@ export function buildRevokeKeyCommand(o: {
     // not be built", and the count check that would have caught a real problem
     // never runs. Exit 2 is a real error and still stops the change.
     produce: `{ grep -v -F -- '${o.blob}' "$SP_F" > "$SP_T" || [ $? = 1 ]; }`,
-    // The count is checked, not assumed. A filter that removed the wrong number
-    // of lines is a filter that did something nobody asked for, and the answer
-    // is to put the backup back rather than to report success.
-    expect: `SP_WANT=$((SP_BEFORE-${o.expectRemoved}))`
+    // EACH HOST COUNTS FOR ITSELF. This used to be `SP_BEFORE-${expectRemoved}`
+    // with `expectRemoved` taken from the FIRST target in the selection and
+    // then baked into the one command every host runs — so the order the
+    // operator happened to select hosts in decided what ran on all of them, and
+    // a host holding the key on a different number of lines failed a count
+    // check about a different machine.
+    //
+    // Counting on the host also buys a check the plan could not make: a
+    // collection that has gone stale, where the key is already gone. That used
+    // to surface as "the new file has 4 lines and 3 were expected", which is
+    // the truth about the wrong thing.
+    expect: [
+      `SP_HIT=$(grep -c -F -- '${o.blob}' "$SP_F" 2>/dev/null || true)`,
+      `case "$SP_HIT" in ''|*[!0-9]*) SP_HIT=0 ;; esac`,
+      '[ "$SP_HIT" -gt 0 ] || { rm -f "$SP_B"; echo "that key is not in this account\u2019s authorized_keys on this host; nothing was changed" >&2; exit 4; }',
+      'SP_WANT=$((SP_BEFORE-SP_HIT))'
+    ].join('\n')
   })
 }
 
@@ -2829,6 +2828,15 @@ function buildStagedWrite(o: {
   expect: string
   rollbackSeconds?: number
 }): string {
+  // THE TOKEN IS VALIDATED HERE, where it is interpolated into four paths in a
+  // command that replaces `authorized_keys`. It was enforced in the two
+  // READ-ONLY commands and not in the two that write, which is exactly
+  // backwards: the doc comment on TOKEN_RE argues for validating it precisely
+  // because the value reaches a command that touches that file, and then it was
+  // applied to the harmless pair.
+  if (!TOKEN_RE.test(o.token)) {
+    throw new Error('refusing to build a staged write from an unvalidated token')
+  }
   const marker = accessCommitMarker(o.token)
   const wait = o.rollbackSeconds ?? ACCESS_ROLLBACK_SECONDS
   return [

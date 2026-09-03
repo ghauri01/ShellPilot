@@ -1053,7 +1053,7 @@ ipcMain.handle('access:plan', (_e, req: Omit<AccessRunRequest, 'token' | 'confir
   const { plan, refusals } = deriveAccessPlan(req, now)
   return {
     token: plan.token,
-    command: plan.spec?.steps[0].command ?? '',
+    command: plan.write?.command ?? '',
     hosts: plan.targets.map((t) => ({
       serverId: t.serverId,
       serverName: t.serverName,
@@ -1083,7 +1083,7 @@ ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRu
   }
 
   const { plan, refusals } = deriveAccessPlan(req, at)
-  const command = plan.spec?.steps[0].command ?? ''
+  const command = plan.write?.command ?? ''
   if (command === '' || command !== req.confirmedCommand) {
     // Not a warning and not a retry. What was agreed to is not what this would
     // run, and there is no version of that worth resolving automatically.
