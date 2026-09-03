@@ -33,6 +33,7 @@ import {
   type DockerStat
 } from '../../../../shared/docker'
 import type { Server } from '../../types'
+import { ComposePanel } from './ComposePanel'
 
 // Containers on a server, and what an operator does with them.
 //
@@ -539,6 +540,19 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
               This runtime did not report compose labels, so containers are not grouped by project.
             </div>
           )}
+
+          {/* The file half.
+              The grouping above is read from container LABELS, which say what is
+              running. This says what is declared — and therefore which declared
+              service has no container at all, which is the one fact nothing on
+              this panel could state before. It is a separate read behind a
+              button because it costs a bounded filesystem search. */}
+          <ComposePanel
+            server={server}
+            cfg={cfgFor(server)}
+            containers={probe.containers}
+            sudo={usedSudoNow === true}
+          />
 
           {/* Disk. The reclaimable column is the one people came for: it is the
               answer to "the disk is full and I do not know what is using it".
