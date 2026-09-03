@@ -299,3 +299,165 @@ different reason than the one given.
 Both were caught by an implementer testing the instruction rather than following it, which is
 now three times across two waves that a brief has been wrong and saying so was worth more than
 compliance.
+
+## Item 29 — a renderer that can be tested
+
+The gap this closes is stated two sections up: no jsdom, no happy-dom, no testing-library,
+`environment: 'node'`, and therefore **no React component in this app could be rendered in a
+test**. The panel suites' `readFileSync`-plus-regex assertions were an honest workaround and
+are still there; they were never able to fail for a component that renders the wrong thing.
+
+### What was added
+
+`jsdom`, `@testing-library/react`, `@testing-library/dom` and `@testing-library/user-event`,
+as **dev** dependencies. `tests/rendererTestHarness.test.ts` is the standing guard on that:
+it fails if any of the four appears in `dependencies` (which is the list electron-builder
+ships into the asar) or if anything under `src/` imports one.
+
+jsdom over happy-dom, on evidence rather than preference. happy-dom is faster and has a
+smaller tree, which matters when `npm audit` is a hard CI gate — but `npm audit` reports the
+same three pre-existing advisories with jsdom installed as without it, so that argument did
+not apply here. What remained was fidelity: these tests exist to catch what actually renders,
+testing-library is developed against jsdom, and a DOM difference that makes a real defect
+invisible would defeat the entire item.
+
+### Per-file environment, not a global flip
+
+Renderer tests declare their environment in a docblock:
+
+```tsx
+// @vitest-environment jsdom
+```
+
+The default stays `node`. This is not a style choice between two working options —
+`environmentMatchGlobs` was deprecated in Vitest 3 and **removed in Vitest 4**, which is what
+this repo runs; nothing in `node_modules/vitest` responds to it any more. The docblock is
+also the more honest form: the file that needs a DOM is the file that says so.
+
+Measured cost to the main-process suite: 112 files, 2319 passing, **17.33s before and 17.83s
+after**, with Vitest attributing 617ms of that to the new setup file — roughly 5ms per file
+for importing a module that checks `typeof window` and returns. The full suite including the
+new renderer tests runs in the same 16–18s band.
+
+### The setup file
+
+`tests/setup/global.ts` is the only entry in `setupFiles`. It is global because Vitest has no
+per-environment setup list, so it does nothing and imports nothing until it has established
+that a DOM exists; importing `@testing-library/react` unconditionally would put react-dom in
+front of every sqlite test in the suite. When there is a `window`, it pulls in
+`tests/setup/renderer.ts`, which does two things:
+
+**Installs `window.shellpilot` before the test module is imported.** The preload bridge is the
+renderer's entire outside world and `store/alerts.ts` reads it at module scope. The previous
+way to work around that is at the top of `tests/diskAlerts.test.ts`: assign `globalThis.window`
+by hand, then `await import()` the module so the assignment happened first. That works, but it
+made every renderer test carry the ordering rule, and it is incompatible with a static import.
+It is no longer necessary. `stubBridge({...})` replaces the bridge per test and is reset
+afterwards. The default is an **empty object**, deliberately: every call site in the renderer
+is written to survive a missing method (`src/renderer/src/lib/bridge.ts`), and a harness
+handing out plausible defaults would let a component pass by talking to the harness.
+
+**Snapshots and restores every zustand store.** The stores in `src/renderer/src/store` are
+module singletons; a test that raises an alert or adds a server leaves it there and the suite
+becomes order-dependent — passes alone, fails in CI. The harness globs that directory, so a
+store added next month is reset without anyone remembering to come back here, and it also
+calls any exported `reset*ForTests()` (e.g. `store/alerts.ts`'s), which owns module-level maps
+a store snapshot cannot reach.
+
+### Writing one
+
+```tsx
+// @vitest-environment jsdom
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { stubBridge } from './setup/renderer'
+import { Thing } from '../src/renderer/src/components/.../Thing'
+import { useApp } from '../src/renderer/src/store/app'
+
+beforeEach(() => {
+  stubBridge({ docker: { list: () => Promise.resolve(probe) } })
+})
+
+it('does the thing', async () => {
+  const user = userEvent.setup()
+  useApp.getState().setSettings({ ... })      // rolled back for you
+  render(<Thing servers={[server]} />)
+  await user.click(screen.getByRole('button', { name: /Read containers/ }))
+  expect(await screen.findByText('web-1')).toBeTruthy()
+})
+```
+
+Notes that are not obvious the first time:
+
+- Test files are `.test.tsx`, and `vitest.config.ts` now includes that extension. The old glob
+  would have silently ignored one.
+- `esbuild: { jsx: 'automatic' }` is set in `vitest.config.ts`. The root `tsconfig.json` is a
+  project-references stub with no `compilerOptions`, so esbuild finds no `jsx` setting to
+  inherit and would otherwise emit `React.createElement` calls — which fail, because no
+  component here imports React.
+- There are no jest-dom matchers. `expect(el).toBeTruthy()`, `el.getAttribute('title')` and
+  `document.body.textContent` cover what these tests need without a sixth dependency.
+- To resolve a promise and let React render in one step, `await act(async () => { resolve(x) })`.
+  That is how the stale-read test lands an answer at a controlled moment.
+- `tests/` is in no tsconfig, so `npm run typecheck` does **not** type-check test files. ESLint
+  does lint them. That predates this work and is worth fixing separately.
+
+### The three tests, and the proof they can fail
+
+Written against defects that had already shipped, so "would this have caught it" is answerable
+rather than rhetorical. Each was confirmed by reverting the fix and watching the test fail.
+
+**`tests/dockerPanel.test.tsx` — the cross-server stale read.** A `diskDetail` request still in
+the air when the operator changes server used to land under the *new* server's heading: one
+host's image, volume and container names presented as another host's, with the itemise button
+hidden because a listing now existed. The test reads containers and disk for `alpha`, starts an
+itemise whose promise is held open, switches to `bravo`, re-reads there, then resolves alpha's
+answer. Reverting the generation guard in `loadDiskItems`:
+
+```
+AssertionError: expected 'Containersalphabravo Refreshdocker 24…' not to contain 'alpha-only/leaked-image'
+Received: "...By itemCloseNothing on this list can be removed from here...Images (1)
+alpha-only/leaked-image:v1alphaaaa111 · 3 weeks ago0 containers1.2GBrunningbravo-api..."
+```
+
+The leak is legible in the failure message itself: alpha's image, rendered directly above
+bravo's container.
+
+**`tests/dockerPanel.test.tsx` — the dead-end error state.** The itemise control used to gate on
+`diskItems === null`, so a failed read — an SSH timeout, the most likely and most transient
+failure — removed the only button that could retry it. The test fails the read, asserts a
+"Try again" button exists and is enabled, then clicks it and asserts the listing arrives.
+Reverting the gate to `diskItems === null`:
+
+```
+TestingLibraryElementError: Unable to find an accessible element with the role "button" and name `/Try again/`
+```
+
+**`tests/statusBar.test.tsx` — the mislabelled alert chip.** A different component, chosen to
+show the harness generalises rather than being shaped around one file. The chip's tooltip once
+built its label from a two-kind ternary; when `disk` became a third `AlertKind`, every disk
+alert was labelled "Memory". Reverting `LABEL[a.kind]` to that ternary:
+
+```
+AssertionError: expected 'web-1: Memory 91%\n\nClick to open th…' to contain 'web-1: Disk 91%'
+- web-1: Disk 91%
++ web-1: Memory 91%
+```
+
+That file also asserts the negative — no chip when nothing is alerting — which is what proves
+the store rollback works rather than the previous test's alerts being inherited.
+
+### What did not change
+
+No production code. Not one line: the three defects were already fixed, and this item was only
+ever about being able to prove it. No existing test was weakened, deleted or rewritten;
+`tests/diskAlerts.test.ts` still stubs `globalThis.window` its own way and still passes.
+Suite 2319 → 2333.
+
+### One finding, unrelated but found here
+
+`npm audit` exits 1 in this tree today, on three pre-existing advisories in transitive
+dependencies (`@xmldom/xmldom`, `fast-uri`, `qs`), all with fixes available. CI runs bare
+`npm audit` as a gate step. Adding jsdom changed nothing about that report — the diff is
+byte-identical before and after — but the gate is already red for reasons that have nothing to
+do with this work.
