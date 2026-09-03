@@ -2,8 +2,12 @@ import { create } from 'zustand'
 import { useApp } from './app'
 import { onServerForgotten } from './serverCleanup'
 import { DISK_DANGER, isDiskCritical } from '../components/monitor/hostHealth'
+import { EVENT_ALERT_KINDS } from '../../../shared/webhook'
 import type {
   AlertKind as WebhookAlertKind,
+  EventAlertKind,
+  NumericAlertKind,
+  StateAlertKind,
   StoreAlertKind,
   StoredAlertEvent,
   StoredAlertRow
@@ -35,8 +39,13 @@ export interface ActiveAlert {
   serverId: string
   serverName: string
   kind: AlertKind
-  value: number
+  /** Null for a kind that is a state rather than a reading. Not zero: this is
+   *  the same rule the whole item runs on, applied to the chip. */
+  value: number | null
   since: number
+  /** A short, already-scrubbed phrase for the tooltip and the inbox. Built from
+   *  our words and names the user typed, never from remote output. */
+  detail?: string
 }
 
 interface AlertState {
@@ -46,6 +55,15 @@ interface AlertState {
 }
 
 const key = (serverId: string, kind: AlertKind): string => `${serverId}:${kind}`
+
+/** How a chip's number reads, in the unit that number is actually in. State
+ *  kinds have no number at all — a chip that printed one would be inventing a
+ *  measurement — so they read as their label alone. */
+export function chipValue(a: ActiveAlert): string {
+  if (a.value === null) return ''
+  const n = Number.isInteger(a.value) ? String(a.value) : a.value.toFixed(1)
+  return ` ${n}${UNIT[a.kind as NumericAlertKind] ?? ''}`
+}
 
 export const useAlerts = create<AlertState>((set, get) => ({
   active: {},
@@ -66,7 +84,7 @@ export const useAlerts = create<AlertState>((set, get) => ({
 // Six hours is roughly "twice a working day" — often enough that a filling disk
 // is not forgotten, rare enough to still be read. Escalation (see evaluate)
 // covers the case where six hours is too long to wait.
-const REPEAT: Record<AlertKind, number> = {
+const REPEAT: Record<NumericAlertKind, number> = {
   cpu: 60_000,
   ram: 60_000,
   disk: 6 * 60 * 60 * 1000,
@@ -86,7 +104,7 @@ const REPEAT: Record<AlertKind, number> = {
 // is a clear line below zero, which no reading can ever reach, so a load alert
 // would raise once and never resolve. Half a runnable thread per core is the
 // same proportion of the line that five points is for a percentage.
-const RECOVER_MARGIN: Record<AlertKind, number> = {
+const RECOVER_MARGIN: Record<NumericAlertKind, number> = {
   cpu: 5,
   ram: 5,
   disk: 5,
@@ -96,7 +114,7 @@ const RECOVER_MARGIN: Record<AlertKind, number> = {
 
 // A rise of this much since the last thing we said re-opens the repeat window.
 // See evaluate() for why a six-hour window needs it.
-const ESCALATE_BY: Record<AlertKind, number> = {
+const ESCALATE_BY: Record<NumericAlertKind, number> = {
   cpu: 5,
   ram: 5,
   disk: 5,
@@ -118,7 +136,7 @@ const ESCALATE_BY: Record<AlertKind, number> = {
 // webhookAlerts.ts, past which genuine alerts are dropped to keep up with the
 // noise. Disk sits at zero because its own bypasses are the feature, and every
 // case its tests pin depends on them firing immediately.
-const MIN_GAP: Record<AlertKind, number> = {
+const MIN_GAP: Record<NumericAlertKind, number> = {
   cpu: 60_000,
   ram: 60_000,
   disk: 0,
@@ -130,7 +148,7 @@ const MIN_GAP: Record<AlertKind, number> = {
 }
 
 /** Below this, a value counts as recovered rather than merely lower. */
-const clearLine = (kind: AlertKind, threshold: number): number =>
+const clearLine = (kind: NumericAlertKind, threshold: number): number =>
   Math.max(0, threshold - RECOVER_MARGIN[kind])
 
 // Last notification time per server+metric, so a sustained problem repeats on
@@ -273,10 +291,37 @@ const dampedUntil = new Map<string, number>()
  */
 const conditionHeld = new Set<string>()
 
+/**
+ * Occurrences already announced, as `serverId:kind:detail:at`.
+ *
+ * The event kinds have no condition to hold and no resolve to wait for, so the
+ * only thing that can stop the same occurrence being announced twice is knowing
+ * it has been announced. It is seeded from the durable log during hydration, so
+ * a restart does not replay a night of database alarms into the notification
+ * centre — which is the exact failure the durable half of this feature was
+ * written to end, in a different kind.
+ */
+const seenEvents = new Set<string>()
+
+const eventDedupeKey = (id: string, kind: AlertKind, detail: string, at: number): string =>
+  `${id}:${kind}:${detail}:${at}`
+
+/** Whether a kind is one of the "something happened, once" kinds. Read off the
+ *  shared list rather than a second literal, so a kind added there cannot be
+ *  quietly left behind here. */
+const isEventKind = (k: AlertKind): boolean => (EVENT_ALERT_KINDS as readonly string[]).includes(k)
+
 function record(
   kind: AlertKind,
   event: StoredAlertEvent['event'],
-  a: { serverId: string; serverName: string; value?: number; threshold?: number; at: number }
+  a: {
+    serverId: string
+    serverName: string
+    value?: number
+    threshold?: number
+    detail?: string
+    at: number
+  }
 ): void {
   void window.shellpilot?.alerts?.record?.(
     {
@@ -285,7 +330,11 @@ function record(
       serverId: a.serverId,
       serverName: a.serverName,
       ...(a.value === undefined ? {} : { value: fmt(a.value) }),
-      ...(a.threshold === undefined ? {} : { threshold: a.threshold })
+      ...(a.threshold === undefined ? {} : { threshold: a.threshold }),
+      // Written only when there is one. An empty string in the row would be a
+      // detail the inbox renders as a blank parenthesis rather than an absent
+      // one, and absent is what it is.
+      ...(a.detail ? { detail: a.detail } : {})
     },
     a.at
   )
@@ -308,6 +357,23 @@ function record(
 export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
   for (const row of [...rows].reverse()) {
     const k = key(row.serverId, row.kind)
+    if (isEventKind(row.kind)) {
+      // An event kind holds no condition and never writes a resolve, so every
+      // raise in the log is a separate occurrence rather than the start of one
+      // that is still running. Walking these down the branch below would mark
+      // the first one outstanding forever and then read every later one as a
+      // "still going" repeat — so the flap counter that exists to damp a
+      // database re-reporting the same alarm on every poll would never get past
+      // one, and damping would be the one piece of this that a restart undid.
+      //
+      // This mirrors noteAlertEvent exactly, including the refresh: a
+      // occurrence arriving while damped extends the quiet rather than being
+      // counted towards a new damp.
+      seenEvents.add(eventDedupeKey(row.serverId, row.kind, row.detail ?? '', row.at))
+      if (isDamped(k, row.at)) dampedUntil.set(k, row.at + FLAP_DAMP_MS)
+      else noteCrossing(k, row.at)
+      continue
+    }
     if (row.event === 'raised') {
       // A crossing is CLEAN when nothing was outstanding — the same test
       // evaluate() calls `reRaised`, and for the same reason: a "still going"
@@ -403,14 +469,19 @@ export const LABEL: Record<AlertKind, string> = {
   ram: 'Memory',
   disk: 'Disk',
   inode: 'Inodes',
-  load: 'Load'
+  load: 'Load',
+  'host-unreachable': 'Unreachable',
+  'job-failed': 'Job failed',
+  'tunnel-down': 'Tunnel down',
+  'db-alarm': 'Database alarm',
+  'db-watch': 'Database watch'
 }
 
 // What the number is measuring, for the sentences a person reads. Disk says
 // "root filesystem" and means it: metrics.ts probes `df -kP /` and nothing
 // else, so a host with a full /var and a roomy / raises nothing here, and an
 // alert that said "disk" would be claiming to have looked at more than it did.
-const SUBJECT: Record<AlertKind, string> = {
+const SUBJECT: Record<NumericAlertKind, string> = {
   cpu: 'CPU',
   ram: 'Memory',
   disk: 'Root filesystem',
@@ -424,14 +495,14 @@ const SUBJECT: Record<AlertKind, string> = {
 // alike. Disk raises STRICTLY above DISK_DANGER — "at or above 85%" was a
 // claim the code does not implement — and correspondingly clears at 85 itself.
 // CPU and memory raise at or above their line.
-const OVER_WORD: Record<AlertKind, string> = {
+const OVER_WORD: Record<NumericAlertKind, string> = {
   cpu: 'at or above',
   ram: 'at or above',
   disk: 'above',
   inode: 'above',
   load: 'at or above'
 }
-const backBelow: Record<AlertKind, (threshold: number) => string> = {
+const backBelow: Record<NumericAlertKind, (threshold: number) => string> = {
   cpu: (t) => `back below ${t}%`,
   ram: (t) => `back below ${t}%`,
   disk: (t) => `back to ${t}% or below`,
@@ -442,7 +513,7 @@ const backBelow: Record<AlertKind, (threshold: number) => string> = {
 // The unit each kind's number is in. Not everything alerting measures is a
 // percentage, and a load average printed as "3%" is a wrong number rather than
 // an ugly one — which is what the status-bar chip showed before this existed.
-export const UNIT: Record<AlertKind, string> = {
+export const UNIT: Record<NumericAlertKind, string> = {
   cpu: '%',
   ram: '%',
   disk: '%',
@@ -458,18 +529,23 @@ const fmt = (v: number): number => Number(v.toFixed(1))
 
 // The wire name for each kind. A Record rather than a ternary, so adding a kind
 // is a type error here instead of a metric quietly posting as 'memory'.
-const WEBHOOK_KIND: Record<AlertKind, WebhookAlertKind> = {
+const WEBHOOK_KIND: Record<StoreAlertKind, WebhookAlertKind> = {
   cpu: 'cpu',
   ram: 'memory',
   disk: 'disk',
   inode: 'inode',
-  load: 'load'
+  load: 'load',
+  'host-unreachable': 'host-unreachable',
+  'job-failed': 'job-failed',
+  'tunnel-down': 'tunnel-down',
+  'db-alarm': 'db-alarm',
+  'db-watch': 'db-watch'
 }
 
 function evaluate(
   serverId: string,
   serverName: string,
-  kind: AlertKind,
+  kind: NumericAlertKind,
   value: number,
   threshold: number,
   now: number,
@@ -662,6 +738,227 @@ function evaluate(
     // from "ShellPilot died".
     ...(tripped ? { damped: true } : {})
   })
+}
+
+// ---------------------------------------------------------------------------
+// Kinds that are a state, not a reading.
+//
+// A host that will not answer, a job step that failed, a tunnel sitting in
+// error. None of them has a number, a threshold, a recovery margin or an
+// escalation step, and inventing a value of 1 so they could share the numeric
+// path would put "1 per core" in a person's notification. They do share
+// everything that matters: the chip, the repeat window, the outstanding-alarm
+// pairing that stops an all-clear for something nobody was told about, the
+// durable log, and flap damping — a tunnel that flaps is exactly as tiring as a
+// disk that does.
+//
+// The words are per kind and are built here, from our own sentences and from
+// names the user typed. Nothing a host, a job or a database said reaches them:
+// AlertPayload.summary is rendered by Slack, and secretRedaction.ts exists
+// because remote text in an outbound field is easy to get wrong.
+// ---------------------------------------------------------------------------
+
+const STATE_WORDS: Record<
+  StateAlertKind,
+  { raised: (name: string, detail: string) => string; resolved: (name: string) => string }
+> = {
+  'host-unreachable': {
+    raised: (name) => `${name} did not answer the last check`,
+    resolved: (name) => `${name} is answering again`
+  },
+  'job-failed': {
+    raised: (name, detail) => `${name} failed a job step${detail ? ` (${detail})` : ''}`,
+    resolved: (name) => `${name} has completed a job step since`
+  },
+  'tunnel-down': {
+    raised: (name) => `Tunnel ${name} is in error`,
+    resolved: (name) => `Tunnel ${name} is carrying traffic again`
+  }
+}
+
+const EVENT_WORDS: Record<EventAlertKind, (name: string, detail: string) => string> = {
+  'db-alarm': (name, detail) => `${name}: ${detail} is in alarm`,
+  'db-watch': (name, detail) => `${name}: ${detail} is worth watching`
+}
+
+// The same character class systemd unit names get, and for the same reason: a
+// `<!channel>` in a name that reaches `summary` is a mass ping in a workspace
+// that trusts this integration. Spaces are allowed because these are names the
+// user typed, and a job called "Upgrade the estate" should read as one.
+const cleanName = (v: string): string =>
+  v.slice(0, 128).replace(/[^A-Za-z0-9 ._@:-]/g, '').replace(/^@+/, '').trim()
+
+/**
+ * One state signal.
+ *
+ * `bad` is `boolean | null`, and the null is the whole point: a tunnel list
+ * that could not be read, a sweep that did not run, a job whose outcome is not
+ * in yet. Null raises nothing, resolves nothing, and leaves the chip exactly
+ * where it is — it is not "fine", it is "not asked".
+ */
+export function checkStateAlert(
+  id: string,
+  name: string,
+  kind: StateAlertKind,
+  bad: boolean | null,
+  detail = ''
+): void {
+  if (bad === null) return
+  if (!useApp.getState().settings.resourceAlertsEnabled) return
+  const now = Date.now()
+  const k = key(id, kind)
+  const who = cleanName(name) || 'A server'
+  const what = cleanName(detail)
+
+  if (!bad) {
+    if (useAlerts.getState().active[k]) {
+      useAlerts.setState((s) => {
+        const active = { ...s.active }
+        delete active[k]
+        return { active }
+      })
+    }
+    if (!hydrated) return
+    conditionHeld.delete(k)
+    if (isDamped(k, now)) return
+    if (announced.delete(k)) {
+      lastNotified.set(k, now)
+      void window.shellpilot?.webhook?.notify({
+        source: 'shellpilot',
+        version: APP_VERSION,
+        event: 'resolved',
+        kind: WEBHOOK_KIND[kind],
+        server: who,
+        summary: STATE_WORDS[kind].resolved(who),
+        at: new Date(now).toISOString()
+      })
+      record(kind, 'resolved', { serverId: id, serverName: who, at: now })
+    }
+    return
+  }
+
+  const existing = useAlerts.getState().active[k]
+  useAlerts.setState((s) => ({
+    active: {
+      ...s.active,
+      [k]: { serverId: id, serverName: who, kind, value: null, since: existing?.since ?? now, detail: what }
+    }
+  }))
+  if (!hydrated) return
+
+  const crossing = !conditionHeld.has(k)
+  if (crossing) {
+    conditionHeld.add(k)
+    if (isDamped(k, now)) dampedUntil.set(k, now + FLAP_DAMP_MS)
+  }
+
+  // A state kind has no "still going" repeat and no escalation: there is
+  // nothing to say a second time about a host that is still not answering that
+  // the first message did not already say, and no number that could get worse.
+  // So it speaks once per transition and then holds its peace until it
+  // resolves — which is stricter than the numeric path, deliberately.
+  if (!crossing) return
+  if (isDamped(k, now)) return
+  const tripped = noteCrossing(k, now)
+  lastNotified.set(k, now)
+  // `lastNotifiedValue` is deliberately NOT written. It is the escalation
+  // memory — "the figure we last said out loud" — and a state kind has no
+  // figure. A 1 here would be a number nothing reads, put there so the two
+  // paths look alike; the paths are not alike, which is why they are two.
+  announced.set(k, { serverId: id, serverName: who, kind })
+
+  const dampHours = Math.round(FLAP_DAMP_MS / 3_600_000)
+  const quiet = tripped
+    ? ` This has happened ${FLAP_CROSSINGS} times in ${dampHours} hours, so nothing further will ` +
+      `be said about it until it has gone ${dampHours} hours without happening again. ` +
+      `The Alerts tab still lists every one.`
+    : ''
+  const summary = STATE_WORDS[kind].raised(who, what)
+  void window.shellpilot?.notify.show(`${who}: ${LABEL[kind]}`, `${summary}.${quiet}`)
+  void window.shellpilot?.webhook?.notify({
+    source: 'shellpilot',
+    version: APP_VERSION,
+    event: 'raised',
+    kind: WEBHOOK_KIND[kind],
+    server: who,
+    summary,
+    at: new Date(now).toISOString(),
+    ...(tripped ? { damped: true } : {})
+  })
+  record(kind, 'raised', { serverId: id, serverName: who, detail: what, at: now })
+}
+
+/**
+ * Something happened, once. Item 18's database verdicts.
+ *
+ * `notableDbEvents` records `alarm` and `watch` and deliberately does not
+ * record `ok`, so nothing in the store can ever say a database recovered. A
+ * kind that cannot observe its own recovery must not hold a status-bar chip:
+ * the chip would be permanent, it would point at a Fleet Monitor that disagreed
+ * with it, and that exact contradiction is what 1a4cfaa was written to end.
+ *
+ * So this raises, is recorded, and is done. The inbox is where it lives
+ * afterwards, which is what an inbox is for.
+ *
+ * `at` is the store's own timestamp for the row, and is what makes this
+ * idempotent: the same row seen by two polls is announced once.
+ */
+export function noteAlertEvent(
+  id: string,
+  name: string,
+  kind: EventAlertKind,
+  detail: string,
+  at: number
+): void {
+  if (!useApp.getState().settings.resourceAlertsEnabled) return
+  const who = cleanName(name) || 'A database'
+  const what = cleanName(detail)
+  // Keyed on the SCRUBBED detail and on the store's own timestamp, because
+  // those are the two fields the durable row carries — and the durable row is
+  // what seeds this set at hydration. Keying on the raw detail here would make
+  // the seed miss every row whose detail the scrubber changed, and the first
+  // launch after a night of alarms would replay all of them.
+  const dedupe = eventDedupeKey(id, kind, what, at)
+  if (seenEvents.has(dedupe)) return
+  const k = key(id, kind)
+  if (!hydrated) {
+    // Not marked seen — so the next poll offers it again once the log has been
+    // read. Announcing before hydration is exactly what the damping and repeat
+    // state on disk exist to prevent.
+    return
+  }
+  seenEvents.add(dedupe)
+  // The occurrence's OWN time drives damping, not the wall clock at the moment
+  // we happened to read it. That is what makes the live path and the hydration
+  // replay above the same arithmetic on the same rows, rather than two versions
+  // that agree until a poll runs late.
+  if (isDamped(k, at)) {
+    dampedUntil.set(k, at + FLAP_DAMP_MS)
+    return
+  }
+  const tripped = noteCrossing(k, at)
+  const summary = EVENT_WORDS[kind](who, what)
+  const dampHours = Math.round(FLAP_DAMP_MS / 3_600_000)
+  void window.shellpilot?.notify.show(
+    `${who}: ${LABEL[kind]}`,
+    `${summary}.` +
+      (tripped
+        ? ` This has happened ${FLAP_CROSSINGS} times in ${dampHours} hours, so nothing further ` +
+          `will be said about it until it has gone ${dampHours} hours without happening again. ` +
+          `The Alerts tab still lists every one.`
+        : '')
+  )
+  void window.shellpilot?.webhook?.notify({
+    source: 'shellpilot',
+    version: APP_VERSION,
+    event: 'raised',
+    kind: WEBHOOK_KIND[kind],
+    server: who,
+    summary,
+    at: new Date(at).toISOString(),
+    ...(tripped ? { damped: true } : {})
+  })
+  record(kind, 'raised', { serverId: id, serverName: who, detail: what, at })
 }
 
 // Failed systemd units, per server.
@@ -897,6 +1194,7 @@ export function resetAlertsForTests(): void {
   raiseTimes.clear()
   dampedUntil.clear()
   conditionHeld.clear()
+  seenEvents.clear()
   failedUnits.clear()
   hydrated = true
   hydrating = null

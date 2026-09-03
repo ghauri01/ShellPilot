@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest'
-import { sanitiseStoredAlert, STORE_ALERT_KINDS } from '../src/shared/webhook'
+import { ALERT_KINDS, sanitiseStoredAlert, STORE_ALERT_KINDS } from '../src/shared/webhook'
 import type { StoredAlertEvent, StoredAlertRow } from '../src/shared/webhook'
 
 // Roadmap item 19b, stage 1: the alert store's memory had to survive a restart.
@@ -252,6 +252,55 @@ describe('the row is rebuilt from a whitelist', () => {
   })
 
   it('names every kind the store measures, and spells memory the store’s way', () => {
-    expect([...STORE_ALERT_KINDS]).toEqual(['cpu', 'ram', 'disk', 'inode', 'load'])
+    // A literal, updated deliberately when a kind is added, because the list is
+    // consumed as a whitelist: a kind present in the type and absent here is a
+    // row main refuses to store, and a kind here that nothing produces is a
+    // value the inbox can render and nobody can explain.
+    expect([...STORE_ALERT_KINDS]).toEqual([
+      'cpu',
+      'ram',
+      'disk',
+      'inode',
+      'load',
+      'host-unreachable',
+      'job-failed',
+      'tunnel-down',
+      'db-alarm',
+      'db-watch'
+    ])
+  })
+
+  // The half of the claim above that the literal alone does not make. The list
+  // was updated for item 19b's new kinds, and an update that only re-typed the
+  // new spelling would have quietly lost the reason the assertion existed.
+  it('keeps the store’s spelling of memory apart from the wire’s', () => {
+    expect([...STORE_ALERT_KINDS]).toContain('ram')
+    expect([...STORE_ALERT_KINDS]).not.toContain('memory')
+    expect([...ALERT_KINDS]).toContain('memory')
+    expect([...ALERT_KINDS]).not.toContain('ram')
+    // `unit-failed` goes out on the wire and has no store entry, because failed
+    // units are a set of names rather than a crossing.
+    expect([...ALERT_KINDS]).toContain('unit-failed')
+    expect([...STORE_ALERT_KINDS]).not.toContain('unit-failed')
+  })
+
+  it('carries a scrubbed detail, and refuses one that is only punctuation', () => {
+    const row = sanitiseStoredAlert({
+      event: 'raised',
+      kind: 'job-failed',
+      serverId: 's1',
+      serverName: 'web-1',
+      detail: 'restart <!channel> nginx'
+    })
+    expect(row?.detail).toBe('restart channel nginx')
+    const empty = sanitiseStoredAlert({
+      event: 'raised',
+      kind: 'job-failed',
+      serverId: 's1',
+      serverName: 'web-1',
+      detail: '<<>>'
+    })
+    expect(empty).not.toBeNull()
+    expect(empty?.detail).toBeUndefined()
   })
 })
