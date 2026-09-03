@@ -1,6 +1,23 @@
 import { createHash } from 'node:crypto'
-import type { HostAccess, AccessCollectOptions, Sha256 } from '../../shared/access'
-import { ACCESS_STATUS_MARKER, buildAccessCommand, parseAccessCollection } from '../../shared/access'
+import type {
+  AccessCollectOptions,
+  AccessCommitOutcome,
+  AccessVerifyResult,
+  HostAccess,
+  Sha256
+} from '../../shared/access'
+import {
+  ACCESS_COMMITTED_PREFIX,
+  ACCESS_ROLLBACK_SECONDS,
+  ACCESS_STATUS_MARKER,
+  accessBackupPath,
+  accessDisarmCommand,
+  accessVerifyCommand,
+  buildAccessCommand,
+  describeAccessOutcome,
+  judgeAccessVerification,
+  parseAccessCollection
+} from '../../shared/access'
 
 // Reading fleet key and access state over SSH — roadmap item 23, main half.
 //
@@ -112,6 +129,225 @@ export class AccessReader {
       return { ok: true, access }
     } catch (e) {
       return { ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The confirmation — roadmap item 23, rule 2
+// ---------------------------------------------------------------------------
+//
+// This file is the ONLY place in the repository that issues
+// `accessDisarmCommand`, and tests/accessWrite.test.ts fails if that stops
+// being true. What earns it the privilege is what it cannot do:
+//
+//  * It does not import ./ssh. There is no expression here that can reach
+//    `acquire()`, the pool, or a connection anything else is using — the
+//    session arrives as an injected dependency, the same way `AccessReader`
+//    takes its `exec`. A future edit that wanted to confirm over the pooled
+//    connection would have to add an import, which the guard test sees.
+//
+//  * It does not decide what counts as independent. `judgeAccessVerification`
+//    in shared/access.ts does, from evidence, with its own tests. This file
+//    gathers the evidence and obeys.
+//
+//  * It never issues the disarm over a connection other than the one that was
+//    judged. Both commands go through the same `session` value, so "verified
+//    on one connection, confirmed on another" is not a state this can be in.
+//
+// WHY THE DISARM RUNS ON THE VERIFYING SESSION and not on a third connection:
+// a third connection would be a third thing that can fail, and its failure
+// would land in the window between "proved safe" and "made permanent" — which
+// is the window the dead-man's switch exists to close. One session that
+// authenticated after the write does both, or the host reverts.
+
+/**
+ * A connection that authenticated for THIS call and belongs to no pool.
+ *
+ * Structural rather than an import of `FreshSession`, for the reason the job
+ * spec in shared/access.ts is structural: nothing here should be able to name
+ * the transport, because naming it is the first step to reaching into it.
+ */
+export interface AccessFreshSession {
+  connectionId: string
+  pooledConnectionIds: string[]
+  authenticatedAt: number
+  exec: (command: string, timeoutMs?: number) => Promise<AccessVerifyResult>
+  close: () => void
+}
+
+export interface AccessCommitDeps {
+  /**
+   * MUST open a connection that authenticates during this call and is not in
+   * any pool. `sshOpenFresh` is the only implementation the app ships; a
+   * `sshExec`-shaped one would satisfy the types and fail the judgement, which
+   * is the point of the judgement.
+   */
+  openFresh: (cfg: unknown) => Promise<AccessFreshSession>
+  now?: () => number
+}
+
+/**
+ * How long the confirmation is given.
+ *
+ * Much shorter than the collector's budget, and shorter than the rollback
+ * window by a wide margin: this is one connect and two one-line commands, and
+ * a confirmation still waiting when the host restores itself is worse than one
+ * that gave up early — the early one reports `reverted-unconfirmed` honestly
+ * while the late one would report `committed` for a file that is no longer
+ * there.
+ */
+export const ACCESS_CONFIRM_TIMEOUT_MS = 20_000
+
+export interface AccessCommitRequest {
+  serverId: string
+  serverName: string
+  /** The account whose authorized_keys was staged. */
+  user: string
+  /** The change's token: what named its backup and its marker on the host. */
+  token: string
+  /** The key file as the read half saw it, for the backup path in the report. */
+  keyPath: string
+  /** When the staged write finished on the host. The whole judgement turns on
+   *  the verifying session having authenticated after this. */
+  stagedAt: number
+  rollbackSeconds?: number
+}
+
+export interface AccessCommitReport {
+  serverId: string
+  serverName: string
+  user: string
+  token: string
+  outcome: AccessCommitOutcome
+  /** One sentence, already written for a person. */
+  detail: string
+  /** Where the previous file is, whichever way this went. */
+  backupPath: string
+  at: number
+}
+
+export class AccessCommitter {
+  constructor(private readonly deps: AccessCommitDeps) {}
+
+  async confirm(cfg: unknown, req: AccessCommitRequest): Promise<AccessCommitReport> {
+    const clock = this.deps.now ?? Date.now
+    const rollbackSeconds = req.rollbackSeconds ?? ACCESS_ROLLBACK_SECONDS
+    const backupPath = accessBackupPath(req.keyPath, req.token)
+
+    // THE DEADLINE IS CHECKED BEFORE ANYTHING IS OPENED, and not only to save a
+    // connection. Past the deadline the host has already put the previous file
+    // back, so a session opened now authenticates against the OLD
+    // authorized_keys — it would very likely succeed, and it would be proving
+    // something about a file the change never touched. A late check is not
+    // merely useless; it is the one that could talk this into confirming.
+    //
+    // Routed through the same judgement rather than duplicated, so there is one
+    // deadline and one sentence for it. `judgeAccessVerification` tests this
+    // first, so evidence it has not gathered yet cannot change the answer.
+    const expired = judgeAccessVerification({
+      token: req.token,
+      stagedAt: req.stagedAt,
+      rollbackSeconds,
+      now: clock(),
+      evidence: { session: null, verify: null }
+    })
+    if (expired.outcome === 'reverted-unconfirmed') {
+      return this.report(req, expired.outcome, expired.reason, backupPath, rollbackSeconds, clock())
+    }
+
+    let session: AccessFreshSession | null = null
+    let openError: string | undefined
+    try {
+      session = await this.deps.openFresh(cfg)
+    } catch (e) {
+      // Not classified further, and shared/access.ts says why: a refused key
+      // and an unreachable host are the same fact from here, and both mean the
+      // same thing about what may happen next.
+      openError = e instanceof Error ? e.message : String(e)
+    }
+
+    try {
+      const verify = session
+        ? await this.run(session, accessVerifyCommand(req.token))
+        : null
+
+      const verdict = judgeAccessVerification({
+        token: req.token,
+        stagedAt: req.stagedAt,
+        rollbackSeconds,
+        now: clock(),
+        evidence: {
+          session: session
+            ? {
+                connectionId: session.connectionId,
+                pooledConnectionIds: session.pooledConnectionIds,
+                authenticatedAt: session.authenticatedAt
+              }
+            : null,
+          openError,
+          verify
+        }
+      })
+
+      let outcome = verdict.outcome
+      let reason = verdict.reason
+
+      if (verdict.commit && session) {
+        const disarm = await this.run(session, accessDisarmCommand(req.keyPath, req.token))
+        if (!disarm.ok || disarm.code !== 0 || !disarm.stdout.includes(ACCESS_COMMITTED_PREFIX)) {
+          // Verified and then not confirmed. The change was fine; the sentence
+          // that reaches the operator has to say so, because the host is about
+          // to undo it and there is nothing to investigate.
+          outcome = 'reverted-unconfirmed'
+          const said = (disarm.stderr ?? '').trim().split('\n')[0].slice(0, 160)
+          reason = `the host let a new session in, but the confirmation could not be written to it (${said || disarm.error || `exit ${String(disarm.code)}`}).`
+        }
+      }
+
+      return this.report(req, outcome, reason, backupPath, rollbackSeconds, clock())
+    } finally {
+      // Always. A confirmation that leaked an authenticated session would leave
+      // a second way into the host open for the life of the process, which is
+      // the opposite of what this feature is for.
+      session?.close()
+    }
+  }
+
+  private report(
+    req: AccessCommitRequest,
+    outcome: AccessCommitOutcome,
+    reason: string,
+    backupPath: string,
+    rollbackSeconds: number,
+    at: number
+  ): AccessCommitReport {
+    return {
+      serverId: req.serverId,
+      serverName: req.serverName,
+      user: req.user,
+      token: req.token,
+      outcome,
+      detail: describeAccessOutcome({
+        outcome,
+        serverName: req.serverName,
+        user: req.user,
+        backupPath,
+        rollbackSeconds,
+        reason
+      }),
+      backupPath,
+      at
+    }
+  }
+
+  /** Never throws: a session that dies mid-check is a failed verification, not
+   *  an exception thrown while deciding whether a key change is permanent. */
+  private async run(session: AccessFreshSession, command: string): Promise<AccessVerifyResult> {
+    try {
+      return await session.exec(command, ACCESS_CONFIRM_TIMEOUT_MS)
+    } catch (e) {
+      return { ok: false, code: null, stdout: '', stderr: '', error: e instanceof Error ? e.message : String(e) }
     }
   }
 }

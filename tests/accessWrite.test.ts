@@ -156,13 +156,21 @@ describe('rule 1 — never remove the key this session is on', () => {
 // ---------------------------------------------------------------------------
 
 describe('rule 2 — nothing is committed without a second, independent session', () => {
-  it('ships no caller for the disarm anywhere in the source tree', async () => {
-    // The refusal, in the shape docker.ts uses for `prune`. Rule 2 is only real
-    // if the disarm happens over a connection that authenticated AFTER the
-    // write, and the job engine cannot provide one — its steps share a pooled,
-    // already-authenticated transport. A disarm wired up as another job step
-    // would turn this rule into a comment, so the disarm exists, is tested, and
-    // is called by nothing.
+  it('lets exactly one place issue the disarm, and only behind an independent session', async () => {
+    // THIS TEST REPLACES ONE THAT FORBADE THE DISARM ENTIRELY, and the reason
+    // for the change is the reason the old one was right.
+    //
+    // What it said: rule 2 is only real if the disarm happens over a connection
+    // that authenticated AFTER the write, the job engine cannot provide one
+    // because its steps share a pooled transport, and a disarm wired up as
+    // another job step would prove only that the writer can still write. All of
+    // that is still true. What has changed is that a session which cannot be
+    // the pooled one now exists (`sshOpenFresh`), so the invariant is no longer
+    // "nothing calls the disarm" — it is "nothing calls the disarm without a
+    // fresh session first".
+    //
+    // Deleting the guard instead of replacing it would have left the strongest
+    // argument in this feature enforced by nothing.
     const root = resolve(__dirname, '..', 'src')
     const hits: string[] = []
     const walk = async (dir: string): Promise<void> => {
@@ -171,14 +179,52 @@ describe('rule 2 — nothing is committed without a second, independent session'
         if (e.isDirectory()) await walk(p)
         else if (/\.tsx?$/.test(e.name)) {
           const text = await readFile(p, 'utf8')
-          // The definition itself is in shared/access.ts; any OTHER mention is a
-          // caller and this test is why it has to be argued for.
-          if (text.includes('accessDisarmCommand') && !p.endsWith('shared/access.ts')) hits.push(p)
+          if (text.includes('accessDisarmCommand')) hits.push(p.slice(root.length + 1))
         }
       }
     }
     await walk(root)
-    expect(hits, `something now issues the disarm: ${hits.join(', ')}`).toEqual([])
+    // Where it is defined, and the one file allowed to issue it. Anything else
+    // — a job step, an IPC handler, a renderer button — fails here.
+    expect(hits.sort()).toEqual(['main/services/access.ts', 'shared/access.ts'])
+
+    const caller = await readFile(join(root, 'main/services/access.ts'), 'utf8')
+
+    // One call site, so "only behind the judgement" is a statement about one
+    // place rather than about whichever place a reader happens to look at.
+    expect(caller.split('accessDisarmCommand(')).toHaveLength(2)
+
+    // And it is behind the judgement, in source order: the check is run, the
+    // judgement rules on it, and the disarm sits inside the branch that ruling
+    // opens. Nothing may be written to the host between the ruling and the
+    // confirmation.
+    const verify = caller.indexOf('accessVerifyCommand(')
+    const judge = caller.indexOf('judgeAccessVerification({')
+    const gate = caller.indexOf('if (verdict.commit')
+    const disarm = caller.indexOf('accessDisarmCommand(')
+    expect(verify).toBeGreaterThan(-1)
+    // `judge` is the FIRST occurrence and it is deliberately before the check:
+    // the deadline is ruled on before a session is opened at all, because past
+    // it the host has already restored itself and a new session would
+    // authenticate against the old file. What matters is that both the check
+    // and a ruling come before the disarm.
+    expect(judge).toBeGreaterThan(-1)
+    expect(gate).toBeGreaterThan(verify)
+    expect(gate).toBeGreaterThan(judge)
+    expect(disarm).toBeGreaterThan(gate)
+
+    // The half the ordering cannot express: this file has no way to REACH a
+    // pooled connection. The session arrives injected, so there is no
+    // expression here that could confirm a change over the transport that made
+    // it — and an edit that wanted to would have to add an import, which is
+    // exactly what this sees.
+    //
+    // Comments are stripped first, because this file ARGUES about `sshExec` and
+    // `acquire()` at length and a check that could not tell prose from code
+    // would have had to be written weaker or deleted.
+    const code = caller.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    expect(code).not.toMatch(/from '\.\/ssh'/)
+    expect(code).not.toMatch(/\bsshExec\b|\bsshExecStream\b|\bacquire\(|\bpoolList\b|\bPooledConnection\b/)
   })
 
   it('puts nothing permanent in the job the engine would run', async () => {

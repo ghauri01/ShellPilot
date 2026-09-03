@@ -2293,18 +2293,71 @@ function buildStagedWrite(o: {
 }
 
 /**
- * Make a staged change permanent.
+ * The one thing that may reach a command in these two builders.
  *
- * Nothing in this repository calls it, and that is the point — see the refusal
- * at the top of this section. It exists so the protocol is complete and
- * testable, and so the thing that eventually issues it has something correct to
- * issue rather than something invented at the call site.
+ * A token is `String(req.now)` today and it is still validated, because the
+ * value is interpolated into a shell command that runs against an
+ * `authorized_keys` file, and "the only caller passes digits" is a property of
+ * this week's callers rather than of this function. Letters are allowed so a
+ * test can name a change `t3`.
+ */
+const TOKEN_RE = /^[A-Za-z0-9]{1,32}$/
+
+/**
+ * Ask the host whether the staged change is still waiting on a confirmation.
+ *
+ * RUN ONLY OVER A SESSION THAT AUTHENTICATED AFTER THE WRITE. That is not
+ * advice to the reader of this function — the connection is what is being
+ * tested. There is nothing in the OUTPUT of this command that proves who ran
+ * it; the proof is that sshd let a new connection in at all, holding the key
+ * material as it now stands on the host. Running this over the pooled
+ * connection that wrote the file would produce the same `VERIFIED:` line and
+ * mean nothing whatsoever.
+ *
+ * What the command itself adds is the other half: that this session landed on
+ * the host and the account the change was staged on, rather than on some other
+ * machine that happens to accept the same key. The backup named with this
+ * change's own token exists on exactly one host, in exactly one home directory.
+ */
+export const ACCESS_VERIFIED_PREFIX = 'VERIFIED: '
+
+export function accessVerifyCommand(token: string): string {
+  if (!TOKEN_RE.test(token)) throw new Error('refusing to build a verification for an unvalidated token')
+  return [
+    'LC_ALL=C',
+    'export LC_ALL',
+    'SP_F="$HOME/.ssh/authorized_keys"',
+    `SP_B="$SP_F.shellpilot-${token}.bak"`,
+    // The backup is the staged change's own footprint, and it is named with
+    // this change's token — so finding it is finding THIS change, on THIS
+    // host, in THIS account's home directory. A session that landed somewhere
+    // else fails here rather than confirming a change it never saw.
+    '[ -f "$SP_B" ] || { echo "no staged change with this token is waiting here" >&2; exit 3; }',
+    // And the file the change produced has to be readable by the account that
+    // just logged in. A key change that leaves sshd's own file unreadable is
+    // the shape of the lockout this whole protocol exists to survive.
+    '[ -r "$SP_F" ] || { echo "the changed authorized_keys cannot be read back" >&2; exit 3; }',
+    `echo "${ACCESS_VERIFIED_PREFIX}${token}"`
+  ].join('\n')
+}
+
+/**
+ * Make a staged change permanent.
  *
  * It must only ever be run over a connection that authenticated AFTER the
  * staged write. Run over the session that made the change it proves nothing at
  * all, and rule 2 becomes a comment.
+ *
+ * ONE CALLER, and the refusal at the top of this section is now a rule about
+ * WHERE rather than about WHETHER: src/main/services/access.ts issues this, and
+ * only after `judgeAccessVerification` has been satisfied by an independent
+ * session. tests/accessWrite.test.ts enforces both — that no other file in
+ * `src/` mentions it, and that the caller cannot reach a pooled connection.
  */
+export const ACCESS_COMMITTED_PREFIX = 'COMMITTED: '
+
 export function accessDisarmCommand(path: string, token: string): string {
+  if (!TOKEN_RE.test(token)) throw new Error('refusing to build a confirmation for an unvalidated token')
   const marker = accessCommitMarker(token)
   return [
     'LC_ALL=C',
@@ -2314,6 +2367,208 @@ export function accessDisarmCommand(path: string, token: string): string {
     // holding the backup path; it wakes, sees the marker, and leaves the new
     // file alone.
     ': > "$SP_M" || { echo "could not confirm the change" >&2; exit 3; }',
-    `echo "COMMITTED: ${path}"`
+    `echo "${ACCESS_COMMITTED_PREFIX}${path}"`
   ].join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// The confirmation — roadmap item 23, stage 3
+// ---------------------------------------------------------------------------
+//
+// The write half staged a change and armed the host's own watchdog, and then
+// stopped, because the only honest thing to do next needed something that did
+// not exist: a session that authenticated AFTER the write. It exists now
+// (`sshOpenFresh` in src/main/services/ssh.ts), and this is the rule it feeds.
+//
+// The rule lives HERE, apart from the transport, on purpose. A transport that
+// decided whether it was independent enough would be marking its own homework;
+// what it can honestly report is what it observed — when its handshake
+// completed, and what the pool was holding at the time — and what to make of
+// that is a policy question with a test.
+//
+// THREE OUTCOMES, AND THEY ARE NOT TWO. The temptation is to collapse the last
+// two into "failed", and it would be wrong in the direction that matters:
+//
+//   committed                    — a second session got in, the watchdog was
+//                                  called off, the new file is the file.
+//   reverted-verification-failed — a second session could NOT get in. The host
+//                                  put the old file back. This is the change
+//                                  being rejected, and the operator has learned
+//                                  something real about that host.
+//   reverted-unconfirmed         — nobody ever told the host either way, so it
+//                                  did what it promised. ShellPilot was closed,
+//                                  or the network went, or the confirmation
+//                                  itself could not be written. NOTHING IS
+//                                  WRONG WITH THE CHANGE. Reporting this as a
+//                                  failure would teach an operator to distrust
+//                                  the one mechanism that protects them, and
+//                                  the correct response is to stage it again
+//                                  rather than to go looking for a fault.
+
+export type AccessCommitOutcome =
+  | 'committed'
+  | 'reverted-verification-failed'
+  | 'reverted-unconfirmed'
+
+/** What an independent session reported about ITSELF. Facts, not a verdict. */
+export interface AccessSessionEvidence {
+  /** Identity of the connection the check ran over. */
+  connectionId: string
+  /** Every pooled connection that existed while it was opened. */
+  pooledConnectionIds: string[]
+  /** When this connection's authentication handshake completed. */
+  authenticatedAt: number
+}
+
+/** What the verification command came back with. */
+export interface AccessVerifyResult {
+  ok: boolean
+  code: number | null
+  stdout: string
+  stderr: string
+  error?: string
+}
+
+export interface AccessCommitEvidence {
+  /** Null when no independent session could be opened at all. */
+  session: AccessSessionEvidence | null
+  /** Why there is no session, when there is none. */
+  openError?: string
+  /** Null when the check never ran, because there was nothing to run it over. */
+  verify: AccessVerifyResult | null
+}
+
+export interface AccessVerdict {
+  /**
+   * Whether the disarm may be issued.
+   *
+   * `outcome` is what the outcome WILL BE if it lands — a disarm that fails to
+   * reach the host leaves the change unconfirmed, and the caller downgrades.
+   */
+  commit: boolean
+  outcome: AccessCommitOutcome
+  /** Why, in a sentence that can be shown to a person. Empty when committed. */
+  reason: string
+}
+
+/**
+ * Decide whether a staged change may be made permanent.
+ *
+ * Every branch that is not a commit is a REVERT, and none of them needs an
+ * action: the host is already holding a watchdog that will put the old file
+ * back. So there is no rollback path here, no cleanup, and no failure this can
+ * itself cause — doing nothing is the safe operation, which is the property
+ * that made the dead-man's switch the right shape in the first place.
+ */
+export function judgeAccessVerification(o: {
+  token: string
+  /** When the staged write finished on the host. */
+  stagedAt: number
+  rollbackSeconds: number
+  now: number
+  evidence: AccessCommitEvidence
+}): AccessVerdict {
+  const deadline = o.stagedAt + o.rollbackSeconds * 1000
+
+  // FIRST, because it makes every other check moot. Past the deadline the host
+  // has already restored itself and removed the marker's reason to exist;
+  // writing one now would be a confirmation of nothing, and reporting
+  // `committed` off the back of it would be a lie told to the one person who
+  // needs to know the change did not stick.
+  if (o.now >= deadline) {
+    return {
+      commit: false,
+      outcome: 'reverted-unconfirmed',
+      reason: `the ${o.rollbackSeconds}-second window closed before this could be confirmed, so the host has already put the previous file back.`
+    }
+  }
+
+  if (o.evidence.session === null) {
+    return {
+      commit: false,
+      outcome: 'reverted-verification-failed',
+      // Deliberately not diagnosed further. A refused key and an unreachable
+      // host look the same from here, and both mean the same thing about what
+      // may be done next: nothing.
+      reason: `a second, independent session could not be opened after the change (${o.evidence.openError ?? 'no reason given'}). A rejected key and an unreachable host are indistinguishable from here, and both mean the change must not be made permanent.`
+    }
+  }
+
+  // The check that gives rule 2 its content. A session that authenticated
+  // BEFORE the file was replaced has proved nothing about the file that is
+  // there now — which is exactly what a "verify" step sharing the job's pooled
+  // transport would have been.
+  if (o.evidence.session.authenticatedAt <= o.stagedAt) {
+    return {
+      commit: false,
+      outcome: 'reverted-verification-failed',
+      reason: `the session that ran the check authenticated before the change was written, so it says nothing about the file that is on the host now.`
+    }
+  }
+
+  // And the same rule from the other side. `sshOpenFresh` cannot produce this,
+  // because an unpooled connection is never entered into the pool — which is
+  // why this is worth checking: it fires when something has quietly started
+  // confirming changes over the connection that made them.
+  if (o.evidence.session.pooledConnectionIds.includes(o.evidence.session.connectionId)) {
+    return {
+      commit: false,
+      outcome: 'reverted-verification-failed',
+      reason: `the check ran over a pooled connection — the same already-authenticated transport that wrote the file — so it proves only that the writer can still write.`
+    }
+  }
+
+  const v = o.evidence.verify
+  if (!v || !v.ok || v.code !== 0) {
+    const said = (v?.stderr ?? '').trim().split('\n')[0].slice(0, 160)
+    return {
+      commit: false,
+      outcome: 'reverted-verification-failed',
+      reason: said
+        ? `the new session reached the host and the check failed there: ${said}`
+        : `the new session reached the host and the check did not complete (${v?.error ?? `exit ${String(v?.code)}`}).`
+    }
+  }
+  if (!v.stdout.includes(`${ACCESS_VERIFIED_PREFIX}${o.token}`)) {
+    return {
+      commit: false,
+      outcome: 'reverted-verification-failed',
+      reason: `the new session did not find this change staged where it landed, so it is not the host and account the change was made on.`
+    }
+  }
+
+  return { commit: true, outcome: 'committed', reason: '' }
+}
+
+/**
+ * One sentence per outcome, written once so main and the renderer cannot say
+ * different things about the same event.
+ *
+ * The three read differently on purpose. An operator scanning a list has to be
+ * able to tell "this host rejected the change" from "nobody confirmed it in
+ * time" without opening anything, because the second is not a fault and the
+ * first is.
+ */
+export function describeAccessOutcome(o: {
+  outcome: AccessCommitOutcome
+  serverName: string
+  user: string
+  backupPath: string
+  rollbackSeconds: number
+  reason: string
+}): string {
+  switch (o.outcome) {
+    case 'committed':
+      return `Committed on ${o.serverName}. A second session authenticated after the change and called off the host's rollback, so ${o.user}'s authorized_keys is now permanent. The previous file is still on the host at ${o.backupPath}.`
+    case 'reverted-verification-failed':
+      return `Reverted on ${o.serverName}: the check failed. ${o.reason} The host's rollback was left armed, so ${o.user}'s previous authorized_keys is back and nothing was committed.`
+    case 'reverted-unconfirmed':
+      return `Reverted on ${o.serverName}: nothing confirmed it in time. ${o.reason} That is the dead-man's switch doing its job rather than the change failing — ${o.user}'s previous authorized_keys is back, the host is exactly as it was, and it can be staged again.`
+  }
+}
+
+/** Where the previous file is left, for the sentence above and for a person in
+ *  a shell who needs it when this app is the thing that is locked out. */
+export function accessBackupPath(keyPath: string, token: string): string {
+  return `${keyPath}.shellpilot-${token}.bak`
 }
