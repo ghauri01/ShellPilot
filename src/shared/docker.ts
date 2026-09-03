@@ -599,7 +599,19 @@ export const DOCKER_MARKERS = {
   inspect: '===SHELLPILOT-INSPECT===',
   health: '===SHELLPILOT-HEALTH===',
   stats: '===SHELLPILOT-STATS===',
-  act: '===SHELLPILOT-ACT==='
+  act: '===SHELLPILOT-ACT===',
+  /**
+   * A CLOSING marker, which the others do not need.
+   *
+   * `attempt()` merges stderr onto stdout, so anything the login shell says —
+   * a locale warning, an motd, a transport notice — arrives AFTER the last
+   * block. Every other collector reads a block that is followed by another
+   * marker, so that noise falls outside it. The itemised disk listing is the
+   * last block in its round trip, and without a marker behind it the noise
+   * landed inside the final table's column offsets and was counted as a row
+   * that could not be read.
+   */
+  end: '===SHELLPILOT-END==='
 } as const
 
 /**
@@ -993,7 +1005,12 @@ export function buildDockerDiskDetailCommand(opts: { sudo?: boolean } = {}): str
     `echo "${DOCKER_MARKERS.engine}"`,
     `${run} version --format "{{.Server.BuildTime}}" 2>/dev/null || true`,
     `echo "${DOCKER_MARKERS.dfDetail}"`,
-    `${run} system df -v 2>&1`
+    `${run} system df -v 2>&1`,
+    // The listing's own status, held over the echo and handed back. A bare
+    // `echo` after it would replace the status the parser uses to tell a host
+    // with no docker from a host with an empty store — which is why every
+    // other block here is ordered rather than bracketed.
+    `SP_RC=$?; echo "${DOCKER_MARKERS.end}"; exit $SP_RC`
   ].join('; ')
 }
 
@@ -1006,13 +1023,30 @@ export function buildDockerDiskDetailCommand(opts: { sudo?: boolean } = {}): str
  * `Date.parse`, which will cheerfully invent a date out of a version string, is
  * how a panel ends up asserting the daemon was built in the year 24.
  */
+/**
+ * Docker's first public release. Anything claiming to predate it is a sentinel
+ * rather than a build time, and there is no version of this panel where the
+ * difference matters less than the difference between them.
+ */
+const DOCKER_EXISTED_FROM = Date.parse('2013-03-01T00:00:00Z')
+
 export function parseDockerEngineBuild(text: string | undefined): DockerEngineBuild | null {
   if (text === undefined) return null
   for (const line of nonEmptyLines(text)) {
     if (!/^\d{4}-\d{2}-\d{2}[T ]/.test(line)) continue
     const at = Date.parse(line)
     if (Number.isNaN(at)) continue
-    return { raw: line, date: new Date(at).toISOString().slice(0, 10), epochMs: at }
+    // A timestamp that is well shaped and still not a fact. podman's
+    // docker-compat derives BuildTime from an int64 that formats as the Unix
+    // epoch when it was never set, and Go's own zero value formats as
+    // `0001-01-01T00:00:00Z`. Both pass every shape check there is, and
+    // "built 1970-01-01, 56 years ago" is the year-24 mistake in a costume.
+    if (at < DOCKER_EXISTED_FROM) continue
+    // The date the DAEMON printed, not the same instant expressed in UTC:
+    // `toISOString` moved an engine built at half eleven at night in Chicago
+    // onto the following day. The shape check above guarantees the first ten
+    // characters are that date.
+    return { raw: line, date: line.slice(0, 10), epochMs: at }
   }
   return null
 }
@@ -1074,7 +1108,11 @@ function diskColumns(header: string): DiskColumn[] {
   const re = /\S+(?: \S+)*/g
   const found: { text: string; at: number }[] = []
   let m: RegExpExecArray | null
-  while ((m = re.exec(header)) !== null) found.push({ text: m[0], at: m.index })
+  // Offsets are counted in CODE POINTS, and `cell` cuts in them too. Go's
+  // tabwriter pads by runes; a JavaScript string index counts UTF-16 units, so
+  // one astral-plane character in a COMMAND shifted every column after it and
+  // dropped the whole row from a listing whose only job is to be complete.
+  while ((m = re.exec(header)) !== null) found.push({ text: m[0], at: [...header.slice(0, m.index)].length })
   return found.map((f, i) => ({
     name: f.text.toUpperCase(),
     start: f.at,
@@ -1087,7 +1125,7 @@ function diskColumns(header: string): DiskColumn[] {
 function cell(columns: DiskColumn[], row: string, name: string): string {
   const col = columns.find((c) => c.name === name)
   if (col === undefined) return ''
-  return row.slice(col.start, col.end).trim()
+  return [...row].slice(col.start, col.end).join('').trim()
 }
 
 type DiskSectionKind = 'images' | 'containers' | 'volumes' | 'cache'

@@ -175,7 +175,27 @@ describe('sizes as docker writes them', () => {
 const REAL_DFV = readFileSync(join(__dirname, 'fixtures/docker/system-df-v-docker-29.txt'), 'utf8')
 
 const dfvOutput = (body: string, buildTime?: string): string =>
-  [DOCKER_MARKERS.engine, buildTime ?? '', DOCKER_MARKERS.dfDetail, body].join('\n')
+  [DOCKER_MARKERS.engine, buildTime ?? '', DOCKER_MARKERS.dfDetail, body, DOCKER_MARKERS.end].join('\n')
+
+// Headers with nothing under them: a docker that is installed, running, and
+// holding nothing at all.
+const EMPTY_STORE = [
+  'Images space usage:',
+  '',
+  'REPOSITORY   TAG       IMAGE ID   CREATED   SIZE      SHARED SIZE   UNIQUE SIZE   CONTAINERS',
+  '',
+  'Containers space usage:',
+  '',
+  'CONTAINER ID   IMAGE     COMMAND   LOCAL VOLUMES   SIZE      CREATED   STATUS    NAMES',
+  '',
+  'Local Volumes space usage:',
+  '',
+  'VOLUME NAME   LINKS     SIZE',
+  '',
+  'Build cache usage: 0B',
+  '',
+  'CACHE ID   CACHE TYPE   SIZE      CREATED   LAST USED   USAGE     SHARED'
+].join('\n')
 
 const okDetail = (out: string): DockerDiskDetail => {
   const r = parseDockerDiskDetailOutput(out, 0)
@@ -326,27 +346,37 @@ describe('which image, which volume — not which category', () => {
   it('reads a host whose store is genuinely empty as empty', () => {
     // Headers with nothing under them. The one case where an empty list is the
     // true answer, and it must not be confused with the refusals below.
-    const body = [
-      'Images space usage:',
-      '',
-      'REPOSITORY   TAG       IMAGE ID   CREATED   SIZE      SHARED SIZE   UNIQUE SIZE   CONTAINERS',
-      '',
-      'Containers space usage:',
-      '',
-      'CONTAINER ID   IMAGE     COMMAND   LOCAL VOLUMES   SIZE      CREATED   STATUS    NAMES',
-      '',
-      'Local Volumes space usage:',
-      '',
-      'VOLUME NAME   LINKS     SIZE',
-      '',
-      'Build cache usage: 0B',
-      '',
-      'CACHE ID   CACHE TYPE   SIZE      CREATED   LAST USED   USAGE     SHARED'
-    ].join('\n')
-    const r = parseDockerDiskDetailOutput(dfvOutput(body), 0)
+    const r = parseDockerDiskDetailOutput(dfvOutput(EMPTY_STORE), 0)
     expect(r.ok).toBe(true)
     expect(r.ok && r.disk.images).toEqual([])
     expect(r.ok && r.disk.sections.images).toBe(true)
+  })
+
+  it('still reads an empty store as empty when the shell left a line on stderr', () => {
+    // The reader merges stderr onto stdout, so anything the LOGIN SHELL says
+    // lands after the listing. With no closing marker it fell inside the last
+    // table's column context, counted as an unreadable row, and — because an
+    // empty store has no readable rows to outweigh it — came back as "docker
+    // returned an error that could not be classified". A fresh docker install
+    // on a host that prints a locale warning is not a permissions problem, and
+    // this is the exact inversion the module exists to prevent, in the place
+    // it is read from: a disk-full incident.
+    for (const noise of [
+      'bash: warning: setlocale: LC_ALL: cannot change locale (en_GB.UTF-8)',
+      'Welcome to Ubuntu 24.04.1 LTS (GNU/Linux 6.8.0-51-generic x86_64)'
+    ]) {
+      const r = parseDockerDiskDetailOutput(`${dfvOutput(EMPTY_STORE)}\n${noise}`, 0)
+      expect(r.ok, noise).toBe(true)
+      expect(r.ok && r.disk.unreadable, noise).toBe(0)
+      expect(r.ok && r.disk.images, noise).toEqual([])
+    }
+  })
+
+  it('does not count that same shell noise as a row of a populated host either', () => {
+    const noisy = `${dfvOutput(REAL_DFV)}\nbash: warning: setlocale: LC_ALL: cannot change locale`
+    const r = parseDockerDiskDetailOutput(noisy, 0)
+    expect(r.ok && r.disk.unreadable).toBe(0)
+    expect(r.ok && r.disk.images).toHaveLength(8)
   })
 
   it('ignores a warning docker slipped in without reading it as a row', () => {
@@ -385,6 +415,74 @@ describe('which image, which volume — not which category', () => {
     const r = parseDockerDiskDetailOutput(dfvOutput(body), 0)
     expect(r.ok).toBe(false)
     expect(!r.ok && r.detail).toMatch(/could not read/)
+  })
+
+  it('calls a 64-character name anonymous only when it is actually hex', () => {
+    // The shape is the only evidence there is, and `name.length === 64` is not
+    // the shape: a named volume of exactly 64 non-hex characters would be
+    // reported as generated rubbish and truncated to twelve characters in the
+    // UI, which is the opposite of what it is.
+    const name = 'z'.repeat(64)
+    const body = [
+      'Local Volumes space usage:',
+      '',
+      'VOLUME NAME                                                        LINKS   SIZE',
+      'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz   1       2.41GB',
+      'a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4   0       12B'
+    ].join('\n')
+    const d = okDetail(dfvOutput(body))
+    expect(d.volumes).toHaveLength(2)
+    expect(d.volumes[0]).toMatchObject({ name, anonymous: false })
+    expect(d.volumes[1].anonymous).toBe(true)
+  })
+
+  it('says it does not know how many, rather than saying none', () => {
+    // A runtime that omits LINKS or CONTAINERS has told us nothing about the
+    // count. `Number('')` is 0, and "0 containers" is the sentence that gets an
+    // image deleted — so these are null, which the panel renders as `?`.
+    const volumes = [
+      'Local Volumes space usage:',
+      '',
+      'VOLUME NAME    SIZE',
+      'stack_pgdata   2.41GB'
+    ].join('\n')
+    const dv = okDetail(dfvOutput(volumes))
+    expect(dv.volumes).toHaveLength(1)
+    expect(dv.volumes[0]).toMatchObject({ name: 'stack_pgdata', links: null })
+
+    const images = [
+      'Images space usage:',
+      '',
+      'REPOSITORY   TAG    IMAGE ID       CREATED       SIZE',
+      'nginx        1.25   206af11251e4   6 hours ago   142MB'
+    ].join('\n')
+    const di = okDetail(dfvOutput(images))
+    expect(di.images).toHaveLength(1)
+    expect(di.images[0]).toMatchObject({ repository: 'nginx', containers: null })
+  })
+
+  it('reads a row whose COMMAND contains an astral-plane character', () => {
+    // docker renders through Go's tabwriter, which pads by RUNES. A JS string
+    // index counts UTF-16 units, so one emoji shifts every column after it by
+    // one and the whole row stops parsing — the container silently vanishes
+    // from a listing whose entire job is to be complete.
+    const body = [
+      'Containers space usage:',
+      '',
+      'CONTAINER ID   IMAGE          COMMAND    LOCAL VOLUMES   SIZE   CREATED      STATUS    NAMES',
+      'aa11bb22cc33   busybox:1.36   "🚀🚀🚀🚀🚀🚀"   0               12B    2 days ago   Created   rocket'
+    ].join('\n')
+    const d = okDetail(dfvOutput(body))
+    expect(d.unreadable).toBe(0)
+    expect(d.containers).toHaveLength(1)
+    expect(d.containers[0]).toMatchObject({
+      id: 'aa11bb22cc33',
+      image: 'busybox:1.36',
+      command: '"🚀🚀🚀🚀🚀🚀"',
+      localVolumes: 0,
+      size: '12B',
+      name: 'rocket'
+    })
   })
 
   it('keeps unreadable rows counted rather than dropping them quietly', () => {
@@ -430,11 +528,32 @@ describe('how old the engine on this host is', () => {
       '<no value>',
       'template: :1:9: executing "" at <.Server.BuildTime>: nil pointer evaluating *types.Version.Server',
       'Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg',
-      '24.0.7'
+      '24.0.7',
+      // Go's and Unix's zero times. podman's docker-compat derives BuildTime
+      // from an int64 that formats as the epoch when it was never set, and
+      // "built 1970-01-01, 56 years ago" is the year-24 mistake wearing a
+      // timestamp. Docker did not exist before 2013.
+      '1970-01-01T00:00:00Z',
+      '0001-01-01T00:00:00Z',
+      // Near-misses `Date.parse` accepts happily and turns into a date nobody
+      // reported. This is what the shape check is for; the four above it get
+      // through the shape check and are stopped by the epoch floor.
+      '2021',
+      '2021-06',
+      '06/02/2021',
+      'Wed Jun 02 2021'
     ]) {
       expect(parseDockerEngineBuild(bad), bad).toBeNull()
     }
     expect(parseDockerEngineBuild(undefined)).toBeNull()
+  })
+
+  it('reports the date the daemon printed, not the one this laptop is in', () => {
+    // `new Date(at).toISOString()` normalises to UTC, so an engine built at
+    // half eleven at night in Chicago was reported as having been built the
+    // next day.
+    const build = parseDockerEngineBuild('2021-06-02T23:30:00-05:00')
+    expect(build?.date).toBe('2021-06-02')
   })
 
   it('does not fail the listing when the engine will not say', () => {
@@ -450,6 +569,18 @@ describe('how old the engine on this host is', () => {
     const cmd = buildDockerDiskDetailCommand()
     expect(cmd).toContain('{{.Server.BuildTime}}')
     expect(cmd).not.toMatch(/curl|wget|https?:/)
+  })
+
+  it('closes the listing with a marker, without losing its exit status', () => {
+    // Without this, everything the login shell left on stderr lands inside the
+    // last table's columns and is counted as a row that could not be read.
+    // The status still has to be the listing's own: it is what tells a host
+    // with no docker from a host with an empty store.
+    const cmd = buildDockerDiskDetailCommand()
+    const tail = cmd.slice(cmd.indexOf('system df -v'))
+    expect(tail).toContain(DOCKER_MARKERS.end)
+    expect(tail).toMatch(/SP_RC=\$\?/)
+    expect(tail).toMatch(/exit \$SP_RC$/)
   })
 
   it('puts the block that may fail before the block that may not', () => {
@@ -502,13 +633,32 @@ describe('the number this must never produce', () => {
 
   it('leaves the headline where docker computed it', () => {
     const panel = read('src/renderer/src/components/docker/DockerPanel.tsx')
-    // The one reduce in the panel is over docker's OWN per-category
-    // reclaimable figures. A second one over per-item sizes is the bug this
-    // whole section is written to prevent.
-    const reduces = panel.match(/\.reduce\(/g) ?? []
-    expect(reduces).toHaveLength(1)
-    expect(panel).toMatch(/reclaimableBytes \?\? 0/)
-    expect(panel).not.toMatch(/uniqueSizeBytes \?\? 0\), 0\)/)
+    // Scoped to the ONE component that renders per-item sizes, because that is
+    // the only place this bug can live. Counting `.reduce(` across the whole
+    // file was neither necessary nor sufficient: it fails on any unrelated
+    // reduce added anywhere in a thousand lines, and it passes a hand-rolled
+    // `let n = 0; for (const i of images) n += i.uniqueSizeBytes ?? 0`, which
+    // IS the bug.
+    const at = panel.indexOf('function DiskItems(')
+    expect(at, 'DiskItems was renamed or moved; this guard needs to follow it').toBeGreaterThan(-1)
+    // From the brace that opens the body — not from the signature, whose
+    // destructured props close with a `}` of their own — to the first `}` in
+    // the first column, which is the end of the function.
+    const opens = panel.indexOf('React.JSX.Element {', at)
+    expect(opens, 'DiskItems no longer has the signature this guard looks for').toBeGreaterThan(at)
+    const rest = panel.slice(opens)
+    const closes = rest.indexOf('\n}')
+    const diskItems = rest.slice(0, closes === -1 ? undefined : closes)
+    // Any accumulation over the per-item byte fields, however it is spelled.
+    expect(diskItems).not.toMatch(/\.reduce\(/)
+    expect(diskItems).not.toMatch(/\+=/)
+    expect(diskItems).not.toMatch(/SizeBytes[^\n]*\+/)
+    // A computed total, not the word — the tooltip legitimately says "in
+    // total" when the runtime gave no unique size and the figure IS the total.
+    expect(diskItems).not.toMatch(/\b(?:const|let|var)\s+\w*[Tt]otal/)
+    // The one total the panel does show is docker's own, computed on the host
+    // where the layer sharing is known — and it lives outside this component.
+    expect(panel.slice(0, at)).toMatch(/reclaimableBytes \?\? 0/)
   })
 })
 

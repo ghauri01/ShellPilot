@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   Activity,
   Container,
@@ -157,7 +157,20 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   // id is what the host is told.
   const refOf = (c: DockerContainer): string => c.id
 
+  // Every read below is a round trip that outlives the click that started it —
+  // `Itemise` is allowed sixty seconds, and the panel stays fully usable while
+  // it is in the air. If the operator switches server in that window, the
+  // answer that eventually lands is about a host they are no longer looking
+  // at: repository names, volume names and container names belonging to
+  // somewhere else, rendered under the new server's heading with nothing to
+  // say so — and the Itemise button hides itself once a listing exists, so
+  // there is no way to notice or correct it. Each read stamps the generation
+  // it started in; `clearReads` ends that generation, and an answer from a
+  // dead one is dropped instead of shown.
+  const generation = useRef(0)
+
   const clearReads = (): void => {
+    generation.current++
     setLogs(null)
     setDisk(null)
     setDiskItems(null)
@@ -165,25 +178,34 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
     setStatsError(null)
     setDetail(null)
     setActionResult(null)
+    // The reads being abandoned owned these. Left set, the new server's
+    // buttons sit disabled until a request about the old one comes back.
+    setDiskLoading(false)
+    setDiskItemsLoading(false)
+    setStatsLoading(false)
   }
 
   const load = async (sudoOverride?: boolean): Promise<void> => {
     if (!server) return
     setLoading(true)
     clearReads()
+    const gen = generation.current
     try {
       const r = await bridge()?.list?.(cfgFor(server), { sudo: sudoOverride ?? useSudo })
+      if (generation.current !== gen) return
       setProbe(r ?? null)
       // Only ask about sudo once something has actually been refused by it —
       // and only when the automatic retry did not already solve it, which it
       // usually does.
       if (r && !r.ok && r.reason === 'permission-denied') {
         const can = await bridge()?.canSudo?.(cfgFor(server))
+        if (generation.current !== gen) return
         setSudoAvailable(can ?? false)
       } else {
         setSudoAvailable(null)
       }
     } catch (e) {
+      if (generation.current !== gen) return
       setProbe({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
     } finally {
       // In a finally, so a rejected invoke leaves a button the user can press
@@ -217,10 +239,13 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   const loadDisk = async (): Promise<void> => {
     if (!server) return
     setDiskLoading(true)
+    const gen = generation.current
     try {
       const r = await bridge()?.disk?.(cfgFor(server), { sudo: useSudo })
+      if (generation.current !== gen) return
       setDisk(r ?? { ok: false, reason: 'unknown', detail: 'Disk usage is not wired up in this build.' })
     } catch (e) {
+      if (generation.current !== gen) return
       setDisk({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
     } finally {
       setDiskLoading(false)
@@ -230,12 +255,15 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   const loadDiskItems = async (): Promise<void> => {
     if (!server) return
     setDiskItemsLoading(true)
+    const gen = generation.current
     try {
       const r = await bridge()?.diskDetail?.(cfgFor(server), { sudo: useSudo })
+      if (generation.current !== gen) return
       setDiskItems(
         r ?? { ok: false, reason: 'unknown', detail: 'The itemised disk view is not wired up in this build.' }
       )
     } catch (e) {
+      if (generation.current !== gen) return
       setDiskItems({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
     } finally {
       setDiskItemsLoading(false)
@@ -248,8 +276,10 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
     if (!server || running.length === 0) return
     setStatsLoading(true)
     setStatsError(null)
+    const gen = generation.current
     try {
       const r = await bridge()?.stats?.(cfgFor(server), running.map(refOf), { sudo: useSudo })
+      if (generation.current !== gen) return
       if (!r) setStatsError('CPU and memory are not wired up in this build.')
       else if (!r.ok) setStatsError(`${DOCKER_FAILURE_HELP[r.reason]} ${r.detail}`)
       else {
@@ -260,6 +290,7 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
         setStats(byName)
       }
     } catch (e) {
+      if (generation.current !== gen) return
       setStatsError(e instanceof Error ? e.message : String(e))
     } finally {
       setStatsLoading(false)
@@ -273,13 +304,16 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
     }
     if (!server) return
     setDetail({ id: c.id, probe: null })
+    const gen = generation.current
     try {
       const r = await bridge()?.inspect?.(cfgFor(server), refOf(c), { sudo: useSudo })
+      if (generation.current !== gen) return
       setDetail({
         id: c.id,
         probe: r ?? { ok: false, reason: 'unknown', detail: 'Inspect is not wired up in this build.' }
       })
     } catch (e) {
+      if (generation.current !== gen) return
       setDetail({
         id: c.id,
         probe: { ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) }
@@ -558,22 +592,34 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
                   which image, and "images: 12.71GB" is not something an operator
                   can act on. It is a second read rather than a wider first one
                   because `-v` walks every image and volume on the host. */}
-              {diskItems === null && (
-                <div className="row" style={{ marginTop: 6, gap: 8, alignItems: 'center' }}>
-                  <button className="btn ghost sm" disabled={diskItemsLoading} onClick={() => void loadDiskItems()}>
-                    <HardDrive size={12} className={clsx(diskItemsLoading && 'spin')} /> Itemise
-                  </button>
-                  <span className="faint" style={{ fontSize: 11 }}>
-                    Every image, container, volume and cache entry, largest first. Read-only.
-                  </span>
-                </div>
-              )}
               {diskItems && !diskItems.ok && (
                 <div className="s-desc danger">
                   <TriangleAlert size={12} /> {DOCKER_FAILURE_HELP[diskItems.reason]}
                   <div className="mono" style={{ marginTop: 4, opacity: 0.8 }}>
                     {diskItems.detail}
                   </div>
+                </div>
+              )}
+              {/* Offered until there is a listing to show — not until there is
+                  a RESULT. Gating on `=== null` made a failed probe a dead
+                  end: an SSH timeout is the most likely way this read fails,
+                  it is the most transient, and the only way out of it was to
+                  close the whole disk card. */}
+              {!diskItems?.ok && (
+                <div className="row" style={{ marginTop: 6, gap: 8, alignItems: 'center' }}>
+                  <button className="btn ghost sm" disabled={diskItemsLoading} onClick={() => void loadDiskItems()}>
+                    <HardDrive size={12} className={clsx(diskItemsLoading && 'spin')} />{' '}
+                    {diskItems === null ? 'Itemise' : 'Try again'}
+                  </button>
+                  {diskItems === null ? (
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      Every image, container, volume and cache entry, largest first. Read-only.
+                    </span>
+                  ) : (
+                    <button className="btn ghost sm" onClick={() => setDiskItems(null)}>
+                      Close
+                    </button>
+                  )}
                 </div>
               )}
               {diskItems?.ok && <DiskItems probe={diskItems} onClose={() => setDiskItems(null)} />}
@@ -906,6 +952,18 @@ function DiskItems({
   const containers = [...d.containers].sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0))
   const volumes = [...d.volumes].sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0))
   const cache = [...d.buildCache].sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0))
+  const empty = images.length === 0 && containers.length === 0 && volumes.length === 0 && cache.length === 0
+
+  // `.cron-when` has a minimum width and no maximum, and an image reference is
+  // unbounded: `registry.example.com/platform/team/service:2024-11-04-abcdef`
+  // pushed the size and the chips off the end of the row. Clipped here rather
+  // than in the shared rule, which the scheduled-jobs table relies on.
+  const nameCell: React.CSSProperties = {
+    maxWidth: 320,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap'
+  }
 
   const heading = (text: string, count: number): React.JSX.Element => (
     <div className="row muted" style={{ fontSize: 11, marginTop: 8 }}>
@@ -925,6 +983,10 @@ function DiskItems({
             shim fails `.Server.*` templates outright — and saying nothing is
             the honest form of that. */}
         {probe.engine && <span className="faint">{formatDockerEngineAge(probe.engine, Date.now())}</span>}
+        {/* This read has its own sudo failover, and the banner above the panel
+            is about the CONTAINER LIST. Without this, a listing that had to
+            escalate to root to be readable said nothing about it. */}
+        {probe.usedSudo === true && <span className="faint">read as root</span>}
         <button className="btn ghost sm" onClick={onClose}>
           Close
         </button>
@@ -937,7 +999,7 @@ function DiskItems({
       {images.length > 0 && heading('Images', images.length)}
       {images.map((i) => (
         <div key={`${i.id}:${i.repository}:${i.tag}`} className="cron-row">
-          <span className="mono cron-when">
+          <span className="mono cron-when" style={nameCell} title={`${i.repository}:${i.tag}`}>
             {i.repository}:{i.tag}
           </span>
           <span className="faint cron-desc">
@@ -952,7 +1014,18 @@ function DiskItems({
           </span>
           {/* UNIQUE SIZE, not SIZE. SIZE includes layers other images share, so
               it is the number that makes a 300MB image look like 900MB. */}
-          <span className="mono" title={`${i.size} including shared layers`}>
+          <span
+            className="mono"
+            title={
+              i.uniqueSize === ''
+                // No UNIQUE SIZE column from this runtime, so the number shown
+                // IS the total. Repeating it as "x including shared layers"
+                // said the same figure twice and implied a comparison that was
+                // never made.
+                ? `${i.size} in total; this runtime did not report how much of it is unique to this image`
+                : `${i.size} including shared layers`
+            }
+          >
             {i.uniqueSize === '' ? i.size : i.uniqueSize}
           </span>
         </div>
@@ -961,7 +1034,9 @@ function DiskItems({
       {containers.length > 0 && heading('Containers', containers.length)}
       {containers.map((c) => (
         <div key={c.id} className="cron-row">
-          <span className="mono cron-when">{c.name}</span>
+          <span className="mono cron-when" style={nameCell} title={c.name}>
+            {c.name}
+          </span>
           <span className="faint cron-desc">{c.image}</span>
           <span className="grow" />
           <span className={clsx('chip', stateTone(c.state))}>{c.status}</span>
@@ -979,7 +1054,7 @@ function DiskItems({
           {/* A generated 64-hex name is unreadable at full length and its first
               twelve characters are what `docker volume ls` shows anyway. A name
               a person typed is shown whole. */}
-          <span className="mono cron-when" title={v.name}>
+          <span className="mono cron-when" style={nameCell} title={v.name}>
             {v.anonymous ? v.name.slice(0, 12) : v.name}
           </span>
           <span className="faint cron-desc">{v.anonymous ? 'anonymous' : 'named'}</span>
@@ -1004,6 +1079,16 @@ function DiskItems({
           <span className="mono">{c.size}</span>
         </div>
       ))}
+
+      {/* An answer, and one worth printing: four headings with nothing under
+          any of them renders as silence otherwise, which reads like a view
+          that failed to load rather than a host holding nothing. */}
+      {empty && (
+        <div className="faint" style={{ fontSize: 11 }}>
+          Docker answered, and every table it printed was empty: there is nothing stored on this
+          host. That is the reading, not a read that failed.
+        </div>
+      )}
 
       {/* Absent and empty are different sentences, and only one of them is
           about this host. podman has historically not printed a build cache
