@@ -92,6 +92,9 @@ export function AlertsPanel(): React.JSX.Element {
   const globalThreshold = useApp((s) => s.settings.resourceAlertThreshold)
   const perHost = useApp((s) => s.settings.resourceAlertThresholds)
   const servers = useWorkspaceServers()
+  // What is in each threshold box while it is being typed in, which is not the
+  // same thing as what is stored. See commitThreshold.
+  const [draft, setDraft] = useState<Record<string, string>>({})
   const [rows, setRows] = useState<StoredAlertRow[] | null>(null)
   const [reading, setReading] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -125,14 +128,45 @@ export function AlertsPanel(): React.JSX.Element {
   // A blank box removes the override rather than storing a zero — an empty
   // field means "no opinion", and a 0 stored here would be a threshold no
   // reading can be below, which is alerting switched off for that host while
-  // the switch still says it is on. Clamping happens in hostThreshold, which is
-  // where every reader of the value goes through.
-  const setThreshold = (serverId: string, raw: string): void => {
+  // the switch still says it is on.
+  //
+  // Nothing outside the range is ever STORED. It used to persist the raw typed
+  // value and rely on hostThreshold to clamp on read, so typing "8" on the way
+  // to "85" wrote an 8 — a number the app will never honour, sitting in the
+  // settings blob and in every backup taken from it for somebody to read later
+  // and draw the wrong conclusion from.
+  //
+  // Clamping on each keystroke would be worse than the bug: "8" would snap to
+  // 50 and "85" could never be typed at all. So the box keeps a draft of what
+  // is being typed, the store only hears a value that is already inside the
+  // range, and leaving the field commits whatever is there, clamped. Reading
+  // still clamps too — a hand-edited settings file and an old backup are not
+  // typing.
+  const commitThreshold = (serverId: string, raw: string): void => {
     const next = { ...perHost }
     const n = Number(raw)
     if (raw.trim() === '' || !Number.isFinite(n)) delete next[serverId]
-    else next[serverId] = n
+    else next[serverId] = Math.min(THRESHOLD_MAX, Math.max(THRESHOLD_MIN, n))
     useApp.getState().setSettings({ resourceAlertThresholds: next })
+  }
+
+  const typeThreshold = (serverId: string, raw: string): void => {
+    setDraft((d) => ({ ...d, [serverId]: raw }))
+    const n = Number(raw)
+    if (raw.trim() === '') commitThreshold(serverId, '')
+    else if (Number.isFinite(n) && n >= THRESHOLD_MIN && n <= THRESHOLD_MAX) {
+      commitThreshold(serverId, raw)
+    }
+  }
+
+  const blurThreshold = (serverId: string): void => {
+    const raw = draft[serverId]
+    if (raw !== undefined) commitThreshold(serverId, raw)
+    setDraft((d) => {
+      const next = { ...d }
+      delete next[serverId]
+      return next
+    })
   }
 
   const now = Date.now()
@@ -268,9 +302,10 @@ export function AlertsPanel(): React.JSX.Element {
                     min={THRESHOLD_MIN}
                     max={THRESHOLD_MAX}
                     placeholder={String(globalThreshold)}
-                    value={override === undefined ? '' : String(override)}
+                    value={draft[srv.id] ?? (override === undefined ? '' : String(override))}
                     aria-label={`CPU and memory threshold for ${srv.name}`}
-                    onChange={(e) => setThreshold(srv.id, e.target.value)}
+                    onChange={(e) => typeThreshold(srv.id, e.target.value)}
+                    onBlur={() => blurThreshold(srv.id)}
                   />
                 </td>
                 <td className="faint">

@@ -93,12 +93,12 @@ describe('the line a sample is actually judged against', () => {
     app.useApp.getState().setSettings({ resourceAlertThresholds: { build: 95 } })
     // 88% on both.
     //
-    // CPU and memory are "over" at the CLEAR line — the threshold less the
-    // five-point recovery margin — which is load-bearing and written down in
-    // checkResourceAlerts: it makes "over" and "not yet recovered" the same
-    // condition, so the chip and the notification state cannot come apart. So
-    // the database's real line is 75 and the build box's is 90, and 88 is over
-    // one and under the other.
+    // CPU and memory are over at the threshold itself — the number in the box,
+    // which is the whole point of a per-host line somebody types. So the
+    // database's line is 80 and the build box's is 95, and 88 is over one and
+    // under the other. The five-point recovery margin is still there; it
+    // decides when a later crossing counts as a new incident, not where the
+    // line is. See checkResourceAlerts.
     sample('db', 'orders-primary', 88)
     sample('build', 'ci-runner', 88)
     expect(raises()).toHaveLength(1)
@@ -121,8 +121,8 @@ describe('the line a sample is actually judged against', () => {
     app.useApp.getState().setSettings({ resourceAlertThresholds: { build: 95 } })
     sample('build', 'ci-runner', 97)
     expect(raises()).toHaveLength(1)
-    // 88 is over the workspace default's line of 75 and under this host's line
-    // of 90. The chip has to follow the host's line, not the default's.
+    // 88 is over the workspace default of 80 and under this host's line of 95.
+    // The chip has to follow the host's line, not the default's.
     sample('build', 'ci-runner', 88)
     expect(alerts.useAlerts.getState().active['build:cpu']).toBeUndefined()
   })

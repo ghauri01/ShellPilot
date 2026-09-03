@@ -140,6 +140,67 @@ describe('the history the chip cannot show', () => {
   })
 })
 
+describe('the per-host threshold box', () => {
+  const server = {
+    id: 's1',
+    workspaceId: 'ws-default',
+    folderId: null,
+    name: 'web-1',
+    host: 'example.test',
+    port: 22,
+    username: 'root',
+    auth: 'key' as const,
+    status: 'offline' as const,
+    tags: [],
+    favorite: false,
+    os: 'Linux',
+    route: [],
+    vpnProfileId: null
+  }
+
+  it('never stores a number the app will not honour', async () => {
+    // Typing "8" on the way to "85" used to persist an 8. hostThreshold clamps
+    // on read, so the app behaved correctly — but the settings blob, and every
+    // backup taken from it, held a threshold no reading can be below, for
+    // whoever opens one later to draw the wrong conclusion from.
+    useApp.setState({ servers: [server] })
+    useApp.getState().setSettings({ resourceAlertThresholds: {} })
+    render(<AlertsPanel />)
+    const box = await screen.findByLabelText('CPU and memory threshold for web-1')
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+
+    await user.type(box, '8')
+    // Nothing out of range reaches the store, and the box still shows what is
+    // being typed — clamping the keystroke would snap it to 50 and "85" could
+    // never be typed at all.
+    expect(useApp.getState().settings.resourceAlertThresholds.s1).toBeUndefined()
+    expect((box as HTMLInputElement).value).toBe('8')
+
+    await user.type(box, '5')
+    expect(useApp.getState().settings.resourceAlertThresholds.s1).toBe(85)
+  })
+
+  it('clamps what is left in the box when the field is left', async () => {
+    useApp.setState({ servers: [server] })
+    useApp.getState().setSettings({ resourceAlertThresholds: {} })
+    render(<AlertsPanel />)
+    const box = await screen.findByLabelText('CPU and memory threshold for web-1')
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    await user.type(box, '8')
+    await user.tab()
+    expect(useApp.getState().settings.resourceAlertThresholds.s1).toBe(50)
+  })
+
+  it('says the number it will actually alert at', async () => {
+    // The row used to print the workspace default's wording for an overridden
+    // host, and the alert then fired five points below whatever it printed.
+    useApp.setState({ servers: [server] })
+    useApp.getState().setSettings({ resourceAlertThreshold: 80, resourceAlertThresholds: { s1: 90 } })
+    render(<AlertsPanel />)
+    await waitFor(() => expect(screen.getByText('alerts at 90%')).toBeTruthy())
+  })
+})
+
 describe('what a row is allowed to say it was about', () => {
   it('prefers the detail, falls back to the numbers, and invents nothing', () => {
     const base = { event: 'raised' as const, serverId: 's1', serverName: 'web-1', at: T0 }

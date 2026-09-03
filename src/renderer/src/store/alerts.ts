@@ -100,9 +100,16 @@ const REPEAT: Record<NumericAlertKind, number> = {
   load: 60_000
 }
 
-// How far below the threshold a value must fall to count as recovered. Without
-// it, a host sitting at the line flaps between raised and resolved on every
-// sample. See evaluate().
+// How far below the threshold a value must fall before a later crossing counts
+// as a NEW incident rather than the same one continuing.
+//
+// It governs the talking, not the line. A reading is over when it reaches the
+// threshold — the number the user typed — and the chip follows that and nothing
+// else. What this margin buys is that a host stepping back over the line has
+// not made a round trip through recovery, so `lastNotifiedValue` survives and
+// the re-raise bypass does not fire; the crossing waits out MIN_GAP and the
+// repeat window like any other. Without it a host sitting exactly on the line
+// would earn a fresh raise on every sample. See evaluate().
 //
 // Per kind, because five is five PERCENT for everything measured in percent and
 // is nonsense for a load average: a threshold of 2 per core less a margin of 5
@@ -1498,9 +1505,9 @@ export const LOAD_DANGER = 2
 
 // The range a per-host override is allowed to take.
 //
-// A threshold of 0 makes `over` true on every sample forever, because the clear
-// line is max(0, 0 - 5) and no reading is below zero; a threshold of 100 can
-// never be reached by a percentage. Both are ways of switching alerting off for
+// A threshold of 0 makes `over` true on every sample forever, because no
+// reading is below zero; a threshold of 100 can never be reached by a
+// percentage. Both are ways of switching alerting off for
 // one host while the switch still says it is on, and neither is what anybody
 // meant to type. The global threshold has a slider that cannot produce them;
 // an override is a number in a box, and the box is the only guard there is.
@@ -1544,15 +1551,28 @@ export function checkResourceAlerts(serverId: string, serverName: string, s: Res
   // is, and both `line` below and the sentence a person reads are built from
   // the same number.
   const threshold = hostThreshold(resourceAlertThreshold, resourceAlertThresholds, serverId)
-  // `line` is the CLEAR line, not the threshold, and CPU and memory are over
-  // when they reach it. That is load-bearing and easy to mistake for a bug:
-  // because `over` and `clearAt` are then the same number, "over" and "not yet
-  // recovered" are the same condition, and the chip and the notification state
-  // cannot come apart. Raising this to `>= resourceAlertThreshold` would open
-  // a five-point band for CPU where the chip is down but the alert memory is
-  // still held — the dead band that stranded disk chips at 82%. If you change
-  // it, the `!over` branch in evaluate has to grow the disk case's handling.
-  const line = clearLine('cpu', threshold)
+  // THE LINE IS THE NUMBER THE USER TYPED.
+  //
+  // This used to be `threshold - RECOVER_MARGIN`, so that "over" and "not yet
+  // recovered" were the same condition and the chip could not come apart from
+  // the notification state. That argument was sound while the threshold was a
+  // single workspace slider — one sentence off by five points that nobody had
+  // chosen — and it stopped being sound the moment the number was one a person
+  // typed into a box beside the words "alerts at 50%". A host held to 50 raised
+  // at 45, with `threshold: 50` on the wire and a desktop body reading "CPU has
+  // been at or above 50%" at 45; at THRESHOLD_MIN the real line was 45, below
+  // the minimum the box claims to enforce.
+  //
+  // The dead band the old comment warns about is already closed, and by the
+  // disk case: evaluate's `!over` branch drops the chip on `over` alone and
+  // keeps `lastNotifiedValue` until the value is genuinely below `clearAt`. So
+  // hysteresis still governs the TALKING — a host stepping back over the line
+  // has not made a round trip through recovery and earns no fresh raise, it
+  // waits out MIN_GAP and the repeat window like anything else — while the chip
+  // and the sentence both follow the number in the box. Disk, inodes and load
+  // are unchanged: their lines are fixed, shared with the Fleet Monitor, and
+  // never five points from anything.
+  const line = threshold
   // Guarded exactly as disk, inode and load are. A null is neither raised nor
   // resolved nor read as healthy, and there is now a null to pass.
   if (s.cpu !== null) {
