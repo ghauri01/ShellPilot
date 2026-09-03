@@ -320,7 +320,13 @@ describe('running a job', () => {
     const store = await openStore()
     const h = harness(store)
     await h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: [] }))
-    expect(h.progress.filter((p) => p.done)).toHaveLength(1)
+    // The COUNT was the whole assertion, which one event for any job, carrying
+    // anything at all, satisfied. What a listener is actually waiting for is
+    // this job id and the finished row beside it — an event with no `job` on it
+    // leaves a renderer holding a `done` it cannot draw.
+    expect(h.progress.filter((p) => p.done).map((p) => `${p.jobId}:${p.job?.state}`)).toEqual([
+      'j1:done'
+    ])
     expect(store.readJob('j1')?.state).toBe('done')
   })
 
@@ -514,6 +520,11 @@ describe('output', () => {
     const target = store.readJob('j1')!.targets[0]
 
     expect(target.outElided).toBe(total - JOB_OUTPUT_HEAD - JOB_OUTPUT_TAIL)
+    // Asserted BEFORE the arithmetic that spends it. `rows[1]?.text ?? ''`
+    // below is a term on both sides of the same collection: drop the notice row
+    // altogether and `stored` and the expected total fall by the same amount,
+    // and the sum goes on balancing over output with no gap marked in it.
+    expect(rows[1]?.text, 'nothing marks where the elided middle was').toContain('bytes elided')
     // EXACTLY the budget plus the notice, not "at most". A `<=` here is
     // satisfied by an implementation that stores the head and throws the tail
     // away — the failure this whole policy exists to prevent — so it asserted

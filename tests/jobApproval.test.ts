@@ -525,7 +525,12 @@ describe('resuming after a restart', () => {
     await h.finish('a')
     await h.finish('b')
     await p
-    expect(s.readJob('j1')?.targets.every((t) => t.state === 'ok')).toBe(true)
+    // NAMED, not counted, and not `every`. `[].every(...)` is `true`, so the
+    // old assertion was satisfied by a run that recorded NO target rows at all,
+    // and equally by one that recorded only the first host — which is exactly
+    // the claim in this test's name. Both hosts have to be there, by id, in
+    // order, each with the state it reached.
+    expect(s.readJob('j1')?.targets.map((t) => `${t.serverId}=${t.state}`)).toEqual(['a=ok', 'b=ok'])
   })
 })
 

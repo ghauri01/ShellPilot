@@ -578,10 +578,26 @@ describe('what a detached launch writes to a host', () => {
     const launch = host.commands.find((c) => c.startsWith('SP_JOB_VERB=launch;')) as string
     // The command the user typed is in the heredoc, and nowhere else.
     expect(host.marker(host.dir).cmd).toBe('sudo apt full-upgrade -y')
-    expect(launch.slice(0, launch.indexOf('<<'))).not.toContain('sudo')
-    for (const verb of ['setsid sudo', 'sudo setsid', 'sudo sh -c', 'sudo mkdir']) {
-      expect(launch, `the wrapper must not run under ${verb}`).not.toContain(verb)
-    }
+    // CUT AT THE CLOSING DELIMITER, not at the first `<<`.
+    //
+    // That first `<<` opens the heredoc that carries `cmd`, and the line which
+    // actually launches the wrapper comes AFTER it — so the old slice ended
+    // before the only text that could have said sudo, and this test passed
+    // against a build that ran the wrapper as `sudo -n setsid sh -c …`. The
+    // list of literals that stood here did not catch it either — it spelled out
+    // `sudo setsid`, `sudo sh -c` and two more as exact substrings, and
+    // `sudo -n setsid` is none of them. `sudo -n` is the form used everywhere in
+    // this codebase, and it was the same hole broadcast.ts's command-start
+    // fragment was widened to close.
+    const eof = 'SPJOB_job1_EOF'
+    const close = launch.lastIndexOf(`\n${eof}\n`)
+    expect(close, 'the command is no longer carried in a heredoc').toBeGreaterThan(-1)
+    const launching = launch.slice(close + eof.length + 2)
+    expect(launching, 'this must be the text that starts the wrapper').toContain('sh -c')
+    expect(launching, 'the wrapper must run as the connecting user, whatever the flags').not.toContain('sudo')
+    expect(launching, 'and it must not be escalated by any other means either').not.toMatch(
+      /\b(doas|pkexec|su\s)/
+    )
     host.exit(host.dir, 0)
     await h.tick()
     await p
@@ -808,8 +824,13 @@ describe('the output cursor across a dropped link', () => {
     const offsets = states
       .filter((s) => isJobDetachedHandle(s.detached))
       .map((s) => (s.detached as { readOffset: number }).readOffset)
-    expect(offsets).toEqual([...offsets].sort((x, y) => x - y))
-    expect(offsets[offsets.length - 1]).toBe(90)
+    // THE SEQUENCE, not `offsets` compared against a sort of itself. That shape
+    // is true of every list of length 0 or 1 — including one from a run that put
+    // no handle on the row at all — so it could not fail against the rewind it
+    // names. These are the three the host actually closed windows on: the launch
+    // at 0, the poll that took the first thirty bytes, and the one after the
+    // reconnect that drained the sixty written while the link was down.
+    expect(offsets).toEqual([0, 30, 90])
   })
 
   it('drains a backlog bigger than one window without waiting between reads', async () => {

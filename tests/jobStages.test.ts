@@ -231,6 +231,11 @@ describe('the health gate between waves', () => {
     const req = approved({ jobId: 'j2', spec: spec(), targets: waved(['a', 'b', 'c']) })
     const run = h.runner.run(req)
     await h.settle()
+    // The control for the assertion at the end of this test. `not.toContain` is
+    // satisfied by a reader that returns nothing at all, so the reader is shown
+    // finding this job FIRST, while it is still open — and only then shown not
+    // finding it once it has halted.
+    expect(store.unfinishedJobs().map((j) => j.id)).toEqual(['j2'])
 
     // Wave 1 ran and its host came back with nginx down.
     h.tick(1)
