@@ -160,7 +160,23 @@ import { toVpnResult } from './services/vpn/errors'
 import { withVpnTransport, withVpnTransportDb } from './services/vpn/transport'
 import type { VpnKeygenResult, VpnKind, VpnMintResult, VpnPublicKeyResult, VpnSpec } from '../shared/vpn'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
-import { backupExport, backupImport, backupInspect, deleteAllData, relaunchApp } from './services/backup'
+import {
+  backupExport,
+  backupImport,
+  backupInspect,
+  deleteAllData,
+  discardStagedBackup,
+  inspectRemoteBackup,
+  listRemoteBackups,
+  readTargets,
+  recordRun,
+  relaunchApp,
+  runBackupToDestination,
+  saveDestinations,
+  startBackupSchedule,
+  stopBackupSchedule
+} from './services/backup'
+import type { BackupDestination } from '../shared/backup'
 import {
   checkForUpdates,
   getUpdaterStatus,
@@ -369,7 +385,12 @@ function createWindow(): void {
     // kept working through its queue for a window that no longer existed, and on
     // `activate` a new window would receive events carrying tailIds it filters
     // out, so the streams were invisible and unstoppable.
-    logTailer.disposeAll()
+    // Nothing half-written at the far end: a tick that has not started must not
+  // start now, and one already running holds the process through its own
+  // promise rather than through this timer.
+  stopBackupSchedule()
+
+  logTailer.disposeAll()
     broadcast.disposeAll()
     // Same, and it matters more here: a job outlives its panel by design, so a
     // window closing is exactly the case where one would keep working through
@@ -2132,6 +2153,56 @@ ipcMain.handle('backup:import', (_e, password: string, path: string) =>
 ipcMain.handle('backup:deleteAll', () => deleteAllData(closeHistoryNow))
 ipcMain.handle('backup:relaunch', () => relaunchApp())
 
+// Destinations. The renderer never sees a credential for any of them: an SFTP
+// destination names a server whose secret credentialResolver reads in main, and
+// an S3 destination names a vault entry that backupTargets reads in main. What
+// crosses this boundary is an id.
+ipcMain.handle('backup:destinations', () => readTargets())
+ipcMain.handle('backup:saveDestinations', (_e, destinations: BackupDestination[]) =>
+  saveDestinations(destinations)
+)
+ipcMain.handle('backup:runDestination', async (_e, id: string, password: string) => {
+  const dest = readTargets().destinations.find((d) => d.id === id)
+  if (!dest) {
+    const stamp = new Date().toISOString()
+    return {
+      ok: false,
+      destinationId: id,
+      destinationName: id,
+      destinationKind: 'local',
+      startedAt: stamp,
+      finishedAt: stamp,
+      verified: false,
+      restoreTested: false,
+      removed: [],
+      failedStage: 'write',
+      error: 'That destination is no longer configured.'
+    }
+  }
+  const report = await runBackupToDestination(dest, password)
+  recordRun(dest.id, report)
+  return report
+})
+ipcMain.handle('backup:listRemote', async (_e, id: string) => {
+  const dest = readTargets().destinations.find((d) => d.id === id)
+  if (!dest) return { ok: false, error: 'That destination is no longer configured.' }
+  return listRemoteBackups(dest)
+})
+ipcMain.handle('backup:inspectRemote', async (_e, id: string, name: string, password: string) => {
+  const dest = readTargets().destinations.find((d) => d.id === id)
+  if (!dest) return { ok: false, error: 'That destination is no longer configured.' }
+  return inspectRemoteBackup(dest, name, password)
+})
+ipcMain.handle('backup:discardStaged', (_e, path: string) => discardStagedBackup(path))
+ipcMain.handle('backup:chooseDirectory', async () => {
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+  const chosen = await dialog.showOpenDialog(win, {
+    title: 'Choose a folder for backups',
+    properties: ['openDirectory', 'createDirectory']
+  })
+  return chosen.canceled ? null : (chosen.filePaths[0] ?? null)
+})
+
 // ---- Updater ----
 ipcMain.handle('updater:check', () => checkForUpdates())
 ipcMain.handle('updater:status', () => getUpdaterStatus())
@@ -2627,6 +2698,15 @@ app.whenReady().then(() => {
   // the stored prefs, so both live behind startAutoCheck rather than a bare
   // check here plus a timer somewhere else.
   startAutoCheck()
+  // Scheduled backups. Started here rather than at module scope for the same
+  // reason startHistory is: only the instance that won the single-instance
+  // lock should be writing to a destination, and two copies of this app
+  // uploading generations into the same bucket would fight over retention.
+  //
+  // The tick only looks at the clock. Nothing runs until a destination has an
+  // interval AND a vault entry holding its passphrase, and a tick that cannot
+  // find one records why rather than doing nothing.
+  startBackupSchedule((line) => console.log('[backup]', line))
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

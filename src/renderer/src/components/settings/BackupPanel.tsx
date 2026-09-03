@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Download, Loader2, ShieldCheck, Trash2, Upload } from 'lucide-react'
 import { useApp } from '../../store/app'
+import { BackupDestinations } from './BackupDestinations'
 import { toast } from '../../store/toast'
 import type { BackupResult, BackupSummary } from '../../../../shared/backup'
 
@@ -273,6 +274,8 @@ export function BackupPanel(): React.JSX.Element {
           </button>
         </div>
       )}
+
+      <BackupDestinations />
 
       <h3 className="backup-h" style={{ color: 'var(--danger)' }}>
         Danger zone

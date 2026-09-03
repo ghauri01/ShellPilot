@@ -357,6 +357,29 @@ export function destinationProblem(d: BackupDestination): string | null {
   return null
 }
 
+/**
+ * The destinations file, as it crosses the IPC boundary.
+ *
+ * Here rather than beside the code that reads it: the preload bridge has to
+ * name this type, and a preload that imported it from src/main would drag the
+ * whole main process into the renderer's type graph — which is a boundary, not
+ * a formatting preference.
+ */
+export interface BackupTargetsFile {
+  version: 1
+  destinations: BackupDestination[]
+  /** Destination id -> epoch ms of the last ATTEMPT. See dueDestinations. */
+  lastRunAt: Record<string, number>
+  /** Destination id -> the last run, success or failure, for the panel. */
+  lastReport: Record<string, BackupRunReport>
+}
+
+export interface RemoteListResult {
+  ok: boolean
+  error?: string
+  generations?: BackupGeneration[]
+}
+
 // ---------------------------------------------------------------------------
 // Database dumps as a source
 // ---------------------------------------------------------------------------

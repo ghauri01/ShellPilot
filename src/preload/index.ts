@@ -107,7 +107,13 @@ import type {
 } from '../shared/vpn'
 import type { KnownHost } from '../main/services/knownhosts'
 import type { SshConfigHost } from '../shared/sshconfig'
-import type { BackupResult } from '../shared/backup'
+import type {
+  BackupDestination,
+  BackupResult,
+  BackupRunReport,
+  BackupTargetsFile,
+  RemoteListResult
+} from '../shared/backup'
 import type { UpdatePrefs, UpdaterCapabilities, UpdaterStatus } from '../shared/updater'
 import type {
   AccessGroup,
@@ -589,7 +595,21 @@ const api = {
     import: (password: string, path: string): Promise<BackupResult> =>
       ipcRenderer.invoke('backup:import', password, path),
     deleteAll: (): Promise<BackupResult> => ipcRenderer.invoke('backup:deleteAll'),
-    relaunch: (): Promise<void> => ipcRenderer.invoke('backup:relaunch')
+    relaunch: (): Promise<void> => ipcRenderer.invoke('backup:relaunch'),
+    // Destinations. Note what is NOT here: no credential, in either direction.
+    // An SFTP destination names a saved server and an S3 one names a vault
+    // entry, and main resolves both — so the renderer can configure where the
+    // vault gets uploaded without ever holding the key to the place it lands.
+    destinations: (): Promise<BackupTargetsFile> => ipcRenderer.invoke('backup:destinations'),
+    saveDestinations: (destinations: BackupDestination[]): Promise<BackupTargetsFile> =>
+      ipcRenderer.invoke('backup:saveDestinations', destinations),
+    runDestination: (id: string, password: string): Promise<BackupRunReport> =>
+      ipcRenderer.invoke('backup:runDestination', id, password),
+    listRemote: (id: string): Promise<RemoteListResult> => ipcRenderer.invoke('backup:listRemote', id),
+    inspectRemote: (id: string, name: string, password: string): Promise<BackupResult> =>
+      ipcRenderer.invoke('backup:inspectRemote', id, name, password),
+    discardStaged: (path: string): Promise<void> => ipcRenderer.invoke('backup:discardStaged', path),
+    chooseDirectory: (): Promise<string | null> => ipcRenderer.invoke('backup:chooseDirectory')
   },
   updater: {
     check: (): Promise<void> => ipcRenderer.invoke('updater:check'),

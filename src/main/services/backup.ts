@@ -25,9 +25,11 @@ import type {
   BackupRunReport,
   BackupStage,
   BackupSummary,
+  BackupTargetsFile,
   BackupVerification,
   DumpCommand,
-  DumpTarget
+  DumpTarget,
+  RemoteListResult
 } from '../../shared/backup'
 
 // A backup is a single passphrase-encrypted file containing everything needed
@@ -339,15 +341,6 @@ export function deleteAllData(closeHistory?: () => void): BackupResult {
 // ---------------------------------------------------------------------------
 
 
-export interface BackupTargetsFile {
-  version: 1
-  destinations: BackupDestination[]
-  /** Destination id -> epoch ms of the last ATTEMPT. See dueDestinations. */
-  lastRunAt: Record<string, number>
-  /** Destination id -> the last run, success or failure, for the panel. */
-  lastReport: Record<string, BackupRunReport>
-}
-
 const EMPTY_TARGETS: BackupTargetsFile = {
   version: 1,
   destinations: [],
@@ -385,6 +378,23 @@ export function saveDestinations(destinations: BackupDestination[]): BackupTarge
   }
   writeTargets(next)
   return next
+}
+
+/**
+ * Remember a run, whether it worked or not.
+ *
+ * Both outcomes, deliberately. A panel that only records successes shows a
+ * destination that has been failing for a month as "last backed up three weeks
+ * ago" — the reassuring half of the truth, which is the half that stops
+ * somebody looking.
+ */
+export function recordRun(destinationId: string, report: BackupRunReport, at = Date.now()): void {
+  const current = readTargets()
+  writeTargets({
+    ...current,
+    lastRunAt: { ...current.lastRunAt, [destinationId]: at },
+    lastReport: { ...current.lastReport, [destinationId]: report }
+  })
 }
 
 /**
@@ -615,12 +625,6 @@ export function withNameTimes(generations: BackupGeneration[]): BackupGeneration
 // ---------------------------------------------------------------------------
 // Restore from a destination
 // ---------------------------------------------------------------------------
-
-export interface RemoteListResult {
-  ok: boolean
-  error?: string
-  generations?: BackupGeneration[]
-}
 
 /** What is actually at a destination right now, newest first. Only our own
  *  names: someone else's files in that directory are not offered as things to
@@ -948,12 +952,7 @@ export async function backupTick(now = Date.now(), opts: RunOptions = {}): Promi
     }
     const report = await runBackupToDestination(dest, password, opts)
     result.ran.push(report)
-    const current = readTargets()
-    writeTargets({
-      ...current,
-      lastRunAt: { ...current.lastRunAt, [dest.id]: now },
-      lastReport: { ...current.lastReport, [dest.id]: report }
-    })
+    recordRun(dest.id, report, now)
   }
   return result
 }
