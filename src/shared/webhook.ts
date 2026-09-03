@@ -198,6 +198,16 @@ export type StoreAlertKind = (typeof STORE_ALERT_KINDS)[number]
 export const ALERT_HISTORY_KIND = 'alert'
 
 /**
+ * The history kinds item 18 writes its verdicts under.
+ *
+ * `notableDbEvents` builds these as `db-${level}` from the verdict level. They
+ * are named here so the read side is a fixed pair of named statements rather
+ * than a kind assembled from a string, and so the two lists cannot drift into
+ * an alert kind nothing produces.
+ */
+export const DB_ALERT_HISTORY_KINDS = ['db-alarm', 'db-watch'] as const
+
+/**
  * What a stored row records, which is one more thing than the wire carries.
  *
  * `stood-down` is not an all-clear and is never posted anywhere: it is the row
@@ -238,6 +248,33 @@ export interface StoredAlertEvent {
 
 /** A row as it comes back out, with the store's own timestamp. */
 export interface StoredAlertRow extends StoredAlertEvent {
+  at: number
+}
+
+/**
+ * One of item 18's database verdicts, as the alert path needs it.
+ *
+ * `notableDbEvents` already decided that this answer is an alarm or a watch,
+ * and wrote it into the history store under its own kind with the numbers on
+ * the payload. Nothing here re-derives that: the level IS the kind, the
+ * question id is what the alert is about, and the timestamp is the store's.
+ * Alerting that recomputed the verdict would be a second opinion that could
+ * disagree with the screen item 18 renders, which is the mistake the disk alert
+ * was careful not to make about `isDiskCritical`.
+ *
+ * Deliberately three fields. The payload also carries a headline and a
+ * "because" written for a human, and neither belongs on this path: they are
+ * prose assembled from a report, and the summary they would land in is rendered
+ * by Slack.
+ */
+export interface StoredDbAlertRow {
+  kind: 'db-alarm' | 'db-watch'
+  /** The database CONNECTION's id. Not a fleet host — a database connection is
+   *  not a server, and notableDbEvents writes a null hostId for that reason. */
+  connectionId: string
+  /** The question id: `replication`, `autovacuum`, `connections`. Ours, short,
+   *  and stable across a reworded headline. */
+  question: string
   at: number
 }
 

@@ -90,8 +90,8 @@ import {
   webhookTest,
   webhookNotify
 } from './services/webhookAlerts'
-import type { AlertPayload, StoredAlertRow } from '../shared/webhook'
-import { ALERT_HISTORY_KIND, sanitiseStoredAlert } from '../shared/webhook'
+import type { AlertPayload, StoredAlertRow, StoredDbAlertRow } from '../shared/webhook'
+import { ALERT_HISTORY_KIND, DB_ALERT_HISTORY_KINDS, sanitiseStoredAlert } from '../shared/webhook'
 import { dbTest, dbQuery, dbInfo, dbClose, dbDisposeAll } from './services/db'
 import { dbShell } from './services/dbshell'
 import { dbOps } from './services/dbOps'
@@ -1579,6 +1579,48 @@ ipcMain.handle('alerts:history', (_e, limit?: number): StoredAlertRow[] => {
   }
   return out
 })
+/**
+ * Item 18's database verdicts, for item 19b to alert on.
+ *
+ * `notableDbEvents` writes them under their own history kinds, so this is two
+ * named reads and a whitelist — the same shape as `alerts:history` above and
+ * for the same reason. It carries the connection id, the question and the
+ * store's timestamp, and nothing else: the payload also holds a headline and a
+ * "because" written for a person, and prose assembled from a report has no
+ * business on a path that ends in a Slack message.
+ *
+ * The verdict is NOT recomputed. The level is the kind the row was written
+ * under. An alert that re-derived it could disagree with the screen item 18
+ * renders, which is exactly the trap the disk alert avoided by making
+ * `isDiskCritical` the only comparison.
+ */
+ipcMain.handle('alerts:db-events', (_e, limit?: number): StoredDbAlertRow[] => {
+  if (!historyStore) return []
+  const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 200
+  const out: StoredDbAlertRow[] = []
+  for (const kind of DB_ALERT_HISTORY_KINDS) {
+    for (const row of historyStore.readEvents({ kind, limit: n })) {
+      const p = row.payload
+      if (typeof p !== 'object' || p === null) continue
+      const r = p as Record<string, unknown>
+      // Both are ours and both are short. A row missing either is dropped
+      // rather than filled in: a database alert naming no database and no
+      // question is a row nobody can act on.
+      if (typeof r.connectionId !== 'string' || r.connectionId === '') continue
+      if (typeof r.question !== 'string' || r.question === '') continue
+      out.push({
+        kind,
+        connectionId: r.connectionId.slice(0, 200),
+        question: r.question.slice(0, 200),
+        at: row.ts
+      })
+    }
+  }
+  // Two reads, one timeline. Newest first, like every other history read.
+  out.sort((a, b) => b.at - a.at)
+  return out.slice(0, n)
+})
+
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()
   return fleetSampler.status()

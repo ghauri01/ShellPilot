@@ -2,7 +2,13 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useApp, useWorkspaceServers } from '../../store/app'
 import { useFleet } from '../../store/fleet'
 import { useFleetStatus } from '../../store/fleetStatus'
-import { checkResourceAlerts, checkUnitAlerts, hydrateAlerts } from '../../store/alerts'
+import {
+  checkResourceAlerts,
+  checkStateAlert,
+  checkUnitAlerts,
+  hydrateAlerts,
+  noteAlertEvent
+} from '../../store/alerts'
 import { bridgeHas, bridgeOn } from '../../lib/bridge'
 import { sshHopsFor } from '../../lib/ssh'
 import type { FleetTarget } from '../../../../shared/fleet'
@@ -103,7 +109,27 @@ export function FleetWatcher(): null {
       if (!e.host) {
         // Recorded, not dropped. A host refusing SSH for six hours used to be
         // indistinguishable from one that is fine, because this returned here.
-        if (e.error) reportError(e.serverId, e.error, e.at)
+        if (e.error) {
+          reportError(e.serverId, e.error, e.at)
+          // And now said out loud. Recording it made the Fleet Monitor honest;
+          // it still reached nobody who was not looking at that screen, which
+          // is the failure this whole item exists to end — and a host that will
+          // not answer is the one condition under which every OTHER alert for
+          // it goes silent, so silence here is silence everywhere.
+          //
+          // The host's own error text is deliberately not passed as a detail.
+          // It is remote output, `summary` is rendered by Slack, and "did not
+          // answer" is the whole of what a person needs to act on.
+          checkStateAlert(
+            e.serverId,
+            serversRef.current.find((s) => s.id === e.serverId)?.name ?? e.serverId,
+            'host-unreachable',
+            true
+          )
+        }
+        // No error and no host is a sweep that did not reach this server at
+        // all. Not a failure, not a success — nothing is said, which is the
+        // null case rather than a false all-clear.
         return
       }
       // The sampler's own timestamp, not arrival time: a sweep that took 40s
@@ -114,6 +140,9 @@ export function FleetWatcher(): null {
       // the monitor's own poll — so an alert could only fire while the user
       // was already looking at the screen that would have shown the problem.
       const name = serversRef.current.find((s) => s.id === e.serverId)?.name ?? e.serverId
+      // A sample arrived, so the host answered. Before any threshold is looked
+      // at, because "it is reachable again" is true whatever the numbers say.
+      checkStateAlert(e.serverId, name, 'host-unreachable', false)
       // `null`, not 0, when df reported nothing: a failed probe yields diskPct
       // 0, and passing that would resolve a disk alert on a host that is still
       // full — a false all-clear manufactured out of a measurement failure.
@@ -177,6 +206,125 @@ export function FleetWatcher(): null {
   useEffect(() => {
     void window.shellpilot?.fleet?.configure({ enabled, intervalMs, targets })
   }, [enabled, intervalMs, targets])
+
+  // A job step that failed.
+  //
+  // The one alert kind whose signal is already being pushed at the renderer:
+  // main emits a progress event on every host transition, so there is nothing
+  // to poll and nothing to sample. Registered once, like the sample handler
+  // above and for the same reason — resubscribing would drop transitions.
+  //
+  // `failed` raises and `ok` resolves. Everything else is null: `pending`,
+  // `waiting`, `running`, `detached` and `rebooting` are a host that has not
+  // answered yet, and `orphaned` is the honest "nobody will ever know how this
+  // ended". None of them is a success, so none of them may clear an alert —
+  // 19a's rule, applied to a state machine instead of a measurement.
+  useEffect(() => {
+    // `as unknown` first: JobsBridge is a named interface with no index
+    // signature, which is the point of the annotation on it in the preload.
+    if (
+      !bridgeHas(
+        window.shellpilot?.jobs as unknown as Record<string, unknown> | undefined,
+        'onProgress'
+      )
+    ) {
+      return
+    }
+    // Job titles arrive on the event that changed the JOB, and the events that
+    // change a HOST do not repeat them. Held here so the alert can say which
+    // job failed rather than quoting a UUID at somebody.
+    const titles = new Map<string, string>()
+    const off = window.shellpilot?.jobs?.onProgress((p) => {
+      if (p.job) titles.set(p.jobId, p.job.title)
+      const host = p.host
+      if (!host) return
+      const bad = host.state === 'failed' ? true : host.state === 'ok' ? false : null
+      checkStateAlert(host.serverId, host.serverName, 'job-failed', bad, titles.get(p.jobId) ?? '')
+      if (p.done) titles.delete(p.jobId)
+    })
+    return () => off?.()
+  }, [])
+
+  // A tunnel sitting in error.
+  //
+  // Polled rather than subscribed because `tunnel.onStatus` is per tunnel id
+  // and this component would have to add and drop subscriptions as tunnels come
+  // and go — a subscription set that can be wrong is worse than a read that is
+  // ten seconds late for a condition measured in minutes.
+  //
+  // `starting` is null on purpose: a tunnel that has not finished coming up is
+  // neither in error nor carrying traffic, and calling it either would announce
+  // a failure every time somebody starts one.
+  useEffect(() => {
+    if (!bridgeHas(window.shellpilot?.tunnel as Record<string, unknown> | undefined, 'list')) return
+    let live = true
+    const read = (): void => {
+      void window.shellpilot?.tunnel?.list().then((list) => {
+        if (!live || !Array.isArray(list)) return
+        const named = useApp.getState().tunnels
+        for (const t of list) {
+          const bad = t.state === 'error' ? true : t.state === 'active' ? false : null
+          if (bad === null) continue
+          checkStateAlert(t.id, named.find((n) => n.id === t.id)?.name ?? t.id, 'tunnel-down', bad)
+        }
+      })
+    }
+    // The first read waits for hydration, rather than being fired and swallowed.
+    // Nothing is said before the durable log is back, so an eager read here
+    // would be one poll's worth of silence for no reason — and for the database
+    // poll below, that is a minute.
+    void hydrateAlerts().then(() => {
+      if (live) read()
+    })
+    const timer = setInterval(read, 10_000)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [])
+
+  // Item 18's database verdicts.
+  //
+  // Read from the history store, where `notableDbEvents` already wrote them
+  // with the level decided and the numbers attached. Nothing here recomputes a
+  // verdict: an alert that re-derived "is this replication lag bad" could
+  // disagree with the screen item 18 renders, which is the trap the disk alert
+  // avoided by making `isDiskCritical` the only comparison in the app.
+  //
+  // A minute, not ten seconds. These rows only appear when a database
+  // operations read runs, which happens when somebody opens that page — there
+  // is nothing here that moves between polls on its own.
+  useEffect(() => {
+    if (!bridgeHas(window.shellpilot?.alerts as Record<string, unknown> | undefined, 'dbEvents')) {
+      return
+    }
+    let live = true
+    const read = (): void => {
+      void window.shellpilot?.alerts?.dbEvents().then((rows) => {
+        if (!live || !Array.isArray(rows)) return
+        const named = useApp.getState().databases
+        // Oldest first, so the flap counter sees the occurrences in the order
+        // they happened rather than the order they were read back.
+        for (const row of [...rows].reverse()) {
+          noteAlertEvent(
+            row.connectionId,
+            named.find((d) => d.id === row.connectionId)?.name ?? row.connectionId,
+            row.kind,
+            row.question,
+            row.at
+          )
+        }
+      })
+    }
+    void hydrateAlerts().then(() => {
+      if (live) read()
+    })
+    const timer = setInterval(read, 60_000)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [])
 
   // Push webhook settings to main on mount, not only when the toggle moves.
   //

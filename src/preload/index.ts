@@ -47,6 +47,7 @@ import type {
   AlertPayload,
   StoredAlertEvent,
   StoredAlertRow,
+  StoredDbAlertRow,
   WebhookConfig,
   WebhookDeliveryStatus,
   WebhookTestResult
@@ -321,7 +322,14 @@ const api = {
   alerts: {
     record: (event: StoredAlertEvent, at?: number): Promise<boolean> =>
       ipcRenderer.invoke('alerts:record', event, at),
-    history: (limit?: number): Promise<StoredAlertRow[]> => ipcRenderer.invoke('alerts:history', limit)
+    history: (limit?: number): Promise<StoredAlertRow[]> => ipcRenderer.invoke('alerts:history', limit),
+    // Item 18's database verdicts, which item 19b alerts on and does not
+    // recompute. A separate named read rather than a filter argument on
+    // `history`: the store's rule is named statements only, and "let the caller
+    // say which kind" is the first step of the query surface that rule exists
+    // to refuse.
+    dbEvents: (limit?: number): Promise<StoredDbAlertRow[]> =>
+      ipcRenderer.invoke('alerts:db-events', limit)
   },
   k8s: {
     read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>
