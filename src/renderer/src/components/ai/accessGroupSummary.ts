@@ -42,6 +42,10 @@ const PHRASING: Record<AiCapability, Phrasing> = {
   databaseAccess: { verb: 'query databases', gerund: 'querying databases' },
   sudo: { verb: 'use sudo', gerund: 'using sudo' },
   serverMetrics: { verb: 'read server metrics', gerund: 'reading server metrics' },
+  hostFacts: {
+    verb: 'read the host inventory and its pending security updates',
+    gerund: 'reading the host inventory and its pending security updates'
+  },
   manageServers: { verb: 'add servers to the workspace', gerund: 'adding servers to the workspace' },
   vpnControl: { verb: 'control VPNs and reverse proxies', gerund: 'controlling VPNs and reverse proxies' }
 }

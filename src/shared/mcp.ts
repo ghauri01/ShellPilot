@@ -18,6 +18,7 @@ export type AiCapability =
   | 'databaseAccess'
   | 'sudo'
   | 'serverMetrics'
+  | 'hostFacts'
   | 'manageServers'
   | 'vpnControl'
 
@@ -86,6 +87,21 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string; detail: string 
     label: 'Server metrics, services & ports',
     detail:
       'CPU, memory, disk and uptime — and also every failed systemd unit and every listening port with the process that owns it. That is a service and port inventory of the host, not only its capacity.'
+  },
+  // Its own capability, NOT a widening of Server metrics, and that was decided
+  // rather than defaulted. "How many unpatched security updates, and which
+  // distribution and kernel" is a vulnerability report about the host and is
+  // arguably the most attacker-useful thing this bridge can return —
+  // materially different from CPU and memory. The 0.8.0 finding recorded above
+  // was exactly a consent that had drifted wider than its grid text, and the
+  // standard it set is that the grid must describe what is actually taken. A
+  // new capability backfills to DENY for every existing group, which is the
+  // correct default here.
+  {
+    id: 'hostFacts',
+    label: 'Host inventory & pending security updates',
+    detail:
+      'Distribution and version, CPU model, architecture, virtualisation type, package manager, how many updates are pending, how many of those are SECURITY updates, and whether the host is waiting on a reboot. That is a patch-status report: it tells an agent which of your hosts are unpatched and against what.'
   },
   {
     id: 'manageServers',

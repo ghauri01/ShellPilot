@@ -48,6 +48,7 @@ import {
   sftpDisposeAll
 } from './services/sftp'
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
+import { HostFactsReader } from './services/hostFacts'
 import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
 import { loadHistory, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
@@ -668,6 +669,17 @@ function closeHistoryNow(): void {
 //
 // The renderer supplies targets because it owns the server list and the
 // workspace scoping; main owns the schedule and the credentials.
+// Host facts, on the sampler's slow clock. One reader for the whole process:
+// it holds no state of its own, only the exec function, and every probe is a
+// single round trip that releases its pooled connection when it finishes.
+//
+// It does NOT go through metrics.ts's exec, which discards the exit code —
+// three of the probes inside the collector use exit status as their API.
+const hostFactsReader = new HostFactsReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
+})
+
 const fleetSampler = new FleetSampler({
   // Secrets are resolved HERE, per sweep, not when targets are configured.
   // A config resolved at configure time would be stale the moment the vault
@@ -677,6 +689,16 @@ const fleetSampler = new FleetSampler({
   // server is refused with an error the fleet UI can show, rather than raising
   // a host-key trust dialog the user cannot connect to any action they took.
   sample: (key, cfg) => metricsSample(key, resolveChainSecrets(cfg as SshConnectConfig), false),
+  // The hourly half — roadmap item C. Injected exactly like `sample`, so the
+  // sampler's tests never touch SSH.
+  //
+  // allowPrompt: false for the same reason. This is the unattended caller, and
+  // a background inventory probe must never be what raises a host-key trust
+  // dialog the user cannot connect to anything they just did.
+  sampleFacts: async (_key, cfg) => {
+    const probe = await hostFactsReader.read(resolveChainSecrets(cfg as SshConnectConfig))
+    return probe.ok ? { ok: true, facts: probe.facts } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
+  },
   release: (key) => metricsDisconnect(key),
   emit: (event) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet:sample', event)
@@ -704,6 +726,12 @@ ipcMain.handle('fleet:configure', (_e, cfg: FleetSamplerConfig) => {
   return fleetSampler.status()
 })
 ipcMain.handle('fleet:status', () => fleetSampler.status())
+// The hourly host-facts collection for one server, as the sampler last saw it.
+//
+// A read of what the sweep already has — it never triggers a probe. A view that
+// wants fresher facts asks for a sweep, so there is exactly one thing deciding
+// when a package manager is shelled out to.
+ipcMain.handle('fleet:facts', (_e, serverId: string) => fleetSampler.factsFor(serverId))
 
 // ---- Run one command across many servers ----
 //

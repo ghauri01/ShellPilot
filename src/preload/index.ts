@@ -10,6 +10,7 @@ import type {
   MetricsResult,
   SshCloseInfo
 } from '../shared/ssh'
+import type { HostFacts } from '../shared/hostFacts'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type { LogLine, LogSource, LogTailState, UnitChoice } from '../shared/logtail'
@@ -387,6 +388,15 @@ const api = {
       ipcRenderer.invoke('fleet:configure', cfg),
     status: (): Promise<FleetSamplerStatus> => ipcRenderer.invoke('fleet:status'),
     sampleNow: (): Promise<FleetSamplerStatus> => ipcRenderer.invoke('fleet:sample-now'),
+    // Host facts as the sampler last collected them — roadmap item C. Read-only
+    // and never a trigger: `at` is when the collection happened and is normally
+    // much older than a metrics sample, because facts are collected hourly.
+    // `error` is set independently of the metrics error, since a host can
+    // answer a metrics sample perfectly and still refuse this probe.
+    facts: (
+      serverId: string
+    ): Promise<{ facts?: HostFacts; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
+      ipcRenderer.invoke('fleet:facts', serverId),
     onSample: (cb: (event: FleetSampleEvent) => void): (() => void) => {
       const h = (_e: IpcRendererEvent, event: FleetSampleEvent): void => cb(event)
       ipcRenderer.on('fleet:sample', h)

@@ -56,6 +56,9 @@ import {
 import { createServerForAgent } from './agentServerCreate'
 import { sftpConnect, sftpList, sftpRead, sftpWrite, sftpDisconnect } from './sftp'
 import { metricsSample } from './metrics'
+import { HostFactsReader } from './hostFacts'
+import type { FactSourceId, HostFacts } from '../../shared/hostFacts'
+import { FACT_STATUS_HELP, SECURITY_COUNT_SUPPORT, factSource } from '../../shared/hostFacts'
 import { AI_CAPABILITIES } from '../../shared/mcp'
 import type { AccessGroup, AiCapability, McpAgentSession } from '../../shared/mcp'
 
@@ -572,6 +575,111 @@ export function describeListeners(
   return [head, ...lines, ...tail].join('\n')
 }
 
+// ---------------------------------------------------------------------------
+// Host facts — roadmap item C
+// ---------------------------------------------------------------------------
+//
+// The same two-part defence as the metrics block above, applied to text that is
+// MORE attacker-controlled than a unit description: PRETTY_NAME is a file on the
+// host, and the CPU model is whatever the CPU or the hypervisor claims.
+//
+//   * Numbers stay OUTSIDE the marked block, exactly as CPU and memory already
+//     do. A count cannot carry a sentence.
+//   * distroId, virtualisation and packageManager are ALLOW-LISTED in
+//     shared/hostFacts.ts rather than merely sanitised, so they are values this
+//     build chose from a fixed set and are safe outside the block too. A host
+//     that invents a package manager gets `null`, not a new word in the output.
+//   * prettyName, cpuModel and the reboot package list are free text and go
+//     through remoteText, inside hostReportedBlock.
+//
+// And the honesty half, which is the actual feature: a null is never printed as
+// zero. Each missing number is printed with the status that explains it, and
+// `unsupported` — this host CANNOT answer, no privilege or retry changes it —
+// gets a full sentence, because an agent that reads it as zero during a CVE
+// week is the failure this item exists to prevent.
+
+/** Free text the host wrote about itself, capped harder than a unit
+ *  description: an 8 KB PRETTY_NAME is already truncated on the host, and this
+ *  is the second cap. */
+const FACT_TEXT_MAX = 120
+
+function factNumber(value: number | null, facts: HostFacts, id: FactSourceId, noun: string): string {
+  if (value !== null) return `${noun}: ${value}`
+  const s = factSource(facts, id)
+  // The status word first, then the sentence for it, then whatever the
+  // collector said. "unknown" alone would read as a shrug; the help text is
+  // what stops `unsupported` being mistaken for zero.
+  return [
+    `${noun}: NOT AVAILABLE (${s.status})`,
+    `  ${FACT_STATUS_HELP[s.status]}`,
+    ...(s.detail ? [`  Collector said: ${remoteText(s.detail, 200)}`] : [])
+  ].join('\n')
+}
+
+export function describeHostFacts(facts: HostFacts, now: number): string {
+  const numbers: string[] = [
+    `Distribution ID: ${facts.distroId ?? 'unknown'}${facts.distroVersion ? ` ${remoteText(facts.distroVersion, 32)}` : ''}`,
+    `Architecture: ${facts.arch ?? 'unknown'}`,
+    `Virtualisation: ${facts.virtualisation ?? 'unknown'}`,
+    `Package manager: ${facts.packageManager ?? 'unknown'}`,
+    factNumber(facts.pendingUpdates, facts, 'updates', 'Pending updates'),
+    factNumber(facts.securityUpdates, facts, 'security-updates', 'Security updates')
+  ]
+
+  // Said out loud even when the number came back, because "apt can count these
+  // and pacman never can" is the thing an agent must not have to infer from a
+  // null.
+  if (facts.packageManager) {
+    const support = SECURITY_COUNT_SUPPORT[facts.packageManager]
+    if (support === 'never') {
+      numbers.push(
+        `  ${facts.packageManager} can NEVER count security updates separately. A zero here would be a lie, so there is no zero.`
+      )
+    } else if (support === 'maybe') {
+      numbers.push(
+        `  ${facts.packageManager} can only count security updates where the repositories publish updateinfo; ShellPilot probed for it rather than assuming.`
+      )
+    }
+  }
+
+  const reboot = factSource(facts, 'reboot-required')
+  numbers.push(
+    facts.rebootRequired === null
+      ? `Reboot required: NOT AVAILABLE (${reboot.status}) — ${FACT_STATUS_HELP[reboot.status]}`
+      : `Reboot required: ${facts.rebootRequired ? 'YES' : 'no'}`
+  )
+
+  // The two staleness axes, both stated. Either one alone can make every number
+  // above meaningless, and they fail independently: a fact collected a minute
+  // ago from a package cache last refreshed in July is fresh AND worthless.
+  const factAge = Math.max(0, now - facts.collectedAt)
+  numbers.push(`These facts were collected ${agePhrase(factAge)}.`)
+  const meta = factSource(facts, 'package-metadata')
+  if (facts.metadataAt === null) {
+    numbers.push(
+      `Package metadata age: NOT AVAILABLE (${meta.status}) — the update counts above cannot be dated.`
+    )
+  } else {
+    const metaAge = Math.max(0, now - facts.metadataAt)
+    numbers.push(
+      `The package metadata those counts came from was last refreshed ${agePhrase(metaAge)}.` +
+        (meta.status === 'stale-metadata'
+          ? ' That is old enough that the counts describe the host as it was then. ShellPilot never refreshes it, because that is a network operation and on some package managers it can break the host.'
+          : '')
+    )
+  }
+
+  const free: string[] = [
+    `Name this host reports for itself: ${remoteText(facts.prettyName, FACT_TEXT_MAX) || '(not reported)'}`,
+    `CPU model this host reports: ${remoteText(facts.cpuModel, FACT_TEXT_MAX) || '(not reported)'}`
+  ]
+  if (facts.rebootReason) {
+    free.push(`Packages this host says are waiting on the reboot: ${remoteText(facts.rebootReason, 200)}`)
+  }
+
+  return [...numbers, '', hostReportedBlock(free.join('\n'))].join('\n')
+}
+
 // How a VPN profile is described to a human — in the approval dialog, and then
 // permanently in the audit log. It has to be enough to recognise which profile
 // is about to start without naming an endpoint, a key or a bind address: where
@@ -995,6 +1103,100 @@ function buildServer(): McpServer {
           )
         ].join('\n')
       )
+    }
+  )
+
+  server.registerTool(
+    'get_host_facts',
+    {
+      title: 'Get host facts',
+      description:
+        'What a host IS, rather than what it is currently doing: distribution and version, architecture, ' +
+        'CPU model, virtualisation type, package manager, how many updates are pending, how many of those ' +
+        'are SECURITY updates, and whether it is waiting on a reboot. ' +
+        'Prefer this over `cat /etc/os-release`, `apt list --upgradable`, `dnf check-update` or ' +
+        '`needs-restarting` through execute_command: it needs no shell access, it NEVER refreshes a package ' +
+        'cache (which is a network operation and on Arch can break the host), and it distinguishes ' +
+        '"no security updates" from "this host cannot count security updates" — a distinction the raw ' +
+        'commands cannot make, and one that reads as a safe zero when it is not. ' +
+        'A number reported as NOT AVAILABLE is NOT zero. Read the status next to it before concluding ' +
+        'anything about how patched a host is. ' +
+        'This is a separate permission from server metrics because it is a patch-status report.',
+      inputSchema: { serverName: z.string().describe('Friendly name or alias exactly as returned by list_servers') },
+      annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: false }
+    },
+    async ({ serverName }, extra) => {
+      const auth = authenticateExtra(extra)
+      if ('error' in auth) return errorText(AUTH_MESSAGES[auth.error])
+      const resolved = resolveServerOrError(auth.session, serverName)
+      if ('error' in resolved) return resolved.error
+      const { server: s, workspace } = resolved.match
+      // `hostFacts`, deliberately NOT `serverMetrics`. See AI_CAPABILITIES.
+      const check = effectiveCapability(auth.session, s.id, 'hostFacts')
+      const ctx: AuditContext = {
+        session: auth.session,
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        serverId: s.id,
+        serverName: s.name,
+        action: 'get_host_facts',
+        capability: 'hostFacts'
+      }
+      // 'medium', not 'low'. The metrics tool is a health check; this one
+      // enumerates which hosts are unpatched and against what, and the approval
+      // dialog should say so at a weight that matches.
+      const gated = await gate(ctx, check, 'medium', extra)
+      if (!gated.ok) return gated.result
+
+      // Answered from the sampler's hourly collection when it has one, for the
+      // same reason get_server_metrics answers from its sweep: the probe shells
+      // out to a package manager on a 45-second budget, and opening a second
+      // connection to re-ask a question the sampler asked forty minutes ago is
+      // load on the estate for an answer that has not moved.
+      //
+      // Facts are stale differently from metrics, so the staleness window is
+      // the FACTS interval and not the sweep interval — and the age is always
+      // stated either way.
+      const cached = fleetCached(s.id)
+      const entry = cached?.entry
+      const factsAt = entry?.factsAt
+      const age = factsAt === undefined ? Infinity : Date.now() - factsAt
+      const usable = entry?.facts && age <= (cached?.factsIntervalMs ?? 0) * FLEET_STALE_FACTOR
+
+      let facts: HostFacts
+      let provenance: string
+      if (usable && entry?.facts) {
+        facts = entry.facts
+        provenance = 'Read from ShellPilot’s background collection, not collected just now.'
+        auditSuccess(ctx, check.decision === 'ask' ? 'approved' : 'not-required')
+      } else {
+        const cfg = resolveChainSecrets(serverToSshConfig(s))
+        const reader = new HostFactsReader({
+          exec: (target, command, timeoutMs) =>
+            sshExec(target as Parameters<typeof sshExec>[0], command, timeoutMs)
+        })
+        const probe = await reader.read(cfg)
+        if (!probe.ok) {
+          recordAudit({
+            ...auditBase(ctx),
+            approval: check.decision === 'ask' ? 'approved' : 'not-required',
+            result: 'error',
+            error: `${probe.reason}: ${probe.detail}`
+          })
+          // The three failures are told apart rather than merged: "could not
+          // reach the host" sends someone to the network, "the host answered
+          // with nothing usable" sends them to the shell on that box.
+          return errorText(
+            probe.reason === 'unreachable'
+              ? `Could not reach the host: ${remoteText(probe.detail, 200)}`
+              : `The host answered but returned no usable facts: ${remoteText(probe.detail, 200)}`
+          )
+        }
+        auditSuccess(ctx, check.decision === 'ask' ? 'approved' : 'not-required')
+        facts = probe.facts
+        provenance = 'Collected just now.'
+      }
+      return text([provenance, '', describeHostFacts(facts, Date.now())].join('\n'))
     }
   )
 
