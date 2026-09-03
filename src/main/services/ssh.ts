@@ -288,8 +288,28 @@ async function openChainDirect(
 // ControlMaster. Without it each new session re-runs authentication, which on
 // a server with two-factor auth means another code prompt every time.
 
+/**
+ * A name for ONE authentication, minted once and never reused.
+ *
+ * `key` below identifies a ROUTE — `srv:abc` is the same string before and
+ * after a reconnect, which is exactly what the pool wants and exactly what a
+ * caller asking "did this command run over the connection that wrote the file"
+ * must not be given. This counter answers that question instead: every id is
+ * distinct, ids for pooled and unpooled connections come from the same
+ * sequence, and an unpooled connection is never entered into the pool — so
+ * `pooledConnectionIds()` cannot contain a `fresh#` id unless somebody has
+ * changed what unpooled means, which is the thing worth catching.
+ */
+let connectionSeq = 0
+function mintConnectionId(prefix: 'pooled' | 'fresh'): string {
+  connectionSeq += 1
+  return `${prefix}#${connectionSeq}`
+}
+
 export interface PooledConnection {
   key: string
+  /** This authentication, not this route. See mintConnectionId. */
+  id: string
   host: string
   username: string
   client: Client
@@ -388,6 +408,7 @@ async function acquireOne(
     const client = await connectClient(hop, sock, allowPrompt)
     const conn: PooledConnection = {
       key,
+      id: mintConnectionId('pooled'),
       host: hop.host,
       username: hop.username,
       client,
@@ -550,6 +571,18 @@ export function poolList(): PoolEntry[] {
     username: c.username,
     sessions: c.refs
   }))
+}
+
+/**
+ * Every authentication the pool is currently holding.
+ *
+ * Not `poolList()` with another column: this exists for callers that have to
+ * PROVE something did not run over a shared connection, and handing them a
+ * route key would let a reconnect satisfy the check by accident. See
+ * `sshOpenFresh`.
+ */
+export function pooledConnectionIds(): string[] {
+  return [...pool.values()].map((c) => c.id)
 }
 
 // Drops a shared connection now, forcing the next connect to authenticate.
@@ -736,28 +769,61 @@ export async function sshExec(
       timeoutMs,
       `Timed out after ${timeoutMs}ms connecting`
     )
-    const client = conn.client
-    return await new Promise<ExecResult>((resolve) => {
-      let settled = false
-      const done = (result: ExecResult): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve(result)
-      }
-      const timer = setTimeout(() => {
-        done({
-          ok: false,
-          stdout: '',
-          stderr: '',
-          code: null,
-          signal: null,
-          truncated: false,
-          elided: 0,
-          error: `Command timed out after ${timeoutMs}ms`
-        })
-      }, timeoutMs)
+    return await execOn(conn.client, command, timeoutMs)
+  } catch (err) {
+    return {
+      ok: false,
+      stdout: '',
+      stderr: '',
+      code: null,
+      signal: null,
+      truncated: false,
+      elided: 0,
+      error: err instanceof Error ? err.message : String(err)
+    }
+  } finally {
+    if (conn) release(conn)
+  }
+}
 
+/**
+ * One buffered command over one client that is already open.
+ *
+ * Split out of `sshExec` so the unpooled path below runs the SAME channel
+ * handling. The output cap, the elision count and the command timeout are
+ * safety properties, and a second copy of them written for the verification
+ * path would be a second thing to drift.
+ */
+function execOn(client: Client, command: string, timeoutMs: number): Promise<ExecResult> {
+  return new Promise<ExecResult>((resolve) => {
+    let settled = false
+    const done = (result: ExecResult): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+    const timer = setTimeout(() => {
+      done({
+        ok: false,
+        stdout: '',
+        stderr: '',
+        code: null,
+        signal: null,
+        truncated: false,
+        elided: 0,
+        error: `Command timed out after ${timeoutMs}ms`
+      })
+    }, timeoutMs)
+
+    // ssh2 THROWS `Not connected` synchronously rather than calling back with
+    // an error when the client is already down, so a command run over a
+    // connection that has closed rejected this promise instead of answering
+    // it. Every caller here is written against "an ExecResult always comes
+    // back", and the case that matters most is a confirmation whose session
+    // died mid-check: it has to read as a failed verification rather than as
+    // an exception on the way to deciding whether a key change is permanent.
+    const start = (): void => {
       client.exec(command, (err, stream) => {
         if (err) {
           done({
@@ -796,20 +862,109 @@ export async function sshExec(
           done({ ok: true, stdout, stderr, code: code ?? null, signal: signal ?? null, truncated, elided })
         })
       })
-    })
-  } catch (err) {
-    return {
-      ok: false,
-      stdout: '',
-      stderr: '',
-      code: null,
-      signal: null,
-      truncated: false,
-      elided: 0,
-      error: err instanceof Error ? err.message : String(err)
     }
-  } finally {
-    if (conn) release(conn)
+    try {
+      start()
+    } catch (err) {
+      done({
+        ok: false,
+        stdout: '',
+        stderr: '',
+        code: null,
+        signal: null,
+        truncated: false,
+        elided: 0,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    }
+  })
+}
+
+/**
+ * A connection that is nobody else's — roadmap item 23, rule 2.
+ *
+ * WHAT THIS IS FOR. Item 23 stages an `authorized_keys` change behind a
+ * watchdog the host arms on itself, and refuses to make it permanent until a
+ * SECOND, INDEPENDENT session has proved the host still lets us in. Every other
+ * caller in this file is the opposite of independent by design: `sshExec`,
+ * `sshExecStream` and the terminal all go through `acquire()`, which is a
+ * ControlMaster — the second command reuses the first command's authentication
+ * and never speaks to sshd's auth layer at all. Running the confirmation over
+ * one of those would prove only that the session which wrote the file can still
+ * write files, which is not a claim about who can log in.
+ *
+ * BYPASSED, NOT DROPPED, and the choice is deliberate. `poolClose()` exists and
+ * would also force a new authentication — by tearing down the connection every
+ * open terminal pane and the metrics sampler are riding on, at the exact moment
+ * the operator is watching a key change. Waiting for the pool to go idle is not
+ * available either: `release()` only arms the idle timer at zero references,
+ * and `setPoolIdle(-1)` makes it Infinity so it is never armed at all. So this
+ * goes around the pool instead, through `openChain()` — a new TCP connection,
+ * the full handshake, the key presented to sshd again — and leaves whatever the
+ * pool is holding untouched. Two live connections for a few seconds is the
+ * cost, and it buys a fact nothing else here can produce.
+ *
+ * WHAT IT REPORTS, and why the caller is given evidence rather than a boolean.
+ * `authenticatedAt` is when THIS handshake completed, so a caller can require
+ * that it happened after the write it is confirming; `pooledConnectionIds` is
+ * what the pool held while this ran, so a caller can require that it is not
+ * among them. Neither is checked here — a transport that graded its own
+ * independence would be marking its own homework, and the rule belongs with the
+ * protocol it protects. See src/main/services/access.ts.
+ */
+export interface FreshSession {
+  /** This authentication. Never a pooled id; see mintConnectionId. */
+  connectionId: string
+  /** Every authentication the pool held while this one was opened. */
+  pooledConnectionIds: string[]
+  /** When this connection's handshake completed, as observed here. */
+  authenticatedAt: number
+  exec: (command: string, timeoutMs?: number) => Promise<ExecResult>
+  /** Ends this connection. Must be called; nothing else is holding it. */
+  close: () => void
+}
+
+export async function sshOpenFresh(
+  cfg: SshHop & { serverId?: string; hops?: SshHop[]; vpnProfileId?: string; serverName?: string },
+  timeoutMs = 30_000,
+  now: () => number = Date.now
+): Promise<FreshSession> {
+  // Snapshotted on BOTH sides of the connect, and unioned. A pooled connection
+  // opened while this one was being negotiated is still a connection this one
+  // must not turn out to be, and taking only the "before" list would miss it.
+  const before = pooledConnectionIds()
+  const chain = await withDeadline(
+    openChain(cfg),
+    timeoutMs,
+    `Timed out after ${timeoutMs}ms opening an independent session`
+  )
+  const authenticatedAt = now()
+  const pooled = [...new Set([...before, ...pooledConnectionIds()])]
+  let closed = false
+  return {
+    connectionId: mintConnectionId('fresh'),
+    pooledConnectionIds: pooled,
+    authenticatedAt,
+    exec: (command, ms = timeoutMs) => execOn(chain.client, command, ms),
+    close: () => {
+      if (closed) return
+      closed = true
+      // Every client in the chain, not just the last: a bastion opened for this
+      // one connection is this connection's to close, and leaving it up would
+      // be an authenticated session nothing is tracking.
+      for (const c of chain.clients) {
+        try {
+          c.end()
+        } catch {
+          /* already gone */
+        }
+      }
+      try {
+        chain.close?.()
+      } catch {
+        /* a VPN forward already closed must not break the teardown */
+      }
+    }
   }
 }
 
