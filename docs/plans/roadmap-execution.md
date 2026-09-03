@@ -588,3 +588,49 @@ The pattern in both is the same, and it is worth naming: **the happy path was ne
 exercised end to end.** Every state the engine can reach was tested, and the two defects live
 in the ordinary sequence — a reboot that works, and a job that finishes — which the fake host
 could produce but was never asked to.
+
+### The key-change gate: what has to happen on a real host before it lifts
+
+All five blockers are fixed and each was proved to fail first. The gate stays off anyway,
+because the residual cannot be closed from a laptop, and the implementer said so rather than
+declaring victory.
+
+**The residual, precisely.** The watchdog now proves it armed before the file is moved, and
+the launcher is chosen on the host: `systemd-run --user --scope` first, then `setsid`, then
+`nohup`, and a refusal to write at all if none of them works. `systemd-run` is first for a
+reason worth keeping — it escapes the **logind session scope** that `KillUserProcesses=yes`
+kills, whereas `setsid` escapes the terminal and not the cgroup. That distinction is the
+difference between a fix and a fix-shaped comment.
+
+What it still cannot promise: a transient systemd scope lives under `user@.service`, and a
+user manager with no lingering and no other session can be stopped with everything inside it.
+The arming proof catches a watchdog that never started; it cannot catch one killed afterwards.
+If that happens the change is live and unprotected, and the leftover backup blocks further
+changes on that host until a person looks — the refusal names the file and the remedy, but
+nobody has watched it happen.
+
+**Five things to try on a real estate, in order of what they would teach:**
+
+1. **A RHEL 9 host with `KillUserProcesses=yes` and no lingering.** The one case that decides
+   whether this protocol is sound. Stage a revoke, let the session end, and see whether the
+   file comes back.
+2. **`ExposeAuthInfo yes` with `AuthenticationMethods publickey,publickey`** — both factors
+   should appear on separate lines and both should be protected from removal.
+3. **An `AuthorizedKeysFile` drop-in the connecting account cannot read** — the write gate
+   should close on `partial` on a real host, not only on a synthesised status line.
+4. **`StrictModes` under `umask 002`** — what mode the replaced file actually has as sshd
+   sees it.
+5. **`systemd-run --user --scope --quiet --collect true` on Debian, Ubuntu and Alpine** — the
+   probe should degrade to `setsid` rather than hang.
+
+**Two decisions inside the fixes worth remembering.** Overlapping changes are refused rather
+than resolved with a lock: killing the first change's watchdog while that change is still
+unconfirmed is "silently make it permanent", which is the same failure pointing the other
+way, and with one backup per host there is no safe overlap. And a session that authenticated
+with a password rather than a key is still refused, even though the host has *proved* no key
+holds it open — being wrong there costs a lockout, and being conservative costs nothing on a
+configuration nobody runs.
+
+`AccessJobSpec` and the `'access'` job kind were deleted rather than wired. Nothing ever
+created one, and the job engine cannot supply the fresh, unpooled session this protocol
+depends on — so the serialisation it needed is asserted where it actually lives.
