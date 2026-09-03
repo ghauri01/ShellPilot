@@ -1597,9 +1597,23 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
       : 'unknown'
 
     // The one invariant that matters: a list exists ONLY for an account whose
-    // file was actually read. Everything else gets null and a reason.
+    // key set was ESTABLISHED. Everything else gets null and a reason.
+    //
+    // TWO statuses establish it, not one. `ok` read the file. `absent` is a
+    // POSITIVE finding, and the collector goes to real trouble for it: it tests
+    // that the home directory and `.ssh` can be traversed BEFORE testing
+    // whether the file is there, precisely so a permission bit can never read
+    // as an empty inventory — and where the connecting account cannot tell, the
+    // sudo branch settles it as root or reports `unknown` rather than `absent`.
+    // An account that reached here as `absent` has had its key set determined
+    // to be empty. Calling that unread put the "this is not a complete picture"
+    // banner up permanently on estates with nothing wrong with them, and a
+    // banner that is always up is wallpaper.
+    //
+    // `denied`, `unknown`, `no-tool`, `unsupported` and `partial` stay null.
+    // None of them was checked, and a null is the only honest value.
     let keys: AuthorizedKey[] | null = null
-    if (keysStatus === 'ok') {
+    if (keysStatus === 'ok' || keysStatus === 'absent') {
       keys = []
       for (const k of (keyLines.get(idx) ?? []).slice(0, 500)) {
         const parsed = parseAuthorizedKeyLine(k.text, k.line, deps.sha256, k.len > KEY_LINE_CAP)

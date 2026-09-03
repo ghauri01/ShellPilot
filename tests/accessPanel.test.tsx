@@ -261,6 +261,44 @@ describe('the by-key view', () => {
   })
 })
 
+describe('the honesty banner', () => {
+  it('is down on a fully-read estate, so it still means something when it is up', async () => {
+    // A stock Ubuntu cloud host: `root` has a login shell and no
+    // authorized_keys, `ubuntu` has one. Both are read; nothing is missing.
+    //
+    // Counting the checked-absent file as unread put the "this is not a
+    // complete picture" banner up permanently on an estate with nothing wrong
+    // with it — and a banner that is always up is wallpaper. The finding it
+    // exists to carry is the one an operator would then scroll past.
+    mount([server('a', 'web-1')], {
+      a: {
+        access: collected([
+          'V tz +0000',
+          'U 1 uid 0',
+          'U 1 shell /bin/bash',
+          'U 1 keys absent -',
+          'U 1 name root',
+          'U 2 uid 1000',
+          'U 2 keys ok -',
+          'U 2 name ubuntu',
+          `K 2 1 60 ssh-ed25519 ${ED25519} ops@laptop`
+        ]),
+        at: 1
+      }
+    })
+    await screen.findByText(/distinct key/)
+    expect(screen.queryByTestId('not-an-answer')).toBeNull()
+    expect(screen.queryByTestId('incomplete-hosts')).toBeNull()
+  })
+
+  it('is up the moment one account actually could not be read', async () => {
+    mount([server('a', 'web-1')], { a: { access: partial(), at: 1 } })
+    expect((await screen.findByTestId('not-an-answer')).textContent).toContain(
+      'not a complete picture'
+    )
+  })
+})
+
 describe('the by-host view', () => {
   async function hosts(access: HostAccess): Promise<void> {
     mount([server('a', 'web-1')], { a: { access, at: 1 } })

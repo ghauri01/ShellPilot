@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import {
   ACCESS_COMMAND,
   ACCESS_SOURCE_IDS,
+  ACCESS_STATUS_HELP,
   ACCESS_STATUS_MARKER,
   KEY_LINE_CAP,
   accessKeyPrefix,
@@ -491,8 +492,14 @@ describe('a collection, and the nulls in it', () => {
     expect(a.accounts[0].keys!.map((k) => k.fingerprint)).toEqual([ED25519_FP])
     expect(a.accounts[1].keys).toBeNull()
     expect(a.accounts[1].keysStatus).toBe('denied')
-    expect(a.accounts[2].keys).toBeNull()
+    // `absent` is an ANSWER, not a null. The collector establishes it by
+    // testing the traversal of the home directory and of .ssh before it looks
+    // for the file, so a permission bit can never arrive here as `absent`.
+    expect(a.accounts[2].keys).toEqual([])
     expect(a.accounts[2].keysStatus).toBe('absent')
+    // The reason is still carried beside it: "empty because there is no file"
+    // is a different sentence from "empty because the file is empty".
+    expect(a.accounts[2].keysDetail).toBe(ACCESS_STATUS_HELP.absent)
   })
 
   it('cannot have a status forged by a key comment', () => {
@@ -625,6 +632,54 @@ describe('a collection, and the nulls in it', () => {
     const s = accessSource(a, 'authorized-keys')
     expect(s.status).toBe('partial')
     expect(s.detail).toContain('read 1 of 2 accounts')
+  })
+
+  it('counts an account with no authorized_keys as READ, not as unread', () => {
+    // A stock Ubuntu cloud image: `root` has a login shell and no
+    // authorized_keys, `ubuntu` has one. `absent` is a POSITIVE finding the
+    // collector went to trouble to establish — it tests the traversal of the
+    // home directory and of .ssh FIRST so a permission bit can never read as an
+    // empty inventory, and only then claims the file is not there.
+    //
+    // Filing that alongside `denied` made the honesty banner permanent wallpaper
+    // on a fully-read estate, and an operator who learns to scroll past the
+    // banner is an operator who will scroll past it on the host where it means
+    // something. The header of shared/access.ts brags about keeping `denied`,
+    // `absent`, `no-tool`, `unsupported` and `partial` apart on the way in;
+    // summariseAccess collapsed all five on the way out.
+    const a = collected(
+      [
+        'U 1 uid 0',
+        'U 1 shell /bin/bash',
+        'U 1 keys absent -',
+        'U 1 name root',
+        'U 2 uid 1000',
+        'U 2 keys ok -',
+        'U 2 name ubuntu',
+        `K 2 1 60 ssh-ed25519 ${ED25519} ops@laptop`
+      ],
+      OK_STATUS
+    )
+    const root = a.accounts.find((x) => x.user === 'root')!
+    // An empty list, and the status still says WHY it is empty.
+    expect(root.keys).toEqual([])
+    expect(root.keysStatus).toBe('absent')
+    const s = summariseAccess(a)
+    expect(s).toMatchObject({ accountsRead: 2, accountsUnread: 0, keys: 1, certain: true })
+    expect(s.uncertainty).toEqual([])
+    // And the whole-host source is `ok`, not `partial`.
+    expect(accessSource(a, 'authorized-keys').status).toBe('ok')
+  })
+
+  it('still refuses to call a denied or unknown account empty', () => {
+    // The other half, and the one that must not move. `absent` was CHECKED;
+    // `denied`, `unknown`, `no-tool` and `unsupported` were not, and a null is
+    // the only honest value for them.
+    for (const status of ['denied', 'unknown', 'no-tool', 'unsupported'] as const) {
+      const a = collected([`U 1 keys ${status} -`, 'U 1 name ops'], OK_STATUS)
+      expect(a.accounts[0].keys, status).toBeNull()
+      expect(summariseAccess(a).certain, status).toBe(false)
+    }
   })
 
   it('reports every account denied as denied, not as an empty estate', () => {

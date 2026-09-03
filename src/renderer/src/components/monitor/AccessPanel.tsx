@@ -104,6 +104,17 @@ function KeyCount({ account }: { account: AccessAccount }): React.JSX.Element {
   return (
     <span>
       <span className="mono">{usable}</span>
+      {/* A zero that was CHECKED, and the chip says which kind of zero it is.
+          The collector proves the home directory and .ssh can be traversed
+          before it concludes the file is not there, so this is a finding and
+          not a shrug — but "no key file at all" and "a key file with nothing
+          in it" are different facts about an account and only one of them is a
+          file somebody has been editing. */}
+      {account.keysStatus === 'absent' && (
+        <span className="chip" title={ACCESS_STATUS_HELP.absent}>
+          no key file
+        </span>
+      )}
       {unreadable > 0 && (
         <span
           className="chip warn"
