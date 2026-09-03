@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
-import { useApp } from '../../store/app'
+import { useApp, useWorkspaceServers } from '../../store/app'
 import { useFleetStatus } from '../../store/fleetStatus'
 import {
   LABEL,
   SNOOZE_CHOICES,
+  THRESHOLD_MAX,
+  THRESHOLD_MIN,
+  hostThreshold,
   acknowledgeAlert,
   chipValue,
   snoozeAlert,
@@ -86,6 +89,9 @@ export function AlertsPanel(): React.JSX.Element {
   const samplerStatus = useFleetStatus((s) => s.status)
   const samplingEnabled = useApp((s) => s.settings.fleetSamplingEnabled)
   const alertsEnabled = useApp((s) => s.settings.resourceAlertsEnabled)
+  const globalThreshold = useApp((s) => s.settings.resourceAlertThreshold)
+  const perHost = useApp((s) => s.settings.resourceAlertThresholds)
+  const servers = useWorkspaceServers()
   const [rows, setRows] = useState<StoredAlertRow[] | null>(null)
   const [reading, setReading] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -115,6 +121,19 @@ export function AlertsPanel(): React.JSX.Element {
   useEffect(() => {
     read()
   }, [read, activeCount])
+
+  // A blank box removes the override rather than storing a zero — an empty
+  // field means "no opinion", and a 0 stored here would be a threshold no
+  // reading can be below, which is alerting switched off for that host while
+  // the switch still says it is on. Clamping happens in hostThreshold, which is
+  // where every reader of the value goes through.
+  const setThreshold = (serverId: string, raw: string): void => {
+    const next = { ...perHost }
+    const n = Number(raw)
+    if (raw.trim() === '' || !Number.isFinite(n)) delete next[serverId]
+    else next[serverId] = n
+    useApp.getState().setSettings({ resourceAlertThresholds: next })
+  }
 
   const now = Date.now()
   const outstanding = useMemo(
@@ -210,6 +229,52 @@ export function AlertsPanel(): React.JSX.Element {
             ))}
           </tbody>
         </table>
+      )}
+
+      <div className="s-title" style={{ marginTop: 12 }}>
+        Per-host thresholds
+      </div>
+      <div className="s-desc">
+        The CPU and memory line for one host, where the estate is not uniform — a build box at 95%
+        is working and a database at 95% is in trouble. Blank uses the workspace default of{' '}
+        {globalThreshold}%. Disk, inodes and load are deliberately not settable per host: they are
+        the numbers the Fleet Monitor colours a bar at and lists a host under, and an alert firing
+        at a different number from the screen it sends you to is worse than no alert.
+      </div>
+      <table className="mini-table">
+        <tbody>
+          {servers.map((srv) => {
+            const override = perHost[srv.id]
+            return (
+              <tr key={srv.id}>
+                <td>{srv.name}</td>
+                <td>
+                  <input
+                    className="input"
+                    style={{ width: 72 }}
+                    type="number"
+                    min={THRESHOLD_MIN}
+                    max={THRESHOLD_MAX}
+                    placeholder={String(globalThreshold)}
+                    value={override === undefined ? '' : String(override)}
+                    aria-label={`CPU and memory threshold for ${srv.name}`}
+                    onChange={(e) => setThreshold(srv.id, e.target.value)}
+                  />
+                </td>
+                <td className="faint">
+                  {override === undefined
+                    ? `using the default, ${globalThreshold}%`
+                    : `alerts at ${hostThreshold(globalThreshold, perHost, srv.id)}%`}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      {servers.length === 0 && (
+        <div className="faint" style={{ fontSize: 12 }}>
+          This workspace has no servers.
+        </div>
       )}
 
       <div className="s-title" style={{ marginTop: 12 }}>

@@ -1252,6 +1252,15 @@ export function clearUnitAlerts(serverId: string): void {
 onServerForgotten((serverId) => {
   clearUnitAlerts(serverId)
   useAlerts.getState().clearServer(serverId)
+  // The per-host threshold too. A row keyed on a deleted server's id is a
+  // setting nothing can show and nothing can remove, and a new server that
+  // happened to be given the same id would inherit it.
+  const perHost = useApp.getState().settings.resourceAlertThresholds
+  if (perHost[serverId] !== undefined) {
+    const next = { ...perHost }
+    delete next[serverId]
+    useApp.getState().setSettings({ resourceAlertThresholds: next })
+  }
   // The repeat window and the escalation memory too: otherwise a re-added
   // server inherits a suppression it never earned.
   for (const k of [...lastNotified.keys()]) {
@@ -1365,6 +1374,37 @@ export function isInodeCritical(pct: number): boolean {
 // full utilisation, two is twice as much work as there is machine.
 export const LOAD_DANGER = 2
 
+// The range a per-host override is allowed to take.
+//
+// A threshold of 0 makes `over` true on every sample forever, because the clear
+// line is max(0, 0 - 5) and no reading is below zero; a threshold of 100 can
+// never be reached by a percentage. Both are ways of switching alerting off for
+// one host while the switch still says it is on, and neither is what anybody
+// meant to type. The global threshold has a slider that cannot produce them;
+// an override is a number in a box, and the box is the only guard there is.
+export const THRESHOLD_MIN = 50
+export const THRESHOLD_MAX = 99
+
+/**
+ * The CPU/memory line for one host.
+ *
+ * Pure, and exported, because it is the whole of the per-host feature and the
+ * part that has to be right: everything else is a text input.
+ */
+export function hostThreshold(
+  global: number,
+  perHost: Record<string, number> | undefined,
+  serverId: string
+): number {
+  const v = perHost?.[serverId]
+  // Not a number, or not a finite one, is not an override. A row that survived
+  // a hand-edited settings file or an old backup falls back to the global
+  // rather than to NaN, which would make every comparison false and silence
+  // the host completely.
+  if (typeof v !== 'number' || !Number.isFinite(v)) return global
+  return Math.min(THRESHOLD_MAX, Math.max(THRESHOLD_MIN, v))
+}
+
 /**
  * Called from the metrics hook and from the fleet sampler on each sample.
  *
@@ -1373,9 +1413,15 @@ export const LOAD_DANGER = 2
  * is no branch that turns one into a zero on the way in.
  */
 export function checkResourceAlerts(serverId: string, serverName: string, s: ResourceSample): void {
-  const { resourceAlertsEnabled, resourceAlertThreshold } = useApp.getState().settings
+  const { resourceAlertsEnabled, resourceAlertThreshold, resourceAlertThresholds } =
+    useApp.getState().settings
   if (!resourceAlertsEnabled) return
   const now = Date.now()
+  // Per host, falling back to the global. Read here rather than inside
+  // evaluate() so there is exactly one place that decides what this host's line
+  // is, and both `line` below and the sentence a person reads are built from
+  // the same number.
+  const threshold = hostThreshold(resourceAlertThreshold, resourceAlertThresholds, serverId)
   // `line` is the CLEAR line, not the threshold, and CPU and memory are over
   // when they reach it. That is load-bearing and easy to mistake for a bug:
   // because `over` and `clearAt` are then the same number, "over" and "not yet
@@ -1384,9 +1430,9 @@ export function checkResourceAlerts(serverId: string, serverName: string, s: Res
   // a five-point band for CPU where the chip is down but the alert memory is
   // still held — the dead band that stranded disk chips at 82%. If you change
   // it, the `!over` branch in evaluate has to grow the disk case's handling.
-  const line = clearLine('cpu', resourceAlertThreshold)
-  evaluate(serverId, serverName, 'cpu', s.cpu, resourceAlertThreshold, now, s.cpu >= line)
-  evaluate(serverId, serverName, 'ram', s.ram, resourceAlertThreshold, now, s.ram >= line)
+  const line = clearLine('cpu', threshold)
+  evaluate(serverId, serverName, 'cpu', s.cpu, threshold, now, s.cpu >= line)
+  evaluate(serverId, serverName, 'ram', s.ram, threshold, now, s.ram >= line)
   // Fixed at DISK_DANGER rather than the configurable threshold: this is the
   // number the Fleet Monitor colours a bar red at and lists a host under, and
   // an alert that fired at a different number from the screen it sends you to

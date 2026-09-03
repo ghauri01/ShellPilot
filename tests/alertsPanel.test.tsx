@@ -89,10 +89,15 @@ describe('the history the chip cannot show', () => {
     })
     render(<AlertsPanel />)
     await waitFor(() => expect(screen.getByText('Unreachable')).toBeTruthy())
-    expect(document.body.textContent).toContain('since 30 min ago')
+    // Scoped to the row, not to the page: the thresholds section below names
+    // percentages of its own, and a body-wide assertion would be passing on
+    // whatever text happened to be absent rather than on this row's contents.
+    const row = screen.getByText('Unreachable').closest('tr')?.textContent ?? ''
+    expect(row).toContain('web-1')
+    expect(row).toContain('since 30 min ago')
     // A state kind has no reading. A "0" here would be a measurement nobody
     // took, which is the rule the whole item runs on.
-    expect(document.body.textContent).not.toContain('0%')
+    expect(row).not.toMatch(/\d\s*%/)
   })
 
   it('says the log could not be read rather than showing an empty history', async () => {
