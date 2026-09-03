@@ -49,6 +49,7 @@ import {
 } from './services/sftp'
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
+import { loadHistory, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
@@ -574,6 +575,42 @@ ipcMain.handle('metrics:sample', (_e, key: string, cfg: SshConnectConfig & { ser
 )
 ipcMain.handle('metrics:disconnect', (_e, key: string) => metricsDisconnect(key))
 
+// ---- The durable store ----
+//
+// Roadmap item A. Opened lazily and off the startup path: loadHistory() never
+// throws, and a machine where it will not open gets `null` and an app that
+// behaves exactly as it did before this existed. Nothing here is awaited,
+// because nothing about launching depends on it.
+//
+// The retention pass is armed here rather than inside the store, so the schedule
+// is visible next to everything else main owns. It runs once shortly after open
+// and then every six hours: full resolution for a week, hourly means for a
+// quarter, then dropped. Measured at ~20 MB steady state versus 730 MB a year
+// unmanaged — a tool that alerts on disk pressure must not cause it.
+let historyStore: HistoryStore | null = null
+let historyRetain: ReturnType<typeof setInterval> | null = null
+const HISTORY_RETAIN_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+void loadHistory().then((store) => {
+  historyStore = store
+  if (!store) return
+  console.log(
+    `[history] open at ${store.path} (journal=${store.journalMode}, sqlite=${store.sqliteVersion}` +
+      `${store.recovery === 'none' ? '' : `, recovery=${store.recovery}`})`
+  )
+  const pass = (): void => {
+    try {
+      historyStore?.retain()
+    } catch (err) {
+      console.error('[history] retention pass failed:', err)
+    }
+  }
+  pass()
+  historyRetain = setInterval(pass, HISTORY_RETAIN_INTERVAL_MS)
+  // Never let the retention timer be the reason the process stays alive.
+  historyRetain.unref?.()
+})
+
 // ---- Fleet sampling ----
 //
 // Runs in main so the estate is sampled whether or not the monitor is on
@@ -602,7 +639,12 @@ const fleetSampler = new FleetSampler({
   vaultUnlocked: () => {
     const s = vaultStatus()
     return !s.exists || s.unlocked
-  }
+  },
+  // Resolved per sweep, not captured: this sampler is constructed at module
+  // scope and the store opens asynchronously after it. Until then — and
+  // forever, on a machine where history is off — this returns null and the
+  // sweep is exactly what it was.
+  history: () => historyStore
 })
 
 // So get_server_metrics can answer from what the monitor already sampled
@@ -1426,6 +1468,11 @@ app.on('before-quit', (e) => {
   localDisposeAll()
   sftpDisposeAll()
   fleetSampler.dispose()
+  // After the sampler, which is the only writer: closing the database out from
+  // under an in-flight sweep would be a caught-and-logged failure rather than a
+  // crash, but it would also silently drop the sweep the user just paid for.
+  if (historyRetain) clearInterval(historyRetain)
+  historyStore?.close()
   metricsDisposeAll()
   dbDisposeAll()
   tunnelDisposeAll()
