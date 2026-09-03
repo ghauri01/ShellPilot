@@ -1099,12 +1099,51 @@ export const JOB_INSTANCE_NOTE =
   'readable here and it can still be cancelled; its marker directory is left in place for the ' +
   'instance that started it.'
 
-/** What the Settings switch turns off, spelled once so main and the UI agree. */
+/**
+ * What the Settings switch turns off, spelled once so main and the UI agree.
+ *
+ * IT NO LONGER SAYS "five small files", because one of the six is `out` and it
+ * is as large as the command makes it. See JOB_OUT_SIZE_NOTE for why there is
+ * no cap on it and what is done instead; a promise the wrapper does not keep is
+ * worse than the fact it was hiding.
+ */
 export const JOB_DETACHED_SETTING_NOTE =
-  'Detached jobs write one directory with five small files under your own state directory on ' +
-  'each host, so a job survives the connection dropping. Nothing is installed and nothing runs ' +
-  'after the job. With this off, jobs run on the attached path: closing the lid mid-upgrade ' +
-  'sends SIGHUP to the remote command, and apt and dpkg do not ignore it.'
+  'Detached jobs write one directory per step under your own state directory on each host — five ' +
+  'small marker files, plus the job’s own output, which is as large as the command makes it — so ' +
+  'a job survives the connection dropping. Nothing is installed and nothing runs after the job, ' +
+  'and the directory is removed as soon as ShellPilot has read the exit status, or swept seven ' +
+  'days later if it never gets back. With this off, jobs run on the attached path: closing the ' +
+  'lid mid-upgrade sends SIGHUP to the remote command, and apt and dpkg do not ignore it.'
+
+/**
+ * Why the remote `out` file has no size cap, when everything else here does.
+ *
+ * ShellPilot caps what it persists and what one poll carries; the file on the
+ * host is bounded by nothing but the command. A runaway step therefore fills
+ * `$HOME` or `/var/tmp` on every target, and if ShellPilot never comes back it
+ * sits there until the seven-day sweep.
+ *
+ * A cap was written and thrown away, and the reason is worth keeping. The only
+ * portable way to bound a file a command is appending to is to put a filter in
+ * front of it — `sh cmd 2>&1 | head -c N` — and when `head` has had its N bytes
+ * it exits, which sends SIGPIPE to the command. On the exact workload this
+ * whole item exists for, that is `apt` taking a fatal signal mid-transaction:
+ * DPKG INTERRUPTED, on every host that was chatty enough, caused by ShellPilot
+ * and by nothing else. `ulimit -f` is worse — it kills with SIGXFSZ and it
+ * counts every file the command writes, not just ours.
+ *
+ * So the file is unbounded, the fact is stated where the operator turns the
+ * feature on, and the bounds that DO exist are named: the directory goes as
+ * soon as the exit status has been read, and the sweep takes an abandoned one
+ * seven days later. If this ever needs a real answer it is a watchdog inside
+ * the wrapper that truncates `out` and records that it did — which changes what
+ * the byte cursor means, and is a piece of work, not a line.
+ */
+export const JOB_OUT_SIZE_NOTE =
+  'A detached job’s output file grows with the command: ShellPilot caps what it stores and what ' +
+  'each poll carries, but it does not truncate the file on the host, because the only portable ' +
+  'way to do that would kill the command with SIGPIPE mid-run. The directory is removed once the ' +
+  'exit status has been read, and an abandoned one is swept after seven days.'
 
 /** The three candidate roots, in resolution order. Documentation for the UI;
  *  the shell in `buildJobProbe` is what actually decides. */
@@ -1235,6 +1274,36 @@ export function jobMarkerDir(root: string, jobId: string, step: number): string 
   return `${root.replace(/\/+$/, '')}/${jobId}.${step}`
 }
 
+/**
+ * The shape `jobMarkerDir` produces, checked on the way back in.
+ *
+ * An absolute path whose last segment is a safe id, a dot and a step number.
+ * `/etc`, `/`, `$HOME` and a path with a `..` in it all fail it.
+ */
+const MARKER_DIR = /^(?:\/[^/]+)+\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.\d{1,3}$/
+
+export function isJobMarkerDir(dir: string): boolean {
+  return typeof dir === 'string' && !dir.includes('..') && MARKER_DIR.test(dir)
+}
+
+/**
+ * Refuse a directory that this module did not shape.
+ *
+ * `buildJobLaunch` validates its inputs on the stated grounds that a caller is
+ * one refactor away from passing something containing a `/` or a `..`. The
+ * builders that RECURSIVELY DELETE and that SIGNAL are where that argument
+ * bites hardest, and they were the two that skipped it: `isJobDetachedHandle`
+ * checks only that `dir` is a string, so a row from another build — or one
+ * somebody edited — reached `rm -rf "$SP_JOB_DIR"` with whatever it said.
+ */
+export function assertJobMarkerDir(dir: string, what: string): void {
+  if (!isJobMarkerDir(dir)) {
+    throw new Error(
+      `${what} must be a marker directory this build created, got ${JSON.stringify(dir)}`
+    )
+  }
+}
+
 // ----------------------------------------------------------------- the probe
 
 export type JobLauncher = 'setsid' | 'nohup' | 'none'
@@ -1269,9 +1338,28 @@ export interface JobHostCapability {
  * controlling terminal to be hung up and its process group can be signalled as
  * a unit; nohup only sets SIGHUP to ignore in the one process it starts. See
  * buildJobSignal for what that costs at cancel time.
+ *
+ * THE SWEEP IS GATED ON THE HOST'S CLOCK BEING PLAUSIBLE. `find -mtime +7` asks
+ * the host how old something is, and a machine whose RTC came up in 2001 — or
+ * one that has just been imaged, or a Pi with no battery and no NTP yet —
+ * answers that everything is ancient. What it would then delete is not only a
+ * stale marker: it is a FINISHED, UNREAPED job's `rc` and `out`, the only copy
+ * of an answer whose reader has not been back yet. The `kill -0` guard does not
+ * cover that case, because a finished job has no pid left to be alive. So the
+ * caller passes its own clock, the host's is compared against it, and a
+ * disagreement of more than a day means the sweep is skipped and the markers
+ * are left where they are. A host that accumulates a few directories is a
+ * smaller problem than a host that deletes the one thing nobody else has.
  */
-export function buildJobProbe(opts: { sweepDays?: number } = {}): string {
+export function buildJobProbe(opts: { sweepDays?: number; nowSeconds?: number } = {}): string {
   const days = Math.max(1, Math.round(opts.sweepDays ?? JOB_MARKER_SWEEP_DAYS))
+  const ours = opts.nowSeconds === undefined ? null : Math.floor(opts.nowSeconds)
+  const clockGuard =
+    ours === null
+      ? // No clock was offered, so there is nothing to compare against and the
+        // sweep runs as it always did. Every caller in this app passes one.
+        'SP_SWEEP=ok;'
+      : `SP_SWEEP=no-clock; SP_HOSTNOW=$(date +%s 2>/dev/null); case "$SP_HOSTNOW" in ''|*[!0-9]*) SP_SWEEP=no-clock;; *) if [ "$SP_HOSTNOW" -lt $((${ours} - 86400)) ] || [ "$SP_HOSTNOW" -gt $((${ours} + 86400)) ]; then SP_SWEEP=skew; else SP_SWEEP=ok; fi;; esac;`
   return [
     'SP_JOB_VERB=probe; SP_JOB_DIR=auto;',
     // A function rather than a `for` over an unquoted list: a $HOME with a
@@ -1289,8 +1377,10 @@ export function buildJobProbe(opts: { sweepDays?: number } = {}): string {
     'if printf x | base64 >/dev/null 2>&1; then SP_B64=yes; fi;',
     // The sweep. `find -maxdepth 0 -mtime +N` on the directory itself asks one
     // question about one path and prints nothing when the answer is no.
-    `if [ -n "$SP_ROOT" ]; then for d in "$SP_ROOT"/*; do [ -d "$d" ] || continue; [ -n "$(find "$d" -maxdepth 0 -mtime +${days} 2>/dev/null)" ] || continue; p=$(cat "$d/pid" 2>/dev/null); if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then continue; fi; rm -rf "$d"; done; fi;`,
+    clockGuard,
+    `if [ -n "$SP_ROOT" ] && [ "$SP_SWEEP" = ok ]; then for d in "$SP_ROOT"/*; do [ -d "$d" ] || continue; [ -n "$(find "$d" -maxdepth 0 -mtime +${days} 2>/dev/null)" ] || continue; p=$(cat "$d/pid" 2>/dev/null); if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then continue; fi; rm -rf "$d"; done; fi;`,
     "echo 'shellpilot-probe/1';",
+    'echo "sweep=$SP_SWEEP";',
     'echo "launcher=$SP_LAUNCH";',
     'echo "base64=$SP_B64";',
     'echo "uid=$(id -u 2>/dev/null)";',
@@ -1414,8 +1504,15 @@ export interface JobPollResult {
   instance: string | null
   pid: number | null
   pgid: number | null
-  /** The recorded exit status. Present means the job is over, because `rc` is
-   *  renamed into place. */
+  /**
+   * The recorded exit status. Present means the job is over, because `rc` is
+   * renamed into place.
+   *
+   * Taken from EITHER of the poll's two reads of that file — the one before the
+   * liveness check or the one after it. See buildJobPoll for the window the
+   * second read closes: without it, a wrapper that finished between the two
+   * instructions is reported as an orphan and its exit status is deleted.
+   */
   rc: number | null
   alive: boolean
   /**
@@ -1431,18 +1528,26 @@ export interface JobPollResult {
   pidCheck: 'strong' | 'weak'
   /** Bytes in `out` at the moment the poll read it. */
   size: number
-  /** Bytes this poll carried. The cursor advances by exactly this. */
-  sent: number
   /**
-   * The window came back FULL, so there is probably more waiting.
+   * Bytes this poll carried, and therefore exactly how far the cursor advances.
    *
-   * A hint, not the answer. The authority is `size` against the caller's own
-   * cursor — this parser does not know the offset the poll was built with, and
-   * a `more` derived from `size - sent` would be wrong by exactly the offset
-   * every time. The poller checks both, so a small window and a full one are
-   * both drained at connection speed.
+   * The HOST's count, reconciled against the body that actually arrived. The
+   * host announces `sent` before it writes the body, so a body that came back
+   * shorter than announced — a file truncated or removed between the two, a
+   * transport cap — would advance the cursor past bytes no reader ever saw, and
+   * there is no later poll to notice: the offset simply skips them. So the
+   * parser takes the smaller of the two. Advancing too little costs a re-read
+   * of bytes that were never emitted; advancing too much loses output silently
+   * and permanently, and only one of those is recoverable.
    */
-  more: boolean
+  sent: number
+  // There is deliberately no `more` field. It existed as a hint — "the window
+  // came back full, so there is probably more" — computed against the DEFAULT
+  // window size, which made it wrong for every caller that overrode `maxBytes`
+  // and right only by accident for the rest. The authority is `size` against
+  // the caller's own cursor, which the caller has and this parser does not, and
+  // every reader already checked that alongside the hint. A redundant field
+  // that is wrong under a parameter this module exposes is worse than no field.
   /** The output itself, already decoded. */
   text: string
 }
@@ -1481,6 +1586,20 @@ export function buildJobPoll(p: {
     // passed to it as an argument.
     'if [ -n "$SP_PID" ] && SP_ARGS=$(ps -o args= -p "$SP_PID" 2>/dev/null); then SP_CHECK=strong; if printf "%s" "$SP_ARGS" | grep -qF -- "$SP_JOB_DIR"; then SP_ALIVE=yes; else SP_ALIVE=no; fi; fi;',
     'echo "alive=$SP_ALIVE"; echo "pidcheck=$SP_CHECK";',
+    // AND `rc` AGAIN, AFTER THE LIVENESS CHECK. The two reads above are two
+    // separate instructions in this shell, and the wrapper's `mv rc.tmp rc` and
+    // its own exit are two adjacent instructions in ANOTHER process. A wrapper
+    // that finishes in the window between them is seen as "no exit status, not
+    // alive" — which classifies as `orphaned`, reaps the directory, and deletes
+    // the `rc` that was in fact written, for a job that exited 0.
+    //
+    // `rc` is the only field that can appear during a poll and never disappear,
+    // so a second read costs one `echo` and closes the window completely: the
+    // first read is authoritative when it answers, the second catches the race.
+    // Both are still taken BEFORE `out` is read, so the ordering argument above
+    // — a poll that sees rc has read everything the command wrote — holds for
+    // either of them.
+    'if [ -f "$SP_JOB_DIR/rc" ]; then echo "rc2=$(head -n1 "$SP_JOB_DIR/rc" 2>/dev/null)"; else echo "rc2="; fi;',
     'SP_SIZE=$(wc -c < "$SP_JOB_DIR/out" 2>/dev/null | tr -dc "0-9"); [ -n "$SP_SIZE" ] || SP_SIZE=0;',
     'echo "size=$SP_SIZE";',
     // The window is closed on the HOST, not by counting what arrived: `wc -c`
@@ -1525,23 +1644,35 @@ export function parseJobPoll(
     const v = f.get(k)
     return v !== undefined && /^\d+$/.test(v) ? Number(v) : null
   }
-  const sent = num('sent') ?? 0
+  const announced = num('sent') ?? 0
   const size = num('size') ?? 0
 
   let text = ''
   let carry = Buffer.alloc(0)
+  /** Bytes of the host's `out` file this body actually carried. */
+  let arrived = announced
   if (opts.base64) {
     // `tr -d` already removed the newlines base64 wraps at; anything else that
     // is not base64 alphabet is dropped rather than throwing, because a poll
     // whose body is slightly odd should cost one chunk of output and not the
     // whole job.
     const bytes = Buffer.from(rawBody.replace(/[^A-Za-z0-9+/=]/g, ''), 'base64')
+    // EXACT, here: the body is the file's bytes and nothing else, so its
+    // decoded length is precisely how far the cursor may move. `sent` is what
+    // the host promised before it wrote them; this is what turned up.
+    arrived = Math.min(announced, bytes.length)
     const joined = opts.carry && opts.carry.length > 0 ? Buffer.concat([opts.carry, bytes]) : bytes
     const keep = incompleteUtf8Tail(joined)
     carry = keep > 0 ? joined.subarray(joined.length - keep) : Buffer.alloc(0)
     text = joined.subarray(0, joined.length - keep).toString('utf8')
   } else {
     text = rawBody
+    // A FLOOR, not an exact count. The transport already decoded these bytes,
+    // so a byte the host wrote and this one did not survive as itself — the
+    // reason the base64 path exists — makes the two lengths disagree in either
+    // direction. The clamp still catches the case that loses output outright: a
+    // header promising bytes over a body that carried none.
+    arrived = Math.min(announced, Buffer.byteLength(rawBody, 'utf8'))
   }
 
   return {
@@ -1549,12 +1680,15 @@ export function parseJobPoll(
     instance: f.get('instance') || null,
     pid: num('pid'),
     pgid: num('pgid'),
-    rc: num('rc'),
+    // EITHER read. The first is authoritative when it answers; the second
+    // exists because the first can be taken microseconds before the wrapper
+    // renames `rc` into place and exits, and the poll would then report a job
+    // that succeeded as an orphan — and reap the evidence. See buildJobPoll.
+    rc: num('rc') ?? num('rc2'),
     alive: f.get('alive') === 'yes',
     pidCheck: f.get('pidcheck') === 'strong' ? 'strong' : 'weak',
     size,
-    sent,
-    more: sent >= JOB_POLL_BYTES,
+    sent: arrived,
     text,
     carry
   }
@@ -1584,8 +1718,8 @@ export type JobPollPhase =
   | 'missing'
   | 'failed-launch'
   /**
-   * The wrapper is gone with no exit status, on a step that was DECLARED to
-   * restart the machine — and the host is answering again.
+   * The wrapper is gone, on a step that was DECLARED to restart the machine —
+   * and the host is answering again.
    *
    * Structurally identical to `orphaned`, and that is exactly why it needs its
    * own name. `orphaned` means nobody knows why the process stopped; here we
@@ -1594,7 +1728,17 @@ export type JobPollPhase =
    * going down under it" is the vocabulary getting a fact backwards, which is
    * the failure item 17 was handed.
    *
-   * It is NOT proof the host restarted. It is the point at which the runner
+   * WITH OR WITHOUT AN EXIT STATUS, and that half was the bug. `systemctl
+   * reboot` and `shutdown -r now` both return 0 immediately, and the wrapper's
+   * very next instruction records that 0 — microseconds later, while systemd is
+   * still stopping units. The marker root deliberately survives the reboot, so
+   * on essentially every REAL reboot the first poll after the host returns
+   * finds `rc=0` and nothing else. Reading that as `finished` made the whole of
+   * item 17 unreachable in production: the one path verifyReboot was written
+   * for was the one path that never took it.
+   *
+   * It is NOT proof the host restarted, and `rc=0` is proof of nothing but that
+   * the reboot was successfully ASKED FOR. It is the point at which the runner
    * goes and checks — see verifyReboot in shared/patch.ts.
    */
   | 'rebooted'
@@ -1627,9 +1771,17 @@ export interface JobPollVerdict {
  *                                      different fact from `orphaned` — the
  *                                      command never began.
  *
- * `rc` is checked FIRST and unconditionally. A wrapper that has exited has no
- * live pid by definition, so an implementation that asked "is it alive" first
- * would report every finished job as orphaned.
+ * `rc` is checked FIRST, because a wrapper that has exited has no live pid by
+ * definition and an implementation that asked "is it alive" first would report
+ * every finished job as orphaned.
+ *
+ * It is NOT checked unconditionally, and that exception is the whole of item
+ * 17 being reachable at all. On a step DECLARED to restart the machine the
+ * exit status is the status of ASKING — `systemctl reboot` returns 0 the
+ * instant the request is accepted, long before anything has stopped — so it
+ * cannot be the answer to "did this host restart, and did it come back well".
+ * A declared reboot therefore goes to `rebooted`, which is the name of the
+ * state in which somebody goes and looks, whether or not an `rc` was recorded.
  */
 export function classifyJobPoll(
   poll: JobPollResult,
@@ -1652,7 +1804,9 @@ export function classifyJobPoll(
 ): JobPollVerdict {
   const foreign = poll.instance !== null && poll.instance !== ctx.instanceId
   if (!poll.present) return { phase: 'missing', foreign: false }
-  if (poll.rc !== null) return { phase: 'finished', foreign }
+  if (poll.rc !== null) {
+    return { phase: ctx.expectsReboot === true ? 'rebooted' : 'finished', foreign }
+  }
   if (poll.pid === null) {
     const grace = ctx.graceMs ?? JOB_LAUNCH_GRACE_MS
     return { phase: ctx.now - ctx.launchedAt <= grace ? 'starting' : 'failed-launch', foreign }
@@ -1690,24 +1844,52 @@ export function classifyJobPoll(
  */
 export function buildJobSignal(p: { dir: string; signal?: 'TERM' | 'KILL' }): string {
   const sig = p.signal === 'KILL' ? 'KILL' : 'TERM'
+  assertJobMarkerDir(p.dir, 'the directory of a job to signal')
   return [
     `SP_JOB_VERB=signal; SP_JOB_DIR=${shQuote(p.dir)}; SP_JOB_SIG=${sig};`,
     'echo "shellpilot-signal/1";',
     'SP_PID=$(head -n1 "$SP_JOB_DIR/pid" 2>/dev/null); SP_PGID=$(head -n1 "$SP_JOB_DIR/pgid" 2>/dev/null);',
     'if [ -z "$SP_PID" ]; then echo "signalled=none"; exit 0; fi;',
     'SP_ARGS=$(ps -o args= -p "$SP_PID" 2>/dev/null) || SP_ARGS=;',
-    'if [ -n "$SP_ARGS" ] && ! printf "%s" "$SP_ARGS" | grep -qF -- "$SP_JOB_DIR"; then echo "signalled=stale"; exit 0; fi;',
+    // NO ARGUMENT LIST, NO SIGNAL. The docblock above promises the pid is
+    // verified before it is signalled, and an empty `SP_ARGS` — a busybox
+    // appliance with no usable `ps`, or a `ps` that refused — used to skip the
+    // check and signal anyway, including `kill -TERM -- -$SP_PID` to a whole
+    // PROCESS GROUP. On exactly the host where that happens, the poll can only
+    // manage `pidcheck=weak`; after a reboot the recorded pid is very likely to
+    // have been recycled onto something else, and that something else may well
+    // be its own group leader. Refusing costs a cancel that does not take on a
+    // host that cannot prove what it would be killing, and says so.
+    'if [ -z "$SP_ARGS" ]; then echo "signalled=unverified"; exit 0; fi;',
+    'if ! printf "%s" "$SP_ARGS" | grep -qF -- "$SP_JOB_DIR"; then echo "signalled=stale"; exit 0; fi;',
     `if [ -n "$SP_PGID" ] && [ "$SP_PID" = "$SP_PGID" ] && [ "$SP_PID" -gt 1 ] 2>/dev/null; then kill -${sig} -- "-$SP_PID" 2>/dev/null; echo "signalled=group"; else kill -${sig} "$SP_PID" 2>/dev/null; echo "signalled=process"; fi;`,
     'exit 0'
   ].join(' ')
 }
 
-export type JobSignalOutcome = 'group' | 'process' | 'none' | 'stale' | 'unknown'
+export type JobSignalOutcome =
+  | 'group'
+  | 'process'
+  | 'none'
+  | 'stale'
+  /** The host has no usable `ps`, so nothing was signalled. See buildJobSignal. */
+  | 'unverified'
+  | 'unknown'
 
 export function parseJobSignal(stdout: string): JobSignalOutcome {
   const v = headerFields(stdout).get('signalled')
-  return v === 'group' || v === 'process' || v === 'none' || v === 'stale' ? v : 'unknown'
+  return v === 'group' || v === 'process' || v === 'none' || v === 'stale' || v === 'unverified'
+    ? v
+    : 'unknown'
 }
+
+/** What a host is told when its pid could not be verified, so nothing was sent. */
+export const JOB_SIGNAL_UNVERIFIED_ERROR = (ms: number, dir: string): string =>
+  `Command timed out after ${ms}ms. NOTHING WAS SIGNALLED: this host has no usable \`ps\`, so ` +
+  'ShellPilot could not confirm that the recorded pid is still this job rather than a process ' +
+  'that has since been given the same number — and sending SIGTERM on that basis could stop ' +
+  `something unrelated. The command may still be running; its marker directory is left at ${dir} ` +
+  'so it can be read, and stopped by hand.'
 
 // ------------------------------------------------------------------ the reap
 
@@ -1724,6 +1906,8 @@ export function parseJobSignal(stdout: string): JobSignalOutcome {
  * decided.
  */
 export function buildJobReap(p: { dir: string }): string {
+  // The recursive delete is the one place a bad `dir` is unrecoverable.
+  assertJobMarkerDir(p.dir, 'the directory of a job to reap')
   return [
     `SP_JOB_VERB=reap; SP_JOB_DIR=${shQuote(p.dir)};`,
     'rm -rf "$SP_JOB_DIR" 2>/dev/null;',
@@ -1850,6 +2034,18 @@ export interface JobDetachedHandle {
   /** The command, so a reclaiming instance can say what it is watching and can
    *  ask restartsTheMachine() about it without re-deriving the step. */
   command: string
+  /**
+   * The boot id the step printed before it went down, on a declared reboot.
+   *
+   * Scraped out of the output as it goes past and kept HERE rather than in a
+   * local, because it is the only evidence a reboot really happened and the
+   * output it came from has already been consumed by the time anybody asks. A
+   * ShellPilot that is restarted across the reboot reads it back from the row
+   * and can still verify; without it, every reclaimed reboot step would report
+   * `unverifiable` — a refusal that is honest but that nothing could ever
+   * satisfy.
+   */
+  bootIdBefore?: string | null
 }
 
 export function isJobDetachedHandle(v: unknown): v is JobDetachedHandle {
@@ -1938,6 +2134,23 @@ export const JOB_GATE_SKIPPED_ERROR = (wave: string, reason: string): string =>
 export const JOB_REBOOT_UNHEALTHY_ERROR = (detail: string): string =>
   `The reboot was issued and the host came back, but not cleanly: ${detail} The wave gate will ` +
   'not pass on this host, so nothing after it was started.'
+
+/**
+ * What the row says while a reboot has been accepted but has not happened yet.
+ *
+ * `systemctl reboot` returns 0 as soon as the request is accepted, and the
+ * wrapper records that 0 microseconds later — while systemd is still stopping
+ * units and sshd is still answering. So there is a window, usually a few
+ * seconds and occasionally longer, in which the exit status exists, the host is
+ * up, and the boot id has not changed. Verifying in that window would report
+ * "it never restarted" about a machine that is halfway through restarting,
+ * which is the same false answer as before with the sign flipped. ShellPilot
+ * waits for the host to actually go, and says what it is waiting for.
+ */
+export const JOB_REBOOT_ACCEPTED_NOTE =
+  'The reboot has been accepted by the host and it is still answering, which is normal: the exit ' +
+  'status of a reboot command is the status of asking. ShellPilot is waiting for it to go down, ' +
+  'and will then check that it really restarted and that nothing failed on the way up.'
 
 /** The error a reboot step carries when the host never came back. */
 export const JOB_REBOOT_TIMEOUT_ERROR = (ms: number): string =>

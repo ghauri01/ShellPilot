@@ -21,14 +21,19 @@ import type {
 } from '../src/shared/jobs'
 import {
   JOB_CMD_PREFIX,
+  JOB_DETACHED_SETTING_NOTE,
   JOB_LAUNCH_GRACE_MS,
   JOB_RECONNECT_BASE_MS,
   JOB_RECONNECT_GLOBAL_MAX,
   JOB_RECONNECT_MAX_MS,
   buildJobPoll,
   buildJobProbe,
+  buildJobReap,
+  buildJobSignal,
   isJobDetachedHandle,
+  isJobMarkerDir,
   jobApprovalFor,
+  jobMarkerDir,
   nextRetryDelay,
   planJob,
   restartsTheMachine
@@ -181,7 +186,7 @@ class FakeHost {
       case 'poll':
         return this.poll(dir, command)
       case 'signal':
-        return this.signal(dir)
+        return this.signal(dir, command)
       case 'reap':
         return this.reap(dir)
       default:
@@ -245,6 +250,19 @@ class FakeHost {
     const marker = this.dirs.get(dir)
     if (!marker) return ok('shellpilot-poll/1\nmarker=missing\nbody/1\n')
 
+    // The poll's reads happen in an ORDER, and the fake takes them in it — the
+    // exit status first, then the liveness check, then the exit status again,
+    // then the output. That is what lets `duringPoll` model the one window this
+    // command cannot close by itself: the polling shell being descheduled
+    // between two of its own instructions.
+    const rc1 = marker.rc
+    const during = this.duringPoll
+    if (during) {
+      this.duringPoll = null
+      during()
+    }
+    const aliveNow = marker.alive && marker.pid !== null
+    const rc2 = marker.rc
     const size = marker.out.length
     const sent = Math.max(0, Math.min(size - off, max))
     const slice = marker.out.subarray(off, off + sent)
@@ -257,21 +275,44 @@ class FakeHost {
       // rc is read BEFORE the output on the real host, and the fake keeps that
       // order so a test that reorders them here would be testing a poll that
       // could report `finished` with output still to come.
-      `rc=${marker.rc ?? ''}`,
-      `alive=${marker.alive && marker.pid !== null ? 'yes' : 'no'}`,
+      `rc=${rc1 ?? ''}`,
+      `alive=${aliveNow ? 'yes' : 'no'}`,
       `pidcheck=${this.opts.weakPidCheck ? 'weak' : 'strong'}`,
+      // And AGAIN, after the liveness check — emitted only where the poll asks
+      // for it, so a builder that stops taking the second read is a fake that
+      // stops answering it, and the race below stops being caught.
+      ...(command.includes('rc2=') ? [`rc2=${rc2 ?? ''}`] : []),
       `size=${size}`,
       `sent=${sent}`,
       'body/1'
     ].join('\n')
-    return ok(`${head}\n${b64 ? slice.toString('base64') : slice.toString('utf8')}`)
+    const cut = this.truncateTo
+    this.truncateTo = null
+    const carried = cut === null ? slice : slice.subarray(0, Math.min(cut, slice.length))
+    return ok(`${head}\n${b64 ? carried.toString('base64') : carried.toString('utf8')}`)
   }
 
-  private signal(dir: string): JobRunResult {
+  private signal(dir: string, command: string): JobRunResult {
     const marker = this.dirs.get(dir)
     if (!marker || marker.pid === null) {
       this.signals.push('none')
       return ok('shellpilot-signal/1\nsignalled=none\n')
+    }
+    // A HOST WITH NO USABLE `ps`: `SP_ARGS` comes back empty, and what the
+    // wrapper does then is the whole question. This fake does whatever the
+    // command it was handed says to do — so the refusal is only simulated if
+    // the builder actually contains it.
+    if (this.opts.weakPidCheck) {
+      if (command.includes('if [ -z "$SP_ARGS" ]; then echo "signalled=unverified"')) {
+        this.signals.push('unverified')
+        return ok('shellpilot-signal/1\nsignalled=unverified\n')
+      }
+      // The bug, modelled: the check is skipped and the signal goes anyway —
+      // to a pid this host cannot show still belongs to the job, and to its
+      // whole process group if it happens to lead one.
+      marker.alive = false
+      this.signals.push('blind')
+      return ok('shellpilot-signal/1\nsignalled=group\n')
     }
     marker.alive = false
     // The rule the builder encodes: the group only goes when the wrapper leads
@@ -311,6 +352,43 @@ class FakeHost {
   steal(dir: string, instance: string): void {
     this.marker(dir).instance = instance
   }
+
+  /**
+   * THE RACE: the wrapper finishes DURING a poll, between its two reads.
+   *
+   * `mv rc.tmp rc` and the wrapper's own exit are adjacent instructions, and
+   * the polling shell can be descheduled between reading `rc` and asking
+   * `kill -0`. A wrapper that lands in that window is observed as "no exit
+   * status, and not alive" — which is the shape of an orphan, and used to be
+   * reported as one: the directory was reaped, DELETING the `rc` that had in
+   * fact been written, and the operator was told about the OOM killer for a job
+   * that exited 0.
+   */
+  finishesMidPoll(dir: string, rc: number, text = ''): void {
+    this.duringPoll = () => {
+      const m = this.marker(dir)
+      if (text !== '') m.out = Buffer.concat([m.out, Buffer.from(text, 'utf8')])
+      m.rc = rc
+      m.alive = false
+    }
+  }
+
+  private duringPoll: (() => void) | null = null
+
+  /**
+   * The next poll's body carries fewer bytes than its header announced.
+   *
+   * `sent` is echoed BEFORE the body is produced — `wc -c` and `tail | head -c`
+   * are two different reads of a file that can be truncated or removed between
+   * them, and the transport has a cap of its own. A cursor that advanced by the
+   * announced number would step over bytes nobody ever saw, silently and with
+   * no later poll to notice.
+   */
+  truncateNextBody(bytes: number): void {
+    this.truncateTo = bytes
+  }
+
+  private truncateTo: number | null = null
 
   disconnect(): void {
     this.connected = false
@@ -537,8 +615,16 @@ describe('when the connection dies underneath a running job', () => {
     host.disconnect()
     await h.tick()
 
-    expect(states.map((s) => s.state)).toEqual(['detached'])
-    expect(states[0].detached, 'the marker must be on the row before the first poll').toBeTruthy()
+    // Twice, and the second one is the point: `detached` with the transport
+    // error beside it. The row is deduped on the STATE AND THE SENTENCE, so a
+    // link that drops after a launch still says how it dropped — under a
+    // state-only dedupe the row was already `detached` from the launch and the
+    // error never arrived anywhere a person could read it.
+    expect(states.map((s) => s.state)).toEqual(['detached', 'detached'])
+    expect(states[1].error).toMatch(/timed out/i)
+    // `toBeTruthy` would pass for `{}`, and this file already has the predicate
+    // that says what a handle IS — the same one the store validates with.
+    expect(isJobDetachedHandle(states[0].detached), 'the marker must be on the row before the first poll').toBe(true)
     // And it is still going: the executor has not settled.
     let settled = false
     void p.then(() => {
@@ -617,8 +703,17 @@ describe('when the connection dies underneath a running job', () => {
     // millisecond, and per-host backoff cannot help because they are
     // synchronised by the wake rather than by each other. The cap is therefore
     // across the app — one executor, one gate, which is what main constructs.
+    //
+    // SIZED OFF THE CAP, not off six. This was written with six hosts against a
+    // constant that is three, and `expect(peak).toBe(JOB_RECONNECT_GLOBAL_MAX)`
+    // is satisfied by "no gate at all" the moment somebody raises that constant
+    // to six — the assertion would then be reading back the number of hosts.
+    const hostCount = JOB_RECONNECT_GLOBAL_MAX + 3
+    expect(hostCount, 'there must be more hosts than slots or nothing is being gated').toBeGreaterThan(
+      JOB_RECONNECT_GLOBAL_MAX
+    )
     const hosts = new Map<string, FakeHost>()
-    for (let i = 0; i < 6; i++) hosts.set(`h${i}`, new FakeHost())
+    for (let i = 0; i < hostCount; i++) hosts.set(`h${i}`, new FakeHost())
     const holds: (() => void)[] = []
     let holding = false
     let inFlight = 0
@@ -646,13 +741,14 @@ describe('when the connection dies underneath a running job', () => {
 
     // Every host loses the link at once, and every host fails its first poll.
     for (const host of hosts.values()) host.disconnect()
-    for (let i = 0; i < 6; i++) await h.tick()
+    for (let i = 0; i < hostCount; i++) await h.tick()
 
     // Now they all retry together, and the run is held so the gate is
     // observable rather than instantaneous.
     holding = true
-    for (let i = 0; i < 6; i++) await h.tick()
-    expect(peak, 'six hosts must not dial one bastion at once').toBe(JOB_RECONNECT_GLOBAL_MAX)
+    for (let i = 0; i < hostCount; i++) await h.tick()
+    expect(peak, `${hostCount} hosts must not dial one bastion at once`).toBe(JOB_RECONNECT_GLOBAL_MAX)
+    expect(peak, 'and the cap must actually be a cap').toBeLessThan(hostCount)
     expect(holds).toHaveLength(JOB_RECONNECT_GLOBAL_MAX)
 
     // A slot released is HANDED ON, not returned to a counter, so the host that
@@ -788,8 +884,10 @@ describe('reclaiming a marker', () => {
     const { req } = request()
     const p = h.exec(req)
     await h.flush()
-    const poll = host.commands.find((c) => c.startsWith('SP_JOB_VERB=poll;'))
-    expect(poll, 'the poll must verify the pid, not merely kill -0 it').toBeUndefined()
+    expect(
+      host.commands.find((c) => c.startsWith('SP_JOB_VERB=poll;')),
+      'nothing has been polled yet — the executor is holding its first wait'
+    ).toBeUndefined()
     host.kill(host.dir) // pid gone: the strong check answers no
     await h.tick()
     expect((await p).finalState).toBe('orphaned')
@@ -819,7 +917,11 @@ describe('reclaiming a marker', () => {
     expect(r.code, 'the exit status is readable by anyone who can see the marker').toBe(3)
     expect(host.countVerb('reap')).toBe(0)
     expect(host.dirs.has(dir), 'another instance still needs that directory').toBe(true)
-    expect(r.detachedHandle, 'the row keeps the handle, because the marker is still there').toBeTruthy()
+    expect(
+      isJobDetachedHandle(r.detachedHandle),
+      'the row keeps the handle, because the marker is still there'
+    ).toBe(true)
+    expect((r.detachedHandle as { dir: string }).dir, 'and it points at that marker').toBe(dir)
   })
 
   it('says so when the marker has been removed underneath it', async () => {
@@ -1071,18 +1173,36 @@ describe('the capability probe', () => {
     expect(probe).not.toMatch(/(?<!\/var)\/tmp\/shellpilot/)
   })
 
-  it('reads rc BEFORE the output, which is what makes a finished poll complete', () => {
+  it('reads rc twice, both times BEFORE the output', () => {
     // The fake answers polls from its own marker state, so it cannot enforce
     // the ORDER of two reads inside the shell — this asserts it on the text
     // instead, because getting it backwards is a silent bug rather than a
-    // failure. `rc` exists only after the command has exited, so if it is there
-    // before `out` is read, nothing can append to `out` afterwards and what
-    // comes back is all of it. Reading rc last leaves a window where the final
-    // lines were written between the two reads and reported as finished
-    // without them — and there is no later poll to catch up, because a poll
-    // that sees rc is the last one.
+    // failure.
+    //
+    // PRESENCE FIRST, and that omission is why this test did not do its job:
+    // it compared two `indexOf` results without asserting either was found, and
+    // `indexOf` returns -1 for a string that is not there. DELETING THE rc READ
+    // ALTOGETHER PASSED IT — -1 is less than everything — which is precisely
+    // the change it exists to catch.
     const poll = buildJobPoll({ dir: '/var/tmp/x/j.1', offset: 0, base64: true })
-    expect(poll.indexOf('rc=')).toBeLessThan(poll.indexOf('tail -c'))
+    const first = poll.indexOf('echo "rc=$(head -n1 "$SP_JOB_DIR/rc"')
+    const second = poll.indexOf('echo "rc2=$(head -n1 "$SP_JOB_DIR/rc"')
+    const alive = poll.indexOf('kill -0 "$SP_PID"')
+    const body = poll.indexOf('tail -c')
+    expect(first, 'the poll no longer reads rc before the liveness check').toBeGreaterThan(-1)
+    expect(second, 'the poll no longer reads rc after the liveness check').toBeGreaterThan(-1)
+    expect(alive, 'the poll no longer checks whether the pid is alive').toBeGreaterThan(-1)
+    expect(body, 'the poll no longer reads the output').toBeGreaterThan(-1)
+    // `rc` exists only after the command has exited, so if it is read before
+    // `out`, nothing can append to `out` afterwards and what comes back is all
+    // of it. Reading rc last leaves a window where the final lines were written
+    // between the two reads and reported as finished without them — and there
+    // is no later poll to catch up, because a poll that sees rc is the last one.
+    // BOTH reads have to satisfy that, which is why the second one sits before
+    // the size and the body rather than at the end.
+    expect(first).toBeLessThan(alive)
+    expect(alive).toBeLessThan(second)
+    expect(second).toBeLessThan(body)
     // And the window is closed on the HOST rather than by counting what
     // arrived, so a file the job is still appending to cannot be re-sent.
     expect(poll).toContain('SP_N=$((SP_SIZE - SP_JOB_OFF))')
@@ -1363,6 +1483,254 @@ describe('picking a job up after a restart', () => {
     const back = s.readJob('j5')
     expect(back?.targets[0].state, 'an unknown state reads back as itself').toBe('detached')
     expect(back?.targets[0].detached).toBeNull()
+  })
+})
+
+
+// =========================================================================
+// The window between two reads
+// =========================================================================
+
+describe('a wrapper that finishes while it is being polled', () => {
+  it('is finished, not orphaned, and its exit status is not deleted', async () => {
+    // THE RACE, and the reason it matters more than its odds suggest: the two
+    // reads are `rc` and `kill -0`, the two events are `mv rc.tmp rc` and the
+    // wrapper's own exit, and a job that lands between them was reported as
+    // ORPHANED — which reaps the marker directory, deleting the `rc` that had
+    // in fact been written, and tells the operator about the OOM killer for a
+    // command that exited 0. There is no second chance: the evidence is gone.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req, output } = request()
+    const p = h.exec(req)
+    await h.flush()
+    const dir = host.dir
+    host.write(dir, 'nearly done\n')
+    // It finishes DURING the poll: after the first read of rc, before the
+    // liveness check. The poll sees rc empty, the pid gone — and rc again.
+    host.finishesMidPoll(dir, 0, 'all done\n')
+    await h.tick()
+
+    const r = await p
+    expect(r.ok, 'a job that exited 0 is not an orphan').toBe(true)
+    expect(r.code).toBe(0)
+    expect(r.finalOutcome).toBeUndefined()
+    expect(r.error).toBeUndefined()
+    // And the output it wrote on the way out came back with it: the second read
+    // is still taken before `out`, so the completeness argument holds for it.
+    expect(output.join('')).toBe('nearly done\nall done\n')
+  })
+
+  it('still reports a real orphan as one', async () => {
+    // The second read must not turn `orphaned` into a state nothing reaches.
+    // A wrapper the OOM killer took wrote no rc, and there is nothing for
+    // either read to find.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req } = request()
+    const p = h.exec(req)
+    await h.flush()
+    host.kill(host.dir)
+    await h.tick()
+    const r = await p
+    expect(r.finalState).toBe('orphaned')
+    expect(r.error).toMatch(/no exit status was ever written/i)
+  })
+
+  it('advances the cursor by what arrived, not by what was announced', async () => {
+    // `sent` is echoed before the body is written, so a body that came back
+    // short — the file truncated, the transport capped — used to move the
+    // cursor past bytes no reader ever saw. Under-reading costs a re-read;
+    // over-reading loses output permanently, and only one of those is
+    // recoverable.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req, output } = request()
+    const p = h.exec(req)
+    await h.flush()
+    const dir = host.dir
+    host.write(dir, 'abcdefghij')
+    // The header says ten and the body carries four.
+    host.truncateNextBody(4)
+    await h.tick()
+    // The cursor moved four, so the same pass reads the rest immediately: the
+    // bytes that did not arrive are read again rather than skipped. Advancing
+    // by the announced ten would have lost `efghij` with nothing to notice it.
+    expect(output.join('')).toBe('abcdefghij')
+    expect(host.countVerb('poll'), 'the second read is what recovers the six').toBe(2)
+    host.exit(dir, 0)
+    await h.tick()
+    await p
+    // And nothing came twice.
+    expect(output.join('')).toBe('abcdefghij')
+  })
+})
+
+// =========================================================================
+// What may be signalled, and by whom
+// =========================================================================
+
+describe('stopping a job this build cannot identify', () => {
+  it('refuses to signal a pid it could not verify, and says so', async () => {
+    // The concrete case: a busybox appliance with no usable `ps`. `SP_ARGS` is
+    // empty, the argument-list check is skipped — and the old wrapper signalled
+    // anyway, including `kill -TERM -- -$SP_PID` to a whole PROCESS GROUP. If
+    // that host has rebooted since the marker was written, the recorded pid is
+    // very likely to have been recycled onto something else; if that something
+    // else leads its own group, ShellPilot stops a stranger's processes. The
+    // poll has been computing `pidcheck=weak` for exactly this host all along,
+    // and nothing consulted it.
+    const host = new FakeHost({ weakPidCheck: true })
+    const h = harness(host)
+    const { req } = request({ timeoutMs: 5_000 })
+    const p = h.exec(req)
+    await h.flush()
+    const dir = host.dir
+    h.advance(60_000)
+    await h.tick()
+
+    const r = await p
+    expect(host.signals, 'nothing may be sent to a pid this host cannot vouch for').toEqual([
+      'unverified'
+    ])
+    expect(r.ok).toBe(false)
+    expect(r.finalOutcome).toBe('timeout')
+    expect(r.error).toMatch(/nothing was signalled/i)
+    expect(r.error).toMatch(/no usable/i)
+    // The command may well still be running, so the marker stays and the row
+    // keeps pointing at it.
+    expect(r.error).toContain(dir)
+    expect(host.dirs.has(dir)).toBe(true)
+    expect(isJobDetachedHandle(r.detachedHandle)).toBe(true)
+  })
+
+  it('does not kill another instance’s job because our own clock ran out', async () => {
+    // JOB_INSTANCE_NOTE argues that cancel is not gated on the instance, and
+    // that argument is about a PERSON deciding to stop an upgrade. An automatic
+    // timeout is a different act: it is one ShellPilot's deadline — measured
+    // from a launch it did not make — ending a run somebody else is watching.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req } = request({ timeoutMs: 5_000 })
+    const p = h.exec(req)
+    await h.flush()
+    const dir = host.dir
+    host.steal(dir, 'sp-someone-else')
+    h.advance(60_000)
+    await h.tick()
+
+    const r = await p
+    expect(host.countVerb('signal'), 'their job, their decision').toBe(0)
+    expect(host.dirs.has(dir), 'and their marker is left alone').toBe(true)
+    expect(r.error).toMatch(/different ShellPilot instance/i)
+    expect(r.finalOutcome).toBe('timeout')
+  })
+
+  it('gives a reclaimed job the whole timeout, measured from the reclaim', async () => {
+    // `launchedAt` is when the COMMAND started. A deadline measured from it is
+    // already long past for a job picked up after a weekend, so the first poll
+    // after a reclaim would signal — a new watcher's opening move being to kill
+    // the thing it just adopted. The timeout says how long WE are prepared to
+    // wait, and this watcher has waited none of it.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req } = request()
+    const p = h.exec(req)
+    await h.flush()
+    const dir = host.dir
+    void p
+
+    const second = harness(host)
+    const { req: req2 } = request({
+      timeoutMs: 900_000,
+      resume: {
+        v: 1,
+        dir,
+        step: 1,
+        instanceId: 'sp-me',
+        launcher: 'setsid',
+        base64: true,
+        launchedAt: 1_000,
+        readOffset: 0,
+        command: 'apt full-upgrade -y'
+      }
+    })
+    second.advance(10_000_000) // a long weekend
+    const p2 = second.exec(req2)
+    await second.flush()
+    await second.tick()
+    expect(host.countVerb('signal'), 'the job it just adopted is still running').toBe(0)
+
+    host.exit(dir, 0)
+    await second.tick()
+    expect((await p2).code).toBe(0)
+  })
+
+  it('refuses a marker directory this build did not shape', async () => {
+    // `isJobDetachedHandle` checks that `dir` is a string and nothing else, and
+    // the reap builder is `rm -rf "$SP_JOB_DIR"`. A row from another build, or
+    // one somebody edited, must not reach it.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req } = request({
+      resume: {
+        v: 1,
+        dir: '/etc',
+        step: 1,
+        instanceId: 'sp-me',
+        launcher: 'setsid',
+        base64: true,
+        launchedAt: 1_000,
+        readOffset: 0,
+        command: 'apt full-upgrade -y'
+      }
+    })
+    const r = await h.exec(req)
+    expect(host.commands, 'nothing at all is sent to the host').toEqual([])
+    expect(r.finalState).toBe('orphaned')
+    expect(r.error).toContain('/etc')
+  })
+
+  it('refuses at the builders too, which is where the rm -rf actually is', () => {
+    expect(isJobMarkerDir(jobMarkerDir('/var/tmp/shellpilot-1000/jobs', 'job1', 2))).toBe(true)
+    for (const bad of ['/etc', '/', '/var/tmp/x/../../etc', 'relative/j.1', '/var/tmp/jobs/j.1x']) {
+      expect(isJobMarkerDir(bad), bad).toBe(false)
+      expect(() => buildJobReap({ dir: bad }), bad).toThrow(/marker directory/)
+      expect(() => buildJobSignal({ dir: bad }), bad).toThrow(/marker directory/)
+    }
+  })
+})
+
+// =========================================================================
+// What the sweep is allowed to believe
+// =========================================================================
+
+describe('the sweep and the host’s clock', () => {
+  it('does not sweep on a host whose clock disagrees with ours', () => {
+    // `find -mtime +7` asks the HOST how old something is. A machine whose RTC
+    // came up in 2001 answers that everything is ancient — and what it would
+    // then delete includes a FINISHED, unreaped job's `rc` and `out`, which the
+    // `kill -0` guard does not cover because a finished job has no pid left to
+    // be alive.
+    const probe = buildJobProbe({ nowSeconds: 1_800_000_000 })
+    expect(probe).toContain('SP_HOSTNOW=$(date +%s 2>/dev/null)')
+    expect(probe).toContain('$((1800000000 - 86400))')
+    expect(probe).toContain('$((1800000000 + 86400))')
+    // The sweep is gated on the comparison, not merely accompanied by it.
+    expect(probe).toContain('[ "$SP_SWEEP" = ok ]; then for d in')
+    // A host with no `date` at all cannot be checked, and is left alone.
+    expect(probe).toContain("SP_SWEEP=no-clock; SP_HOSTNOW=")
+  })
+
+  it('says what a detached job actually leaves on a host', () => {
+    // The note used to promise "five small files". Five of them are small; the
+    // sixth is the job's own output and is as large as the command makes it.
+    // See JOB_OUT_SIZE_NOTE for why there is no cap on it — the only portable
+    // one kills the command with SIGPIPE, which on an apt run is the dpkg
+    // interruption this whole feature exists to prevent.
+    expect(JOB_DETACHED_SETTING_NOTE).not.toContain('five small files')
+    expect(JOB_DETACHED_SETTING_NOTE).toMatch(/as large as the command makes it/i)
+    expect(JOB_DETACHED_SETTING_NOTE).toMatch(/swept seven days later/i)
   })
 })
 

@@ -115,6 +115,9 @@ class FakeHost {
             `rc=${marker.rc ?? ''}`,
             `alive=${marker.alive && marker.pid !== null ? 'yes' : 'no'}`,
             'pidcheck=strong',
+            // Emitted only where the poll asks for it, so a builder that stops
+            // reading rc twice is a fake that stops answering twice.
+            ...(command.includes('rc2=') ? [`rc2=${marker.rc ?? ''}`] : []),
             `size=${size}`,
             `sent=${sent}`,
             'body/1',
@@ -137,7 +140,25 @@ class FakeHost {
     m.out = Buffer.concat([m.out, Buffer.from(text, 'utf8')])
   }
 
-  /** The kernel took the process with the rest of userspace. */
+  /**
+   * THE ORDINARY REBOOT, and the one the fake could always have produced and
+   * was never asked to.
+   *
+   * `systemctl reboot` returns 0 the moment the request is accepted, and the
+   * wrapper's very next instruction records that 0 — microseconds later, while
+   * systemd is still stopping units. The marker root is a state directory and
+   * not /tmp precisely so that it survives, so what the first poll after the
+   * host comes back sees is `rc=0`, an exit status, on a marker that is still
+   * there. Every reboot test in this file used to skip this step and go
+   * straight to `goDown()`, which is the case where the kernel took the wrapper
+   * before it could write anything — real, but rare.
+   */
+  rebootAccepted(rc = 0): void {
+    this.marker().rc = rc
+    this.marker().alive = false
+  }
+
+  /** The machine actually goes: sshd stops answering. */
   goDown(): void {
     this.marker().alive = false
     this.marker().pid = this.marker().pid
@@ -246,7 +267,6 @@ describe('classifying a poll on a step that was declared to restart the machine'
     pidCheck: 'strong' as const,
     size: 40,
     sent: 0,
-    more: false,
     text: ''
   }
 
@@ -266,14 +286,36 @@ describe('classifying a poll on a step that was declared to restart the machine'
     })
   })
 
-  it('still prefers a recorded exit status over either', () => {
-    // rc is checked first and unconditionally: a wrapper that exited has no
-    // live pid by definition.
+  it('does NOT accept a recorded exit status as the answer on a declared reboot', () => {
+    // INVERTED, and this test as it stood is why the defect survived review:
+    // it pinned "rc wins, unconditionally" as intended without confronting what
+    // it implied for the only step type that has a `expectsReboot` at all.
+    //
+    // `buildRebootStep` ends in `systemctl reboot` or `shutdown -r now`. BOTH
+    // RETURN 0 IMMEDIATELY — the exit status of a reboot command is the status
+    // of ASKING — and the wrapper's next instruction writes that 0 to `rc`,
+    // while systemd is still stopping units. The marker directory deliberately
+    // survives the reboot, so the first poll after the host answers again finds
+    // rc=0 and the old classifier called it `finished`: the executor reaped and
+    // returned ok, and `buildRebootVerify`/`verifyReboot` — the whole of item
+    // 17 — never ran on the one path they were written for. A host that came
+    // back with eleven failed units, or that never rebooted because something
+    // swallowed the request, reported success and the wave rolled on.
+    //
+    // So a declared reboot goes to `rebooted` whatever `rc` says. `rebooted` is
+    // not a claim that the machine restarted; it is the state in which somebody
+    // goes and looks.
     expect(
       classifyJobPoll(
         { ...poll, rc: 0 },
         { instanceId: 'sp-me', launchedAt: 0, now: 1_000, expectsReboot: true }
       ).phase
+    ).toBe('rebooted')
+    // And nothing changes for a step that did not declare one: an ordinary
+    // command's exit status is still the answer, still checked first, because a
+    // wrapper that has exited has no live pid by definition.
+    expect(
+      classifyJobPoll({ ...poll, rc: 0 }, { instanceId: 'sp-me', launchedAt: 0, now: 1_000 }).phase
     ).toBe('finished')
   })
 
@@ -415,6 +457,179 @@ describe('issuing a reboot and waiting for the host', () => {
     expect(r.error).toContain('expected')
     // It was `rebooting` throughout, not `unreachable`.
     expect(states.map((s) => s.state)).toContain('rebooting')
+  })
+
+  // -----------------------------------------------------------------------
+  // THE ORDINARY SEQUENCE — a reboot that works
+  // -----------------------------------------------------------------------
+  // Every test above this line drives `goDown()`: the wrapper is taken by the
+  // kernel before it can record anything. That is real and it is rare. What
+  // happens on essentially every real reboot is that `systemctl reboot` returns
+  // 0, the wrapper writes `rc=0` microseconds later while systemd is still
+  // stopping units, and the marker — which is in a state directory precisely so
+  // that it survives — is still there with that 0 in it when the host answers
+  // again. The fake could always have produced that. It was never asked to, and
+  // in that gap item 17 was unreachable in production.
+
+  it('verifies a reboot that recorded an exit status, which is all of them', async () => {
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req, output } = request()
+    const p = h.exec(req)
+    await h.flush()
+
+    host.write(`${REBOOT_BOOT_ID_MARK}boot-before\n`)
+    await h.tick()
+    // The reboot was accepted and the wrapper recorded its 0. The host has not
+    // gone yet — systemd is still stopping units — so nothing is concluded.
+    host.rebootAccepted()
+    await h.tick()
+    expect(
+      host.commands.some((c) => c.includes('shellpilot-postboot/1')),
+      'a host that is still answering has not restarted yet, and must not be judged as if it had'
+    ).toBe(false)
+    let settled = false
+    void p.then(() => {
+      settled = true
+    })
+    await h.flush()
+    expect(settled, 'rc=0 from a reboot command is the status of ASKING, not an answer').toBe(false)
+
+    // Now it goes, and comes back with a unit that did not start.
+    host.goDown()
+    await h.tick()
+    host.comeBack()
+    host.unitState = 'degraded'
+    host.failed = 'nginx.service '
+    await h.tick()
+
+    const r = await p
+    // THE HEADLINE. Before this fix the poll above returned `ok: true, code: 0`
+    // and the wave rolled on to the next host.
+    expect(r.ok).toBe(false)
+    expect(r.finalOutcome).toBe('unhealthy')
+    expect(r.error).toContain('nginx.service')
+    expect(output.join('')).toContain('nginx.service')
+    expect(host.commands.some((c) => c.includes('shellpilot-postboot/1'))).toBe(true)
+  })
+
+  it('reports a clean reboot as a success, exit status and all', async () => {
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req, output } = request()
+    const p = h.exec(req)
+    await h.flush()
+    host.write(`${REBOOT_BOOT_ID_MARK}boot-before\n`)
+    await h.tick()
+    host.rebootAccepted()
+    await h.tick()
+    host.goDown()
+    await h.tick()
+    host.comeBack()
+    await h.tick()
+
+    const r = await p
+    expect(r.ok).toBe(true)
+    expect(r.code).toBe(0)
+    expect(output.join(''), 'and it says what it checked, not merely that it passed').toMatch(
+      /restarted/i
+    )
+    expect(host.dirs.size, 'the marker is reaped once the answer is in hand').toBe(0)
+  })
+
+  it('says the reboot was swallowed when the host answers throughout', async () => {
+    // rc=0 and the machine never goes: something accepted the request and did
+    // nothing with it — a container, a masked target, a systemd that refused.
+    // The host is answering the whole time, so `rebooting` never becomes a
+    // timeout; what ends it is the boot id, which has not changed.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req, states } = request({ timeoutMs: 60_000 })
+    const p = h.exec(req)
+    await h.flush()
+    host.write(`${REBOOT_BOOT_ID_MARK}boot-before\n`)
+    await h.tick()
+    host.rebootAccepted()
+    await h.tick()
+    // It is waiting, and the row says why rather than showing a bare exit code.
+    expect(states.some((x) => /still answering/i.test(x.error ?? ''))).toBe(true)
+    // Past the deadline, still up, still the same boot.
+    h.advance(120_000)
+    await h.tick()
+
+    const r = await p
+    expect(r.ok).toBe(false)
+    expect(r.error).toContain('never restarted')
+    expect(r.finalOutcome).toBe('unhealthy')
+  })
+
+  it('does not wait on a reboot command that failed outright', async () => {
+    // `sudo -n systemctl reboot` on a host without the sudoers rule exits
+    // non-zero and nothing is going to happen. There is no reason to sit
+    // through the deadline waiting for a machine that was never asked.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req } = request()
+    const p = h.exec(req)
+    await h.flush()
+    host.write(`${REBOOT_BOOT_ID_MARK}boot-before\n`)
+    await h.tick()
+    host.rebootAccepted(1)
+    await h.tick()
+    const r = await p
+    expect(r.ok).toBe(false)
+    expect(r.error).toContain('never restarted')
+    // The status of the refusal is the useful half, and it is kept.
+    expect(r.code).toBe(1)
+  })
+
+  it('verifies a reboot it is reclaiming, using the boot id from the row', async () => {
+    // The boot id is printed once, on the way down, and a ShellPilot that was
+    // restarted across the reboot never saw it go past. It is on the handle for
+    // exactly this: without it every reclaimed reboot would come back
+    // `unverifiable`, which is honest and which nothing could ever satisfy.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req } = request()
+    const p = h.exec(req)
+    await h.flush()
+    host.write(`${REBOOT_BOOT_ID_MARK}boot-before\n`)
+    await h.tick()
+    const dir = host.dir
+    host.rebootAccepted()
+
+    // A second ShellPilot picks the marker up from the row alone.
+    const second = harness(host)
+    const { req: req2 } = request({
+      resume: {
+        v: 1,
+        dir,
+        step: 2,
+        instanceId: 'sp-me',
+        launcher: 'setsid',
+        base64: true,
+        launchedAt: 1_000,
+        readOffset: host.marker().out.length,
+        command: buildRebootStep(),
+        bootIdBefore: 'boot-before'
+      }
+    })
+    host.comeBack()
+    const p2 = second.exec(req2)
+    await second.flush()
+    await second.tick()
+    const r2 = await p2
+    expect(r2.ok, 'the boot id changed, so it restarted and came back clean').toBe(true)
+    expect(
+      host.commands.some((c) => c.includes('shellpilot-postboot/1')),
+      'and it was CHECKED rather than assumed from the exit status on the marker'
+    ).toBe(true)
+
+    // The first watcher is left holding a marker somebody else reaped; it says
+    // so rather than claiming an answer.
+    while (h.pending > 0) await h.tick()
+    const r = await p
+    expect(r.ok).toBe(false)
   })
 
   it('leaves an ordinary detached job disconnect unbounded, as B2 designed it', async () => {

@@ -7,6 +7,10 @@ import {
   JOB_POLL_BYTES,
   JOB_POLL_MS,
   JOB_RECONNECT_GLOBAL_MAX,
+  JOB_REBOOT_ACCEPTED_NOTE,
+  JOB_SIGNAL_UNVERIFIED_ERROR,
+  isJobMarkerDir,
+  parseJobSignal,
   buildJobLaunch,
   buildJobPoll,
   buildJobProbe,
@@ -44,7 +48,8 @@ import {
 //
 // So the command is launched into its own session with `setsid`, the channel
 // that launched it closes immediately, and everything after that is a POLL of
-// five small files. The link may drop, the laptop may sleep, ShellPilot may be
+// five small marker files and one output file whose size is the command's own
+// business — see JOB_OUT_SIZE_NOTE. The link may drop, the laptop may sleep, ShellPilot may be
 // restarted; none of it reaches the process doing the work.
 //
 // What lands on the host, why that is defensible, and why `/tmp` is not in the
@@ -186,7 +191,13 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
   async function capabilityFor(req: JobExecRequest): Promise<JobHostCapability> {
     const cached = caps.get(req.serverId)
     if (cached) return cached
-    const r = await deps.run(req.cfg, buildJobProbe(), pollTimeoutMs)
+    // OUR clock goes with the probe, because the sweep it carries decides what
+    // to delete by asking the HOST how old something is. See buildJobProbe.
+    const r = await deps.run(
+      req.cfg,
+      buildJobProbe({ nowSeconds: Math.floor(now() / 1000) }),
+      pollTimeoutMs
+    )
     // A probe that could not run at all is not "this host cannot detach" — it
     // is "this host did not answer", and the attached executor is about to say
     // so with a better error than anything invented here. Cached anyway, so a
@@ -308,11 +319,30 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
    * path that is exercised only in the failure people report.
    */
   async function watch(req: JobExecRequest, handle: JobDetachedHandle): Promise<JobExecResult> {
+    // THE DIRECTORY IS RE-VALIDATED HERE, at the one entrance every poll,
+    // signal and `rm -rf` goes through. A handle arrives from a row this
+    // process did not necessarily write: `isJobDetachedHandle` checks that
+    // `dir` is a string and nothing more, and a row from another build — or one
+    // somebody edited — must not reach the reap builder. The builders assert it
+    // too; this is where the refusal can still be a sentence rather than a
+    // throw, and where nothing has been sent to the host yet.
+    if (!isJobMarkerDir(handle.dir)) {
+      return {
+        ok: false,
+        code: null,
+        error:
+          `This job’s recorded marker directory (${JSON.stringify(handle.dir)}) is not one ` +
+          'ShellPilot creates, so nothing was read from the host and nothing was removed from it.',
+        finalState: 'orphaned',
+        finalOutcome: 'orphaned',
+        detachedHandle: null
+      }
+    }
     let carry: Buffer = Buffer.alloc(0)
     let attempts = 0
     /** The state last reported, so a steady link does not rewrite the row every
      *  three seconds. */
-    let reported: string | null = req.resume ? null : 'detached'
+    let reported: string | null = req.resume ? null : 'detached\u0000'
     let signalled = false
     /** Set when this pass knows there is more to read: poll again at once
      *  rather than at the next tick. A job producing megabytes drains at
@@ -339,14 +369,46 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
     // smoothing-over B2 refused.
     const declaredReboot = req.reboot === true
     const looksLikeReboot = declaredReboot || restartsTheMachine(handle.command)
-    /** The boot id the reboot step printed before it went down, scraped from
-     *  the output as it arrives. Null until the step has said it. */
-    let bootIdBefore: string | null = null
-    const deadline = handle.launchedAt + req.timeoutMs
+    /**
+     * The boot id the reboot step printed before it went down, scraped from the
+     * output as it arrives — and kept on the HANDLE, so it survives this
+     * process. A reclaim reads it back from the row; without that, every
+     * reboot step watched across a restart would come back `unverifiable`.
+     */
+    let bootIdBefore: string | null = handle.bootIdBefore ?? null
+    /**
+     * The host has stopped answering at least once since this watch began.
+     *
+     * The discriminator between "it has not gone down yet" and "it never went
+     * down", which the boot id alone cannot supply: during the seconds between
+     * `systemctl reboot` returning 0 and sshd stopping, the host is up and its
+     * boot id is unchanged — exactly what a reboot that was swallowed looks
+     * like. A RECLAIM starts true: the gap in observation is itself the
+     * silence, and the machine had every opportunity to go and come back while
+     * nobody was watching, so the boot id is both the only evidence and enough.
+     */
+    let sawSilence = req.resume !== undefined
+    /**
+     * A reclaimed step's clock starts when THIS instance picked it up.
+     *
+     * `launchedAt` is when the command started, which for a job reclaimed after
+     * a weekend is long past every deadline — so a deadline measured from it
+     * fires on the first poll after the reclaim and sends SIGTERM to a job that
+     * is running perfectly well, as its new watcher's opening move. A timeout
+     * is a statement about how long WE are prepared to wait, and this watcher
+     * has waited none of it.
+     */
+    const deadline = (req.resume !== undefined ? now() : handle.launchedAt) + req.timeoutMs
 
+    // Deduped on the state AND the sentence beside it: two different reasons to
+    // be `rebooting` — "it has been asked and is still answering" and "it has
+    // stopped answering, which is what we wanted" — are different facts about
+    // the host, and a dedupe on the state alone would leave the first one on
+    // the row for the whole of the second.
     const say = (state: 'running' | 'detached' | 'rebooting' | 'foreign', error?: string): void => {
-      if (reported === state) return
-      reported = state
+      const key = `${state}\u0000${error ?? ''}`
+      if (reported === key) return
+      reported = key
       req.onState?.({ state, error })
     }
     const persist = (): void => req.onState?.({ detached: { ...handle } })
@@ -411,6 +473,7 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
           looksLikeReboot ? 'rebooting' : 'detached',
           looksLikeReboot ? `${JOB_REBOOTING_NOTE}${r.error ? ` (${r.error})` : ''}` : r.error
         )
+        sawSilence = true
         // A DECLARED reboot is the one case where "not answering" has a
         // deadline, because it is the one case where we asked for the silence
         // and therefore know roughly how long it should last. An ordinary
@@ -439,7 +502,13 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
         // no second chance to read what it printed on the way down — and the
         // boot id it printed there is the only evidence available from here
         // that it really restarted rather than merely dropped the connection.
-        if (declaredReboot) bootIdBefore = parseRebootBootId(poll.text) ?? bootIdBefore
+        if (declaredReboot) {
+          const seen = parseRebootBootId(poll.text)
+          if (seen !== null && seen !== bootIdBefore) {
+            bootIdBefore = seen
+            handle.bootIdBefore = seen
+          }
+        }
       }
       if (poll.sent > 0) {
         handle.readOffset += poll.sent
@@ -456,45 +525,63 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
       if (verdict.foreign) say('foreign', JOB_INSTANCE_NOTE)
 
       switch (verdict.phase) {
-        case 'finished': {
+        // ONE BLOCK FOR BOTH, and the branch inside it is on `declaredReboot`
+        // rather than on the phase. That is the fix for the defect that made
+        // item 17 unreachable in production: `rebooted` used to mean "the
+        // wrapper vanished without an exit status", which on a REAL reboot
+        // almost never happens — `systemctl reboot` returns 0 immediately and
+        // the wrapper records that 0 while systemd is still stopping units, so
+        // the first poll after the host came back read `rc=0`, called it
+        // `finished`, reaped, and reported success. A host that came back with
+        // eleven failed units, or that never rebooted at all because something
+        // swallowed the request, was reported as a clean reboot. The classifier
+        // now sends a declared reboot here whatever `rc` says; this block
+        // checks the declaration and not the phase, so neither half can be
+        // fixed into being wrong again on its own.
+        case 'finished':
+        case 'rebooted': {
           // Drain before answering. `rc` is read before the output on the host,
           // so a poll that reports it has already read everything the command
           // wrote — but the WINDOW is capped, so there may be more than one
           // poll's worth of it waiting. Ending here would truncate the tail of
-          // the run, which is exactly where the answer to "did it work" is.
+          // the run, which is exactly where the answer to "did it work" is —
+          // and, on a reboot step, where the boot id is.
           if (poll.size > handle.readOffset) {
             immediate = true
             continue
           }
-          if (!verdict.foreign) await reap(req, handle)
-          return {
-            ok: true,
-            code: poll.rc,
-            // Everything the command wrote came back on one stream, because the
-            // wrapper redirects stderr into stdout: that is what keeps the two
-            // in ORDER, which on an apt run is the difference between a
-            // readable log and two shuffled halves. The cost is that the
-            // runner's classifier cannot look at stderr alone, so it is told to
-            // classify from the merged tail instead. `missing-command` and exit
-            // 126 still resolve; the "permission denied and no stdout" rule
-            // cannot, because there is no separate stdout to be empty.
-            mergedOutput: true,
-            detachedHandle: verdict.foreign ? { ...handle } : null
+
+          if (!declaredReboot) {
+            if (!verdict.foreign) await reap(req, handle)
+            return {
+              ok: true,
+              code: poll.rc,
+              // Everything the command wrote came back on one stream, because
+              // the wrapper redirects stderr into stdout: that is what keeps
+              // the two in ORDER, which on an apt run is the difference between
+              // a readable log and two shuffled halves. The cost is that the
+              // runner's classifier cannot look at stderr alone, so it is told
+              // to classify from the merged tail instead. `missing-command` and
+              // exit 126 still resolve; the "permission denied and no stdout"
+              // rule cannot, because there is no separate stdout to be empty.
+              mergedOutput: true,
+              detachedHandle: verdict.foreign ? { ...handle } : null
+            }
           }
-        }
-        case 'rebooted': {
-          // The machine did what it was told: the wrapper is gone, no exit
-          // status was ever written — because the kernel took the process with
-          // the rest of userspace — and the host is answering again, which the
-          // poll that produced this verdict has just proved.
-          //
-          // Drain first, exactly as `finished` and `orphaned` do: what the step
-          // printed on its way down includes the boot id this is about to be
-          // compared against.
-          if (poll.size > handle.readOffset) {
-            immediate = true
+
+          // A DECLARED REBOOT THAT HAS BEEN ACCEPTED BUT HAS NOT HAPPENED YET.
+          // The command exited 0, the host is still answering and its boot id
+          // has not changed — which is precisely what a reboot that was
+          // swallowed looks like, a few seconds too early. Verifying now would
+          // report "it never restarted" about a machine that is halfway
+          // through restarting: the old false success with its sign flipped.
+          // So: wait for it to go. A non-zero exit is not this case — the
+          // request itself was refused and there is nothing to wait for.
+          if (!sawSilence && poll.rc === 0 && now() <= deadline) {
+            say('rebooting', JOB_REBOOT_ACCEPTED_NOTE)
             continue
           }
+
           if (!verdict.foreign) await reap(req, handle)
           // NOW go and look. "The host answered" is not "the host is well", and
           // this is the point item 17 exists to add: a reboot step that stops
@@ -506,18 +593,24 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
             : { answered: false, bootId: null, uptimeSeconds: null, unitState: null, failed: null }
           const rv = verifyReboot(bootIdBefore, after)
           req.onOutput('out', `\n… ${rv.reason}\n`)
+          const stillTheirs = verdict.foreign ? { ...handle } : null
           if (rv.ok) {
-            return { ok: true, code: 0, mergedOutput: true, detachedHandle: null }
+            // `rc` where the wrapper recorded one, because a reboot step that
+            // exited 0 and a reboot step the kernel took mid-write are both
+            // successes here and the row should not invent a status for either.
+            return { ok: true, code: poll.rc ?? 0, mergedOutput: true, detachedHandle: stillTheirs }
           }
           return {
             ok: false,
-            code: null,
+            // Kept when there is one: on a reboot that was refused rather than
+            // performed, the exit status of the refusal is the useful half.
+            code: poll.rc,
             error: JOB_REBOOT_UNHEALTHY_ERROR(rv.reason),
             // `unhealthy` and not `unreachable`: the host is answering. See
             // JOB_OUTCOME_LABEL.
             finalOutcome: 'unhealthy',
             mergedOutput: true,
-            detachedHandle: null
+            detachedHandle: stillTheirs
           }
         }
         case 'orphaned': {
@@ -588,7 +681,12 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
         default: {
           // starting, or running.
           say('running')
-          if (poll.more || poll.size > handle.readOffset) {
+          // `size` against our own cursor, and nothing else. The parser used to
+          // offer a `more` hint alongside this, computed against the DEFAULT
+          // window rather than the one the poll was built with — so it was
+          // wrong for every caller that set `pollBytes` and redundant for the
+          // rest, since this check is the authority in both cases.
+          if (poll.size > handle.readOffset) {
             immediate = true
             continue
           }
@@ -597,9 +695,48 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
             // jobExec's rule, and it costs more here, where "still running"
             // means a real process that outlives this app. Signalled once, then
             // one more pass to collect whatever it printed on the way down.
+            //
+            // NOT FOR A FOREIGN MARKER. JOB_INSTANCE_NOTE argues that cancel is
+            // not gated on the instance, and that argument is about a person in
+            // front of the machine deciding to stop an upgrade. This is not
+            // that: it is one ShellPilot's clock automatically killing another
+            // ShellPilot's job, on a deadline the other one never agreed to and
+            // measured from a launch it may have watched for hours. So it is
+            // reported and left alone.
+            if (verdict.foreign) {
+              return {
+                ok: false,
+                code: null,
+                error:
+                  `Command timed out after ${req.timeoutMs}ms. Nothing was signalled: this job ` +
+                  'was launched by a different ShellPilot instance, and an automatic timeout is ' +
+                  'not a reason to stop somebody else’s run. It may still be going; its marker ' +
+                  `directory is at ${handle.dir}.`,
+                finalOutcome: 'timeout',
+                mergedOutput: true,
+                detachedHandle: { ...handle }
+              }
+            }
             if (!signalled) {
+              const sent = await deps.run(req.cfg, buildJobSignal({ dir: handle.dir }), pollTimeoutMs)
+              const outcome = sent.ok ? parseJobSignal(sent.stdout) : 'unknown'
+              // THE HOST REFUSED, and the refusal is the feature: with no
+              // usable `ps` the recorded pid cannot be shown to still be this
+              // job, and `kill -TERM -- -$pid` on a recycled pid that leads its
+              // own group would stop a stranger's processes. Saying "SIGTERM
+              // was sent" here would be false, and the next poll would report
+              // the job as still running with no explanation for it.
+              if (outcome === 'unverified') {
+                return {
+                  ok: false,
+                  code: null,
+                  error: JOB_SIGNAL_UNVERIFIED_ERROR(req.timeoutMs, handle.dir),
+                  finalOutcome: 'timeout',
+                  mergedOutput: true,
+                  detachedHandle: { ...handle }
+                }
+              }
               signalled = true
-              await deps.run(req.cfg, buildJobSignal({ dir: handle.dir }), pollTimeoutMs)
               immediate = true
               continue
             }
