@@ -67,7 +67,12 @@ import type {
   AccessRunResult,
   AccessStagingFailure
 } from '../shared/access'
-import { ACCESS_ROLLBACK_SECONDS, planAccessChange } from '../shared/access'
+import {
+  ACCESS_ROLLBACK_SECONDS,
+  ACCESS_WRITE_DISABLED_REASON,
+  ACCESS_WRITE_ENABLED,
+  planAccessChange
+} from '../shared/access'
 import type { JobHostCapabilityReport, JobRunRequest } from '../shared/jobs'
 import { JOB_DETACHED_STALL_GRACE_MS, jobCohorts, restartsTheMachine } from '../shared/jobs'
 import type { GateHost } from '../shared/patch'
@@ -1012,6 +1017,13 @@ function deriveAccessPlan(
 }
 
 ipcMain.handle('access:plan', (_e, req: Omit<AccessRunRequest, 'token' | 'confirmedCommand'>): AccessChangePreview => {
+  // THE GATE, before anything is derived and before the module switch is even
+  // consulted. See ACCESS_WRITE_ENABLED in shared/access.ts for the argument.
+  //
+  // Here rather than only in the renderer because the renderer hiding a button
+  // is a courtesy and this is the boundary: it covers a renderer that lies
+  // about what it can do, a resumed job, and whatever calls this next.
+  if (!ACCESS_WRITE_ENABLED) throw new Error(ACCESS_WRITE_DISABLED_REASON)
   if (!accessModuleOn) throw new Error('Key and access management is switched off in Settings.')
   const now = Date.now()
   const { plan, refusals } = deriveAccessPlan(req, now)
@@ -1030,6 +1042,10 @@ ipcMain.handle('access:plan', (_e, req: Omit<AccessRunRequest, 'token' | 'confir
 })
 
 ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRunResult> => {
+  // The same gate, first, and not merely because `access:plan` already has one:
+  // a caller that never asked for a plan can reach this channel directly, and
+  // this is the one that writes.
+  if (!ACCESS_WRITE_ENABLED) throw new Error(ACCESS_WRITE_DISABLED_REASON)
   if (!accessModuleOn) throw new Error('Key and access management is switched off in Settings.')
 
   const at = Number(req.token)

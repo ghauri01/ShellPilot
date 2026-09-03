@@ -2172,6 +2172,68 @@ export function accessToFacts(access: HostAccess): Record<string, string> {
 //    the connecting account, against files it can already write, and a host
 //    where that is not enough is a host this should refuse rather than force.
 
+// ---------------------------------------------------------------------------
+// THE GATE
+// ---------------------------------------------------------------------------
+//
+// The write half is switched off in this build. The read half ships without
+// it.
+//
+// WHY, in one sentence: adversarial review found five blockers in the plan
+// path, and every one of them sits behind a promise of safety rather than in
+// front of it — which makes shipping the buttons worse than shipping nothing.
+// The dead-man's rollback in rule 2 is the whole reason a key change is offered
+// at all, and A ROLLBACK THAT CANNOT BE RELIED ON IS WORSE THAN NO ROLLBACK,
+// because the operator is told they are safe. Somebody with no rollback tries
+// one host and keeps a terminal open. Somebody who believes they have one
+// selects twelve.
+//
+// WHAT IS NOT DONE HERE, and this part matters as much: nothing below is
+// deleted. `planAccessChange`, `buildStagedWrite`, `buildRevokeKeyCommand`,
+// `buildAddKeyCommand`, `accessDisarmCommand` and `AccessCommitter` all stay,
+// and so does every test they have. They are being fixed next, and those tests
+// are the written record of what is wrong with them. Deleting the code along
+// with the button would delete the evidence and the argument at the same time.
+//
+// HOW IT IS ENFORCED. Main checks this constant at the top of both
+// `access:plan` and `access:run`, before anything is derived — so it covers
+// every caller and not only the renderer. The panel reads the same constant to
+// decide whether to draw a button, and prints ACCESS_WRITE_DISABLED_REASON
+// where the button would have been, because a control that quietly vanished
+// reads as a feature that has not arrived rather than one that was withdrawn.
+// tests/accessWrite.test.ts fails if either half of that stops being true.
+export const ACCESS_WRITE_ENABLED = false
+
+/**
+ * What the panel says where the button would be. One source of words, so the
+ * renderer and anything else that has to explain this cannot drift apart.
+ */
+export const ACCESS_WRITE_DISABLED_REASON =
+  'Changing authorized keys is not enabled in this build. The safety net behind it — the host ' +
+  'restoring its own previous file if nothing confirms the change — is not yet dependable, and a ' +
+  'rollback that cannot be relied on is worse than no rollback at all, because it tells you that ' +
+  'you are safe. Reading is unaffected: nothing on this screen writes to any host.'
+
+/**
+ * What the write half will and will not be able to do when it is switched back
+ * on, said before anybody picks a target.
+ *
+ * Scope honesty, and it belongs in front of the feature rather than in a
+ * refusal after somebody has selected twelve hosts. "Revoke a key across the
+ * fleet" describes something broader than what this builds: the staged command
+ * resolves `$HOME/.ssh/authorized_keys` on the host, so it can only ever edit
+ * the account ShellPilot connects as — and rule 1 blocks it even there unless
+ * sshd will say which key the session is authenticated with, which is off by
+ * default.
+ */
+export const ACCESS_WRITE_SCOPE =
+  'Even once it is enabled it will only ever edit ~/.ssh/authorized_keys for the account ' +
+  'ShellPilot connects as on each host — not another account\u2019s file, and not any path sshd was ' +
+  'configured to read instead. On the account it connects as it also needs the host to report ' +
+  'which key this session authenticated with (sshd\u2019s ExposeAuthInfo, off by default); without ' +
+  'that it refuses, because nothing can prove the key being removed is not the one holding the ' +
+  'connection open.'
+
 /** How long the host waits for a disarm before putting the old file back.
  *
  *  Long enough for a person to try a real connection from a real terminal, and

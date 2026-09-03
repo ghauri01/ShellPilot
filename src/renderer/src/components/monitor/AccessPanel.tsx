@@ -5,6 +5,9 @@ import { clsx, duration } from '../../lib/format'
 import { sshHopsFor } from '../../lib/ssh'
 import {
   ACCESS_STATUS_HELP,
+  ACCESS_WRITE_DISABLED_REASON,
+  ACCESS_WRITE_ENABLED,
+  ACCESS_WRITE_SCOPE,
   KEY_PROBLEM_HELP,
   accessSource,
   summariseAccess,
@@ -367,10 +370,17 @@ export function AccessPanel({
   }, [collected])
 
   const unchecked = failed.length + never.length + stale.length
-  // The write half is gated by the module switch in main, which also decides
-  // whether the bridge has these methods at all. A build or an install where it
-  // is off shows no button rather than a button that fails.
-  const canWrite = bridgeHas(window.shellpilot?.fleet as Record<string, unknown> | undefined, 'accessPlan')
+  // GATED OFF in this build — see ACCESS_WRITE_ENABLED in shared/access.ts for
+  // the argument. The bridge check stays beside it because both have to be true
+  // and they fail for different reasons: the constant is a decision about this
+  // build, the bridge is a fact about this install.
+  //
+  // The button is not merely hidden. Main refuses `access:plan` and
+  // `access:run` outright, and the notice below says the buttons were withdrawn
+  // rather than leaving an operator to conclude they have not arrived.
+  const canWrite =
+    ACCESS_WRITE_ENABLED &&
+    bridgeHas(window.shellpilot?.fleet as Record<string, unknown> | undefined, 'accessPlan')
 
   return (
     <div className="bc-panel">
@@ -391,6 +401,17 @@ export function AccessPanel({
           <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
         </button>
       </div>
+
+      {/* Said once, at the top, before a target is chosen — because the point
+          of saying it is that nobody plans around a capability this does not
+          have. Both halves matter: that the write half is off, and what it will
+          and will not be able to do when it is back. */}
+      {!ACCESS_WRITE_ENABLED && (
+        <div className="s-desc" data-testid="write-gated">
+          <ShieldAlert size={12} /> <b>{ACCESS_WRITE_DISABLED_REASON}</b>{' '}
+          <span className="muted">{ACCESS_WRITE_SCOPE}</span>
+        </div>
+      )}
 
       {collected.length === 0 ? (
         <div className="s-desc">

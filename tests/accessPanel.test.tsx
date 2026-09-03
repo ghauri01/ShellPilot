@@ -7,6 +7,7 @@ import { stubBridge } from './setup/renderer'
 import { AccessPanel } from '../src/renderer/src/components/monitor/AccessPanel'
 import {
   ACCESS_STATUS_MARKER,
+  ACCESS_WRITE_ENABLED,
   parseAccessCollection,
   type HostAccess,
   type Sha256
@@ -93,11 +94,28 @@ const partial = (): HostAccess =>
 
 type Entry = { access?: HostAccess; at?: number; error?: string; errorAt?: number }
 
-function mount(servers: Server[], byId: Record<string, Entry>): void {
+/**
+ * `withWrite` puts `accessPlan`/`accessRun` on the bridge.
+ *
+ * Without it a "there is no revoke button" test proves only that this stub
+ * does not expose one — the panel's `canWrite` keys off the bridge — which is
+ * exactly the vacuity the gate test must not have.
+ */
+function mount(servers: Server[], byId: Record<string, Entry>, withWrite = false): void {
   stubBridge({
     fleet: {
       access: async (id: string) => byId[id] ?? { intervalMs: 3_600_000 },
-      sampleNow: async () => undefined
+      sampleNow: async () => undefined,
+      ...(withWrite
+        ? {
+            accessPlan: async () => {
+              throw new Error('the gate let a plan through')
+            },
+            accessRun: async () => {
+              throw new Error('the gate let a run through')
+            }
+          }
+        : {})
     }
   })
   render(<AccessPanel servers={servers} />)
@@ -296,6 +314,42 @@ describe('the honesty banner', () => {
     expect((await screen.findByTestId('not-an-answer')).textContent).toContain(
       'not a complete picture'
     )
+  })
+})
+
+describe('the write half, which this build does not have', () => {
+  it('offers no way to change a key even when the bridge has the methods', async () => {
+    // With the write methods ON the bridge, so this proves the gate rather
+    // than proving the stub is missing something.
+    mount([server('a', 'web-1')], { a: { access: complete(), at: Date.now() } }, true)
+    await screen.findByText(ED25519_FP)
+    expect(screen.queryByTestId(`revoke-${ED25519_FP}`)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Revoke/ })).toBeNull()
+  })
+
+  it('says so, and says why, rather than just not being there', async () => {
+    // A button that quietly vanished is read as a feature that has not arrived.
+    // This one was withdrawn, and the reason is the thing an operator most
+    // needs: the rollback behind it cannot be relied on yet, and a rollback
+    // that cannot be relied on is worse than none — it tells you that you are
+    // safe.
+    mount([server('a', 'web-1')], { a: { access: complete(), at: Date.now() } })
+    const note = await screen.findByTestId('write-gated')
+    expect(note.textContent).toMatch(/not enabled in this build/i)
+    expect(note.textContent).toMatch(/roll ?back/i)
+  })
+
+  it('says what the write half would edit, before any target is chosen', async () => {
+    // Scope honesty. Even re-enabled it can only edit the connecting account's
+    // own ~/.ssh/authorized_keys, and it needs sshd to report the session key
+    // before it will touch that account at all. Someone who reads "revoke a
+    // key across the fleet" and finds out afterwards that it meant one account
+    // per host has been misled by the feature's own name.
+    mount([server('a', 'web-1')], { a: { access: complete(), at: Date.now() } })
+    const note = await screen.findByTestId('write-gated')
+    expect(note.textContent).toContain('authorized_keys')
+    expect(note.textContent).toMatch(/account ShellPilot connects as|connecting account/i)
+    expect(note.textContent).toMatch(/ExposeAuthInfo|which key this session/i)
   })
 })
 
@@ -521,15 +575,13 @@ const report = (outcome: string, detail: string): Record<string, unknown> => ({
   at: 1
 })
 
-describe('revoking a key', () => {
-  it('shows no revoke control at all when the bridge cannot write', async () => {
-    // The module gate lives in main. A build where it is off must show no
-    // button rather than one that fails when pressed.
-    mount([server('a', 'web-1')], { a: { access: complete(), at: 1 } })
-    await screen.findByText(ED25519_FP)
-    expect(screen.queryByTestId(`revoke-${ED25519_FP}`)).toBeNull()
-  })
-
+// The confirm dialog these drive is gated off in this build — see
+// ACCESS_WRITE_ENABLED in shared/access.ts. They are KEPT, not deleted: they are
+// the record of what the write half's renderer is supposed to do, and the task
+// that fixes the five blockers in the plan path needs them. `skipIf` rather
+// than `skip` so they come back on their own the moment the gate is flipped,
+// which is when somebody has to look at them.
+describe.skipIf(!ACCESS_WRITE_ENABLED)('revoking a key', () => {
   it('asks before anything is written, and says the change is staged rather than applied', async () => {
     mountWrite()
     await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))

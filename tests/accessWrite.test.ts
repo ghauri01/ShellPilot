@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
   ACCESS_ROLLBACK_SECONDS,
+  ACCESS_WRITE_DISABLED_REASON,
+  ACCESS_WRITE_ENABLED,
   ACCESS_STATUS_MARKER,
   accessCommitMarker,
   accessDisarmCommand,
@@ -20,6 +22,60 @@ import {
 } from '../src/shared/access'
 import { JOB_KINDS } from '../src/shared/jobs'
 import type { JobSpec, JobTargetRef } from '../src/shared/jobs'
+
+describe('the gate that keeps the write half out of this build', () => {
+  // GATED OFF, deliberately, and this block is what makes that a property
+  // rather than an accident. Adversarial review found five blockers in the plan
+  // path and concluded it must not reach an operator testing on a real estate;
+  // the read half is close and safe to run today, so the write half is switched
+  // off at one named constant and the read half ships.
+  //
+  // Everything BELOW this block still runs. The builders, the staged write, the
+  // rollback and the judgement are all still tested against real files — they
+  // are being fixed next, and these tests are the record of what is wrong with
+  // them. Deleting them along with the button would delete the evidence.
+
+  it('is off, and turning it on is a decision somebody makes here', () => {
+    expect(
+      ACCESS_WRITE_ENABLED,
+      'ACCESS_WRITE_ENABLED is true. Flipping it re-exposes access:plan and ' +
+        'access:run to the UI. The five blockers adversarial review found in ' +
+        'the plan path have to be fixed and this test deliberately rewritten ' +
+        'first — the point of the constant is that the change cannot happen ' +
+        'as a side effect of something else.'
+    ).toBe(false)
+    // A reason an operator can read, not a boolean on its own. "The buttons
+    // vanished" is not an explanation, and an operator who is told nothing
+    // assumes the feature is coming rather than that it was withdrawn.
+    expect(ACCESS_WRITE_DISABLED_REASON.length).toBeGreaterThan(80)
+    expect(ACCESS_WRITE_DISABLED_REASON).toMatch(/roll ?back/i)
+  })
+
+  it('is checked in main, in both handlers, before anything is derived', async () => {
+    // THE guard that makes this real. The renderer hiding a button is a
+    // courtesy; main refusing is the gate, and it covers every caller — a
+    // renderer that lies about what it can do, a resumed job, a future bridge.
+    //
+    // Asserted against the source because the alternative is asserting against
+    // an Electron main process, and a check that is deleted from main while the
+    // constant stays false is exactly the regression this exists to catch.
+    const main = await readFile(resolve(__dirname, '..', 'src/main/index.ts'), 'utf8')
+    for (const channel of ['access:plan', 'access:run']) {
+      const at = main.indexOf(`ipcMain.handle('${channel}'`)
+      expect(at, channel).toBeGreaterThan(-1)
+      // Within the first few lines of the handler, before any plan is derived.
+      const head = main.slice(at, at + 900)
+      expect(head, channel).toContain('ACCESS_WRITE_ENABLED')
+      const body = main.slice(at)
+      const gate = body.indexOf('ACCESS_WRITE_ENABLED')
+      const derive = body.indexOf('deriveAccessPlan')
+      expect(
+        derive === -1 || gate < derive,
+        `${channel} derives a plan before it checks the gate`
+      ).toBe(true)
+    }
+  })
+})
 
 // The write half — roadmap item 23, stage 2.
 //
