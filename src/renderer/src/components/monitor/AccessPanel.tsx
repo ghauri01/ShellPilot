@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { KeyRound, RefreshCw, ShieldAlert } from 'lucide-react'
 import { bridgeHas } from '../../lib/bridge'
 import { clsx } from '../../lib/format'
+import { sshHopsFor } from '../../lib/ssh'
 import {
   ACCESS_STATUS_HELP,
   KEY_PROBLEM_HELP,
@@ -191,7 +192,35 @@ export function AccessPanel({
         if (!access) continue
         for (const a of access.accounts) {
           if ((a.keys ?? []).some((k) => k.fingerprint === fingerprint)) {
-            out.push({ serverId: s.id, serverName: s.name, user: a.user, cfg: s })
+            out.push({
+              serverId: s.id,
+              serverName: s.name,
+              user: a.user,
+              // The same shape broadcast and patch send, and for the same
+              // reason: no secret is carried here. Main resolves them per host
+              // at the moment it connects, so a vault unlocked or a credential
+              // edited since this panel rendered is honoured rather than baked
+              // in. Handing over the `Server` row from the store instead
+              // typechecks — `cfg` is `unknown` on the wire — and main would
+              // open nothing, on the one operation where "nothing happened" is
+              // reported as a host that refused the change.
+              cfg: {
+                sessionId: `access-${s.id}`,
+                cols: 80,
+                rows: 24,
+                serverId: s.id,
+                host: s.host,
+                port: s.port,
+                username: s.username,
+                auth: s.auth === 'password' || s.auth === 'agent' ? s.auth : 'key',
+                hops: sshHopsFor(s),
+                // Carried where broadcast does not, because the confirmation
+                // opens a SECOND connection: one that came up over the tunnel
+                // and one that did not would be two different hosts as far as
+                // this rule is concerned.
+                vpnProfileId: s.vpnProfileId ?? undefined
+              }
+            })
           }
         }
       }

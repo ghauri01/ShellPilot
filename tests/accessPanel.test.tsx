@@ -418,6 +418,30 @@ describe('revoking a key', () => {
     expect(sent!.fingerprint).toBe(ED25519_FP)
   })
 
+  it('sends a connection main can actually dial, and no secret in it', async () => {
+    // The first version of this panel handed main the `Server` row from the
+    // store. It typechecks — `cfg` is `unknown` on the wire — and main would
+    // have opened nothing, on the one operation where "nothing happened" is
+    // reported as a host that refused the change.
+    let sent: Record<string, unknown> | null = null
+    mountWrite({ onRun: (r) => (sent = r) })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    await userEvent.click(await screen.findByTestId('revoke-go'))
+    await waitFor(() => expect(sent).not.toBeNull())
+
+    const target = (sent!.targets as { user: string; cfg: Record<string, unknown> }[])[0]
+    expect(target.user).toBe('ops')
+    expect(target.cfg.host).toBe('a.example.internal')
+    expect(target.cfg.port).toBe(22)
+    expect(target.cfg.username).toBe('ops')
+    expect(target.cfg.serverId).toBe('a')
+    // Never a credential. Main resolves them per host at the moment it
+    // connects, so a vault unlocked since this rendered is honoured.
+    expect(Object.keys(target.cfg)).not.toContain('password')
+    expect(Object.keys(target.cfg)).not.toContain('privateKey')
+    expect(Object.keys(target.cfg)).not.toContain('passphrase')
+  })
+
   it('names every host it will not touch, in the same dialog as the ones it will', async () => {
     // A host quietly left out of a fleet-wide revocation is the exact failure
     // the read half exists to prevent.
