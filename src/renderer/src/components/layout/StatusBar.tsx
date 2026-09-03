@@ -2,7 +2,7 @@ import { GitBranch, Wifi, Bell, Cpu, AlertTriangle } from 'lucide-react'
 import { useApp } from '../../store/app'
 import { LABEL, chipValue, useAlerts } from '../../store/alerts'
 import { useFleetStatus, samplerWarning } from '../../store/fleetStatus'
-import { openSettings } from '../../store/nav'
+import { openMonitor, openSettings } from '../../store/nav'
 import { colorVar } from './WorkspaceSwitcher'
 import { UpdateIndicator } from './UpdateIndicator'
 
@@ -47,8 +47,12 @@ export function StatusBar(): React.JSX.Element {
             // showed a load average of 3.2 per core as "3%" — a wrong number
             // rather than an ugly one.
             .map((a) => `${a.serverName}: ${LABEL[a.kind]}${chipValue(a)}${a.detail ? ` — ${a.detail}` : ''}`)
-            .join('\n')}\n\nClick to open the Fleet Monitor.`}
-          onClick={() => setActivity('monitor')}
+            .join('\n')}\n\nClick to open the alert inbox.`}
+          // The inbox, not merely the page it is on. The chip is the pointer to
+          // it — a pointer that opened the Fleet Monitor on whatever tab was
+          // last used would be a chip saying "it is in here somewhere", which
+          // is the shape of the problem, not the fix.
+          onClick={() => openMonitor('alerts')}
         >
           <AlertTriangle size={12} />
           <span>

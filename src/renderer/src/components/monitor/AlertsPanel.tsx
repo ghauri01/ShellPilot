@@ -1,0 +1,203 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, RefreshCw } from 'lucide-react'
+import { useApp } from '../../store/app'
+import { useFleetStatus } from '../../store/fleetStatus'
+import { LABEL, chipValue, useAlerts } from '../../store/alerts'
+import { alertCoverageText } from '../settings/alertCoverage'
+import { openSettings } from '../../store/nav'
+import { clsx } from '../../lib/format'
+import type { StoredAlertRow } from '../../../../shared/webhook'
+
+// The alert inbox — roadmap item 19b.
+//
+// The roadmap asks for "an alert inbox with a history rather than transient
+// toasts", and names the reason: "a disk alert that fires forty times overnight
+// gets the whole feature muted, which is worse than not shipping it." Flap
+// damping is what stops the forty; this is what makes the damping affordable.
+// A feature that goes quiet on purpose has to have somewhere the quiet parts
+// are still written down, or "we damped it" is indistinguishable from "we lost
+// it" — which is the same objection the `damped: true` flag on the webhook
+// answers for an endpoint.
+//
+// Everything here is READ from the durable log the store already writes. There
+// is no second source of truth, no in-memory list of "recent alerts" that a
+// restart empties, and no computation: a row is rendered as it was recorded,
+// having been whitelisted twice on the way — once when the renderer decided it
+// and once by main on the way back out.
+
+/** How much of the log to show. The same 500 the store hydrates from, so the
+ *  inbox and the suppression state are looking at the same rows — a history
+ *  that showed less than the thing deciding whether to speak would be a screen
+ *  you could not use to explain the silence. */
+const LIMIT = 500
+
+/** How each recorded event reads in a list. `stood-down` is the one that is not
+ *  self-explanatory, and it is the one that most needs saying: it is what gets
+ *  written when alerting is switched off with something outstanding, and it is
+ *  deliberately not an all-clear. */
+const EVENT_WORD: Record<StoredAlertRow['event'], string> = {
+  raised: 'Raised',
+  resolved: 'Cleared',
+  'stood-down': 'Stood down'
+}
+
+const EVENT_CLASS: Record<StoredAlertRow['event'], string> = {
+  raised: 'warn',
+  resolved: 'ok',
+  'stood-down': 'faint'
+}
+
+/**
+ * A row's own words for what it was about.
+ *
+ * The numeric kinds have a value and a threshold; the rest have a detail. A row
+ * with neither says nothing rather than inventing a zero — the rule the whole
+ * item runs on, at the last surface that could break it.
+ */
+export function rowSubject(row: StoredAlertRow): string {
+  if (row.detail) return row.detail
+  if (row.value === undefined) return ''
+  return row.threshold === undefined ? String(row.value) : `${row.value} of ${row.threshold}`
+}
+
+function when(at: number, now: number): string {
+  const mins = Math.floor((now - at) / 60_000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours} h ago`
+  return new Date(at).toLocaleString()
+}
+
+export function AlertsPanel(): React.JSX.Element {
+  const active = useAlerts((s) => s.active)
+  const samplerStatus = useFleetStatus((s) => s.status)
+  const samplingEnabled = useApp((s) => s.settings.fleetSamplingEnabled)
+  const alertsEnabled = useApp((s) => s.settings.resourceAlertsEnabled)
+  const [rows, setRows] = useState<StoredAlertRow[] | null>(null)
+  const [reading, setReading] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  const read = useCallback(() => {
+    const history = window.shellpilot?.alerts?.history
+    if (!history) {
+      setFailed(true)
+      return
+    }
+    setReading(true)
+    void Promise.resolve(history(LIMIT))
+      .then((r) => {
+        setRows(Array.isArray(r) ? r : [])
+        setFailed(false)
+      })
+      // An unreadable log is said out loud rather than rendered as an empty
+      // history. "Nothing has happened" and "we could not look" are the two
+      // things this whole item refuses to conflate.
+      .catch(() => setFailed(true))
+      .then(() => setReading(false))
+  }, [])
+
+  // Re-read whenever something is raised or cleared, so the list does not sit
+  // one incident behind the chip pointing at it.
+  const activeCount = Object.keys(active).length
+  useEffect(() => {
+    read()
+  }, [read, activeCount])
+
+  const now = Date.now()
+  const outstanding = useMemo(
+    () => Object.values(active).sort((a, b) => a.since - b.since),
+    [active]
+  )
+
+  return (
+    <div className="bc-panel">
+      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+        <AlertTriangle size={14} className="faint" />
+        <b className="grow">Alerts</b>
+        <button className="btn ghost sm" onClick={read} disabled={reading}>
+          <RefreshCw size={12} /> Refresh
+        </button>
+      </div>
+
+      {/* The same sentence the settings screen shows, from the same function.
+          Not a paraphrase: alertCoverage.ts exists because this claim was once
+          made from the SWITCH rather than from whether the sampler is actually
+          looping, and a second copy of the wording here is how that comes back.
+          Every kind added by this item inherits it, because every kind added by
+          this item is raised from the same sampler. */}
+      <div className="s-desc">{alertCoverageText(samplerStatus?.running, samplingEnabled)}</div>
+      {!alertsEnabled && (
+        <div className="s-desc warn">
+          Resource alerts are switched off, so nothing new will be added below.{' '}
+          <button className="btn ghost sm" onClick={() => openSettings('monitoring')}>
+            Monitoring settings
+          </button>
+        </div>
+      )}
+
+      <div className="s-title" style={{ marginTop: 12 }}>
+        Outstanding
+      </div>
+      {outstanding.length === 0 ? (
+        <div className="faint" style={{ fontSize: 12 }}>
+          Nothing is outstanding right now.
+        </div>
+      ) : (
+        <table className="mini-table">
+          <tbody>
+            {outstanding.map((a) => (
+              <tr key={`${a.serverId}:${a.kind}`}>
+                <td className="warn">{LABEL[a.kind]}</td>
+                <td>{a.serverName}</td>
+                <td>
+                  {chipValue(a).trim()}
+                  {a.detail ? ` ${a.detail}` : ''}
+                </td>
+                <td className="faint">since {when(a.since, now)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="s-title" style={{ marginTop: 12 }}>
+        History
+      </div>
+      {failed ? (
+        <div className="warn" style={{ fontSize: 12 }}>
+          The alert log could not be read, so this history is not the history — it is nothing at
+          all. Anything raised while it is unreadable is still delivered.
+        </div>
+      ) : rows === null ? (
+        <div className="faint" style={{ fontSize: 12 }}>
+          Reading the alert log…
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="faint" style={{ fontSize: 12 }}>
+          No alert has been recorded yet.
+        </div>
+      ) : (
+        <table className="mini-table">
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={`${row.at}:${row.serverId}:${row.kind}:${i}`}>
+                <td className={clsx(EVENT_CLASS[row.event])}>{EVENT_WORD[row.event]}</td>
+                <td>{LABEL[row.kind]}</td>
+                <td>{row.serverName || row.serverId}</td>
+                <td className="faint">{rowSubject(row)}</td>
+                <td className="faint">{when(row.at, now)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {rows !== null && rows.length >= LIMIT && (
+        <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>
+          Showing the most recent {LIMIT}. Older events are kept for as long as the history store
+          keeps anything, and are not shown here.
+        </div>
+      )}
+    </div>
+  )
+}

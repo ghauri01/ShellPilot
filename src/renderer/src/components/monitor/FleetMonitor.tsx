@@ -16,6 +16,8 @@ import { fleetTotals, useFleet } from '../../store/fleet'
 import { bridgeHas } from '../../lib/bridge'
 import { bytes, clsx } from '../../lib/format'
 import type { MonitorGroup, Server } from '../../types'
+import { AlertsPanel } from './AlertsPanel'
+import { useAlerts } from '../../store/alerts'
 import { FleetHealth } from './FleetHealth'
 import { FleetSearch } from './FleetSearch'
 import { InventoryPanel } from './InventoryPanel'
@@ -24,7 +26,7 @@ import { PatchPanel } from './PatchPanel'
 import { LogTailPanel } from './LogTailPanel'
 import { CronPanel } from './CronPanel'
 import { MODULES, moduleEnabled, type ModuleDef, type ModuleId } from '../../../../shared/modules'
-import { openSettings } from '../../store/nav'
+import { openSettings, useNav } from '../../store/nav'
 import { DockerPanel } from '../docker/DockerPanel'
 import { KubernetesPanel } from '../kubernetes/KubernetesPanel'
 
@@ -218,6 +220,7 @@ export function FleetMonitor(): React.JSX.Element {
   // A disabled module is one more branch, not a new mechanism — the same way
   // the activity bar and viewbar already hide what does not apply.
   const modules = useApp((s) => s.settings.modules)
+  const alertCount = useAlerts((s) => Object.keys(s.active).length)
 
   // Sub-navigation, added after looking at the composite rather than at each
   // panel on its own.
@@ -232,15 +235,26 @@ export function FleetMonitor(): React.JSX.Element {
   // broadcast or an open log tail must survive looking at the overview — and
   // LogTailPanel stops its remote command on unmount, so switching tab would
   // otherwise kill a tail the user is in the middle of reading.
-  const [tab, setTab] = useState<'overview' | ModuleId>('overview')
+  //
+  // `alerts` is a FIXED tab beside Overview rather than a module, and that is a
+  // decision rather than an omission. Modules default OFF for every existing
+  // install — `backfillModules` guarantees an upgrade is not consent — so an
+  // alert inbox registered as one would be invisible to everybody who already
+  // has the app, while the status-bar chip went on pointing at this page. A
+  // pointer to a tab that is not there is worse than no pointer. Alerting is
+  // also not optional weight: the store, the durable log and the sampler are
+  // already paid for, and this tab is a table over rows that exist either way.
+  const tab = useNav((s) => s.monitorTab)
+  const setTab = useNav((s) => s.setMonitorTab)
   const tabs = useMemo<ModuleDef[]>(
     () => MODULES.filter((m) => moduleEnabled(modules, m.id)),
     [modules]
   )
   // A module switched off while its tab is open would otherwise leave the page
   // blank with no way back.
-  const activeTab = tab === 'overview' || tabs.some((t) => t.id === tab) ? tab : 'overview'
-  const show = (id: 'overview' | ModuleId): React.CSSProperties | undefined =>
+  const activeTab =
+    tab === 'overview' || tab === 'alerts' || tabs.some((t) => t.id === tab) ? tab : 'overview'
+  const show = (id: 'overview' | 'alerts' | ModuleId): React.CSSProperties | undefined =>
     activeTab === id ? undefined : { display: 'none' }
   const groups = useWorkspaceMonitorGroups()
   const hosts = useFleet((s) => s.hosts)
@@ -331,14 +345,27 @@ export function FleetMonitor(): React.JSX.Element {
         </div>
       )}
 
-      {tabs.length > 0 && (
-        <div className="segment monitor-tabs">
-          <button
-            className={clsx('seg-btn', activeTab === 'overview' && 'active')}
-            onClick={() => setTab('overview')}
-          >
-            Overview
-          </button>
+      {/* Always rendered, where it used to appear only once a module was on.
+          Overview and Alerts are both here whatever the module state is, and a
+          bar that vanished would take the inbox with it. */}
+      <div className="segment monitor-tabs">
+        <button
+          className={clsx('seg-btn', activeTab === 'overview' && 'active')}
+          onClick={() => setTab('overview')}
+        >
+          Overview
+        </button>
+        <button
+          className={clsx('seg-btn', activeTab === 'alerts' && 'active')}
+          onClick={() => setTab('alerts')}
+        >
+          Alerts
+          {/* The count, so the tab says whether it is worth opening. Only when
+              there is one: a permanent "0" trains people to stop reading it. */}
+          {alertCount > 0 && <span className="chip danger" style={{ marginLeft: 6 }}>{alertCount}</span>}
+        </button>
+        {tabs.length > 0 && (
+          <>
           {tabs.map((m) => (
             <button
               key={m.id}
@@ -348,8 +375,17 @@ export function FleetMonitor(): React.JSX.Element {
               {m.label}
             </button>
           ))}
-        </div>
-      )}
+          </>
+        )}
+      </div>
+
+      {/* Mounted always and hidden with the rest, for the reason written at
+          `tab` above: the panel reads the durable log on mount, and a tab that
+          unmounted would re-read it on every visit while the chip that sent you
+          here already knew the answer. */}
+      <div style={show('alerts')}>
+        <AlertsPanel />
+      </div>
 
       {moduleEnabled(modules, 'fleetSearch') && (
         <div style={show('fleetSearch')}>
