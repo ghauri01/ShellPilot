@@ -86,8 +86,12 @@ export interface HistoryWriter {
  */
 export function metricsToSamples(host: HostMetrics): Record<string, number> {
   return {
-    cpu: host.cpu,
-    memPct: host.memPct,
+    // A metric that could not be measured is not recorded at all. Writing a
+    // zero would put an idle CPU in the series for a sweep where the probe
+    // came back with nothing, and a chart cannot tell that apart from a host
+    // that was genuinely quiet.
+    ...(host.cpu === null ? {} : { cpu: host.cpu }),
+    ...(host.memPct === null ? {} : { memPct: host.memPct }),
     memUsed: host.memUsed,
     diskPct: host.diskPct,
     diskUsed: host.diskUsed,

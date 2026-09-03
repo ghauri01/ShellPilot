@@ -1353,8 +1353,15 @@ useApp.subscribe((s, prev) => {
  * how a caller says a thing could not be measured.
  */
 export interface ResourceSample {
-  cpu: number
-  ram: number
+  /** Null when the CPU could not be measured — no procfs, no `grep`, or a
+   *  compound exec that was cut short. Zero would be an idle machine, and an
+   *  idle reading resolves an alert for a host that is still pegged: two
+   *  `resolved` webhooks, the chip gone, `conditionHeld` cleared, and the
+   *  genuine re-cross counting as a fresh clean crossing towards a flap damp. */
+  cpu: number | null
+  /** Null when memory could not be measured. Same rule, same consequence: 0/0
+   *  is not 0%. */
+  ram: number | null
   /** Null when df reported no filesystem at all. A failed probe yields a
    *  diskPct of 0, and 0 here would read as an empty disk and post an
    *  all-clear for a host that may well still be full. */
@@ -1443,8 +1450,14 @@ export function checkResourceAlerts(serverId: string, serverName: string, s: Res
   // still held — the dead band that stranded disk chips at 82%. If you change
   // it, the `!over` branch in evaluate has to grow the disk case's handling.
   const line = clearLine('cpu', threshold)
-  evaluate(serverId, serverName, 'cpu', s.cpu, threshold, now, s.cpu >= line)
-  evaluate(serverId, serverName, 'ram', s.ram, threshold, now, s.ram >= line)
+  // Guarded exactly as disk, inode and load are. A null is neither raised nor
+  // resolved nor read as healthy, and there is now a null to pass.
+  if (s.cpu !== null) {
+    evaluate(serverId, serverName, 'cpu', s.cpu, threshold, now, s.cpu >= line)
+  }
+  if (s.ram !== null) {
+    evaluate(serverId, serverName, 'ram', s.ram, threshold, now, s.ram >= line)
+  }
   // Fixed at DISK_DANGER rather than the configurable threshold: this is the
   // number the Fleet Monitor colours a bar red at and lists a host under, and
   // an alert that fired at a different number from the screen it sends you to

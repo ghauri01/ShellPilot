@@ -99,14 +99,22 @@ export function useServerMetrics(server: Server, active: boolean): LiveMetrics {
             }
           }
           net.current = { rx: d.netRx, tx: d.netTx, t: now }
+          // A sweep that could not read the CPU or the memory holds the last
+          // number the gauge had rather than dropping it to zero. Zero is a
+          // perfectly idle machine, and a trough in the sparkline for a probe
+          // that failed is a picture of something that did not happen. What
+          // the reading actually was — including null — is on `host`, which is
+          // what every honest reader of this hook uses.
+          const cpu = d.cpu ?? s.cpu
+          const ram = d.memPct ?? s.ram
           ref.current = {
-            cpu: d.cpu,
-            ram: d.memPct,
+            cpu,
+            ram,
             disk: d.diskPct,
             rx,
             tx,
-            cpuHistory: push(s.cpuHistory, d.cpu),
-            ramHistory: push(s.ramHistory, d.memPct),
+            cpuHistory: push(s.cpuHistory, cpu),
+            ramHistory: push(s.ramHistory, ram),
             diskHistory: push(s.diskHistory, d.diskPct),
             rxHistory: push(s.rxHistory, rx),
             txHistory: push(s.txHistory, tx),
@@ -120,8 +128,11 @@ export function useServerMetrics(server: Server, active: boolean): LiveMetrics {
           // checkResourceAlerts. 0 would read as an empty disk and clear a
           // real alert.
           checkResourceAlerts(server.id, server.name, {
-            cpu: d.cpu,
-            ram: d.memPct,
+            // The raw reading, not the held display value above: the gauge may
+            // keep showing the last number it had, but nothing may raise or
+            // resolve on a measurement that did not happen.
+            cpu: d.cpu ?? null,
+            ram: d.memPct ?? null,
             disk: d.diskTotal > 0 ? d.diskPct : null,
             // Both already null when the host could not answer; passing them
             // through unchanged is the point. `?? null` covers a sample taken

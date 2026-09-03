@@ -147,8 +147,12 @@ export function FleetWatcher(): null {
       // 0, and passing that would resolve a disk alert on a host that is still
       // full — a false all-clear manufactured out of a measurement failure.
       checkResourceAlerts(e.serverId, name, {
-        cpu: e.host.cpu,
-        ram: e.host.memPct,
+        // Already null when the probe read no CPU section and no MemTotal, and
+        // passed through unchanged. `?? null` covers a sample taken by an older
+        // build of main, where the fields are a bare number and cannot be
+        // absent — which costs nothing and cannot turn a reading into one.
+        cpu: e.host.cpu ?? null,
+        ram: e.host.memPct ?? null,
         disk: e.host.diskTotal > 0 ? e.host.diskPct : null,
         // Null, not zero, for both. `df -i` is absent on some busybox
         // userlands and btrfs and zfs honestly report no inode table; a

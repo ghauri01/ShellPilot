@@ -36,7 +36,13 @@ export function MonitorView({
         ['CPU cores', `${m.host.cores} vCPU`],
         ['Memory', bytes(m.host.memTotal)],
         ['Disk', bytes(m.host.diskTotal)],
-        ['Used memory', `${bytes(m.host.memUsed)} (${m.host.memPct.toFixed(0)}%)`],
+        // "not measured" rather than a percentage nobody took. memUsed is
+        // still printed: it is what /proc/meminfo gave, and it is zero for the
+        // same honest reason the percentage is absent.
+        [
+          'Used memory',
+          `${bytes(m.host.memUsed)}${m.host.memPct === null ? '' : ` (${m.host.memPct.toFixed(0)}%)`}`
+        ],
         ['Used disk', `${bytes(m.host.diskUsed)} (${m.host.diskPct.toFixed(0)}%)`],
         ['Host / IP', server.host]
       ]

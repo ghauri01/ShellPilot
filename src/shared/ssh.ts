@@ -85,8 +85,20 @@ export interface SftpUploadSummary {
 }
 
 export interface HostMetrics {
-  cpu: number // percent 0-100
-  memPct: number
+  /**
+   * CPU usage as a percentage, or null when it could not be measured.
+   *
+   * Null, never zero, for the same reason inodePct and load1 are: the probe is
+   * one compound exec, and a host with no procfs, no `grep`, or a link that
+   * cut the stream short yields no CPU section at all. Zero there is a
+   * perfectly idle machine, and an idle reading on the alert path posts an
+   * all-clear for a host that is still pegged.
+   */
+  cpu: number | null // percent 0-100
+  /** Memory used as a percentage, or null when MemTotal could not be read. A
+   *  cgroup-only container and an unreadable /proc/meminfo both land here, and
+   *  0/0 is not 0%. */
+  memPct: number | null
   memUsed: number // bytes
   memTotal: number
   diskPct: number
