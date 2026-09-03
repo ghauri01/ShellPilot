@@ -667,20 +667,83 @@ export function buildAccessCommand(opts: AccessCollectOptions = {}): string {
     // the TOP of the file so an included file wins, and guessing which applies
     // from out here would be a guess. Two disagreeing directives report as
     // ambiguous, which is the truth.
+    //
+    // TRAVERSAL BEFORE EXISTENCE, the same discipline the account loop below
+    // applies to a home directory and did not used to apply here. `chmod 700
+    // /etc/ssh` is on plenty of hardened images; `[ -e /etc/ssh/sshd_config ]`
+    // through a directory this account cannot enter is FALSE, which is
+    // indistinguishable from the file not being there — and `absent` takes the
+    // parser's "no config, so the compiled-in default applies" branch straight
+    // to `keyFileIsDefault = true`. A permission bit reading as a clean bill of
+    // health, one directory up from where the same mistake was already guarded
+    // against.
+    //
+    // AND A FILE SKIPPED IS A FILE REPORTED. A 0600 root-only hardening
+    // drop-in is ordinary. Skipping it silently and then noting `ok` meant the
+    // parser saw zero AuthorizedKeysFile directives, concluded the default was
+    // in force, and called the inventory complete over a config it had read
+    // part of. The note is decided in a variable and emitted ONCE at the end so
+    // there is exactly one status for this source, whichever branch set it.
+    ...ifSudo(...findBin('sshd', 'SP_SSHDBIN')),
     'SP_SSHD=""',
-    '[ -r /etc/ssh/sshd_config ] && SP_SSHD=/etc/ssh/sshd_config',
-    'if [ -n "$SP_SSHD" ]; then',
+    'SP_SSHD_MISS=0',
+    'SP_SSHD_ST=ok',
+    'SP_SSHD_W="-"',
+    'SP_SSHD_D="-"',
+    'if [ ! -d /etc/ssh ]; then',
+    'SP_SSHD_ST=absent; SP_SSHD_D="this host has no /etc/ssh directory"',
+    'elif [ ! -x /etc/ssh ]; then',
+    'SP_SSHD_ST=denied; SP_SSHD_MISS=1',
+    'SP_SSHD_D="/etc/ssh exists and this account cannot enter it, so nothing about where sshd looks for keys was read"',
+    'elif [ -r /etc/ssh/sshd_config ]; then',
+    'SP_SSHD=/etc/ssh/sshd_config',
+    'SP_SSHD_D="$SP_SSHD"',
     'for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do',
-    '[ -f "$f" ] && [ -r "$f" ] || continue',
+    '[ -f "$f" ] || continue',
+    'if [ -r "$f" ]; then',
     `sp_val keyfile "$(grep -i -E '^[[:space:]]*AuthorizedKeysFile[[:space:]]' "$f" 2>/dev/null | head -1)"`,
     `sp_val keycmd "$(grep -i -E '^[[:space:]]*AuthorizedKeysCommand[[:space:]]' "$f" 2>/dev/null | head -1)"`,
-    'done',
-    'sp_note sshd-config ok - "$SP_SSHD"',
-    'elif [ -e /etc/ssh/sshd_config ]; then',
-    'sp_note sshd-config denied - "sshd_config exists and this account cannot read it"',
     'else',
-    'sp_note sshd-config absent - "this host has no /etc/ssh/sshd_config"',
+    'SP_SSHD_MISS=1',
     'fi',
+    'done',
+    // A drop-in directory that cannot be entered hides an unknown number of
+    // files, so it is the same finding as one unreadable file and worse.
+    '[ -d /etc/ssh/sshd_config.d ] && [ ! -x /etc/ssh/sshd_config.d ] && SP_SSHD_MISS=1',
+    'if [ "$SP_SSHD_MISS" = 1 ]; then',
+    'SP_SSHD_ST=partial',
+    'SP_SSHD_D="a file under /etc/ssh could not be read, so a directive moving the key file may not be in what was read"',
+    'fi',
+    'elif [ -e /etc/ssh/sshd_config ]; then',
+    'SP_SSHD_ST=denied; SP_SSHD_MISS=1',
+    'SP_SSHD_D="sshd_config exists and this account cannot read it"',
+    'else',
+    'SP_SSHD_ST=absent; SP_SSHD_D="this host has no /etc/ssh/sshd_config"',
+    'fi',
+    ...ifSudo(
+      // `sshd -T` prints the EFFECTIVE configuration, every Include resolved
+      // and every drop-in applied, so it settles in one call what a pile of
+      // file reads can only approximate.
+      //
+      // Asked for ONLY when the unprivileged read produced no directives at
+      // all — /etc/ssh untraversable, or sshd_config itself unreadable. Where
+      // some files WERE read, adding a second, differently-spelled copy of the
+      // same directive (`sshd -T` prints the resolved list, the file prints
+      // what somebody typed) would make the two disagree and report ambiguity
+      // where there is none, or force this to arbitrate between them — which
+      // is exactly what the "two disagreeing directives report as ambiguous"
+      // rule above refuses to do. A `partial` stays `partial`.
+      'if [ "$SP_SSHD_MISS" = 1 ] && [ -z "$SP_SSHD" ] && [ "$SP_SUDO" = 1 ] && [ -n "$SP_SSHDBIN" ]; then',
+      'SP_SSHD_T=$(sudo -n "$SP_SSHDBIN" -T 2>/dev/null || true)',
+      'if [ -n "$SP_SSHD_T" ]; then',
+      `sp_val keyfile "$(printf '%s\\n' "$SP_SSHD_T" | grep -i -E '^[[:space:]]*AuthorizedKeysFile[[:space:]]' | head -1)"`,
+      `sp_val keycmd "$(printf '%s\\n' "$SP_SSHD_T" | grep -i -E '^[[:space:]]*AuthorizedKeysCommand[[:space:]]' | head -1)"`,
+      'SP_SSHD_ST=ok; SP_SSHD_W=root',
+      'SP_SSHD_D="sshd -T reported the effective configuration"',
+      'fi',
+      'fi'
+    ),
+    'sp_note sshd-config "$SP_SSHD_ST" "$SP_SSHD_W" "$SP_SSHD_D"',
 
     // ---- lock state, once, with no hash in sight -------------------------
     // `passwd -S -a` rather than /etc/shadow. One call instead of one per
@@ -1555,9 +1618,16 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
     commands.length === 0 || /^none$/i.test(commands[0]) ? null : commands[0]
 
   // Whether sshd looks where this collector looked. `null` — could not tell —
-  // for both "the config was unreadable" and "the config disagrees with
-  // itself", because both mean the same thing to a reader: the inventory below
-  // may not be the whole story and nobody can say from here.
+  // for "the config was unreadable", for "part of the config was unreadable",
+  // and for "the config disagrees with itself", because all three mean the same
+  // thing to a reader: the inventory below may not be the whole story and
+  // nobody can say from here.
+  //
+  // Only `absent` and `ok` conclude anything, and that is stated as a rule
+  // rather than left to fall out of the branches: `partial` reaching the `ok`
+  // arm would answer "yes, the default is in force" from a config file this
+  // collection read some of, which is the finding this whole block exists to
+  // stop.
   let keyFileIsDefault: boolean | null = null
   if (source('sshd-config').status === 'absent') {
     // No sshd_config at all means sshd, if it is running, is on its

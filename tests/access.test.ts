@@ -919,7 +919,9 @@ function fakeHost(): FakeHost {
     collect: ({ sudo = false, hide = [] } = {}) => {
       let cmd = buildAccessCommand({ sudo })
         .replaceAll('/etc/passwd', `${root}/etc/passwd`)
-        .replaceAll('/etc/ssh/', `${root}/etc/ssh/`)
+        // Without the trailing slash too: the collector tests `/etc/ssh`
+        // itself for traversability before it looks inside it.
+        .replaceAll('/etc/ssh', `${root}/etc/ssh`)
       for (const name of hide) {
         cmd = cmd
           .replace(new RegExp(`for c in ${name}[^;]*;`), `for c in sp-absent-${name};`)
@@ -1118,6 +1120,70 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     const k = acct(parse(h.collect()), 'ops').keys![0]
     expect(k.comment).not.toMatch(/[‪-‮]/)
     expect(k.fingerprint).toBe(ED25519_FP)
+  })
+
+  // -------------------------------------------------------------------------
+  // sshd's config, and the two ways reading part of it read as reading all of it
+  // -------------------------------------------------------------------------
+
+  it('says partial, not ok, when a sshd_config.d drop-in cannot be read', () => {
+    // A 0600 root-only hardening drop-in is ordinary. The loop skipped it with
+    // `[ -f ] && [ -r ] || continue` and then noted `sshd-config ok`
+    // unconditionally, so the parser saw zero AuthorizedKeysFile directives,
+    // concluded `keyFileIsDefault = true`, and the collection called itself a
+    // complete picture of a host whose sshd config it had only partly read.
+    //
+    // The file skipped here is the one that matters: it moves the key file.
+    const h = host()
+    h.file('etc/ssh/sshd_config.d/10-hardening.conf', 'AuthorizedKeysFile /etc/ssh/keys/%u\n')
+    chmodSync(join(h.root, 'etc/ssh/sshd_config.d/10-hardening.conf'), 0o000)
+    const a = parse(h.collect())
+    expect(accessSource(a, 'sshd-config').status).toBe('partial')
+    // And nothing downstream may conclude the inventory is the whole story.
+    expect(a.keyFileIsDefault).toBeNull()
+    expect(summariseAccess(a).certain).toBe(false)
+  })
+
+  it('says denied, not absent, when /etc/ssh cannot be traversed', () => {
+    // `chmod 700 /etc/ssh` is on plenty of hardened images. `[ -e
+    // /etc/ssh/sshd_config ]` is then false through an untraversable directory
+    // — indistinguishable from the file not being there — so the collector
+    // reported `absent`, and `absent` took the parser's "no config, so the
+    // compiled-in default applies" branch to `keyFileIsDefault = true`.
+    //
+    // This is the traversal-before-existence discipline the file applies
+    // carefully to home directories at the account loop, and did not apply to
+    // /etc/ssh.
+    const h = host()
+    chmodSync(join(h.root, 'etc/ssh'), 0o000)
+    try {
+      const a = parse(h.collect())
+      expect(accessSource(a, 'sshd-config').status).toBe('denied')
+      expect(a.keyFileIsDefault).toBeNull()
+      expect(summariseAccess(a).certain).toBe(false)
+    } finally {
+      chmodSync(join(h.root, 'etc/ssh'), 0o755)
+    }
+  })
+
+  it('still says absent when /etc/ssh really is not there', () => {
+    // The other half. A host with no sshd config at all is a host running the
+    // compiled-in default, which IS where this collector looks — and calling
+    // that uncertain would be the wallpaper failure in the other direction.
+    const h = fakeHost()
+    trees.push(h.root)
+    h.file('etc/passwd', `ops:x:1000:1000:Ops:${h.root}/home/ops:/bin/bash\n`)
+    const a = parse(h.collect())
+    expect(accessSource(a, 'sshd-config').status).toBe('absent')
+    expect(a.keyFileIsDefault).toBe(true)
+  })
+
+  it('reads a drop-in it CAN read and still says ok', () => {
+    const h = host()
+    h.file('etc/ssh/sshd_config.d/10-cloudimg.conf', 'PasswordAuthentication no\n')
+    const a = parse(h.collect())
+    expect(accessSource(a, 'sshd-config').status).toBe('ok')
+    expect(a.keyFileIsDefault).toBe(true)
   })
 
   it('says no-tool rather than none when the login database has no reader', () => {
