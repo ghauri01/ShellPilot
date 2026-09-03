@@ -1,0 +1,783 @@
+import type { JobExecRequest, JobExecResult, JobExecutor } from './jobRunner'
+import type { JobDetachedHandle, JobHostCapability, JobHostCapabilityReport } from '../../shared/jobs'
+import {
+  JOB_INSTANCE_NOTE,
+  JOB_LAUNCH_FAILED_ERROR,
+  JOB_ORPHANED_ERROR,
+  JOB_POLL_BYTES,
+  JOB_POLL_MS,
+  JOB_RECONNECT_GLOBAL_MAX,
+  JOB_REBOOT_ACCEPTED_NOTE,
+  JOB_SIGNAL_UNVERIFIED_ERROR,
+  isJobMarkerDir,
+  parseJobSignal,
+  buildJobLaunch,
+  buildJobPoll,
+  buildJobProbe,
+  buildJobReap,
+  buildJobSignal,
+  classifyJobPoll,
+  jobMarkerDir,
+  nextRetryDelay,
+  parseJobLaunch,
+  parseJobPoll,
+  parseJobProbe,
+  restartsTheMachine,
+  JOB_REBOOT_TIMEOUT_ERROR,
+  JOB_REBOOT_UNHEALTHY_ERROR
+} from '../../shared/jobs'
+import {
+  JOB_REBOOTING_NOTE,
+  buildRebootVerify,
+  parseRebootBootId,
+  parseRebootVerify,
+  verifyReboot
+} from '../../shared/patch'
+
+// The detached executor — roadmap item B2.
+//
+// ---------------------------------------------------------------------------
+// The one thing this exists to fix
+// ---------------------------------------------------------------------------
+// On the attached path a dying socket means sshd sends SIGHUP, and `apt` and
+// `dpkg` do not ignore it. Nine minutes into an estate upgrade, closing the lid
+// is not lost output: it is DPKG INTERRUPTED ON EVERY HOST, with
+// `sudo dpkg --configure -a` waiting on each of them. That is not a smaller
+// version of the feature, it is a harmful one, and it is why item 17 —
+// patching, the flagship — cannot ship on B1.
+//
+// So the command is launched into its own session with `setsid`, the channel
+// that launched it closes immediately, and everything after that is a POLL of
+// five small marker files and one output file whose size is the command's own
+// business — see JOB_OUT_SIZE_NOTE. The link may drop, the laptop may sleep, ShellPilot may be
+// restarted; none of it reaches the process doing the work.
+//
+// What lands on the host, why that is defensible, and why `/tmp` is not in the
+// candidate list is written out at the head of shared/jobs.ts, next to the
+// builders that produce it. It is written THERE rather than here on purpose:
+// that file is what the test fake reads, so the promise and the thing that
+// keeps it cannot drift apart.
+//
+// ---------------------------------------------------------------------------
+// Degrade, do not pretend
+// ---------------------------------------------------------------------------
+// A host with no writable state directory, or without `setsid` and `nohup`,
+// cannot do this. It falls back to B1's attached executor FOR THAT HOST, and
+// the fallback is reported per host rather than logged: an estate where one
+// busybox appliance degrades is an estate where fourteen hosts survive the lid
+// closing and one does not, and an operator who is not told which is the one
+// has been handed a guarantee that is false for a machine they cannot name.
+
+/** What ssh.ts's `sshExec` gives back, restated so this module is testable
+ *  without a socket. A connection that never came up is `ok: false` with an
+ *  `error`, exactly as sshExec reports it — nothing here throws for that. */
+export interface JobRunResult {
+  ok: boolean
+  code: number | null
+  stdout: string
+  stderr: string
+  error?: string
+}
+
+export interface DetachedDeps {
+  /** One command, buffered result out. `sshExec` bound with secret resolution. */
+  run: (cfg: unknown, command: string, timeoutMs: number) => Promise<JobRunResult>
+  /**
+   * This ShellPilot's id, stable across restarts on this machine.
+   *
+   * Stable is the requirement, not unique-per-launch: a job launched before a
+   * restart must be OURS after it, or every reclaim would report `foreign` and
+   * refuse to reap its own markers.
+   */
+  instanceId: string
+  /** The attached executor, for hosts that cannot detach and for when the
+   *  Settings switch is off. */
+  attached: JobExecutor
+  /** The Settings switch. Read per launch, so flipping it never disturbs a job
+   *  already running. */
+  enabled: () => boolean
+  /**
+   * Whether credentials can be resolved at all right now.
+   *
+   * A locked vault must PARK the poll loop, the way fleetSampler parks its
+   * sweep — not error out. Erroring would end a job that is still running
+   * perfectly well on fifteen hosts, and would do it because of something local
+   * and temporary. See the park branch in `poll`.
+   */
+  vaultUnlocked?: () => boolean
+  now?: () => number
+  /** Injected so the test suite advances time rather than sleeping through it. */
+  sleep?: (ms: number) => Promise<void>
+  /** Injected so the backoff schedule is asserted rather than sampled. */
+  random?: () => number
+  /** Called whenever a host's capability is learned, for the Settings row. */
+  onCapability?: (report: JobHostCapabilityReport) => void
+  pollMs?: number
+  pollBytes?: number
+  /** How long one poll command may take before it counts as a dropped link. */
+  pollTimeoutMs?: number
+  /** How long the loop waits between checks while the vault is locked. */
+  parkMs?: number
+}
+
+const DEFAULT_POLL_TIMEOUT_MS = 30_000
+const DEFAULT_PARK_MS = 10_000
+
+/**
+ * A global cap on hosts dialling at once.
+ *
+ * The case is a laptop waking: fifteen detached jobs notice the dead link in
+ * the same millisecond and all reconnect to the same bastion. Per-host backoff
+ * does not help, because they are synchronised by the wake and not by each
+ * other. So the gate is across the app, not per job — one instance of this
+ * class per executor, which main constructs once.
+ */
+class Gate {
+  private inFlight = 0
+  private readonly waiting: (() => void)[] = []
+
+  constructor(private readonly max: number) {}
+
+  async acquire(): Promise<() => void> {
+    if (this.inFlight < this.max) {
+      this.inFlight++
+      return () => this.releaseOne()
+    }
+    await new Promise<void>((resolve) => this.waiting.push(resolve))
+    return () => this.releaseOne()
+  }
+
+  private releaseOne(): void {
+    const next = this.waiting.shift()
+    // Handed straight on rather than decremented and re-acquired: a released
+    // slot that went back on the counter would let a host which arrived later
+    // overtake one that has been waiting, and under a wake-up stampede that is
+    // the difference between fifteen hosts draining in order and fifteen hosts
+    // taking turns at random.
+    if (next) next()
+    else this.inFlight--
+  }
+
+  get busy(): number {
+    return this.inFlight
+  }
+}
+
+export interface DetachedExecutor extends JobExecutor {
+  /** What each host was found capable of. Drives the Settings row that names
+   *  the hosts running attached and why. */
+  capabilities(): JobHostCapabilityReport[]
+  /** Forget a host's probe result, so the next job asks again. Called when a
+   *  server's configuration changes underneath us. */
+  forget(serverId: string): void
+}
+
+export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
+  const now = (): number => (deps.now ?? Date.now)()
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref?.()))
+  const random = deps.random ?? Math.random
+  const pollMs = deps.pollMs ?? JOB_POLL_MS
+  const pollBytes = deps.pollBytes ?? JOB_POLL_BYTES
+  const pollTimeoutMs = deps.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS
+  const parkMs = deps.parkMs ?? DEFAULT_PARK_MS
+  const gate = new Gate(JOB_RECONNECT_GLOBAL_MAX)
+
+  /** Probe results, one per server, for the life of this app run. Not
+   *  persisted: a host that gained setsid since yesterday should not have to
+   *  wait for a cache to expire, and the probe is one exec. */
+  const caps = new Map<string, JobHostCapability>()
+  const reports = new Map<string, JobHostCapabilityReport>()
+
+  async function capabilityFor(req: JobExecRequest): Promise<JobHostCapability> {
+    const cached = caps.get(req.serverId)
+    if (cached) return cached
+    // OUR clock goes with the probe, because the sweep it carries decides what
+    // to delete by asking the HOST how old something is. See buildJobProbe.
+    const r = await deps.run(
+      req.cfg,
+      buildJobProbe({ nowSeconds: Math.floor(now() / 1000) }),
+      pollTimeoutMs
+    )
+    // A probe that could not run at all is not "this host cannot detach" — it
+    // is "this host did not answer", and the attached executor is about to say
+    // so with a better error than anything invented here. Cached anyway, so a
+    // three-step job does not probe an unreachable host three times.
+    const cap: JobHostCapability = r.ok
+      ? parseJobProbe(r.stdout)
+      : { root: null, launcher: 'none', base64: false, uid: null, ok: false, reason: r.error ?? 'the host did not answer the capability probe' }
+    caps.set(req.serverId, cap)
+    const report: JobHostCapabilityReport = {
+      serverId: req.serverId,
+      serverName: req.serverName,
+      at: now(),
+      detached: cap.ok,
+      reason: cap.reason,
+      root: cap.root,
+      launcher: cap.launcher
+    }
+    reports.set(req.serverId, report)
+    deps.onCapability?.(report)
+    return cap
+  }
+
+  /**
+   * Record that a host cannot detach after all, so the next step and the next
+   * job take the attached path without paying for the discovery again.
+   *
+   * Keeps whatever the probe learned about the root and the launcher, because
+   * "we found a writable /var/tmp and setsid, and it still did not detach" is
+   * more useful to look at than a blanked row.
+   */
+  function degrade(req: JobExecRequest, reason: string): void {
+    const cap = caps.get(req.serverId)
+    caps.set(req.serverId, {
+      root: cap?.root ?? null,
+      launcher: cap?.launcher ?? 'none',
+      base64: cap?.base64 ?? false,
+      uid: cap?.uid ?? null,
+      ok: false,
+      reason
+    })
+    const report: JobHostCapabilityReport = {
+      serverId: req.serverId,
+      serverName: req.serverName,
+      at: now(),
+      detached: false,
+      reason,
+      root: cap?.root ?? null,
+      launcher: cap?.launcher ?? 'none'
+    }
+    reports.set(req.serverId, report)
+    deps.onCapability?.(report)
+  }
+
+  const exec: JobExecutor = async (req) => {
+    // The switch, and the resume path, before anything else.
+    //
+    // A job being RECLAIMED is never sent down the attached path even when the
+    // switch has since been turned off: there is a process running on that host
+    // right now and a marker directory recording it, and the honest thing is to
+    // finish watching it and reap it. Turning detached execution off means "do
+    // not launch any more of these", not "abandon the ones already out there".
+    if (req.resume) return await watch(req, req.resume)
+    if (!deps.enabled()) return await deps.attached(req)
+
+    const cap = await capabilityFor(req)
+    if (!cap.ok || cap.root === null || cap.launcher === 'none') {
+      req.onState?.({ degraded: cap.reason ?? 'this host cannot run a detached job' })
+      return await deps.attached(req)
+    }
+
+    const dir = jobMarkerDir(cap.root, req.jobId, req.step)
+    const handle: JobDetachedHandle = {
+      v: 1,
+      dir,
+      step: req.step,
+      instanceId: deps.instanceId,
+      launcher: cap.launcher,
+      base64: cap.base64,
+      launchedAt: now(),
+      readOffset: 0,
+      command: req.command
+    }
+
+    const launch = await deps.run(
+      req.cfg,
+      buildJobLaunch({
+        dir,
+        jobId: req.jobId,
+        instanceId: deps.instanceId,
+        command: req.command,
+        launcher: cap.launcher
+      }),
+      pollTimeoutMs
+    )
+    if (!launch.ok) {
+      return { ok: false, code: null, error: launch.error ?? 'the launch command did not complete' }
+    }
+    const parsed = parseJobLaunch(launch.stdout)
+    if (!parsed.ok) {
+      return { ok: false, code: null, error: parsed.error ?? 'the launch did not take' }
+    }
+
+    // PERSISTED BEFORE THE FIRST POLL, and this ordering is the whole of "a
+    // ShellPilot that never saw it start can pick it up". A crash between the
+    // launch and the first write would leave a running command with nothing
+    // recording where its marker is — reclaimable by nobody, swept a week
+    // later, its output lost. The write costs one row.
+    req.onState?.({ state: 'detached', detached: { ...handle } })
+    return await watch(req, handle)
+  }
+
+  /**
+   * Follow a detached step until it has an answer.
+   *
+   * Everything below is a loop over one poll, and the loop is the same whether
+   * this instance launched the job a second ago or is picking up a marker
+   * written by a ShellPilot that has since been restarted. That is deliberate:
+   * a reclaim path that is a different code path from the live one is a reclaim
+   * path that is exercised only in the failure people report.
+   */
+  async function watch(req: JobExecRequest, handle: JobDetachedHandle): Promise<JobExecResult> {
+    // THE DIRECTORY IS RE-VALIDATED HERE, at the one entrance every poll,
+    // signal and `rm -rf` goes through. A handle arrives from a row this
+    // process did not necessarily write: `isJobDetachedHandle` checks that
+    // `dir` is a string and nothing more, and a row from another build — or one
+    // somebody edited — must not reach the reap builder. The builders assert it
+    // too; this is where the refusal can still be a sentence rather than a
+    // throw, and where nothing has been sent to the host yet.
+    if (!isJobMarkerDir(handle.dir)) {
+      return {
+        ok: false,
+        code: null,
+        error:
+          `This job’s recorded marker directory (${JSON.stringify(handle.dir)}) is not one ` +
+          'ShellPilot creates, so nothing was read from the host and nothing was removed from it.',
+        finalState: 'orphaned',
+        finalOutcome: 'orphaned',
+        detachedHandle: null
+      }
+    }
+    let carry: Buffer = Buffer.alloc(0)
+    let attempts = 0
+    /** The state last reported, so a steady link does not rewrite the row every
+     *  three seconds. */
+    let reported: string | null = req.resume ? null : 'detached\u0000'
+    let signalled = false
+    /** Set when this pass knows there is more to read: poll again at once
+     *  rather than at the next tick. A job producing megabytes drains at
+     *  connection speed instead of at one window per poll interval. */
+    let immediate = false
+    // ---- Item 17: reboot-and-wait.
+    //
+    // TWO SEPARATE FACTS, and collapsing them was the temptation worth
+    // resisting.
+    //
+    //  * `looksLikeReboot` is a GUESS off the command text. What it earns is the
+    //    `rebooting` state while the link is down — a cosmetic, reversible
+    //    label that costs nothing if the guess is wrong.
+    //  * `declaredReboot` is the step SAYING so (JobStep.reboot), which means
+    //    the operator confirmed a reboot step by that name. What it earns is
+    //    substantive: a wrapper that vanished without an exit status is read as
+    //    the machine having restarted rather than as an orphan, the wait is
+    //    bounded, and the host is checked for having come back healthy instead
+    //    of merely for having come back.
+    //
+    // A guess must never be enough to suppress `orphaned`. That state is the
+    // honest answer to "the process is gone and nobody knows why", and turning
+    // it off because a command mentioned `reboot` would be exactly the kind of
+    // smoothing-over B2 refused.
+    const declaredReboot = req.reboot === true
+    const looksLikeReboot = declaredReboot || restartsTheMachine(handle.command)
+    /**
+     * The boot id the reboot step printed before it went down, scraped from the
+     * output as it arrives — and kept on the HANDLE, so it survives this
+     * process. A reclaim reads it back from the row; without that, every
+     * reboot step watched across a restart would come back `unverifiable`.
+     */
+    let bootIdBefore: string | null = handle.bootIdBefore ?? null
+    /**
+     * The host has stopped answering at least once since this watch began.
+     *
+     * The discriminator between "it has not gone down yet" and "it never went
+     * down", which the boot id alone cannot supply: during the seconds between
+     * `systemctl reboot` returning 0 and sshd stopping, the host is up and its
+     * boot id is unchanged — exactly what a reboot that was swallowed looks
+     * like. A RECLAIM starts true: the gap in observation is itself the
+     * silence, and the machine had every opportunity to go and come back while
+     * nobody was watching, so the boot id is both the only evidence and enough.
+     */
+    let sawSilence = req.resume !== undefined
+    /**
+     * A reclaimed step's clock starts when THIS instance picked it up.
+     *
+     * `launchedAt` is when the command started, which for a job reclaimed after
+     * a weekend is long past every deadline — so a deadline measured from it
+     * fires on the first poll after the reclaim and sends SIGTERM to a job that
+     * is running perfectly well, as its new watcher's opening move. A timeout
+     * is a statement about how long WE are prepared to wait, and this watcher
+     * has waited none of it.
+     */
+    const deadline = (req.resume !== undefined ? now() : handle.launchedAt) + req.timeoutMs
+
+    // Deduped on the state AND the sentence beside it: two different reasons to
+    // be `rebooting` — "it has been asked and is still answering" and "it has
+    // stopped answering, which is what we wanted" — are different facts about
+    // the host, and a dedupe on the state alone would leave the first one on
+    // the row for the whole of the second.
+    const say = (state: 'running' | 'detached' | 'rebooting' | 'foreign', error?: string): void => {
+      const key = `${state}\u0000${error ?? ''}`
+      if (reported === key) return
+      reported = key
+      req.onState?.({ state, error })
+    }
+    const persist = (): void => req.onState?.({ detached: { ...handle } })
+
+    for (;;) {
+      // The run that owns this host has gone — the window closed, or a second
+      // run took the id. Stop polling and leave the row saying `detached`: the
+      // command is still going, the marker records where, and adopt() picks it
+      // up at the next launch. Nothing terminal may be written here; that is
+      // BLOCKER 1's rule and it is more load-bearing now than it was, because
+      // now there really is something on the other end.
+      if (req.alive && !req.alive()) {
+        return { ok: false, code: null, detachedHandle: { ...handle }, finalState: 'detached' }
+      }
+
+      // PARK, do not error. `credentialResolver` throws VaultLockedError and a
+      // loop that let that through would end a job which is running perfectly
+      // well on fifteen hosts, because of something local and temporary. This
+      // is fleetSampler's rule; the difference is that a parked SAMPLE loses a
+      // data point and a parked JOB loses nothing at all, because the byte
+      // offset makes the next poll pick up exactly where this one would have.
+      if (deps.vaultUnlocked && !deps.vaultUnlocked()) {
+        say('detached', 'Paused: the vault is locked, so this host cannot be polled. The job is ' +
+          'still running on it and polling resumes when the vault is unlocked.')
+        await sleep(parkMs)
+        continue
+      }
+
+      if (immediate) immediate = false
+      else await sleep(attempts === 0 ? pollMs : nextRetryDelay(attempts, random))
+
+      // Only a RETRY goes through the gate. A healthy estate polls on its own
+      // cadence and never queues; a wake-up, where every host retries at once,
+      // is exactly what the cap is for.
+      const release = attempts === 0 ? null : await gate.acquire()
+      let r: JobRunResult
+      try {
+        r = await deps.run(
+          req.cfg,
+          buildJobPoll({ dir: handle.dir, offset: handle.readOffset, maxBytes: pollBytes, base64: handle.base64 }),
+          pollTimeoutMs
+        )
+      } catch (e) {
+        r = { ok: false, code: null, stdout: '', stderr: '', error: e instanceof Error ? e.message : String(e) }
+      } finally {
+        release?.()
+      }
+
+      if (!r.ok) {
+        // THE LINK IS DOWN, THE JOB IS NOT. This is the state the whole item
+        // exists to be able to express: `detached`, not `unreachable` and not
+        // `failed`. A host that stopped answering while running a step that
+        // restarts the machine is `rebooting`, which is the roadmap's example
+        // of today's vocabulary getting a fact exactly backwards.
+        attempts++
+        // The row carries the SENTENCE, not just the transport error. "Timed
+        // out connecting" next to a state called `rebooting` reads as a fault
+        // report; the note says the silence was asked for and what happens
+        // next. The transport error is kept behind it, because it is still the
+        // only evidence of how the link actually failed.
+        say(
+          looksLikeReboot ? 'rebooting' : 'detached',
+          looksLikeReboot ? `${JOB_REBOOTING_NOTE}${r.error ? ` (${r.error})` : ''}` : r.error
+        )
+        sawSilence = true
+        // A DECLARED reboot is the one case where "not answering" has a
+        // deadline, because it is the one case where we asked for the silence
+        // and therefore know roughly how long it should last. An ordinary
+        // detached job deliberately has no such bound while the link is down —
+        // that is B2's whole point and it is left exactly as it was.
+        if (declaredReboot && now() > deadline) {
+          return {
+            ok: false,
+            code: null,
+            error: JOB_REBOOT_TIMEOUT_ERROR(req.timeoutMs),
+            finalOutcome: 'timeout',
+            mergedOutput: true,
+            detachedHandle: { ...handle }
+          }
+        }
+        continue
+      }
+
+      const poll = parseJobPoll(r.stdout, { base64: handle.base64, carry })
+      carry = poll.carry
+      attempts = 0
+
+      if (poll.sent > 0 && poll.text !== '') {
+        req.onOutput('out', poll.text)
+        // Scraped as it goes past, because after the machine restarts there is
+        // no second chance to read what it printed on the way down — and the
+        // boot id it printed there is the only evidence available from here
+        // that it really restarted rather than merely dropped the connection.
+        if (declaredReboot) {
+          const seen = parseRebootBootId(poll.text)
+          if (seen !== null && seen !== bootIdBefore) {
+            bootIdBefore = seen
+            handle.bootIdBefore = seen
+          }
+        }
+      }
+      if (poll.sent > 0) {
+        handle.readOffset += poll.sent
+        persist()
+      }
+
+      const verdict = classifyJobPoll(poll, {
+        instanceId: deps.instanceId,
+        launchedAt: handle.launchedAt,
+        now: now(),
+        expectsReboot: declaredReboot
+      })
+
+      if (verdict.foreign) say('foreign', JOB_INSTANCE_NOTE)
+
+      switch (verdict.phase) {
+        // ONE BLOCK FOR BOTH, and the branch inside it is on `declaredReboot`
+        // rather than on the phase. That is the fix for the defect that made
+        // item 17 unreachable in production: `rebooted` used to mean "the
+        // wrapper vanished without an exit status", which on a REAL reboot
+        // almost never happens — `systemctl reboot` returns 0 immediately and
+        // the wrapper records that 0 while systemd is still stopping units, so
+        // the first poll after the host came back read `rc=0`, called it
+        // `finished`, reaped, and reported success. A host that came back with
+        // eleven failed units, or that never rebooted at all because something
+        // swallowed the request, was reported as a clean reboot. The classifier
+        // now sends a declared reboot here whatever `rc` says; this block
+        // checks the declaration and not the phase, so neither half can be
+        // fixed into being wrong again on its own.
+        case 'finished':
+        case 'rebooted': {
+          // Drain before answering. `rc` is read before the output on the host,
+          // so a poll that reports it has already read everything the command
+          // wrote — but the WINDOW is capped, so there may be more than one
+          // poll's worth of it waiting. Ending here would truncate the tail of
+          // the run, which is exactly where the answer to "did it work" is —
+          // and, on a reboot step, where the boot id is.
+          if (poll.size > handle.readOffset) {
+            immediate = true
+            continue
+          }
+
+          if (!declaredReboot) {
+            if (!verdict.foreign) await reap(req, handle)
+            return {
+              ok: true,
+              code: poll.rc,
+              // Everything the command wrote came back on one stream, because
+              // the wrapper redirects stderr into stdout: that is what keeps
+              // the two in ORDER, which on an apt run is the difference between
+              // a readable log and two shuffled halves. The cost is that the
+              // runner's classifier cannot look at stderr alone, so it is told
+              // to classify from the merged tail instead. `missing-command` and
+              // exit 126 still resolve; the "permission denied and no stdout"
+              // rule cannot, because there is no separate stdout to be empty.
+              mergedOutput: true,
+              detachedHandle: verdict.foreign ? { ...handle } : null
+            }
+          }
+
+          // A DECLARED REBOOT THAT HAS BEEN ACCEPTED BUT HAS NOT HAPPENED YET.
+          // The command exited 0, the host is still answering and its boot id
+          // has not changed — which is precisely what a reboot that was
+          // swallowed looks like, a few seconds too early. Verifying now would
+          // report "it never restarted" about a machine that is halfway
+          // through restarting: the old false success with its sign flipped.
+          // So: wait for it to go. A non-zero exit is not this case — the
+          // request itself was refused and there is nothing to wait for.
+          if (!sawSilence && poll.rc === 0 && now() <= deadline) {
+            say('rebooting', JOB_REBOOT_ACCEPTED_NOTE)
+            continue
+          }
+
+          if (!verdict.foreign) await reap(req, handle)
+          // NOW go and look. "The host answered" is not "the host is well", and
+          // this is the point item 17 exists to add: a reboot step that stops
+          // at "it came back" is a reboot step that reports a machine with
+          // eleven failed units as a success.
+          const check = await deps.run(req.cfg, buildRebootVerify(), pollTimeoutMs)
+          const after = check.ok
+            ? parseRebootVerify(check.stdout)
+            : { answered: false, bootId: null, uptimeSeconds: null, unitState: null, failed: null }
+          const rv = verifyReboot(bootIdBefore, after)
+          req.onOutput('out', `\n… ${rv.reason}\n`)
+          const stillTheirs = verdict.foreign ? { ...handle } : null
+          if (rv.ok) {
+            // `rc` where the wrapper recorded one, because a reboot step that
+            // exited 0 and a reboot step the kernel took mid-write are both
+            // successes here and the row should not invent a status for either.
+            return { ok: true, code: poll.rc ?? 0, mergedOutput: true, detachedHandle: stillTheirs }
+          }
+          return {
+            ok: false,
+            // Kept when there is one: on a reboot that was refused rather than
+            // performed, the exit status of the refusal is the useful half.
+            code: poll.rc,
+            error: JOB_REBOOT_UNHEALTHY_ERROR(rv.reason),
+            // `unhealthy` and not `unreachable`: the host is answering. See
+            // JOB_OUTCOME_LABEL.
+            finalOutcome: 'unhealthy',
+            mergedOutput: true,
+            detachedHandle: stillTheirs
+          }
+        }
+        case 'orphaned': {
+          if (poll.size > handle.readOffset) {
+            immediate = true
+            continue
+          }
+          if (!verdict.foreign) await reap(req, handle)
+          // A process that is gone BECAUSE WE SIGNALLED IT is not an orphan.
+          // `orphaned` means nobody knows why it stopped, and here we do: the
+          // step ran past its deadline and this code sent it a TERM. Reporting
+          // that as an orphan would hide our own hand in it, and it is the
+          // difference between "raise the timeout" and "go and look at that
+          // machine".
+          if (signalled) {
+            return {
+              ok: false,
+              code: null,
+              error:
+                `Command timed out after ${req.timeoutMs}ms. SIGTERM was sent to the remote ` +
+                `process and it has gone, without recording an exit status.`,
+              finalOutcome: 'timeout',
+              mergedOutput: true,
+              detachedHandle: null
+            }
+          }
+          return {
+            ok: false,
+            code: null,
+            error: JOB_ORPHANED_ERROR,
+            finalState: 'orphaned',
+            finalOutcome: 'orphaned',
+            mergedOutput: true,
+            detachedHandle: null
+          }
+        }
+        case 'failed-launch': {
+          // The marker is there and nothing ever wrote a pid, so the launcher
+          // this host advertised does not actually detach anything. That is a
+          // CAPABILITY failure found late rather than a job failure: the
+          // marker is removed, the host is recorded as unable to detach with
+          // the reason, and the step runs on the attached path — the same
+          // outcome as a host that failed the probe up front, arrived at from
+          // the other direction. Anything else would report a job failure for
+          // something the operator can neither see nor fix.
+          if (!verdict.foreign) await reap(req, handle)
+          degrade(req, JOB_LAUNCH_FAILED_ERROR)
+          req.onState?.({ state: 'running', detached: null, degraded: JOB_LAUNCH_FAILED_ERROR })
+          return await deps.attached(req)
+        }
+        case 'missing': {
+          // The directory is gone and we did not remove it. Either another
+          // instance reaped it, or something cleared the state directory.
+          // Whatever the command did is not knowable from here, and `orphaned`
+          // is precisely that: no exit status will ever be read for this host.
+          return {
+            ok: false,
+            code: null,
+            error:
+              'The marker directory for this job is no longer on the host, so its exit status ' +
+              'cannot be read. Another ShellPilot may have reaped it, or the state directory was ' +
+              'cleared underneath it.',
+            finalState: 'orphaned',
+            finalOutcome: 'orphaned',
+            detachedHandle: null
+          }
+        }
+        default: {
+          // starting, or running.
+          say('running')
+          // `size` against our own cursor, and nothing else. The parser used to
+          // offer a `more` hint alongside this, computed against the DEFAULT
+          // window rather than the one the poll was built with — so it was
+          // wrong for every caller that set `pollBytes` and redundant for the
+          // rest, since this check is the authority in both cases.
+          if (poll.size > handle.readOffset) {
+            immediate = true
+            continue
+          }
+          if (now() > deadline) {
+            // A timeout that leaves the command running has decided nothing —
+            // jobExec's rule, and it costs more here, where "still running"
+            // means a real process that outlives this app. Signalled once, then
+            // one more pass to collect whatever it printed on the way down.
+            //
+            // NOT FOR A FOREIGN MARKER. JOB_INSTANCE_NOTE argues that cancel is
+            // not gated on the instance, and that argument is about a person in
+            // front of the machine deciding to stop an upgrade. This is not
+            // that: it is one ShellPilot's clock automatically killing another
+            // ShellPilot's job, on a deadline the other one never agreed to and
+            // measured from a launch it may have watched for hours. So it is
+            // reported and left alone.
+            if (verdict.foreign) {
+              return {
+                ok: false,
+                code: null,
+                error:
+                  `Command timed out after ${req.timeoutMs}ms. Nothing was signalled: this job ` +
+                  'was launched by a different ShellPilot instance, and an automatic timeout is ' +
+                  'not a reason to stop somebody else’s run. It may still be going; its marker ' +
+                  `directory is at ${handle.dir}.`,
+                finalOutcome: 'timeout',
+                mergedOutput: true,
+                detachedHandle: { ...handle }
+              }
+            }
+            if (!signalled) {
+              const sent = await deps.run(req.cfg, buildJobSignal({ dir: handle.dir }), pollTimeoutMs)
+              const outcome = sent.ok ? parseJobSignal(sent.stdout) : 'unknown'
+              // THE HOST REFUSED, and the refusal is the feature: with no
+              // usable `ps` the recorded pid cannot be shown to still be this
+              // job, and `kill -TERM -- -$pid` on a recycled pid that leads its
+              // own group would stop a stranger's processes. Saying "SIGTERM
+              // was sent" here would be false, and the next poll would report
+              // the job as still running with no explanation for it.
+              if (outcome === 'unverified') {
+                return {
+                  ok: false,
+                  code: null,
+                  error: JOB_SIGNAL_UNVERIFIED_ERROR(req.timeoutMs, handle.dir),
+                  finalOutcome: 'timeout',
+                  mergedOutput: true,
+                  detachedHandle: { ...handle }
+                }
+              }
+              signalled = true
+              immediate = true
+              continue
+            }
+            return {
+              ok: false,
+              code: null,
+              error:
+                `Command timed out after ${req.timeoutMs}ms. SIGTERM was sent to the remote ` +
+                `process; its marker directory is left in place so the exit status can still be ` +
+                `read from ${handle.dir}.`,
+              mergedOutput: true,
+              detachedHandle: { ...handle }
+            }
+          }
+          continue
+        }
+      }
+    }
+  }
+
+  /**
+   * Remove the marker directory, once its answer is in hand.
+   *
+   * Never for a foreign instance — that is the one operation which destroys
+   * something another reader still needs, and it is the whole of what "detect
+   * and degrade, do not lock" costs us. A reap that fails is not an error worth
+   * failing a job over: the probe's sweep removes it a week later.
+   */
+  async function reap(req: JobExecRequest, handle: JobDetachedHandle): Promise<void> {
+    try {
+      await deps.run(req.cfg, buildJobReap({ dir: handle.dir }), pollTimeoutMs)
+    } catch {
+      /* the sweep in buildJobProbe is the backstop; see JOB_MARKER_SWEEP_DAYS */
+    }
+  }
+
+  const executor = exec as DetachedExecutor
+  executor.capabilities = (): JobHostCapabilityReport[] => [...reports.values()]
+  executor.forget = (serverId: string): void => {
+    caps.delete(serverId)
+    reports.delete(serverId)
+  }
+  return executor
+}

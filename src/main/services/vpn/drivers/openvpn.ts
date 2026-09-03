@@ -443,7 +443,7 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
             if (!session.stopping) ctx.log('the management channel closed', 'app')
           }
         },
-        { runDir: ctx.runDir, platform }
+        { platform }
       )
 
       session = {
@@ -481,7 +481,7 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
           ? '/dev/stdin'
           : await writeSecretFile(ctx.runDir, CONFIG_FILE_NAME, config)
 
-        // `ovpnArgs` emits `--script-security 0`, the `--pull-filter reject`
+        // `ovpnArgs` emits `--script-security 1`, the `--pull-filter reject`
         // set, `--management-client --management-query-passwords
         // --management-hold`, `--auth-nocache` and — when `redirectGateway` is
         // false — `--route-nopull` plus the `redirect-gateway` pull-filter. A

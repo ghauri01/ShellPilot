@@ -84,6 +84,19 @@ describe('payload sanitising — what actually leaves the machine', () => {
     expect(() => new Date(out!.at).toISOString()).not.toThrow()
   })
 
+  it('lets a disk alert through, by name', async () => {
+    // Written as a literal rather than a loop over ALERT_KINDS. A loop derives
+    // both sides from the same constant and passes whatever that constant says,
+    // including nothing. This fails if 'disk' is not in the whitelist, which is
+    // exactly how a new kind used to be dropped in main with no record of it.
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    expect(sanitisePayload({ event: 'raised', kind: 'disk' })?.kind).toBe('disk')
+    expect(sanitisePayload({ event: 'resolved', kind: 'disk' })?.kind).toBe('disk')
+    expect(sanitisePayload({ event: 'raised', kind: 'cpu' })?.kind).toBe('cpu')
+    expect(sanitisePayload({ event: 'raised', kind: 'memory' })?.kind).toBe('memory')
+    expect(sanitisePayload({ event: 'raised', kind: 'unit-failed' })?.kind).toBe('unit-failed')
+  })
+
   it('rejects a payload whose event or kind is not one of ours', async () => {
     const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
     expect(sanitisePayload({ event: 'exfil', kind: 'cpu' })).toBeNull()
@@ -146,6 +159,31 @@ describe('payload sanitising — what actually leaves the machine', () => {
     expect(out!.threshold).toBeUndefined()
     expect(out!.minutes).toBeUndefined()
   })
+  it('drops a leading @, which is a mass ping and not a unit name', async () => {
+    // Discord's `@everyone` is all unit-name characters, so the character
+    // class alone let it through. systemd itself rejects a name whose prefix
+    // before `@` is empty, so refusing it costs no real unit name.
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      event: 'raised',
+      kind: 'unit-failed',
+      units: ['@everyone.service', '@here', '@@everyone']
+    })
+    expect(out?.units).toEqual(['everyone.service', 'here', 'everyone'])
+  })
+
+  it('keeps @ inside a template unit name', async () => {
+    // Why `@` stays in the class at all. `getty@tty1.service` is a real unit;
+    // mangling it would make the alert name a unit that does not exist.
+    const { sanitisePayload } = await import('../src/main/services/webhookAlerts')
+    const out = sanitisePayload({
+      event: 'raised',
+      kind: 'unit-failed',
+      units: ['getty@tty1.service', 'user@1000.service']
+    })
+    expect(out?.units).toEqual(['getty@tty1.service', 'user@1000.service'])
+  })
+
 })
 
 // ---- Delivery policy ----
@@ -301,6 +339,21 @@ describe('a webhook whose URL is taken away', () => {
     expect(m.webhookStatus()).toMatchObject({ enabled: false, hasUrl: false })
   })
 
+  it('records a rejected payload instead of showing a healthy webhook', async () => {
+    // The other silent discard. A kind that main's whitelist did not know
+    // returned here with nothing written down: the alert never arrived and the
+    // settings pane still reported a webhook in perfect health.
+    const m = await import('../src/main/services/webhookAlerts')
+    const calls: string[] = []
+    globalThis.fetch = (async (u: string) => {
+      calls.push(String(u))
+      return new Response('', { status: 200 })
+    }) as unknown as typeof fetch
+    m.webhookNotify({ event: 'raised', kind: 'not-a-kind', server: 'box', summary: 'x' })
+    expect(calls).toEqual([])
+    expect(m.webhookDeliveryStatus().lastError).toMatch(/did not match the payload shape/i)
+  })
+
   it('says why, if an alert ever reaches the send path without a URL', async () => {
     const m = await import('../src/main/services/webhookAlerts')
     m.webhookSetUrl('')
@@ -324,4 +377,5 @@ describe('a webhook whose URL is taken away', () => {
     expect(calls).toEqual([])
     expect(m.webhookDeliveryStatus().lastError).toMatch(/no webhook url/i)
   })
+
 })

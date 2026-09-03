@@ -82,8 +82,17 @@ export async function initPersistence(): Promise<void> {
 
   // Main owns the connection pool, so mirror the retention policy into it.
   void window.shellpilot?.ssh.setPoolIdle(useApp.getState().settings.sshMasterIdleMinutes)
+  // Main defaults this ON and only ever hears otherwise from here, so a fresh
+  // install and an install whose data file predates the setting behave the
+  // same. Pushed at startup as well as on change: main holds the value in
+  // memory and would otherwise run a job detached on the strength of a default
+  // the user turned off last week.
+  void window.shellpilot?.jobs.setDetached(useApp.getState().settings.jobsDetached !== false)
 
   useApp.subscribe((state, prev) => {
+    if (state.settings.jobsDetached !== prev.settings.jobsDetached) {
+      void window.shellpilot?.jobs.setDetached(state.settings.jobsDetached !== false)
+    }
     if (state.settings.sshMasterIdleMinutes !== prev.settings.sshMasterIdleMinutes) {
       void window.shellpilot?.ssh.setPoolIdle(state.settings.sshMasterIdleMinutes)
     }

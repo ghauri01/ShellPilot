@@ -1,0 +1,213 @@
+{
+  "overview": {
+    "ok": true,
+    "rows": [
+      {
+        "version": "8.0.46",
+        "version_comment": "MySQL Community Server - GPL",
+        "server_id": 1,
+        "read_only": 0,
+        "max_connections": 151,
+        "hostname": "bff0413350bd"
+      }
+    ]
+  },
+  "superReadOnly": {
+    "ok": true,
+    "rows": [
+      {
+        "super_read_only": 0
+      }
+    ]
+  },
+  "replicaStatus": {
+    "ok": true,
+    "rows": []
+  },
+  "slaveStatus": {
+    "ok": true,
+    "rows": []
+  },
+  "logBin": {
+    "ok": true,
+    "rows": [
+      {
+        "log_bin": 1
+      }
+    ]
+  },
+  "binlogExpireSeconds": {
+    "ok": true,
+    "rows": [
+      {
+        "expire_seconds": 2592000
+      }
+    ]
+  },
+  "binlogExpireDays": {
+    "ok": true,
+    "rows": [
+      {
+        "expire_days": 0
+      }
+    ]
+  },
+  "binaryLogs": {
+    "ok": true,
+    "rows": [
+      {
+        "Log_name": "binlog.000001",
+        "File_size": 180,
+        "Encrypted": "No"
+      },
+      {
+        "Log_name": "binlog.000002",
+        "File_size": 2997942,
+        "Encrypted": "No"
+      },
+      {
+        "Log_name": "binlog.000003",
+        "File_size": 1850,
+        "Encrypted": "No"
+      }
+    ]
+  },
+  "slowSettings": {
+    "ok": true,
+    "rows": [
+      {
+        "slow_query_log": 1,
+        "long_query_time": 1,
+        "slow_query_log_file": "/var/lib/mysql/bff0413350bd-slow.log",
+        "log_output": "FILE"
+      }
+    ]
+  },
+  "status": {
+    "ok": true,
+    "rows": [
+      {
+        "Variable_name": "Aborted_connects",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Connection_errors_max_connections",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_dirty",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_free",
+        "Value": "6985"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_total",
+        "Value": "8192"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_read_requests",
+        "Value": "17345"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_reads",
+        "Value": "1050"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_wait_free",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_row_lock_time_avg",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_row_lock_waits",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Max_used_connections",
+        "Value": "2"
+      },
+      {
+        "Variable_name": "Queries",
+        "Value": "30"
+      },
+      {
+        "Variable_name": "Slow_queries",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Threads_connected",
+        "Value": "2"
+      },
+      {
+        "Variable_name": "Threads_running",
+        "Value": "3"
+      },
+      {
+        "Variable_name": "Uptime",
+        "Value": "307"
+      }
+    ]
+  },
+  "bufferPool": {
+    "ok": true,
+    "rows": [
+      {
+        "bytes": 134217728,
+        "instances": 1
+      }
+    ]
+  },
+  "processlist": {
+    "ok": true,
+    "rows": [
+      {
+        "id": 5,
+        "user": "event_scheduler",
+        "host": "localhost",
+        "db": null,
+        "command": "Daemon",
+        "seconds": 306,
+        "state": "Waiting on empty queue",
+        "info": null
+      },
+      {
+        "id": 9,
+        "user": "repl",
+        "host": "172.21.0.5:41336",
+        "db": null,
+        "command": "Binlog Dump GTID",
+        "seconds": 120,
+        "state": "Source has sent all binlog to replica; waiting for more updates",
+        "info": null
+      },
+      {
+        "id": 10,
+        "user": "root",
+        "host": "192.168.65.1:49478",
+        "db": null,
+        "command": "Query",
+        "seconds": 0,
+        "state": "executing",
+        "info": "SELECT ID AS id, USER AS user, HOST AS host, DB AS db, COMMAND AS command,\n    TIME AS seconds, STATE AS state, LEFT(INFO, 200) AS info\n    FROM information_schema.PROCESSLIST WHERE COMMAND <> 'Sleep'"
+      }
+    ]
+  },
+  "sizes": {
+    "ok": true,
+    "rows": [
+      {
+        "schema": "shop",
+        "name": "orders",
+        "engine": "InnoDB",
+        "table_rows": 0,
+        "data_bytes": 16384,
+        "index_bytes": 16384,
+        "free_bytes": 0
+      }
+    ]
+  }
+}

@@ -71,6 +71,19 @@ describe('upgrading a policy file written before a capability existed', () => {
     expect(getGroup('grp-read-only')?.capabilities.vpnControl).toBe('deny')
   })
 
+  it('backfills hostFacts to DENY on every group, built-in ones included', () => {
+    // Roadmap item C, and the one capability of which this is true. It returns
+    // how many unpatched security updates a host is carrying and against which
+    // distribution, which is a vulnerability report rather than a health check
+    // — so unlike manageServers and vpnControl, no seeded group opts in at
+    // 'ask' either. An upgraded install gets it off, and turning it on is a
+    // deliberate act.
+    for (const g of listGroups()) {
+      expect(g.capabilities.hostFacts, g.name).toBe('deny')
+    }
+    expect(evaluateCapability(getGroup('grp-full'), 'hostFacts').decision).toBe('deny')
+  })
+
   it('denies a new capability on a custom group, which has no intent on record', () => {
     expect(getGroup('grp-custom')?.capabilities.manageServers).toBe('deny')
     // Especially this one: a group written before VPNs existed cannot have

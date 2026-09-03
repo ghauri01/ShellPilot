@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -10,7 +11,9 @@ import {
   logLineMatches,
   parseLogMark,
   validateLogSource,
-  validateSince
+  validateSince,
+  buildLogFileListCommand,
+  buildUnitListCommand
 } from '../src/shared/logtail'
 import { SUDO_PROBE } from '../src/shared/docker'
 
@@ -454,5 +457,43 @@ describe('grepping inside the tail', () => {
   it('shows everything when the box is empty', () => {
     expect(filterLogLines(lines, '   ')).toBe(lines)
     expect(logLineMatches('anything', '!')).toBe(true)
+  })
+})
+
+describe('the commands we build are valid shell', () => {
+  // The File picker shipped broken because its command ended `...$'; | sort -u`
+  // — a syntax error — and nothing anywhere executed it to find out. Asking the
+  // shell itself is the only check that could not agree with the same mistake.
+  // `sh -n` parses without running, so this touches no filesystem and no host.
+  const parses = (cmd: string): { ok: boolean; err: string } => {
+    const r = spawnSync('sh', ['-n'], { input: cmd, encoding: 'utf8' })
+    return { ok: r.status === 0, err: (r.stderr || '').trim() }
+  }
+
+  it('the log-file listing command parses', () => {
+    const r = parses(buildLogFileListCommand())
+    expect(r.err).toBe('')
+    expect(r.ok).toBe(true)
+  })
+
+  it('the unit listing command parses', () => {
+    const r = parses(buildUnitListCommand())
+    expect(r.err).toBe('')
+    expect(r.ok).toBe(true)
+  })
+
+  it('every tail command parses, for all three kinds and both sudo modes', () => {
+    const sources: LogSource[] = [
+      { kind: 'unit', target: 'sp-logger.service' },
+      { kind: 'unit', target: 'getty@tty1.service', priority: 'err', since: '2 hours ago' },
+      { kind: 'file', target: '/var/log/syslog' },
+      { kind: 'container', target: 'sp-db-sp-postgres-1' }
+    ]
+    for (const s of sources) {
+      for (const sudo of ['auto', 'never', 'always'] as const) {
+        const r = parses(buildTailCommand({ ...s, sudo }, 50))
+        expect(`${s.kind}/${sudo}: ${r.err}`).toBe(`${s.kind}/${sudo}: `)
+      }
+    }
   })
 })

@@ -73,8 +73,87 @@ export const TYPE_ABOVE_HOSTS = 5
 // machine", which is worse than useless: a guard that cries wolf on a read-only
 // grep is a guard people learn to click through, and it is then not there for
 // the `reboot` that meant it.
+//
+// ---------------------------------------------------------------------------
+// WHY sudo's OPTIONS ARE PARSED RATHER THAN SKIPPED
+// ---------------------------------------------------------------------------
+// The prefix used to be `(?:sudo\s+|doas\s+)?` — sudo with no flags at all. So
+// `sudo -n reboot` matched no destructive rule and fell through to the blanket
+// `runs as root` rule, which is `elevated`: ONE confirm click on one host,
+// where a bare `reboot` demands a typed phrase. Strictly weaker confirmation
+// for strictly more privilege, which is exactly backwards.
+//
+// And `-n` is not an exotic spelling. It is the only escalation that cannot
+// prompt for a password, which is why SUDO_PROBE in docker.ts, the docker sudo
+// failover and cron.ts all use it on channels with no tty. The spelling this
+// app itself prefers was the spelling the guard missed.
+//
+// The widening has to stop EXACTLY at the command, because an option pattern
+// that swallows arbitrary tokens reads `sudo -n cat reboot.txt` as "stops the
+// machine" — the cry-wolf failure the anchor exists to prevent, reintroduced by
+// the fix for the opposite failure. So this is sudo's real option grammar
+// rather than a permissive `-\S+`:
+//
+//   * a bundle of boolean short flags                  -n   -nH   -E
+//   * a short flag that TAKES a value, attached or separated, and only for the
+//     letters that really take one                     -u root   -uroot
+//   * a long flag, with `=value` or a separated value  --non-interactive
+//                                                      --user=root  --user root
+//   * `--`, end of options                             sudo -- reboot
+//   * a VAR=value assignment, which sudo accepts ahead of the command
+//
+// The letter list is the whole point. `-u` takes a value, so `sudo -u root
+// reboot` has to let `root` past; `-n` does not, so `sudo -n cat reboot.txt`
+// must NOT let `cat` past. A naive `(?:-\S+\s+)*` gets the first case only by
+// treating `root` as another flag, and having done that it has no way left to
+// refuse the second.
+//
+// WHY "does this flag take a value" IS ASKED IN A LOOKAHEAD and the token is
+// then consumed by a plain `-\S+`, rather than the flag being spelled out once
+// and consumed in the same breath. Spelled inline as
+// `-[A-Za-z]*[value-letter]\s*VALUE`, a token like `-uuuu` parses four ways,
+// every one of them over the same characters, and a line of such flags
+// multiplies out: `sudo -u -u -u …` did not finish on twenty flags, in a
+// function that runs on every keystroke in the broadcast panel. A JavaScript
+// lookahead is not re-entered once it has succeeded, so asking the question
+// there and consuming the token unambiguously leaves at most one real choice
+// per token — take the next word as a value, or do not — and the wrong branch
+// dies at the next token instead of forking again.
+/** A flag's value: quoted, because `-p 'password for %p: '` contains a space. */
+const SUDO_VALUE = String.raw`(?:'[^']*'|"[^"]*"|\S+)`
+/** Short options of sudo/doas that consume the next word. */
+const SUDO_VALUE_SHORT = 'aCcDghpRrtTUu'
+/** Long options of sudo/doas that consume the next word when not given `=`. */
+const SUDO_VALUE_LONG =
+  'auth-type|chdir|chroot|close-from|command-timeout|group|host|login-class|other-user|prompt|role|type|user'
+// A value never starts with `-`. `sudo -n -u root reboot` has to read `-n` as
+// the boolean it is rather than eating the next flag, and that `(?!-)` is also
+// what stops a run of flags being ambiguous at every position.
+//
+// The last two alternatives are the ones that do the work: any other option
+// token, and a `VAR=value` assignment, which sudo accepts before the command.
+// `-\S+` is broad on purpose — it can only ever match something beginning with
+// a dash, and no command this file grades begins with one, so it cannot swallow
+// the verb. `--` falls out of it for free.
+const SUDO_OPT = String.raw`(?:(?=-[A-Za-z]*[${SUDO_VALUE_SHORT}]\s)-\S+\s+(?!-)${SUDO_VALUE}|(?=--(?:${SUDO_VALUE_LONG})\s)--\S+\s+(?!-)${SUDO_VALUE}|-\S+|\w+=\S+)`
+/** `sudo`/`doas` and everything up to, but not including, the command. */
+const SUDO = String.raw`(?:sudo|doas)\s+(?:${SUDO_OPT}\s+)*`
+/**
+ * Where a command can start: line start or after `;`, `&`, `|`, `(` or a
+ * newline, past any env assignments, past any sudo and its options.
+ *
+ * ONE definition, used by every rule below and imported by jobs.ts, because
+ * two copies of a safety rule that no longer agree is worse than one copy that
+ * is wrong — the wrong one is at least predictable. `restartsTheMachine()` kept
+ * its own flagless copy and therefore missed `sudo -n reboot` long after this
+ * one was fixed.
+ */
+export function commandStart(rest: string): RegExp {
+  return new RegExp(String.raw`(^|[;&|(]|\n)\s*(?:\w+=\S+\s+)*(?:${SUDO})?${rest}`)
+}
+
 function atCommandStart(verbs: string): RegExp {
-  return new RegExp(String.raw`(^|[;&|(]|\n)\s*(?:\w+=\S+\s+)*(?:sudo\s+|doas\s+)?(?:${verbs})\b`)
+  return commandStart(String.raw`(?:${verbs})\b`)
 }
 
 // A flag argument, wherever it appears in a command's argument list rather than
@@ -82,9 +161,7 @@ function atCommandStart(verbs: string): RegExp {
 // `chmod -R 777 /srv`, and a guard that only reads the first token is a guard
 // that misses whichever order the person happened to type.
 function flagAnywhere(verb: string, flags: string): RegExp {
-  return new RegExp(
-    String.raw`(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(?:${verb})(?:\s+[^\s;|&]+)*\s+(?:${flags})\b`
-  )
+  return commandStart(String.raw`(?:${verb})(?:\s+[^\s;|&]+)*\s+(?:${flags})\b`)
 }
 
 const DESTRUCTIVE = [
@@ -92,22 +169,22 @@ const DESTRUCTIVE = [
   // reading only the short flags made the most explicit spelling the one that
   // ran with no confirmation at all.
   {
-    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?rm\s+((-[a-zA-Z]*[rf][a-zA-Z]*|--recursive|--force|--no-preserve-root)\s+)+/,
+    rx: commandStart(String.raw`rm\s+((-[a-zA-Z]*[rf][a-zA-Z]*|--recursive|--force|--no-preserve-root)\s+)+`),
     why: 'deletes files recursively or forcibly'
   },
   // `find … -exec rm` and `… | xargs rm` are how a bulk delete is actually
   // typed. Neither puts `rm` at a command start, so the anchored rule above
   // reads both as ordinary.
-  { rx: /-exec\s+(?:sudo\s+|doas\s+)?rm\b/, why: 'deletes files through find -exec' },
-  { rx: /\bxargs\s+(?:-\S+\s+)*(?:sudo\s+|doas\s+)?rm\b/, why: 'deletes files through xargs' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?find\s[^;|&]*\s-delete\b/, why: 'deletes every file find matches' },
+  { rx: new RegExp(String.raw`-exec\s+(?:${SUDO})?rm\b`), why: 'deletes files through find -exec' },
+  { rx: new RegExp(String.raw`\bxargs\s+(?:-\S+\s+)*(?:${SUDO})?rm\b`), why: 'deletes files through xargs' },
+  { rx: commandStart(String.raw`find\s[^;|&]*\s-delete\b`), why: 'deletes every file find matches' },
   { rx: atCommandStart('mkfs(\\.\\w+)?|fdisk|parted|wipefs'), why: 'writes to a partition table or filesystem' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?dd\s[^|;]*\bof=/, why: 'writes directly to a device or file with dd' },
+  { rx: commandStart(String.raw`dd\s[^|;]*\bof=`), why: 'writes directly to a device or file with dd' },
   { rx: atCommandStart('shutdown|poweroff|halt|reboot'), why: 'stops or restarts the machine' },
   // systemd's own spellings of the same thing. `systemctl poweroff` puts
   // `systemctl` at the command start, so the verb rule above never sees it.
   {
-    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?systemctl\s+(poweroff|reboot|halt|kexec)\b/,
+    rx: commandStart(String.raw`systemctl\s+(poweroff|reboot|halt|kexec)\b`),
     why: 'stops or restarts the machine'
   },
   { rx: atCommandStart('userdel|groupdel'), why: 'removes an account' },
@@ -115,36 +192,40 @@ const DESTRUCTIVE = [
   { rx: atCommandStart('truncate|shred'), why: 'destroys file contents' },
   { rx: flagAnywhere('chown', '-[a-zA-Z]*R[a-zA-Z]*|--recursive'), why: 'changes ownership recursively' },
   { rx: flagAnywhere('chmod', '-[a-zA-Z]*R[a-zA-Z]*|--recursive'), why: 'changes permissions recursively' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(kill|killall|pkill)\s+(-9|-KILL|-s\s*(9|KILL|SIGKILL))\b/, why: 'sends SIGKILL' },
+  { rx: commandStart(String.raw`(kill|killall|pkill)\s+(-9|-KILL|-s\s*(9|KILL|SIGKILL))\b`), why: 'sends SIGKILL' },
   // `\b-F\b` never matched ` -F`: there is no word boundary between a space and
   // a dash, so the single most common way to flush a firewall read as ordinary.
   {
-    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(iptables|ip6tables|nft|ufw)\b[^;|]*(\bflush\b|\s-F\b|\breset\b)/,
+    rx: commandStart(String.raw`(iptables|ip6tables|nft|ufw)\b[^;|]*(\bflush\b|\s-F\b|\breset\b)`),
     why: 'clears firewall rules'
   },
   { rx: />\s*\/dev\/[sn][dv]/, why: 'redirects output onto a block device' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?systemctl\s+(stop|disable|mask)\b/, why: 'stops or disables a service' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?service\s+\S+\s+stop\b/, why: 'stops a service' },
+  { rx: commandStart(String.raw`systemctl\s+(stop|disable|mask)\b`), why: 'stops or disables a service' },
+  { rx: commandStart(String.raw`service\s+\S+\s+stop\b`), why: 'stops a service' },
   // One key away from `crontab -e`, and it takes the whole schedule with it.
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?crontab\s+-[a-z]*r[a-z]*\b/, why: 'removes the crontab' },
+  { rx: commandStart(String.raw`crontab\s+-[a-z]*r[a-z]*\b`), why: 'removes the crontab' },
   { rx: atCommandStart('lvremove|vgremove|pvremove'), why: 'removes a volume or volume group' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(zfs|zpool)\s+destroy\b/, why: 'destroys a dataset or pool' }
+  { rx: commandStart(String.raw`(zfs|zpool)\s+destroy\b`), why: 'destroys a dataset or pool' }
 ]
 
 const ELEVATED = [
   // Anchored to a command start rather than to position zero: `curl … | sudo
   // bash` is root, and reading only the first word said it was not.
   { rx: atCommandStart('sudo|doas'), why: 'runs as root' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?systemctl\s+(restart|reload)\b/, why: 'restarts a service' },
-  { rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?service\s+\S+\s+(restart|reload)\b/, why: 'restarts a service' },
+  { rx: commandStart(String.raw`systemctl\s+(restart|reload)\b`), why: 'restarts a service' },
+  { rx: commandStart(String.raw`service\s+\S+\s+(restart|reload)\b`), why: 'restarts a service' },
   {
-    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(apt|apt-get|yum|dnf|apk|pacman)\s+(install|remove|purge|autoremove|upgrade|dist-upgrade|full-upgrade|update)\b/,
+    rx: commandStart(
+      String.raw`(apt|apt-get|yum|dnf|apk|pacman)\s+(install|remove|purge|autoremove|upgrade|dist-upgrade|full-upgrade|update)\b`
+    ),
     why: 'changes installed packages'
   },
   // The noun-verb spellings (`docker system prune`, `docker volume rm`) are the
   // common ones now, and the verb-only rule matched none of them.
   {
-    rx: /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?(docker|podman)\s+(?:(?:container|image|volume|network|system|compose)\s+)?(rm|rmi|stop|kill|prune|down)\b/,
+    rx: commandStart(
+      String.raw`(docker|podman)\s+(?:(?:container|image|volume|network|system|compose)\s+)?(rm|rmi|stop|kill|prune|down)\b`
+    ),
     why: 'removes or stops containers'
   }
 ]
@@ -415,6 +496,17 @@ export interface BroadcastRequest {
   runId: string
   command: string
   timeoutMs?: number
+  /**
+   * The record of what the user was asked and what they answered — B3.
+   *
+   * Required, and checked in main against a fresh `planBroadcast` over this
+   * very request before a single channel is opened. Before B3 the plan was
+   * computed in the renderer's `useMemo` and thrown away, so `broadcast:run`
+   * took a command and a target list and had no idea whether anybody had
+   * agreed to either. See CommandApproval at the foot of this file for why
+   * that stopped being acceptable.
+   */
+  approval: CommandApproval
   targets: {
     serverId: string
     serverName: string
@@ -439,3 +531,264 @@ export const BROADCAST_TIMEOUT_MS = 60_000
 export const BROADCAST_STALL_GRACE_MS = 30_000
 /** Per-host output kept, in characters. A fan-out can produce a lot. */
 export const BROADCAST_OUTPUT_CAP = 20_000
+
+// ===========================================================================
+// B3: the approval record
+// ===========================================================================
+//
+// WHY THIS IS HERE AND NOT ONLY IN jobs.ts. A job is a broadcast that outlives
+// its panel, and B3's whole point is that there is ONE approval model rather
+// than two. jobs.ts imports this file; this file imports nothing. So the record
+// and the check live at the bottom, where both surfaces can reach them, and the
+// only thing each surface supplies is its own re-derived plan — `planBroadcast`
+// for one command against a flat target list, `planJob` for a step list against
+// cohorts.
+//
+// ---------------------------------------------------------------------------
+// REVERSING A SETTLED DECISION, deliberately, and here is the reasoning
+// ---------------------------------------------------------------------------
+// main/index.ts used to state that main does not re-derive the approval model,
+// because "the renderer is where the user is and is not a trust boundary here".
+// Both halves of that were true and the conclusion has stopped being true, for
+// a reason that did not exist when it was written:
+//
+//   The renderer is where the user is. It is also GONE by the time a detached
+//   job needs re-authorising.
+//
+// B2 made a job outlive the process. A job resumed at the next launch is being
+// acted on by a ShellPilot that never showed anybody a dialog, and "the
+// renderer computed a plan" is not a fact that survives a restart — it was
+// never written down anywhere. `BroadcastPlan` was computed in a `useMemo` and
+// thrown away.
+//
+// This is still not an attacker boundary and is not sold as one: anyone driving
+// the renderer already has a shell on these hosts. What it is, is a RECORD and
+// an AGREEMENT CHECK. The record says what a human was asked and what they
+// answered; the check says the thing about to run is still the thing they were
+// asked about. Those two are what a durable job needs and what neither the
+// renderer-only path nor the AI capability gate produces.
+
+/** A host as it appeared in the list the user confirmed. */
+export interface ApprovalTargetRef {
+  serverId: string
+  serverName: string
+  cohort?: string
+}
+
+/**
+ * What a human was asked, and what they answered.
+ *
+ * Written with the job, in the row, so a process that never saw the dialog can
+ * ask "was this authorised, for exactly this?" and answer from rows alone. It
+ * carries the RESOLVED target list rather than a selection rule for the reason
+ * broadcast refuses saved target sets at all: a rule re-evaluated later is a
+ * blast radius that can grow after consent was given.
+ *
+ * `phrase` is the word the user actually typed, kept because "the dialog
+ * demanded RUN" and "the user typed RUN" are two different facts and only the
+ * second one is consent. It is not a secret and is one of three literals, but
+ * it goes through `redactOutput` on its way to the log with everything else,
+ * because a redaction rule with an exception is a redaction rule someone will
+ * eventually widen.
+ */
+export interface CommandApproval {
+  v: 1
+  /** Which surface produced it. Recorded, never used to weaken a check. */
+  surface: 'broadcast' | 'job'
+  /** The command text of every step, in order, exactly as approved. */
+  commands: string[]
+  targets: ApprovalTargetRef[]
+  risk: BroadcastRisk
+  confirmation: BroadcastConfirmation
+  /** The phrase typed, where one was required. Null where none was. */
+  phrase: string | null
+  confirmedAt: number
+}
+
+export type ApprovalVerdict = { ok: true } | { ok: false; reason: string }
+
+export function isCommandApproval(v: unknown): v is CommandApproval {
+  if (typeof v !== 'object' || v === null) return false
+  const a = v as Partial<CommandApproval>
+  return (
+    a.v === 1 &&
+    (a.surface === 'broadcast' || a.surface === 'job') &&
+    Array.isArray(a.commands) &&
+    a.commands.every((c) => typeof c === 'string') &&
+    Array.isArray(a.targets) &&
+    a.targets.every(
+      (t) =>
+        typeof t === 'object' &&
+        t !== null &&
+        typeof (t as ApprovalTargetRef).serverId === 'string' &&
+        typeof (t as ApprovalTargetRef).serverName === 'string'
+    ) &&
+    (a.risk === 'ordinary' || a.risk === 'elevated' || a.risk === 'destructive') &&
+    typeof a.confirmation === 'object' &&
+    a.confirmation !== null &&
+    (a.phrase === null || typeof a.phrase === 'string') &&
+    typeof a.confirmedAt === 'number' &&
+    Number.isFinite(a.confirmedAt) &&
+    a.confirmedAt > 0
+  )
+}
+
+/**
+ * Mint the record at the moment the human answers.
+ *
+ * The plan is passed in rather than derived here, because the two surfaces
+ * derive it differently — see the header — and a mint that re-derived would be
+ * a third copy of the rule.
+ */
+export function approvalFor(o: {
+  surface: 'broadcast' | 'job'
+  commands: string[]
+  targets: ApprovalTargetRef[]
+  plan: { risk: BroadcastRisk; confirmation: BroadcastConfirmation }
+  phrase?: string | null
+  confirmedAt: number
+}): CommandApproval {
+  return {
+    v: 1,
+    surface: o.surface,
+    commands: [...o.commands],
+    // Copied field by field, so a caller's richer object — a whole Server row,
+    // with a host and a username on it — cannot smuggle itself into a record
+    // that is kept for a year and written to a log.
+    targets: o.targets.map((t) => ({
+      serverId: t.serverId,
+      serverName: t.serverName,
+      ...(t.cohort === undefined ? {} : { cohort: t.cohort })
+    })),
+    risk: o.plan.risk,
+    confirmation: o.plan.confirmation,
+    phrase: o.phrase ?? null,
+    confirmedAt: o.confirmedAt
+  }
+}
+
+/** One line of a command, short enough to put in a refusal message. */
+function snippet(s: string): string {
+  const one = s.replace(/\s+/g, ' ').trim()
+  return one.length <= 60 ? one : `${one.slice(0, 57)}…`
+}
+
+function sameConfirmation(a: BroadcastConfirmation, b: BroadcastConfirmation): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'type-to-confirm' && b.kind === 'type-to-confirm') return a.phrase === b.phrase
+  return true
+}
+
+/**
+ * Is the thing about to run still the thing that was approved?
+ *
+ * Answered from the record and from a FRESH re-derivation, never from the
+ * record alone. The three disagreements it exists to catch are the three that
+ * actually happen:
+ *
+ *  - THE COMMAND WAS EDITED under a stored approval. The record's copy of the
+ *    step text is what makes this visible; comparing the spec to itself would
+ *    always agree.
+ *  - A TARGET WAS ADDED. Consent was given for a blast radius, and a radius
+ *    that grows after the fact is the exact accident the whole model exists to
+ *    prevent.
+ *  - THE CLASSIFIER GOT STRICTER. A command that read `elevated` in the build
+ *    that asked and reads `destructive` in the build that resumes was approved
+ *    against a weaker demand than the one now in force. Refusing is the only
+ *    reading of that which does not silently downgrade a safety rule the
+ *    project deliberately tightened.
+ *
+ * SERVER NAMES ARE NOT COMPARED, and that is a decision rather than an
+ * oversight: a rename changes the label on a machine and not the machine, and
+ * refusing to finish an upgrade because somebody tidied up a workspace name
+ * would be friction with no safety behind it. Ids and cohorts are compared,
+ * because those are what gets connected to and what sized the confirmation.
+ */
+export function verifyApproval(
+  approval: unknown,
+  actual: { commands: string[]; targets: ApprovalTargetRef[] },
+  rederived: { risk: BroadcastRisk; confirmation: BroadcastConfirmation }
+): ApprovalVerdict {
+  if (!isCommandApproval(approval)) {
+    return {
+      ok: false,
+      reason:
+        'no usable approval record came with this run. Nothing runs on a confirmation that was ' +
+        'never written down — re-open the panel and confirm it again.'
+    }
+  }
+
+  if (approval.commands.length !== actual.commands.length) {
+    return {
+      ok: false,
+      reason:
+        `the approval covers ${approval.commands.length} step(s) and this run has ` +
+        `${actual.commands.length}. Confirm it again.`
+    }
+  }
+  for (let i = 0; i < actual.commands.length; i++) {
+    if (approval.commands[i] !== actual.commands[i]) {
+      return {
+        ok: false,
+        reason:
+          `step ${i + 1} was approved as \`${snippet(approval.commands[i])}\` and is now ` +
+          `\`${snippet(actual.commands[i])}\`. An edited command needs a fresh confirmation.`
+      }
+    }
+  }
+
+  const approved = new Map(approval.targets.map((t) => [t.serverId, t.cohort ?? '']))
+  const added = actual.targets.filter((t) => !approved.has(t.serverId))
+  if (added.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `${added.map((t) => t.serverName).join(', ')} ${added.length === 1 ? 'was' : 'were'} not in ` +
+        'the target list that was confirmed. A host added after the fact runs on nobody’s ' +
+        'approval.'
+    }
+  }
+  // A SHRUNK list is allowed, and only in this direction. Resuming three of a
+  // job's fifteen hosts is exactly what B2's reclaim does, and every one of
+  // those three was in the list the user confirmed. Growth is the danger;
+  // shrinkage cannot raise a blast radius. It is still reported below when the
+  // cohort a survivor sits in has changed, because that CAN raise one.
+  for (const t of actual.targets) {
+    const cohort = approved.get(t.serverId)
+    if (cohort !== undefined && cohort !== (t.cohort ?? '')) {
+      return {
+        ok: false,
+        reason:
+          `${t.serverName} was confirmed in wave "${cohort || 'all at once'}" and is now in ` +
+          `"${t.cohort ?? 'all at once'}". Moving a host between waves changes how many run at ` +
+          'once, which is what the confirmation was sized against.'
+      }
+    }
+  }
+
+  if (approval.risk !== rederived.risk) {
+    return {
+      ok: false,
+      reason:
+        `this was approved as \`${approval.risk}\` and now classifies as \`${rederived.risk}\`. ` +
+        'The record is held to the stricter reading, so it needs confirming again.'
+    }
+  }
+  if (!sameConfirmation(approval.confirmation, rederived.confirmation)) {
+    return {
+      ok: false,
+      reason:
+        `this was approved with a \`${approval.confirmation.kind}\` step and now requires ` +
+        `\`${rederived.confirmation.kind}\`. Confirm it again.`
+    }
+  }
+  if (approval.confirmation.kind === 'type-to-confirm' && approval.phrase !== approval.confirmation.phrase) {
+    return {
+      ok: false,
+      reason:
+        `this needed the word ${approval.confirmation.phrase} typed, and the record ` +
+        `${approval.phrase === null ? 'has no typed phrase at all' : 'has a different one'}.`
+    }
+  }
+  return { ok: true }
+}

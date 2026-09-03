@@ -8,7 +8,10 @@ import {
   planBroadcast,
   summariseBroadcast,
   TYPE_ABOVE_HOSTS,
-  type BroadcastHostResult
+  approvalFor,
+  verifyApproval,
+  type BroadcastHostResult,
+  type CommandApproval
 } from '../src/shared/broadcast'
 
 // The approval model, settled before the executor was written.
@@ -208,6 +211,85 @@ describe('spellings the classifier used to miss', () => {
     expect(assessCommand('apt-get purge nginx').risk).toBe('elevated')
     expect(assessCommand('apt autoremove').risk).toBe('elevated')
   })
+
+  // -----------------------------------------------------------------------
+  // sudo WITH FLAGS, which is the spelling this codebase itself uses.
+  //
+  // The prefix admitted `sudo ` and `doas ` and nothing else — no options. So
+  // `sudo -n reboot` fell out of every destructive rule and landed on the
+  // `runs as root` rule instead, which is `elevated`: one confirm click on one
+  // host, where a bare `reboot` demands a typed phrase. Strictly weaker
+  // confirmation for strictly more privilege.
+  //
+  // And `-n` is not an exotic spelling. It is the ONLY escalation that cannot
+  // prompt for a password, which is why SUDO_PROBE in src/shared/docker.ts,
+  // the docker sudo failover and src/shared/cron.ts all use it. The spelling
+  // the app prefers was the spelling the guard missed.
+  // -----------------------------------------------------------------------
+  it('flags a machine-stopping verb behind sudo with flags', () => {
+    for (const c of [
+      'sudo -n reboot',
+      'sudo --non-interactive reboot',
+      'sudo -u root reboot',
+      'sudo -H shutdown -h now',
+      'doas -n reboot',
+      // Bundled short flags, an attached value, a long flag with `=`, an
+      // end-of-options `--`, and a quoted value with a space in it.
+      'sudo -nH poweroff',
+      'sudo -uroot reboot',
+      'sudo --user=root halt',
+      'sudo -- reboot',
+      "sudo -p 'password for %p: ' reboot",
+      // The env prefix still has to work in front of the flags.
+      'DEBIAN_FRONTEND=noninteractive sudo -n shutdown -h now',
+      // And it still has to work after a chain, not only at position zero.
+      'apt-get -y upgrade && sudo -n reboot'
+    ]) {
+      expect(assessCommand(c).risk, c).toBe('destructive')
+    }
+  })
+
+  it('flags the rest of the destructive set behind a flagged sudo, not just reboot', () => {
+    // Every hand-rolled rule carried its own copy of the flagless prefix, so
+    // the hole was the whole set. `sudo -n rm -rf /var/log` taking a single
+    // confirm click on one host is a worse hole than the reboot one.
+    for (const c of [
+      'sudo -n rm -rf /var/log',
+      'sudo -u root rm --recursive --force /srv/old',
+      'sudo -n systemctl stop nginx',
+      'sudo -n systemctl reboot',
+      'sudo -n service nginx stop',
+      'sudo -n iptables -F',
+      'sudo -n crontab -r',
+      'sudo -n dd if=/dev/zero of=/dev/sda',
+      'sudo -n mkfs.ext4 /dev/sdb1',
+      'sudo -n chmod -R 777 /srv',
+      'sudo -u root chown --recursive deploy /srv',
+      'sudo -n pkill -9 nginx',
+      'sudo -n userdel deploy',
+      'sudo -n lvremove /dev/vg0/data',
+      'sudo -n zfs destroy tank/backups',
+      'sudo -n truncate -s 0 /var/log/syslog',
+      "sudo -n find /var/log -name '*.gz' -delete",
+      // The two rules that read a sudo which is NOT at a command start.
+      "find /srv -name '*.bak' -exec sudo -n rm -rf {} +",
+      'find /srv -type f | xargs sudo -n rm -f'
+    ]) {
+      expect(assessCommand(c).risk, c).toBe('destructive')
+    }
+  })
+
+  it('gives the elevated rules the same reading, so the reason is still said', () => {
+    // These already read `elevated` before the fix — but only via the blanket
+    // `runs as root` rule, so the dialog said "runs as root" and never said
+    // WHAT it was about to do. The reason is the half of the model the user
+    // actually reads.
+    const why = (c: string): string[] => assessCommand(c).reasons
+    expect(why('sudo -n apt-get install nginx')).toContain('changes installed packages')
+    expect(why('sudo -n systemctl restart nginx')).toContain('restarts a service')
+    expect(why('sudo -n service nginx reload')).toContain('restarts a service')
+    expect(why('sudo -u root docker system prune -af')).toContain('removes or stops containers')
+  })
 })
 
 describe('and still not crying wolf', () => {
@@ -231,7 +313,84 @@ describe('and still not crying wolf', () => {
       'echo charming',
       'grep reboot /var/log/syslog',
       // A filename that happens to end in a capital R is not a recursive flag.
-      'chmod 644 /srv/foo-baR'
+      'chmod 644 /srv/foo-baR',
+      // The word `sudo` in an argument is not a command running as root, and
+      // `sudoers` is not `sudo` — there is no word boundary inside it.
+      'echo sudo reboot',
+      'ls /etc/sudoers.d',
+      'cat /etc/sudoers.d/90-reboot',
+      'grep -r sudo /etc/pam.d'
+    ]) {
+      expect(assessCommand(c).risk, c).toBe('ordinary')
+    }
+  })
+
+  // -----------------------------------------------------------------------
+  // The half of the sudo-flag fix that matters more than the other half.
+  //
+  // Widening the prefix to admit option arguments is one careless character
+  // away from admitting the COMMAND as an option argument — and then
+  // `sudo -u deploy grep reboot /var/log/syslog` reads as "stops the machine".
+  // A guard that fires on a read-only grep is a guard people learn to click
+  // through, and it is then not there for the `reboot` that meant it.
+  //
+  // These are all `elevated`, because they genuinely do run as root. What none
+  // of them may be is `destructive`: the destructive verb in each one is an
+  // ARGUMENT, not a command.
+  // -----------------------------------------------------------------------
+  it('does not read a verb in a flagged sudo’s arguments as a command', () => {
+    for (const c of [
+      'sudo -u deploy grep reboot /var/log/syslog',
+      'sudo -n cat reboot.txt',
+      'sudo cat /var/log/reboot.log',
+      'sudo -u root tail -n 50 /var/log/shutdown.log',
+      'sudo -n grep -r reboot /etc',
+      'sudo -n test -f /run/reboot-required',
+      'sudo -n stat /sbin/reboot',
+      'sudo -n ls /etc/systemd/system/reboot.target.wants',
+      'sudo -n journalctl -u nginx | grep -i shutdown',
+      'sudo -n systemctl status reboot-guard',
+      // `-u deploy` must consume `deploy` as the flag's value and then STOP.
+      // A prefix that swallowed any token after any flag would read the `rm`
+      // here as a command.
+      'sudo -u deploy ls -la /srv/rm-backups',
+      'sudo -n head -n 100 /var/log/mkfs.log',
+      'sudo -n diff /etc/crontab /etc/crontab.bak'
+    ]) {
+      const a = assessCommand(c)
+      expect(a.risk, c).toBe('elevated')
+      expect(a.reasons, c).toEqual(['runs as root'])
+    }
+  })
+
+  it('cannot be made to hang by a long line of flags', () => {
+    // Not a theoretical hardening. The first version of the widened prefix
+    // spelled the value-taking flags inline, which made `sudo -u -u -u …`
+    // parse exponentially many ways over the same characters — twenty flags
+    // did not finish. `assessCommand` runs on every keystroke in the broadcast
+    // panel, so an input that wedges it wedges the window.
+    for (const line of [
+      `sudo ${'-u '.repeat(400)}x`,
+      `sudo ${'-u a '.repeat(400)}x`,
+      `sudo ${'-uuuu a '.repeat(400)}x`,
+      `sudo ${'--user root '.repeat(400)}x`,
+      `sudo ${'-nHE '.repeat(400)}x`
+    ]) {
+      const started = Date.now()
+      expect(assessCommand(line).risk).toBe('elevated')
+      expect(Date.now() - started, line.slice(0, 40)).toBeLessThan(250)
+    }
+  })
+
+  it('still refuses to widen the anchor itself', () => {
+    // The option loop hangs off `sudo`/`doas` and nothing else. A bare flag,
+    // or a flag behind some other command, is not a licence to go looking for
+    // a verb further down the line.
+    for (const c of [
+      'ssh -n web01 uptime',
+      'nice -n 10 tar cf backup.tar /srv',
+      'timeout -k 5 30 curl https://example.test/reboot',
+      'ansible -m shell -a uptime web'
     ]) {
       expect(assessCommand(c).risk, c).toBe('ordinary')
     }
@@ -316,5 +475,141 @@ describe('the decision not to escalate on a fan-out', () => {
       kind: 'type-to-confirm',
       phrase: 'RUN'
     })
+  })
+})
+
+// ===========================================================================
+// B3: the plan stops being a value in a useMemo and becomes a record
+// ===========================================================================
+//
+// Before B3, `BroadcastPanel` computed a plan, used it to gate a dialog, and
+// threw it away. `broadcast:run` took a run id, a command and a target list,
+// and main had no idea whether anybody had agreed to any of it. Everything
+// below is about closing that: one record type, one verifier, and both surfaces
+// — broadcast and job — calling them rather than growing a second model each.
+
+describe('the approval record, shared with the job engine', () => {
+  const two = targets(2)
+  const mint = (command: string, t = two, phrase: string | null = null): CommandApproval =>
+    approvalFor({
+      surface: 'broadcast',
+      commands: [command],
+      targets: t,
+      plan: planBroadcast(command, t),
+      phrase,
+      confirmedAt: 1_700_000_000_000
+    })
+
+  const check = (a: unknown, command: string, t = two): ReturnType<typeof verifyApproval> =>
+    verifyApproval(a, { commands: [command], targets: t }, planBroadcast(command, t))
+
+  it('accepts a record that still matches the run it came with', () => {
+    expect(check(mint('uptime'), 'uptime')).toEqual({ ok: true })
+  })
+
+  it('refuses a run with no record at all', () => {
+    const v = check(undefined, 'uptime')
+    expect(v.ok).toBe(false)
+    expect(v.ok === false && v.reason).toMatch(/never written down/i)
+  })
+
+  it('refuses a command edited under the record', () => {
+    const v = check(mint('uptime'), 'rm -rf /var/log')
+    expect(v.ok).toBe(false)
+    expect(v.ok === false && v.reason).toMatch(/approved as `uptime` and is now `rm -rf \/var\/log`/)
+  })
+
+  it('refuses a host added after the record was minted', () => {
+    const v = check(mint('uptime', targets(2)), 'uptime', targets(3))
+    expect(v.ok).toBe(false)
+    expect(v.ok === false && v.reason).toMatch(/host-2 was not in the target list that was confirmed/)
+  })
+
+  it('refuses when the record was graded by a laxer classifier', () => {
+    // The disagreement that comparing a request to itself can never see: same
+    // command, same hosts, a risk grade that has since tightened.
+    const stale = { ...mint('rm -rf /srv'), risk: 'ordinary' as const, confirmation: { kind: 'none' as const }, phrase: null }
+    expect(planBroadcast('rm -rf /srv', two).risk, 'or this proves nothing').toBe('destructive')
+    const v = check(stale, 'rm -rf /srv')
+    expect(v.ok).toBe(false)
+    expect(v.ok === false && v.reason).toMatch(/approved as `ordinary` and now classifies as `destructive`/)
+  })
+
+  it('demands the phrase the model asked for, not merely that the model asked', () => {
+    const command = 'rm -rf /srv'
+    expect(planBroadcast(command, two).confirmation).toEqual({ kind: 'type-to-confirm', phrase: 'RUN' })
+    // The dialog demanded RUN and nobody typed it.
+    const unsigned = check(mint(command, two, null), command)
+    expect(unsigned.ok).toBe(false)
+    expect(unsigned.ok === false && unsigned.reason).toMatch(/no typed phrase at all/)
+    expect(check(mint(command, two, 'RUN'), command)).toEqual({ ok: true })
+  })
+})
+
+describe('where the broadcast approval is enforced', () => {
+  // Source assertions, in the style of the closure walk in
+  // tests/jobsNotExposed.test.ts: the handler lives in main/index.ts, which
+  // cannot be constructed in a unit test, and the property being asserted is
+  // that the wiring exists at all.
+  const main = readFileSync(resolve(__dirname, '../src/main/index.ts'), 'utf8')
+  const panel = readFileSync(
+    resolve(__dirname, '../src/renderer/src/components/monitor/BroadcastPanel.tsx'),
+    'utf8'
+  )
+
+  it('main re-derives the plan and refuses before the runner is reached', () => {
+    const handler = main.slice(main.indexOf("ipcMain.handle('broadcast:run'"))
+    const body = handler.slice(0, handler.indexOf('\n})'))
+    // EACH INDEX IS PROVED TO EXIST BEFORE IT IS ORDERED. `indexOf` returns -1
+    // for a string that is not there, and -1 is less than every real index — so
+    // an ordering assertion on its own passes most loudly against the very bug
+    // it was written to catch: a handler with the throw deleted. That failure
+    // mode is not hypothetical here, it is what the first version of this test
+    // did when the refusal was mutated out.
+    const at = (needle: string): number => {
+      const i = body.indexOf(needle)
+      expect(i, `the broadcast:run handler no longer contains ${needle}`).toBeGreaterThanOrEqual(0)
+      return i
+    }
+    expect(body, 'main must re-derive rather than trust the request').toContain('verifyApproval(')
+    const run = at('broadcast.run(req)')
+    expect(at('verifyApproval(')).toBeLessThan(run)
+    expect(at('planBroadcast(')).toBeLessThan(run)
+    // The refusal has to be a THROW, before the runner. A logged disagreement
+    // that still runs the command is not a refusal.
+    expect(at('throw new Error')).toBeLessThan(run)
+    expect(at('!verdict.ok')).toBeLessThan(run)
+  })
+
+  it('main writes the decision to the job approval log, granted or refused', () => {
+    const handler = main.slice(main.indexOf("ipcMain.handle('broadcast:run'"))
+    const body = handler.slice(0, handler.indexOf('\n})'))
+    expect(body).toContain("event: 'refused'")
+    expect(body).toContain("event: 'granted'")
+    // And the writer is the job approval log, NOT the AI audit log — the
+    // argument is in approvalLog.ts and in docs/AI-SECURITY.md.
+    expect(body).toContain('recordJobApproval(')
+    expect(body).not.toContain('recordAudit(')
+  })
+
+  it('the panel mints the record from the plan it showed and the phrase that was typed', () => {
+    expect(panel).toContain('approvalFor({')
+    expect(panel).toMatch(/surface: 'broadcast'/)
+    // Minted from the plan and the phrase state, not re-derived at send time:
+    // what is recorded has to be what was on screen.
+    expect(panel).toMatch(/phrase: plan\.confirmation\.kind === 'type-to-confirm' \? phrase\.trim\(\) : null/)
+    expect(panel).toMatch(/^\s+approval,$/m)
+  })
+
+  it('does not grow a second approval model beside the shared one', () => {
+    // The whole point of B3. If a future change re-implements the check in
+    // main rather than calling the shared one, this is where it shows up.
+    const shared = readFileSync(resolve(__dirname, '../src/shared/broadcast.ts'), 'utf8')
+    expect(shared.match(/export function verifyApproval/g)).toHaveLength(1)
+    expect(main).not.toMatch(/function verifyApproval/)
+    const jobs = readFileSync(resolve(__dirname, '../src/shared/jobs.ts'), 'utf8')
+    // jobs.ts adapts it, it does not restate it.
+    expect(jobs).toContain('return verifyApproval(')
+    expect(jobs).not.toMatch(/export function verifyApproval\s*\(/)
   })
 })

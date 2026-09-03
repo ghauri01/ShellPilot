@@ -594,10 +594,24 @@ export const DOCKER_MARKERS = {
   ps: '===SHELLPILOT-PS===',
   compose: '===SHELLPILOT-COMPOSE===',
   df: '===SHELLPILOT-DF===',
+  dfDetail: '===SHELLPILOT-DFV===',
+  engine: '===SHELLPILOT-ENGINE===',
   inspect: '===SHELLPILOT-INSPECT===',
   health: '===SHELLPILOT-HEALTH===',
   stats: '===SHELLPILOT-STATS===',
-  act: '===SHELLPILOT-ACT==='
+  act: '===SHELLPILOT-ACT===',
+  /**
+   * A CLOSING marker, which the others do not need.
+   *
+   * `attempt()` merges stderr onto stdout, so anything the login shell says —
+   * a locale warning, an motd, a transport notice — arrives AFTER the last
+   * block. Every other collector reads a block that is followed by another
+   * marker, so that noise falls outside it. The itemised disk listing is the
+   * last block in its round trip, and without a marker behind it the noise
+   * landed inside the final table's column offsets and was counted as a row
+   * that could not be read.
+   */
+  end: '===SHELLPILOT-END==='
 } as const
 
 /**
@@ -836,6 +850,465 @@ export function parseDockerDiskOutput(output: string, exitCode: number | null): 
     }
   }
   return { ok: true, rows }
+}
+
+// --------------------------------------------------- system df -v, itemised
+
+// THE NUMBER THIS SECTION MUST NEVER PRODUCE, stated before the types because
+// every reviewer's first instinct is to add it:
+//
+//   **Per-item sizes do not add up to a total, and summing them is wrong.**
+//
+// `SIZE` in the images table is the size of every layer the image is built
+// from, and layers are shared: eight images off the same base each report the
+// base's bytes. Adding them can overstate the disk by a multiple — and it looks
+// correct in every hand-written fixture, because a fixture nobody recorded has
+// no shared layers in it. `UNIQUE SIZE` is the honest per-image figure (docker
+// computes it against the whole store), but even those do not sum to
+// "reclaimable", because whether an image is reclaimable depends on what is
+// referencing it right now.
+//
+// So the headline number keeps coming from the NON-verbose `docker system df`,
+// where docker did the arithmetic itself and knows about the sharing. This
+// section exists to answer "which of these is big", per item, and nothing here
+// totals anything.
+
+/** One row of the `Images space usage:` table. */
+export interface DockerDiskImage {
+  /** `<none>` when nothing tags it. Kept verbatim — docker's own word for it. */
+  repository: string
+  tag: string
+  /** Short id, as docker prints it here. */
+  id: string
+  created: string
+  /** Every layer, INCLUDING ones other images share. Never summed. See above. */
+  size: string
+  sizeBytes: number | null
+  sharedSize: string
+  sharedSizeBytes: number | null
+  /** The bytes that belong to this image alone — the honest per-image figure. */
+  uniqueSize: string
+  uniqueSizeBytes: number | null
+  /** How many containers reference it. 0 with no tag is the classic leftover. */
+  containers: number | null
+  /** `<none>:<none>`. A build's previous layer set, orphaned by the next build. */
+  dangling: boolean
+}
+
+/** One row of the `Containers space usage:` table. */
+export interface DockerDiskContainer {
+  id: string
+  image: string
+  /** Quoted, and truncated by docker with a unicode ellipsis. Shown as given. */
+  command: string
+  localVolumes: number | null
+  /** The container's writable layer — NOT its image. */
+  size: string
+  sizeBytes: number | null
+  created: string
+  /** `Up 17 hours (healthy)`, `Exited (137) 2 days ago`, `Created`. */
+  status: string
+  /** Derived from the status, the same way the container list derives it. */
+  state: string
+  name: string
+}
+
+/** One row of the `Local Volumes space usage:` table. */
+export interface DockerDiskVolume {
+  name: string
+  /** 0 means no container references it — which is not the same as unwanted. */
+  links: number | null
+  size: string
+  sizeBytes: number | null
+  /**
+   * A 64-hex name is one docker generated for an unnamed mount; anything else
+   * is a name a person typed. There is no flag for this, only the shape, and
+   * the difference matters: an anonymous volume with no links is usually
+   * rubbish, a named one with no links is usually a stopped database.
+   */
+  anonymous: boolean
+}
+
+/** One row of the `Build cache usage:` table. */
+export interface DockerDiskCacheEntry {
+  id: string
+  type: string
+  size: string
+  sizeBytes: number | null
+  created: string
+  lastUsed: string
+  usage: number | null
+  /** `true`/`false` as docker printed it. Not coerced — podman may not print it. */
+  shared: string
+}
+
+export interface DockerDiskDetail {
+  images: DockerDiskImage[]
+  containers: DockerDiskContainer[]
+  volumes: DockerDiskVolume[]
+  buildCache: DockerDiskCacheEntry[]
+  /**
+   * Which tables the runtime actually printed.
+   *
+   * podman has historically omitted the build cache table entirely, and "this
+   * host has no build cache" and "this runtime does not have build cache" are
+   * different sentences. Absent is not empty — the same distinction `section()`
+   * keeps for markers.
+   */
+  sections: { images: boolean; containers: boolean; volumes: boolean; buildCache: boolean }
+  /** Rows inside a table this parser could not read. Counted, never dropped quietly. */
+  unreadable: number
+}
+
+/**
+ * When the engine running on this host was BUILT.
+ *
+ * `{{.Server.BuildTime}}` and nothing else: no network call, and no baked table
+ * of release dates. A table needs an owner and a refresh cadence, and a table
+ * that has rotted states something false — whereas a build date is a fact the
+ * daemon already knows about itself and cannot go stale.
+ */
+export interface DockerEngineBuild {
+  /** Exactly what the template printed. */
+  raw: string
+  /** `2021-06-02` — the date, without a time nobody is going to read. */
+  date: string
+  epochMs: number
+}
+
+export type DockerDiskDetailProbe =
+  | { ok: true; disk: DockerDiskDetail; engine: DockerEngineBuild | null; usedSudo?: boolean }
+  | { ok: false; reason: DockerFailure; detail: string }
+
+/**
+ * `docker system df -v`, plus the engine's build date.
+ *
+ * Two blocks, and the ORDER is load-bearing. The build-time probe ends in
+ * `|| true`, so it has to come first: only the last block's exit status
+ * survives, and a `|| true` after `system df -v` would erase the status the
+ * parser uses to tell a host with no docker from a host with an empty store.
+ *
+ * The build-time probe's stderr goes to /dev/null for the same reason the
+ * version probe's does — podman's docker shim cannot answer `.Server.*` at all
+ * and fails it with a nil-pointer template error, which is not evidence of
+ * anything. A host that cannot answer simply gets no age line.
+ *
+ * `-v` here, unlike `buildDockerDiskCommand`, is the entire point: the summary
+ * gives four category totals, and "which of these images is the big one" is not
+ * answerable from four numbers. It is a page of output, so it is a separate
+ * read the operator asks for rather than something every refresh pays for.
+ */
+export function buildDockerDiskDetailCommand(opts: { sudo?: boolean } = {}): string {
+  const run = runner(opts.sudo)
+  return [
+    resolveBinary('docker'),
+    `echo "${DOCKER_MARKERS.engine}"`,
+    `${run} version --format "{{.Server.BuildTime}}" 2>/dev/null || true`,
+    `echo "${DOCKER_MARKERS.dfDetail}"`,
+    `${run} system df -v 2>&1`,
+    // The listing's own status, held over the echo and handed back. A bare
+    // `echo` after it would replace the status the parser uses to tell a host
+    // with no docker from a host with an empty store — which is why every
+    // other block here is ordered rather than bracketed.
+    `SP_RC=$?; echo "${DOCKER_MARKERS.end}"; exit $SP_RC`
+  ].join('; ')
+}
+
+/**
+ * The engine build date, or null.
+ *
+ * Deliberately strict about the shape: docker prints an RFC3339 timestamp, and
+ * anything else in this block is the runtime declining to answer — `<no
+ * value>`, a Go template error, or podman's shim notice. Handing those to
+ * `Date.parse`, which will cheerfully invent a date out of a version string, is
+ * how a panel ends up asserting the daemon was built in the year 24.
+ */
+/**
+ * Docker's first public release. Anything claiming to predate it is a sentinel
+ * rather than a build time, and there is no version of this panel where the
+ * difference matters less than the difference between them.
+ */
+const DOCKER_EXISTED_FROM = Date.parse('2013-03-01T00:00:00Z')
+
+export function parseDockerEngineBuild(text: string | undefined): DockerEngineBuild | null {
+  if (text === undefined) return null
+  for (const line of nonEmptyLines(text)) {
+    if (!/^\d{4}-\d{2}-\d{2}[T ]/.test(line)) continue
+    const at = Date.parse(line)
+    if (Number.isNaN(at)) continue
+    // A timestamp that is well shaped and still not a fact. podman's
+    // docker-compat derives BuildTime from an int64 that formats as the Unix
+    // epoch when it was never set, and Go's own zero value formats as
+    // `0001-01-01T00:00:00Z`. Both pass every shape check there is, and
+    // "built 1970-01-01, 56 years ago" is the year-24 mistake in a costume.
+    if (at < DOCKER_EXISTED_FROM) continue
+    // The date the DAEMON printed, not the same instant expressed in UTC:
+    // `toISOString` moved an engine built at half eleven at night in Chicago
+    // onto the following day. The shape check above guarantees the first ten
+    // characters are that date.
+    return { raw: line, date: line.slice(0, 10), epochMs: at }
+  }
+  return null
+}
+
+/**
+ * "built 2021-06-02, 4 years ago".
+ *
+ * `now` is a parameter rather than a call to `Date.now()` so this is a function
+ * of its inputs and can be tested without freezing the clock.
+ *
+ * A build date in the future is a clock disagreement between this machine and
+ * that one, not a fact about the engine, so it reports the date and stops
+ * rather than saying "in 3 days".
+ */
+export function formatDockerEngineAge(build: DockerEngineBuild, now: number): string {
+  const days = Math.floor((now - build.epochMs) / 86_400_000)
+  if (days < 0) return `built ${build.date}`
+  const plural = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? '' : 's'} ago`
+  const years = Math.floor(days / 365.25)
+  const months = Math.floor(days / 30.44)
+  if (years >= 1) return `built ${build.date}, ${plural(years, 'year')}`
+  if (months >= 1) return `built ${build.date}, ${plural(months, 'month')}`
+  if (days === 0) return `built ${build.date}, today`
+  return `built ${build.date}, ${plural(days, 'day')}`
+}
+
+/**
+ * A column of one of the four tables: its header, and where it starts.
+ *
+ * WHY POSITIONAL, when every other parser in this file splits on a separator.
+ *
+ * The verbose tables have two columns with spaces INSIDE a single cell, so the
+ * `/\s{2,}/` split the summary parser uses does not survive them: `COMMAND` is
+ * a quoted string docker truncates with a unicode ellipsis — `"/bin/sh -c 'set
+ * -e\n…"` — and `STATUS` reads `Up 17 hours (healthy)` or `Exited (137) 2 days
+ * ago`. Splitting on two-or-more spaces happens to work on the recorded fixture
+ * and stops working the first time a command line contains a double space,
+ * which is not a hypothetical: `sh -c 'a  b'` is a real entrypoint.
+ *
+ * docker renders these through Go's tabwriter, which pads every column to the
+ * widest cell in it INCLUDING the header — so the header row's offsets are the
+ * table's offsets, for every row, exactly. Cutting there reads a cell that
+ * contains anything at all.
+ *
+ * Columns are looked up BY NAME rather than by index, because the runtimes
+ * disagree about which columns exist and an index would silently read the wrong
+ * one. A column this runtime did not print reads as absent instead.
+ */
+interface DiskColumn {
+  name: string
+  start: number
+  end: number
+}
+
+function diskColumns(header: string): DiskColumn[] {
+  // Column headings are separated by two or more spaces and several contain ONE
+  // space (`IMAGE ID`, `SHARED SIZE`, `VOLUME NAME`), so a single space is part
+  // of a name and two is a boundary.
+  const re = /\S+(?: \S+)*/g
+  const found: { text: string; at: number }[] = []
+  let m: RegExpExecArray | null
+  // Offsets are counted in CODE POINTS, and `cell` cuts in them too. Go's
+  // tabwriter pads by runes; a JavaScript string index counts UTF-16 units, so
+  // one astral-plane character in a COMMAND shifted every column after it and
+  // dropped the whole row from a listing whose only job is to be complete.
+  while ((m = re.exec(header)) !== null) found.push({ text: m[0], at: [...header.slice(0, m.index)].length })
+  return found.map((f, i) => ({
+    name: f.text.toUpperCase(),
+    start: f.at,
+    // The last column runs to the end of the line: a name wider than its own
+    // header must not be clipped.
+    end: i + 1 < found.length ? found[i + 1].at : Number.MAX_SAFE_INTEGER
+  }))
+}
+
+function cell(columns: DiskColumn[], row: string, name: string): string {
+  const col = columns.find((c) => c.name === name)
+  if (col === undefined) return ''
+  return [...row].slice(col.start, col.end).join('').trim()
+}
+
+type DiskSectionKind = 'images' | 'containers' | 'volumes' | 'cache'
+
+/**
+ * Which table a heading opens, or null for a line that is not a heading.
+ *
+ * Matched on the keyword rather than the whole sentence: docker writes `Local
+ * Volumes space usage:` and `Build cache usage: 0B` — two different shapes
+ * already — and podman words them differently again.
+ */
+function diskSectionKind(line: string): DiskSectionKind | null {
+  const t = line.trim()
+  if (!/\busage:/i.test(t)) return null
+  if (/^images\b/i.test(t)) return 'images'
+  if (/^containers\b/i.test(t)) return 'containers'
+  if (/\bvolumes\b/i.test(t)) return 'volumes'
+  if (/\bcache\b/i.test(t)) return 'cache'
+  return null
+}
+
+/** A header row is entirely upper case; a warning docker slipped in is not. */
+function isDiskHeader(line: string): boolean {
+  return !/[a-z]/.test(line) && /[A-Z]/.test(line)
+}
+
+export function parseDockerDiskDetailOutput(output: string, exitCode: number | null): DockerDiskDetailProbe {
+  const body = section(output, DOCKER_MARKERS.dfDetail)
+  if (body === undefined) {
+    const detail = nonEmptyLines(output)[0] ?? 'docker did not run'
+    return { ok: false, reason: classifyDockerFailure(output, exitCode), detail }
+  }
+  const engine = parseDockerEngineBuild(section(output, DOCKER_MARKERS.engine))
+
+  const disk: DockerDiskDetail = {
+    images: [],
+    containers: [],
+    volumes: [],
+    buildCache: [],
+    sections: { images: false, containers: false, volumes: false, buildCache: false },
+    unreadable: 0
+  }
+
+  let kind: DiskSectionKind | null = null
+  let columns: DiskColumn[] | null = null
+  // Lines are NOT trimmed: the column offsets are measured from the start of
+  // the line, so leading space is data here rather than noise.
+  for (const raw of body.split('\n')) {
+    const line = raw.replace(/\s+$/, '')
+    if (line.trim() === '') continue
+
+    const heading = diskSectionKind(line)
+    if (heading !== null) {
+      kind = heading
+      columns = null
+      if (heading === 'cache') disk.sections.buildCache = true
+      else disk.sections[heading] = true
+      continue
+    }
+    // Anything before the first heading is docker talking rather than
+    // answering — the podman-docker shim notice, a bridge-nf warning. Kept out
+    // of the tables; still visible to blockFailure below.
+    if (kind === null) continue
+    if (columns === null) {
+      if (isDiskHeader(line)) columns = diskColumns(line)
+      else disk.unreadable++
+      continue
+    }
+
+    if (kind === 'images') {
+      const repository = cell(columns, line, 'REPOSITORY')
+      const tag = cell(columns, line, 'TAG')
+      const size = cell(columns, line, 'SIZE')
+      if (repository === '' || parseDockerSize(size) === null) {
+        disk.unreadable++
+        continue
+      }
+      const sharedSize = cell(columns, line, 'SHARED SIZE')
+      const uniqueSize = cell(columns, line, 'UNIQUE SIZE')
+      disk.images.push({
+        repository,
+        tag,
+        id: cell(columns, line, 'IMAGE ID'),
+        created: cell(columns, line, 'CREATED'),
+        size,
+        sizeBytes: parseDockerSize(size),
+        sharedSize,
+        sharedSizeBytes: parseDockerSize(sharedSize),
+        uniqueSize,
+        uniqueSizeBytes: parseDockerSize(uniqueSize),
+        containers: parseCount(cell(columns, line, 'CONTAINERS')),
+        dangling: repository === '<none>' && tag === '<none>'
+      })
+      continue
+    }
+
+    if (kind === 'containers') {
+      const id = cell(columns, line, 'CONTAINER ID')
+      const size = cell(columns, line, 'SIZE')
+      if (id === '' || parseDockerSize(size) === null) {
+        disk.unreadable++
+        continue
+      }
+      const status = cell(columns, line, 'STATUS')
+      disk.containers.push({
+        id,
+        image: cell(columns, line, 'IMAGE'),
+        command: cell(columns, line, 'COMMAND'),
+        localVolumes: parseCount(cell(columns, line, 'LOCAL VOLUMES')),
+        size,
+        sizeBytes: parseDockerSize(size),
+        created: cell(columns, line, 'CREATED'),
+        status,
+        // This table has no State column, so the status line is all there is —
+        // the same fallback the container list already uses.
+        state: stateFrom('', status),
+        name: cell(columns, line, 'NAMES')
+      })
+      continue
+    }
+
+    if (kind === 'volumes') {
+      const name = cell(columns, line, 'VOLUME NAME')
+      const size = cell(columns, line, 'SIZE')
+      if (name === '' || parseDockerSize(size) === null) {
+        disk.unreadable++
+        continue
+      }
+      disk.volumes.push({
+        name,
+        links: parseCount(cell(columns, line, 'LINKS')),
+        size,
+        sizeBytes: parseDockerSize(size),
+        anonymous: /^[0-9a-f]{64}$/.test(name)
+      })
+      continue
+    }
+
+    const id = cell(columns, line, 'CACHE ID')
+    const size = cell(columns, line, 'SIZE')
+    if (id === '' || parseDockerSize(size) === null) {
+      disk.unreadable++
+      continue
+    }
+    disk.buildCache.push({
+      id,
+      type: cell(columns, line, 'CACHE TYPE'),
+      size,
+      sizeBytes: parseDockerSize(size),
+      created: cell(columns, line, 'CREATED'),
+      lastUsed: cell(columns, line, 'LAST USED'),
+      usage: parseCount(cell(columns, line, 'USAGE')),
+      shared: cell(columns, line, 'SHARED')
+    })
+  }
+
+  const items = disk.images.length + disk.containers.length + disk.volumes.length + disk.buildCache.length
+  if (items === 0) {
+    // The rule the whole module is built on: "nothing here" and "you are not
+    // allowed to look" must never render the same.
+    const failure = blockFailure(body, exitCode)
+    if (failure) return { ok: false, ...failure }
+    const printed =
+      disk.sections.images || disk.sections.containers || disk.sections.volumes || disk.sections.buildCache
+    if (!printed) {
+      return {
+        ok: false,
+        reason: 'unknown',
+        detail: nonEmptyLines(body)[0] ?? 'docker system df -v returned nothing this parser could read'
+      }
+    }
+    // Tables printed, and every row inside them unreadable: a runtime whose
+    // columns are not the ones assumed here. Reporting that as an empty store
+    // is the same lie as reporting a refused socket as one.
+    if (disk.unreadable > 0) {
+      return {
+        ok: false,
+        reason: 'unknown',
+        detail: `docker system df -v returned ${disk.unreadable} row(s) this parser could not read`
+      }
+    }
+  }
+  return { ok: true, disk, engine }
 }
 
 // -------------------------------------------------------------- inspect
@@ -1384,6 +1857,7 @@ export interface DockerBridge {
     opts?: DockerLogsOptions
   ): Promise<{ ok: boolean; output: string; error?: string }>
   disk(cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerDiskProbe>
+  diskDetail(cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerDiskDetailProbe>
   inspect(cfg: unknown, ref: string, opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerInspectProbe>
   stats(cfg: unknown, refs: string[], opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerStatsProbe>
   act(

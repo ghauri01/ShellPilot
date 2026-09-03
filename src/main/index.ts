@@ -3,8 +3,9 @@
 import './portable'
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, session, Menu, Notification, powerMonitor } from 'electron'
 import { join } from 'node:path'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import {
   sshConnect,
   sshWrite,
@@ -48,8 +49,23 @@ import {
   sftpDisposeAll
 } from './services/sftp'
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
-import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
+import { HostFactsReader } from './services/hostFacts'
+import { FleetSampler, fleetCached, setActiveFleetSampler } from './services/fleetSampler'
+import { loadHistory, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
+import { JobRunner, type JobStore } from './services/jobRunner'
+import { attachedJobExecutor } from './services/jobExec'
+import { detachedJobExecutor } from './services/jobDetached'
+import type { JobHostCapabilityReport, JobRunRequest } from '../shared/jobs'
+import { JOB_DETACHED_STALL_GRACE_MS, jobCohorts, restartsTheMachine } from '../shared/jobs'
+import type { GateHost } from '../shared/patch'
+import {
+  buildTopology,
+  rebootBlockFor,
+  sameWaveDatabaseBlocks,
+  unmatchedHopNote,
+  type RebootBlock
+} from '../shared/topology'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSourceReport } from '../shared/cron'
@@ -64,6 +80,7 @@ import { KubernetesReader } from './services/kubernetes'
 import { buildK8sLogsCommand } from '../shared/kubernetes'
 import type { K8sRolloutTarget } from '../shared/kubernetes'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
+import { planBroadcast, verifyApproval } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
 import {
   webhookConfigure,
@@ -73,10 +90,13 @@ import {
   webhookTest,
   webhookNotify
 } from './services/webhookAlerts'
-import type { AlertPayload } from '../shared/webhook'
+import type { AlertPayload, StoredAlertRow } from '../shared/webhook'
+import { ALERT_HISTORY_KIND, sanitiseStoredAlert } from '../shared/webhook'
 import { dbTest, dbQuery, dbInfo, dbClose, dbDisposeAll } from './services/db'
 import { dbShell } from './services/dbshell'
+import { dbOps } from './services/dbOps'
 import type { DbConnectConfig } from '../shared/db'
+import { notableDbEvents } from '../shared/dbOps'
 import { setSecret, getSecret, deleteSecret, secretsAvailable } from './services/secrets'
 import {
   vaultStatus,
@@ -139,7 +159,14 @@ import { parseSshConfig } from '../shared/sshconfig'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
 import { resolveDbSecrets, resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
-import { refreshMcpDataCache, listCachedWorkspaces, listCachedServers } from './services/mcpDataCache'
+import {
+  refreshMcpDataCache,
+  listCachedWorkspaces,
+  listCachedServers,
+  listCachedDatabases,
+  getCachedServer,
+  serverToSshConfig
+} from './services/mcpDataCache'
 import {
   listGroups,
   createGroup,
@@ -179,6 +206,7 @@ import {
   biometricUnlock
 } from './services/biometrics'
 import { listAudit } from './services/auditLog'
+import { recordJobApproval } from './services/approvalLog'
 import { startMcpServer, stopMcpServer, mcpServerStatus, explainSessionAccess } from './services/mcpServer'
 
 const isDev = !app.isPackaged
@@ -324,6 +352,10 @@ function createWindow(): void {
     // out, so the streams were invisible and unstoppable.
     logTailer.disposeAll()
     broadcast.disposeAll()
+    // Same, and it matters more here: a job outlives its panel by design, so a
+    // window closing is exactly the case where one would keep working through
+    // its queue with nowhere to report. Queued hosts must not start.
+    jobRunner.disposeAll()
   })
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
@@ -574,6 +606,188 @@ ipcMain.handle('metrics:sample', (_e, key: string, cfg: SshConnectConfig & { ser
 )
 ipcMain.handle('metrics:disconnect', (_e, key: string) => metricsDisconnect(key))
 
+// ---- The durable store ----
+//
+// Roadmap item A. Opened lazily and off the startup path: loadHistory() never
+// throws, and a machine where it will not open gets `null` and an app that
+// behaves exactly as it did before this existed. Nothing here is awaited,
+// because nothing about launching depends on it.
+//
+// The retention pass is armed here rather than inside the store, so the schedule
+// is visible next to everything else main owns. It runs once shortly after open
+// and then every six hours: full resolution for a week, hourly means for a
+// quarter, then dropped. Measured at ~20 MB steady state versus 730 MB a year
+// unmanaged — and about twice that on disk, because a full .bak is taken at
+// every clean launch. A tool that alerts on disk pressure must not cause it.
+let historyStore: HistoryStore | null = null
+let historyRetain: ReturnType<typeof setInterval> | null = null
+const HISTORY_RETAIN_INTERVAL_MS = 6 * 60 * 60 * 1000
+/** How long 'before-quit' waits for an in-flight sweep to finish writing before
+ *  closing the store anyway. Inside the 4s teardown cap, with room to spare. */
+const HISTORY_LAST_SWEEP_MS = 1500
+
+// Called from app.whenReady(), NOT at module scope.
+//
+// Module evaluation is synchronous, so the single-instance decision below is
+// made first either way — but loadHistory() awaits an import, so the open, the
+// integrity_check, the pragmas, the schema and the backup all happen in a later
+// turn, racing app.quit() on the instance that lost the lock. That second
+// process would open the same file and its backup call would overwrite the
+// RUNNING instance's .bak with a copy taken from a concurrently-written
+// database, then die without ever closing. A truncated .bak silently downgrades
+// the primary's recovery ladder from "restore from backup" to "start empty".
+// Only the winning instance reaches whenReady, so only it opens the store.
+function startHistory(): void {
+  void loadHistory().then((store) => {
+    historyStore = store
+    if (!store) return
+    console.log(
+      `[history] open at ${store.path} (journal=${store.journalMode}, sqlite=${store.sqliteVersion}` +
+        `${store.recovery === 'none' ? '' : `, recovery=${store.recovery}`})`
+    )
+    // Recorded in the store as well as logged. `recovery` is the answer to
+    // "why does this fleet have no past", and a console line in a packaged app
+    // is not somewhere a user can look — an event survives to be shown.
+    if (store.recovery !== 'none') {
+      store.recordEvent('history-recovery', null, { recovery: store.recovery })
+    }
+    // Only the CHANGE is recorded, not every refusal. A machine whose clock is
+    // permanently wrong runs this four times a day forever, and a store that
+    // refuses to age out is not helped by an event every six hours saying so.
+    // Adopt before the first job can be started, and before the retention pass
+    // below could delete what we are about to read. Every job whose rows say it
+    // was running belongs to a process that is gone: on the attached path its
+    // channel died with that process, so the honest close is `abandoned` and
+    // the row says what the SIGHUP may have left behind. Doing this at open —
+    // rather than lazily, when someone happens to look at the job list — is
+    // what makes a stale `running` row impossible to observe.
+    try {
+      const adopted = jobRunner.adopt()
+      if (adopted.length > 0) {
+        console.log(`[jobs] closed ${adopted.length} job(s) abandoned when ShellPilot last stopped`)
+      }
+      // Then the ones that are STILL RUNNING. adopt() deliberately leaves any
+      // job with a detached marker open, because there is a command in its own
+      // session on that host right now and the marker directory records where —
+      // so this picks it up from the rows alone, resumes reading its output
+      // from the byte it had got to, and finishes it. That is the whole of what
+      // B2 claims over B1.
+      //
+      // The server address comes from the same cache the MCP bridge resolves
+      // names through, which main primes at launch from the persisted data
+      // file. Reading a host's address is not a capability and this is not the
+      // direction the agent boundary guards: nothing agent-reachable can reach
+      // the job engine, and that is unchanged. The CONFIG IS NOT STORED WITH
+      // THE JOB, deliberately — it can carry an inline credential, and the job
+      // store is a year-long record.
+      // B3: reclaim re-derives the approval model over the stored spec and
+      // target list before it resumes anything, and refuses to START a host
+      // this process never saw a human authorise. It still FINISHES the hosts
+      // already running — the command is on that machine either way, and
+      // refusing to read its exit status would discard the record while
+      // leaving the risk.
+      const reclaimed = jobRunner.reclaim({
+        cfgFor: (serverId) => {
+          const server = getCachedServer(serverId)
+          return server ? serverToSshConfig(server) : null
+        }
+      })
+      if (reclaimed.length > 0) {
+        console.log(`[jobs] resumed ${reclaimed.length} detached job(s) still running on their hosts`)
+      }
+    } catch (err) {
+      console.error('[jobs] adoption failed:', err)
+    }
+
+    let lastSkip: string | null = null
+    let lastJobSkip: string | null = null
+    const pass = (): void => {
+      try {
+        // Job output on its own, much shorter horizon: it cannot be
+        // downsampled the way a metric series can — there is no hourly mean of
+        // a dpkg log — so the only honest choices are keep it or drop it. The
+        // job and target rows behind it live twelve times longer, because they
+        // are tiny and they are what a change log reads.
+        try {
+          const jobs = historyStore?.jobRetain()
+          if (jobs && (jobs.outputDropped > 0 || jobs.jobsDropped > 0)) {
+            console.log(
+              `[jobs] retention dropped ${jobs.outputDropped} output row(s) and ${jobs.jobsDropped} job(s)`
+            )
+          }
+          // Recorded, not only logged, for retain()'s reason: a store that
+          // quietly stopped ageing out its change log is visible in the store
+          // rather than in a console nobody kept. Written under a different
+          // kind from retain()'s so the two skips are tellable apart — they
+          // have different causes and different costs.
+          const jobSkip = jobs?.skipped ?? null
+          if (jobSkip !== null && jobSkip !== lastJobSkip) {
+            historyStore?.recordEvent('job-retention-skipped', null, { reason: jobSkip })
+          }
+          lastJobSkip = jobSkip
+        } catch (err) {
+          console.error('[jobs] retention pass failed:', err)
+        }
+        const result = historyStore?.retain()
+        const skipped = result?.skipped ?? null
+        if (skipped !== null && skipped !== lastSkip) {
+          // retain() has already said why on the console. Recording it means a
+          // store that quietly stopped ageing out is visible in the store
+          // itself rather than only in a log nobody kept.
+          historyStore?.recordEvent('retention-skipped', null, { reason: skipped })
+        }
+        lastSkip = skipped
+      } catch (err) {
+        console.error('[history] retention pass failed:', err)
+      }
+    }
+    pass()
+    historyRetain = setInterval(pass, HISTORY_RETAIN_INTERVAL_MS)
+    // Never let the retention timer be the reason the process stays alive.
+    historyRetain.unref?.()
+  })
+}
+
+/**
+ * The job runner's view of the store.
+ *
+ * Resolved per call, not captured, for exactly the reason the fleet sampler's
+ * `history` accessor is: the runner is constructed at module scope and the
+ * store opens asynchronously after it — and on a machine where history is off
+ * it never opens at all. A captured null would make jobs permanently
+ * unavailable on every machine, including the ones where the store opened two
+ * seconds later.
+ *
+ * The writes are no-ops without a store rather than throws. `jobs:run` refuses
+ * up front with a sentence that says why, so nothing gets as far as here
+ * believing it is being recorded; what these guards cover is the store closing
+ * underneath a job that is already running, which is a shutdown, not an error.
+ */
+const jobStore: JobStore = {
+  createJob: (job) => historyStore?.createJob(job),
+  updateJob: (id, patch) => historyStore?.updateJob(id, patch),
+  updateJobTarget: (id, serverId, patch) => historyStore?.updateJobTarget(id, serverId, patch),
+  appendJobOutput: (id, serverId, lines) => historyStore?.appendJobOutput(id, serverId, lines),
+  listJobs: (limit) => historyStore?.listJobs(limit) ?? [],
+  readJob: (id) => historyStore?.readJob(id) ?? null,
+  readJobOutput: (id, serverId) => historyStore?.readJobOutput(id, serverId) ?? [],
+  unfinishedJobs: () => historyStore?.unfinishedJobs() ?? [],
+  recordEvent: (kind, hostId, payload, at) => historyStore?.recordEvent(kind, hostId, payload, at)
+}
+
+/** Close the store and stop its timer, for the paths that do not go through
+ *  'before-quit' — deleteAllData and backupImport both delete the database out
+ *  from under this process, and relaunchApp()'s app.exit(0) emits no
+ *  'before-quit' at all. */
+function closeHistoryNow(): void {
+  if (historyRetain) {
+    clearInterval(historyRetain)
+    historyRetain = null
+  }
+  historyStore?.close()
+  historyStore = null
+}
+
 // ---- Fleet sampling ----
 //
 // Runs in main so the estate is sampled whether or not the monitor is on
@@ -583,6 +797,17 @@ ipcMain.handle('metrics:disconnect', (_e, key: string) => metricsDisconnect(key)
 //
 // The renderer supplies targets because it owns the server list and the
 // workspace scoping; main owns the schedule and the credentials.
+// Host facts, on the sampler's slow clock. One reader for the whole process:
+// it holds no state of its own, only the exec function, and every probe is a
+// single round trip that releases its pooled connection when it finishes.
+//
+// It does NOT go through metrics.ts's exec, which discards the exit code —
+// three of the probes inside the collector use exit status as their API.
+const hostFactsReader = new HostFactsReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
+})
+
 const fleetSampler = new FleetSampler({
   // Secrets are resolved HERE, per sweep, not when targets are configured.
   // A config resolved at configure time would be stale the moment the vault
@@ -592,6 +817,16 @@ const fleetSampler = new FleetSampler({
   // server is refused with an error the fleet UI can show, rather than raising
   // a host-key trust dialog the user cannot connect to any action they took.
   sample: (key, cfg) => metricsSample(key, resolveChainSecrets(cfg as SshConnectConfig), false),
+  // The hourly half — roadmap item C. Injected exactly like `sample`, so the
+  // sampler's tests never touch SSH.
+  //
+  // allowPrompt: false for the same reason. This is the unattended caller, and
+  // a background inventory probe must never be what raises a host-key trust
+  // dialog the user cannot connect to anything they just did.
+  sampleFacts: async (_key, cfg) => {
+    const probe = await hostFactsReader.read(resolveChainSecrets(cfg as SshConnectConfig))
+    return probe.ok ? { ok: true, facts: probe.facts } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
+  },
   release: (key) => metricsDisconnect(key),
   emit: (event) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fleet:sample', event)
@@ -602,7 +837,12 @@ const fleetSampler = new FleetSampler({
   vaultUnlocked: () => {
     const s = vaultStatus()
     return !s.exists || s.unlocked
-  }
+  },
+  // Resolved per sweep, not captured: this sampler is constructed at module
+  // scope and the store opens asynchronously after it. Until then — and
+  // forever, on a machine where history is off — this returns null and the
+  // sweep is exactly what it was.
+  history: () => historyStore
 })
 
 // So get_server_metrics can answer from what the monitor already sampled
@@ -614,15 +854,39 @@ ipcMain.handle('fleet:configure', (_e, cfg: FleetSamplerConfig) => {
   return fleetSampler.status()
 })
 ipcMain.handle('fleet:status', () => fleetSampler.status())
+// The hourly host-facts collection for one server, as the sampler last saw it.
+//
+// A read of what the sweep already has — it never triggers a probe. A view that
+// wants fresher facts asks for a sweep, so there is exactly one thing deciding
+// when a package manager is shelled out to.
+ipcMain.handle('fleet:facts', (_e, serverId: string) => fleetSampler.factsFor(serverId))
 
 // ---- Run one command across many servers ----
 //
-// The approval model is in shared/broadcast.ts and is enforced in the renderer,
-// where the user is. Main deliberately does not re-derive it: a second copy of
-// a safety rule is a second thing to drift, and the renderer is not a trust
-// boundary here — anyone driving it already has a terminal on these hosts.
+// THIS COMMENT USED TO SAY THE OPPOSITE, and the reversal is roadmap item B3.
+// What stood here was:
 //
-// What main owns is the part the renderer cannot do safely: bounded
+//     "The approval model ... is enforced in the renderer, where the user is.
+//      Main deliberately does not re-derive it: a second copy of a safety rule
+//      is a second thing to drift, and the renderer is not a trust boundary
+//      here — anyone driving it already has a terminal on these hosts."
+//
+// Every clause of that is still true and the conclusion no longer follows,
+// because the premise it rested on was that the person who approved a run is
+// present for the whole of it. B2 made a job outlive the process. A job resumed
+// at the next launch is being acted on by a ShellPilot that never showed
+// anybody a dialog, and "the renderer computed a plan" was never a fact written
+// down anywhere — `BroadcastPlan` lived in a `useMemo` and was discarded.
+//
+// So main re-derives, and the second copy the old comment feared is avoided the
+// only way it can be: there is ONE implementation of the rule, in
+// shared/broadcast.ts, called from both sides. The renderer calls it to ask the
+// human; main calls it to check that what arrived is what was asked about. It
+// is still not sold as a trust boundary — it is a RECORD and an AGREEMENT
+// CHECK, which is what a durable job needs and what neither the renderer-only
+// path nor the AI capability gate produced.
+//
+// What main owns beyond that is the part the renderer cannot do safely: bounded
 // concurrency, cancellation that actually stops queued hosts, and per-host
 // results.
 //
@@ -644,11 +908,297 @@ const broadcast = new BroadcastRunner({
 })
 
 ipcMain.handle('broadcast:run', async (_e, req: BroadcastRequest) => {
+  // B3: the same check a job gets, over the same shared implementation.
+  //
+  // A broadcast has no store and therefore no row to hold the record — that is
+  // exactly what a JOB is, and duplicating the job store here would be the
+  // second model this item exists to prevent. What it does share is the record
+  // type, the verifier, and the log: one approval model, one file, two
+  // surfaces.
+  const verdict = verifyApproval(
+    req.approval,
+    { commands: [req.command], targets: req.targets },
+    planBroadcast(req.command, req.targets)
+  )
+  const logRow = {
+    surface: 'broadcast' as const,
+    jobId: req.runId,
+    title: 'Broadcast',
+    risk: req.approval?.risk ?? planBroadcast(req.command, req.targets).risk,
+    confirmation: req.approval?.confirmation?.kind ?? 'none',
+    phrase: req.approval?.phrase ?? null,
+    confirmedAt: req.approval?.confirmedAt ?? null,
+    hosts: req.targets.map((t) => t.serverName),
+    commands: [req.command]
+  }
+  if (!verdict.ok) {
+    recordJobApproval({ ...logRow, event: 'refused', reason: verdict.reason })
+    throw new Error(`This broadcast was not started: ${verdict.reason}`)
+  }
+  recordJobApproval({ ...logRow, event: 'granted' })
   // Secrets are resolved per host inside exec, not carried in the request, for
   // the same reason the fleet targets do not carry them.
   return broadcast.run(req)
 })
 ipcMain.handle('broadcast:cancel', (_e, runId: string) => broadcast.cancel(runId))
+
+// ---- Jobs ----
+//
+/**
+ * This ShellPilot's id, stable across restarts on this machine.
+ *
+ * STABLE is the requirement, not unique-per-launch. It is what a marker
+ * directory records, and it is how a reclaim tells "this is mine, finish
+ * watching it and reap it" from "another ShellPilot started this, read it and
+ * leave the directory alone". An id minted per launch would make every job
+ * foreign to the instance that started it the moment the app restarted, and
+ * markers would accumulate on every host until the sweep took them.
+ *
+ * A file rather than a machine fingerprint: two ShellPilots on one machine with
+ * separate userData directories — a portable build next to an installed one —
+ * are genuinely two instances and should say so.
+ */
+function shellpilotInstanceId(): string {
+  const file = join(app.getPath('userData'), 'instance-id')
+  try {
+    const existing = readFileSync(file, 'utf8').trim()
+    // Validated, not merely read: it is going into a path on a remote host, and
+    // assertSafeJobId in shared/jobs.ts would refuse it later — at launch time,
+    // per host, which is a worse place to find out.
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(existing)) return existing
+  } catch {
+    /* first run, or an unreadable file: mint a new one below */
+  }
+  const minted = `sp-${randomUUID()}`
+  try {
+    writeFileSync(file, `${minted}\n`, { encoding: 'utf8', mode: 0o600 })
+  } catch (e) {
+    // A machine where userData is not writable still gets a working app; what
+    // it loses is cross-restart ownership of its markers, which degrades to
+    // "every reclaimed job looks foreign" — readable, cancellable, not reaped.
+    console.error('[jobs] could not record an instance id:', e)
+  }
+  return minted
+}
+
+//
+// Roadmap item B1: a broadcast that outlives its panel. The row exists in the
+// store before the first host is touched, every transition is written, and a
+// job read back after a restart is the same job rather than a new record
+// describing it.
+//
+// What it deliberately does NOT claim is surviving a dropped connection. B1
+// runs on the attached path, where `sshExec` on timeout resolves and abandons
+// without signalling the remote, and where a dying socket means sshd sends
+// SIGHUP — which apt and dpkg do not ignore. A job that was running when this
+// process stopped is `abandoned`, and adopt() writes that down at the next
+// launch instead of leaving a row claiming it is still going. B2 replaces the
+// executor with a detached launch; nothing else here changes, which is why the
+// executor is an injected strategy rather than a call to sshExec.
+//
+// NOT exposed to the MCP bridge, and the reason is not broadcast's repeated.
+// Durability defeats revocation: `denyAllPending()` resolves requests that are
+// PENDING, and can do nothing about a job already running on fifteen hosts,
+// because nothing is pending. See tests/jobsNotExposed.test.ts.
+// The executor is a module, not a lambda: see the header of jobExec.ts. It
+// streams rather than buffering, because `sshExec` stops appending at 200 KB
+// and drops the rest — which put the ceiling BELOW the runner's own head+tail
+// budget and made a 3 MB upgrade read back as complete.
+const attachedExec = attachedJobExecutor({
+  stream: (cfg, command, handlers, allowPrompt) =>
+    sshExecStream(resolveChainSecrets(cfg as SshConnectConfig), command, handlers, allowPrompt)
+})
+
+/**
+ * The Settings switch, held here and read per launch.
+ *
+ * Defaults ON, because the attached path is not a safer version of this — it is
+ * the one that leaves dpkg interrupted on every host when the lid closes. Off
+ * is for the operator who wants nothing whatsoever written to their machines,
+ * and it is honestly labelled as the weaker behaviour rather than as the
+ * cautious one. Pushed from the renderer at startup like sshMasterIdleMinutes;
+ * until it arrives this default applies.
+ */
+let jobsDetachedEnabled = true
+const jobCapabilities = new Map<string, JobHostCapabilityReport>()
+
+const detachedExec = detachedJobExecutor({
+  // allowPrompt false, for broadcast's reason: a fan-out across hosts with
+  // unknown keys would raise a stack of identical trust dialogs.
+  run: async (cfg, command, timeoutMs) => {
+    const r = await sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs, false)
+    return { ok: r.ok, code: r.code, stdout: r.stdout, stderr: r.stderr, error: r.error }
+  },
+  instanceId: shellpilotInstanceId(),
+  attached: attachedExec,
+  enabled: () => jobsDetachedEnabled,
+  // A vault that does not exist is not a locked vault — fleetSampler's rule,
+  // and the same one-liner. What differs is the consequence: a parked SAMPLE
+  // loses a data point, while a parked POLL loses nothing at all, because the
+  // byte cursor makes the next one pick up exactly where this would have.
+  vaultUnlocked: () => {
+    const st = vaultStatus()
+    return !st.exists || st.unlocked
+  },
+  onCapability: (report) => {
+    jobCapabilities.set(report.serverId, report)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('jobs:capability', report)
+    }
+  }
+})
+
+/**
+ * The reboot-ordering refusal — item 17, enforced in MAIN.
+ *
+ * A HARD REFUSAL rather than a confirmation. The argument is written out in
+ * shared/topology.ts and it comes down to one sentence: a question asked
+ * fifteen times during a staged estate upgrade is answered by reflex, and
+ * rebooting the machine every other connection runs through is not a thing to
+ * be sure about.
+ *
+ * It lives here, at the door every job goes through, rather than only in the
+ * panel that offers the button. A check that exists only in the renderer is a
+ * check the next caller does not have — and the renderer is, by B2's own
+ * argument, gone by the time a durable job is being acted on.
+ *
+ * BOTH the declared reboot step and a command that merely LOOKS like one are
+ * checked. The declaration is what earns reboot-and-wait; the guess is enough
+ * to earn a refusal, because a refusal costs an operator one deliberate run on
+ * one host and being wrong costs them the bastion.
+ *
+ * The topology hole — hops that name no saved server — is reported in the
+ * refusal text rather than closed. There is nothing here that could close it.
+ */
+function rebootOrderingRefusal(req: JobRunRequest): string | null {
+  const restarts = req.spec.steps.some((s) => s.reboot === true || restartsTheMachine(s.command))
+  if (!restarts) return null
+
+  const topo = buildTopology(
+    // host/port travel with the record, and they are not decoration: they are
+    // how a bare hop is recognised as a saved machine and how two saved records
+    // are recognised as one. Trimming them here would put the serverId-only
+    // blind spot back at the door every job goes through.
+    listCachedServers().map((srv) => ({
+      id: srv.id,
+      name: srv.name,
+      host: srv.host,
+      port: srv.port,
+      route: srv.route
+    })),
+    listCachedDatabases().map((db) => ({
+      id: db.id,
+      name: db.name,
+      kind: db.kind,
+      database: db.database,
+      sshServerId: db.sshServerId
+    }))
+  )
+
+  const blocks: RebootBlock[] = []
+  for (const t of req.targets) {
+    const b = rebootBlockFor(topo, t.serverId)
+    if (b !== null) blocks.push(b)
+  }
+  for (const wave of jobCohorts(req.targets)) {
+    blocks.push(...sameWaveDatabaseBlocks(topo, wave.targets.map((t) => t.serverId)))
+  }
+  if (blocks.length === 0) return null
+
+  const seen = new Set<string>()
+  const lines = blocks
+    .filter((b) => {
+      const k = `${b.kind}:${b.serverId}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+    .map((b) => b.reason)
+  const note = unmatchedHopNote(topo)
+  return [...lines, ...(note === null ? [] : [note])].join(' ')
+}
+
+/**
+ * What the wave gate reads — B4.
+ *
+ * The fleet sampler's cache, shaped for `evaluateGate`, and NOT a probe of its
+ * own. A gate that ran its own SSH health check would be a second
+ * implementation of "is this host healthy" in the process deciding whether to
+ * keep rolling an estate upgrade, which is the disagreement hostHealth.ts was
+ * moved into shared/ to end.
+ *
+ * `sampledAt` is the NEWEST observation of any kind, success or failure, and
+ * that matters: a host that went down during the wave has an `errorAt` and no
+ * new `at`, and a gate reading only the success timestamp would call the
+ * freshest possible evidence of a problem "stale" and wait five minutes for a
+ * success that is never coming.
+ */
+function gateHealthFor(serverIds: string[]): GateHost[] {
+  return serverIds.map((serverId) => {
+    const entry = fleetCached(serverId)?.entry
+    const name = getCachedServer(serverId)?.name ?? serverId
+    const at = entry?.at ?? null
+    const errorAt = entry?.errorAt ?? null
+    const unreachable = entry?.error !== undefined && (errorAt ?? 0) >= (at ?? 0)
+    const services = entry?.host?.services ?? null
+    return {
+      serverId,
+      serverName: name,
+      sampledAt: at === null && errorAt === null ? null : Math.max(at ?? 0, errorAt ?? 0),
+      unreachable,
+      unreachableError: unreachable ? (entry?.error ?? null) : null,
+      // null, not [], when systemd could not be asked. hostHealth.ts's rule,
+      // and here it decides whether the host is `unverified` (reported, not
+      // blocking) rather than healthy.
+      failedUnits:
+        services === null
+          ? null
+          : services.filter((u) => u.active === 'failed' || u.sub === 'failed').map((u) => u.name)
+    }
+  })
+}
+
+const jobRunner = new JobRunner({
+  exec: detachedExec,
+  guard: rebootOrderingRefusal,
+  health: gateHealthFor,
+  // B3. Injected rather than imported inside the runner, so the runner stays
+  // constructible without an Electron `app` object and a test can hand in an
+  // array. The refusal happens with or without this; what a missing one loses
+  // is the record of it.
+  approvalLog: recordJobApproval,
+  // Sized for the detached path, which deliberately outlives a dropped link:
+  // its worst honest case is a full reconnect backoff plus a poll, and the
+  // attached executor's own timer fires long before this either way.
+  stallGraceMs: JOB_DETACHED_STALL_GRACE_MS,
+  store: jobStore,
+  emit: (progress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('jobs:progress', progress)
+  },
+  emitOutput: (output) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('jobs:output', output)
+  }
+})
+
+ipcMain.handle('jobs:list', (_e, limit?: number) => jobRunner.list(limit))
+ipcMain.handle('jobs:get', (_e, jobId: string) => jobRunner.get(jobId))
+ipcMain.handle('jobs:run', async (_e, req: JobRunRequest) => {
+  // A job with no store is not a job: the whole of what B1 adds over a
+  // broadcast is the row. Refusing with a sentence beats running something the
+  // user believes is being recorded and is not.
+  if (!historyStore) {
+    throw new Error(
+      'Jobs need the history store, which is not open on this machine. Run this as a broadcast ' +
+        'instead, or see the console for why history is disabled.'
+    )
+  }
+  return jobRunner.run(req)
+})
+ipcMain.handle('jobs:cancel', (_e, jobId: string) => jobRunner.cancel(jobId))
+ipcMain.handle('jobs:setDetached', (_e, enabled: boolean) => {
+  jobsDetachedEnabled = enabled !== false
+})
+ipcMain.handle('jobs:capabilities', () => [...jobCapabilities.values()])
 
 // ---- Live log tailing across hosts ----
 //
@@ -844,6 +1394,11 @@ ipcMain.handle(
 ipcMain.handle('docker:disk', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
   dockerReader.disk(cfg, opts ?? {})
 )
+// The itemised form of the same read. Still read-only: it lists what is on the
+// disk, and nothing on this channel or below it can remove any of it.
+ipcMain.handle('docker:disk-detail', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+  dockerReader.diskDetail(cfg, opts ?? {})
+)
 ipcMain.handle(
   'docker:inspect',
   (_e, cfg: unknown, ref: string, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
@@ -982,6 +1537,48 @@ ipcMain.handle('webhook:test', () => webhookTest())
 ipcMain.handle('webhook:notify', (_e, payload: AlertPayload) => {
   webhookNotify(payload)
 })
+
+// ---- The alert log ----
+//
+// Roadmap item 19b. Every raise and resolve the alert store decides is written
+// here and read back at startup, so suppression survives a restart. Before it,
+// the repeat window lived in a renderer Map: a disk that has been at 91% for a
+// month re-announced itself on every launch, and the only defence against that
+// is the mute button.
+//
+// Two named methods over the history store's own named statements. There is
+// deliberately no filter argument, no ordering argument and nothing resembling
+// a query: the store's design rule is that no SQL crosses its boundary in
+// either direction, and an "just let the caller pass a WHERE" surface here is
+// exactly how that rule would be lost.
+ipcMain.handle('alerts:record', (_e, raw: unknown, at?: number) => {
+  const event = sanitiseStoredAlert(raw)
+  // A row that did not survive the whitelist is dropped and NOT written as a
+  // partial. A half-row in the inbox reads as an alert nobody can explain.
+  if (!event) return false
+  if (!historyStore) return false
+  historyStore.recordEvent(
+    ALERT_HISTORY_KIND,
+    event.serverId,
+    event,
+    typeof at === 'number' && Number.isFinite(at) ? at : undefined
+  )
+  return true
+})
+
+ipcMain.handle('alerts:history', (_e, limit?: number): StoredAlertRow[] => {
+  if (!historyStore) return []
+  const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(2000, Math.floor(limit))) : 500
+  const out: StoredAlertRow[] = []
+  for (const row of historyStore.readEvents({ kind: ALERT_HISTORY_KIND, limit: n })) {
+    // Sanitised on the way OUT as well as the way in. The rows on disk predate
+    // whatever version is reading them, and a kind this build does not know is
+    // not a kind it can render or reason about.
+    const event = sanitiseStoredAlert(row.payload)
+    if (event) out.push({ ...event, at: row.ts })
+  }
+  return out
+})
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()
   return fleetSampler.status()
@@ -1000,6 +1597,19 @@ ipcMain.handle('db:shell', (_e, cfg: DbConnectConfig, line: string) =>
   dbShell(withVpnTransportDb(resolveDbSecrets(cfg)), line)
 )
 ipcMain.handle('db:close', (_e, id: string) => dbClose(id))
+// Operational reads (roadmap 18). Strictly read-only — see the refusal written
+// down at the top of src/shared/dbOps.ts. Notable states are recorded as
+// history events so item 19b can alert on them later; the alerting itself is
+// deliberately NOT here.
+ipcMain.handle('db:ops', async (_e, cfg: DbConnectConfig) => {
+  const report = await dbOps(withVpnTransportDb(resolveDbSecrets(cfg)))
+  if (report.ok) {
+    // hostId is null: a database connection is not a fleet host, and inventing
+    // one would put rows in a host's timeline that host never produced.
+    for (const event of notableDbEvents(report)) historyStore?.recordEvent(event.kind, null, event.payload)
+  }
+  return report
+})
 
 // ---- SSH config import ----
 ipcMain.handle('sshconfig:read', () => {
@@ -1070,8 +1680,10 @@ ipcMain.handle('notify:show', (_e, title: string, body: string) => {
 // ---- Backup ----
 ipcMain.handle('backup:export', (_e, password: string) => backupExport(password))
 ipcMain.handle('backup:inspect', (_e, password: string, path?: string) => backupInspect(password, path))
-ipcMain.handle('backup:import', (_e, password: string, path: string) => backupImport(password, path))
-ipcMain.handle('backup:deleteAll', () => deleteAllData())
+ipcMain.handle('backup:import', (_e, password: string, path: string) =>
+  backupImport(password, path, closeHistoryNow)
+)
+ipcMain.handle('backup:deleteAll', () => deleteAllData(closeHistoryNow))
 ipcMain.handle('backup:relaunch', () => relaunchApp())
 
 // ---- Updater ----
@@ -1417,10 +2029,32 @@ app.on('before-quit', (e) => {
   logTailer.disposeAll()
   // Queued hosts must not start after the window is gone.
   broadcast.disposeAll()
+  // Same for a job. Its rows stay; adopt() closes them as abandoned at the next
+  // launch, which is the truth about what the attached path just did to them.
+  jobRunner.disposeAll()
   sshDisposeAll()
   localDisposeAll()
   sftpDisposeAll()
-  fleetSampler.dispose()
+  // After the sampler, which is the only writer: closing the database out from
+  // under an in-flight sweep would be a caught-and-logged failure rather than a
+  // crash, but it would also silently drop the sweep the user just paid for.
+  //
+  // dispose() stops the loop synchronously and hands back the sweep that was
+  // already in flight. That sweep persists what it collected in its own
+  // finally, AFTER dispose() returns, so closing here without waiting drops the
+  // last sweep of every session — the exact thing the paragraph above says must
+  // not happen.
+  //
+  // Bounded, though. An in-flight sweep can be parked on an SSH exec against a
+  // host that has stopped answering, and quitting must not wait on the network:
+  // after HISTORY_LAST_SWEEP_MS the store closes anyway, and a sweep that lands
+  // later is dropped by the store's own guard, which says so on the console.
+  // Closing is what folds the WAL back into the primary, so it has to happen on
+  // every quit rather than only on the fast ones.
+  const lastSweep = fleetSampler.dispose().catch(() => undefined)
+  if (historyRetain) clearInterval(historyRetain)
+  const sweepDeadline = new Promise<void>((resolve) => setTimeout(resolve, HISTORY_LAST_SWEEP_MS))
+  const historyClosed = Promise.race([lastSweep, sweepDeadline]).then(() => historyStore?.close())
   metricsDisposeAll()
   dbDisposeAll()
   tunnelDisposeAll()
@@ -1432,7 +2066,10 @@ app.on('before-quit', (e) => {
   // child must never be able to hold the app open — an orphan is reaped on the
   // next launch, an app that will not quit is a support ticket.
   const cap = new Promise<void>((resolve) => setTimeout(resolve, 4000))
-  void Promise.race([vpnDisposeAll().catch(() => undefined), cap]).finally(() => app.exit(0))
+  void Promise.race([
+    Promise.all([vpnDisposeAll().catch(() => undefined), historyClosed]),
+    cap
+  ]).finally(() => app.exit(0))
 })
 
 // Safety net: never let a stray async error (e.g. a failed child_process
@@ -1502,6 +2139,10 @@ if (!app.requestSingleInstanceLock()) {
 
 app.whenReady().then(() => {
   installCsp()
+  // Only the instance that won the single-instance lock gets here, which is the
+  // whole reason the store is opened from inside whenReady rather than at
+  // module scope. See startHistory.
+  startHistory()
   createWindow()
   installMenu()
   // Primed once at launch so the MCP bridge can resolve server/workspace

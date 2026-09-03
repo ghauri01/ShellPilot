@@ -1,10 +1,14 @@
 import { GitBranch, Wifi, Bell, Cpu, AlertTriangle } from 'lucide-react'
 import { useApp } from '../../store/app'
-import { useAlerts } from '../../store/alerts'
+import { LABEL, UNIT, useAlerts } from '../../store/alerts'
 import { useFleetStatus, samplerWarning } from '../../store/fleetStatus'
 import { openSettings } from '../../store/nav'
 import { colorVar } from './WorkspaceSwitcher'
 import { UpdateIndicator } from './UpdateIndicator'
+
+// Whole numbers stay whole; a load average keeps the decimal that makes it a
+// load average. `toFixed(0)` was right while everything was a percentage.
+const fmtValue = (v: number): string => (Number.isInteger(v) ? String(v) : v.toFixed(1))
 
 export function StatusBar(): React.JSX.Element {
   const ws = useApp((s) => s.activeWorkspace())
@@ -41,7 +45,12 @@ export function StatusBar(): React.JSX.Element {
         <button
           className="item resource-alert"
           title={`${Object.values(alerts)
-            .map((a) => `${a.serverName}: ${a.kind === 'cpu' ? 'CPU' : 'Memory'} ${a.value.toFixed(0)}%`)
+            // The store's own labels and the store's own units, not a ternary
+            // and not a hard-coded percent sign here. A third kind made that
+            // ternary label every disk alert "Memory", and a hard-coded `%`
+            // showed a load average of 3.2 per core as "3%" — a wrong number
+            // rather than an ugly one.
+            .map((a) => `${a.serverName}: ${LABEL[a.kind]} ${fmtValue(a.value)}${UNIT[a.kind]}`)
             .join('\n')}\n\nClick to open the Fleet Monitor.`}
           onClick={() => setActivity('monitor')}
         >

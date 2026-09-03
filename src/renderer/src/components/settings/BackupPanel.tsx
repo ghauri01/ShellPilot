@@ -220,7 +220,10 @@ export function BackupPanel(): React.JSX.Element {
       <p className="s-desc" style={{ marginBottom: 10 }}>
         Replaces everything currently in this app with the contents of the backup file. Type the
         passphrase for that backup first, then choose the file — you get to see what is inside it
-        before anything is replaced, and the app restarts once the restore completes.
+        before anything is replaced, and the app restarts once the restore completes. The recorded
+        history of the servers already on this machine is cleared as part of the restore: a backup
+        does not carry history, and keeping the old estate's would leave two estates in one
+        timeline.
       </p>
       <div className="row" style={{ gap: 8 }}>
         <input
@@ -277,8 +280,9 @@ export function BackupPanel(): React.JSX.Element {
       <p className="s-desc" style={{ marginBottom: 10 }}>
         Permanently deletes every workspace, server, database, tunnel, stored credential, the
         vault, trusted host keys and AI/MCP configuration — everything a backup covers, gone from
-        this machine. This cannot be undone from within the app; only a backup taken beforehand
-        can bring it back.
+        this machine. It also deletes the recorded history: every sample, event and observed fact
+        about your servers. This cannot be undone from within the app, and a backup does not
+        contain the history — only what a backup covers can be brought back.
       </p>
 
       {settings.backupDirty ? (

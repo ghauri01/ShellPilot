@@ -9,6 +9,7 @@ import {
   ChevronDown,
   FileCode2,
   TerminalSquare,
+  Activity,
   Loader2,
   Pencil,
   Trash2,
@@ -18,6 +19,7 @@ import { useApp, useWorkspaceServers } from '../../store/app'
 import { clsx } from '../../lib/format'
 import { useClickOutside } from '../../hooks/useClickOutside'
 import { DbShell } from './DbShell'
+import { DbOpsPanel } from './DbOpsPanel'
 import { toast } from '../../store/toast'
 import { KIND_COLOR, KIND_SHORT } from './DatabaseSidebar'
 import { sshHopFor } from '../../lib/ssh'
@@ -25,6 +27,7 @@ import { withVaultUnlock } from '../../lib/withVaultUnlock'
 import { classifyConnectionError, errorText } from '../../lib/connectionError'
 import { openDatabaseCreator, openDatabaseEditor } from '../../store/dbEditor'
 import { openSettings } from '../../store/nav'
+import { supportsDbOps, type DbVerdictLevel } from '../../../../shared/dbOps'
 import type { DatabaseConn, DbKind, Server } from '../../types'
 import type { DbConnectConfig, DbInfo, DbQueryResult, DbTestResult } from '../../../../shared/db'
 
@@ -81,6 +84,20 @@ function connSummary(db: DatabaseConn, jump: Server | undefined, error: string |
   }
 }
 
+/**
+ * What the Operations tab says when it is not the tab you are looking at.
+ *
+ * `unknown` earns a mark of its own: a question that could not be asked is not
+ * a pass, and a badge that only lit for `watch`/`alarm` would render "we were
+ * not allowed to check replication" as a clean tab.
+ */
+const OPS_BADGE: Record<DbVerdictLevel, { label: string; chip: string; title: string }> = {
+  ok: { label: '', chip: 'ok', title: 'everything readable was healthy' },
+  unknown: { label: '?', chip: '', title: 'something could not be read — not a pass' },
+  watch: { label: '!', chip: 'warn', title: 'something needs watching' },
+  alarm: { label: '!', chip: 'danger', title: 'something is wrong' }
+}
+
 export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
   const deleteDatabase = useApp((s) => s.deleteDatabase)
   const servers = useWorkspaceServers()
@@ -104,7 +121,25 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
   // just the ones matching the currently selected name.
   const [pickerOpen, setPickerOpen] = useState(false)
   const [typed, setTyped] = useState(false)
-  const [mode, setMode] = useState<'query' | 'shell'>('query')
+  const [mode, setMode] = useState<'query' | 'shell' | 'ops'>('query')
+  // Operational reads exist for PostgreSQL and MySQL/MariaDB only. MongoDB and
+  // Redis answer completely different questions (replica-set state and oplog
+  // window; eviction policy and persistence) and get their own pass rather than
+  // a thin imitation of this one, so the tab is absent rather than empty.
+  const hasOps = supportsDbOps(db.kind)
+  /**
+   * The worst verdict the last operational read produced.
+   *
+   * Held HERE and not in DbOpsPanel because the panel is unmounted the moment
+   * the operator switches back to the query tab, and the tab nobody has open is
+   * exactly the one the badge exists for. It is why worstVerdict() ranks
+   * `unknown` above `ok`: a question that could not be asked has to be able to
+   * put a mark on a closed tab.
+   */
+  const [opsLevel, setOpsLevel] = useState<DbVerdictLevel | null>(null)
+  useEffect(() => {
+    setOpsLevel(null)
+  }, [db.id])
   const pickerRef = useRef<HTMLDivElement>(null)
   useClickOutside(pickerRef, () => setPickerOpen(false), pickerOpen)
 
@@ -301,6 +336,20 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
           <button className={`btn sm${mode === 'shell' ? ' primary' : ''}`} onClick={() => setMode('shell')}>
             <TerminalSquare size={13} /> Shell
           </button>
+          {hasOps && (
+            <button
+              className={`btn sm${mode === 'ops' ? ' primary' : ''}`}
+              onClick={() => setMode('ops')}
+              title={opsLevel ? `Last operational read: ${OPS_BADGE[opsLevel].title}` : undefined}
+            >
+              <Activity size={13} /> Operations
+              {opsLevel && opsLevel !== 'ok' && (
+                <span className={`chip ${OPS_BADGE[opsLevel].chip}`} style={{ marginLeft: 4 }}>
+                  {OPS_BADGE[opsLevel].label}
+                </span>
+              )}
+            </button>
+          )}
         </div>
         <span className="spacer" />
         {conn.phase === 'connecting' && <Loader2 size={14} className="spin" />}
@@ -381,7 +430,9 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-          {mode === 'shell' ? (
+          {mode === 'ops' && hasOps ? (
+            <DbOpsPanel cfg={cfgWith(dbName)} kind={db.kind} onVerdict={setOpsLevel} />
+          ) : mode === 'shell' ? (
             <DbShell
               cfg={cfgWith(dbName)}
               kind={db.kind}

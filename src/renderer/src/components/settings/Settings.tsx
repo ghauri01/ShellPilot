@@ -20,6 +20,7 @@ import type { SettingsSection } from '../../store/nav'
 import { useVault } from '../../store/vault'
 import { useVaultPrompt } from '../../store/vaultPrompt'
 import { clsx, duration } from '../../lib/format'
+import { JOB_DETACHED_SETTING_NOTE } from '../../../../shared/jobs'
 import { bridgeOn } from '../../lib/bridge'
 import { ShortcutManager } from './ShortcutManager'
 import { BackupPanel } from './BackupPanel'
@@ -501,7 +502,7 @@ export function Settings(): React.JSX.Element {
                   webhook is posted from inside one of the two. */}
               <SettingSwitch
                 label="Alerts"
-                desc="The master switch. Covers CPU and memory at or above the threshold, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. Alerts repeat once a minute while a condition lasts, and clear themselves on recovery."
+                desc="The master switch. Covers CPU and memory at or above the threshold, a root filesystem more than 85% full by blocks OR by inodes, a load average at or above 2 per core, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. CPU, memory and load repeat once a minute while the condition lasts; a full disk or inode table repeats every six hours, or sooner if it gets 5 points worse. They clear themselves on recovery: a filesystem as soon as it is back to 85% or below, CPU and memory once they are 5 points under the threshold, so a host sitting exactly on the line does not flicker on and off. A host that crosses the same line five times in six hours is announced once more and then held quiet until it has gone six hours without crossing again. Anything the host could not measure — no inode accounting, no /proc/loadavg, no df — raises nothing and clears nothing, because a reading nobody could take is not a reading of zero. Switching this off also takes down any alerts already showing."
                 checked={settings.resourceAlertsEnabled}
                 onChange={(v) => setSettings({ resourceAlertsEnabled: v })}
               />
@@ -509,7 +510,13 @@ export function Settings(): React.JSX.Element {
                 <div className="s-info">
                   <div className="s-title">Alert threshold</div>
                   <div className="s-desc">
-                    The same figure applies to CPU and to memory.{' '}
+                    The same figure applies to CPU and to memory. Disk has its own, fixed at{' '}
+                    <strong>85%</strong>: a root filesystem past that alerts, which is the same
+                    85% at which the Fleet Monitor lists the host as needing attention and turns
+                    its disk bar red. Inodes use the same 85% and load its own fixed{' '}
+                    <strong>2 per core</strong>. Only the root filesystem is measured, for blocks
+                    and for inodes alike — a host that has filled /var and has room on / raises
+                    nothing here.{' '}
                     {alertCoverageText(fleetStatus?.running, settings.fleetSamplingEnabled)}
                   </div>
                 </div>
@@ -598,6 +605,18 @@ export function Settings(): React.JSX.Element {
               <h2>SSH</h2>
               <div className="sub">Connection reuse and re-authentication policy.</div>
               <SshSessions />
+              {/* Spelled out rather than summarised, because it is the one
+                  setting here that decides whether ShellPilot writes anything
+                  to your machines. An operator is owed the exact list, and the
+                  honest description of what turning it OFF costs — which is not
+                  "less is written", it is "a long command dies with the
+                  connection, and apt and dpkg do not survive that". */}
+              <SettingSwitch
+                label="Let jobs keep running when the connection drops"
+                desc={JOB_DETACHED_SETTING_NOTE}
+                checked={settings.jobsDetached !== false}
+                onChange={(v) => setSettings({ jobsDetached: v })}
+              />
             </div>
           )}
 

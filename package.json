@@ -1,6 +1,6 @@
 {
   "name": "shellpilot",
-  "version": "0.9.3",
+  "version": "0.9.7",
   "description": "Free, open-source SSH client, SFTP browser, SSH tunnel manager, multi-engine database GUI and encrypted secrets vault in one cross-platform desktop app. A MobaXterm, PuTTY and Termius alternative for Windows, macOS and Linux.",
   "keywords": [
     "ssh",
@@ -78,6 +78,7 @@
     "pack": "npm run build && electron-builder --dir",
     "dist:portable": "npm run build && electron-builder --win portable",
     "test": "vitest run",
+    "test:capability": "ELECTRON_RUN_AS_NODE=1 electron ./node_modules/vitest/vitest.mjs run tests/historyCapability.test.ts",
     "check:advisories": "node scripts/check-engine-advisories.mjs"
   },
   "dependencies": {
@@ -101,6 +102,9 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/mssql": "^12.3.0",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.21.0",
@@ -115,6 +119,7 @@
     "eslint": "^9.39.5",
     "eslint-plugin-react-hooks": "^5.2.0",
     "js-yaml": "^4.1.0",
+    "jsdom": "^30.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.2",

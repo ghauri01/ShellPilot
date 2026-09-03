@@ -122,10 +122,21 @@ never output** — a shell session's contents are yours, and a log of them would
 target than the thing it was meant to protect. There is a test asserting no field capable of holding
 terminal input or output has been added.
 
-Two files rather than one is deliberate. The AI audit log answers *"what did an agent do"*; its
-entries are agent-shaped (`agentName`, `capability`, `approval`) and it is displayed in the AI
-section. Local terminal rows there would mean an AI-labelled log full of things no AI did, which is
-how a log stops being trusted.
+Jobs and broadcasts are logged **separately again**, to `shellpilot-job-approvals.jsonl`
+(`approvalLog.ts`, append-only, `0600`, same discipline — a separate module as well as a separate file, because `auditLog.ts` is inside the agent-reachable import closure and `tests/jobsNotExposed.test.ts` refuses to let anything in it import the job vocabulary). One entry per approval
+decision — granted, refused, resumed, or sealed — carrying the risk, the confirmation kind, the
+phrase the user typed where one was required, the host names and the step commands, all redacted
+through the same `redactOutput` rules. **Never output**: a job's output is in the history store
+under its own retention, not here.
+
+Three files rather than one is deliberate, and it is the same argument twice. The AI audit log
+answers *"what did an agent do"*; its entries are agent-shaped (`agentName`, `capability`,
+`approval`) and it is displayed in the AI section. Local terminal rows there would mean an
+AI-labelled log full of things no AI did, which is how a log stops being trusted. A job is
+human-only by construction — it is not reachable from the bridge and will not be, because
+durability defeats revocation: `denyAllPending()` resolves requests that are *pending*, and a job
+already detached on fifteen hosts has nothing pending to deny. So its rows would be AI-labelled rows
+no AI produced, for exactly the local terminal's reason.
 
 ## Granting `vpnControl` is a bigger decision than it looks
 

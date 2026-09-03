@@ -406,6 +406,54 @@ describe('supervisor lifecycle', () => {
     await waitFor(() => spawns.length === 2)
   })
 
+  it('leaves a stop that is already under way to do the killing', async () => {
+    // A readiness promise does not only time out — it REJECTS, the moment a
+    // driver gives up on a start, and a driver that gives up stops the run in
+    // the same turn. So the readiness catch and the stop ladder ran over each
+    // other and the catch won: SIGKILL landed on a live, answering engine
+    // microseconds after `stop()` had asked it, over its own control channel,
+    // to exit and put the routes back. It never acted on the request — the tun
+    // interface stayed up and the pushed routes stayed installed, which is the
+    // one thing the control channel exists to prevent. On Windows, where
+    // process.kill is a hard TerminateProcess, that channel is the only polite
+    // mechanism there is.
+    //
+    // Seen from the other end in tests/vpnOpenvpnDriver.test.ts: the OpenVPN
+    // stub died of SIGKILL on every run of the dismissed-prompt case, and lost
+    // the acknowledgement it was in the middle of writing whenever the machine
+    // was loaded enough for the kill to win.
+    let giveUp!: (e: Error) => void
+    const asked: string[] = []
+    const spec = make({
+      restart: 'on-failure',
+      readiness: () =>
+        new Promise<void>((_resolve, reject) => {
+          giveUp = reject
+        }),
+      gracefulStop: async () => {
+        asked.push('control channel')
+      },
+      gracefulTimeoutMs: 5_000
+    })
+    void sup.spawn(spec).catch(() => {})
+    // readiness() is called after the pid record is written, so waiting for the
+    // spawn alone would not prove the promise this test rejects exists yet.
+    await waitFor(() => Boolean(giveUp))
+
+    // Exactly the shape a driver produces: give up, then stop, in one turn.
+    giveUp(new Error('the one-time code prompt was cancelled'))
+    const stopped = sup.stop(spec.id)
+    await flush()
+
+    expect(asked).toEqual(['control channel'])
+    expect(signals).toEqual([])
+
+    // And it exits because it was asked to, not because it was killed.
+    spawns[0].child.exit(0)
+    await stopped
+    expect(signals).toEqual([])
+  })
+
   it('bounds the ring by bytes, so one huge line cannot defeat the line cap', async () => {
     const spec = make({ logRing: { maxLines: 2_000, maxBytes: 1_024 } })
     const handle = await sup.spawn(spec)

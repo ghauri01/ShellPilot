@@ -1,3 +1,4 @@
+import type { HostFacts } from './hostFacts'
 import type { HostMetrics, SshConnectConfig } from './ssh'
 
 // Background fleet sampling.
@@ -28,6 +29,17 @@ export interface FleetSamplerConfig {
   // per-server poll chains rather than using setInterval.
   intervalMs: number
   targets: FleetTarget[]
+  /**
+   * How often to re-collect HOST FACTS, which is a different cadence from
+   * metrics and not a second timer — see FleetSampler.sweep().
+   *
+   * Hourly by default. A distribution, a CPU model and a package manager do not
+   * change between two-minute sweeps, and the update counts move when a cron
+   * job refreshes a package cache rather than continuously. Optional so a
+   * config written before facts existed keeps working and simply gets the
+   * default.
+   */
+  factsIntervalMs?: number
 }
 
 export type FleetSampleReason =
@@ -46,6 +58,16 @@ export interface FleetSampleEvent {
   // its own probes.
   host?: HostMetrics
   error?: string
+  /**
+   * Present only on the sweeps where the slow host-facts probe was also due,
+   * which is roughly one sweep in thirty. Its absence means "not collected on
+   * this sweep", never "this host has no facts" — a listener must keep the last
+   * set it saw rather than clearing on every metrics-only event.
+   */
+  facts?: HostFacts
+  /** Set when the facts probe ran and failed, independently of `error`: a host
+   *  can answer a metrics sample perfectly and still refuse the facts probe. */
+  factsError?: string
 }
 
 // Why the sampler is not currently running, for a UI that has to explain

@@ -1,0 +1,221 @@
+{
+  "overview": {
+    "ok": true,
+    "rows": [
+      {
+        "version": "10.4.34-MariaDB-1:10.4.34+maria~ubu2004",
+        "version_comment": "mariadb.org binary distribution",
+        "server_id": 1,
+        "read_only": 0,
+        "max_connections": 100,
+        "hostname": "57b38b797c1a"
+      }
+    ]
+  },
+  "superReadOnly": {
+    "ok": false,
+    "code": "ER_UNKNOWN_SYSTEM_VARIABLE",
+    "errno": 1193,
+    "sqlState": "HY000",
+    "message": "Unknown system variable 'super_read_only'"
+  },
+  "replicaStatus": {
+    "ok": false,
+    "code": "ER_PARSE_ERROR",
+    "errno": 1064,
+    "sqlState": "42000",
+    "message": "You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'REPLICA STATUS' at line 1"
+  },
+  "slaveStatus": {
+    "ok": true,
+    "rows": []
+  },
+  "logBin": {
+    "ok": true,
+    "rows": [
+      {
+        "log_bin": 0
+      }
+    ]
+  },
+  "binlogExpireSeconds": {
+    "ok": false,
+    "code": "ER_UNKNOWN_SYSTEM_VARIABLE",
+    "errno": 1193,
+    "sqlState": "HY000",
+    "message": "Unknown system variable 'binlog_expire_logs_seconds'"
+  },
+  "binlogExpireDays": {
+    "ok": true,
+    "rows": [
+      {
+        "expire_days": 10
+      }
+    ]
+  },
+  "binaryLogs": {
+    "ok": false,
+    "code": "ER_NO_BINARY_LOGGING",
+    "errno": 1381,
+    "sqlState": "HY000",
+    "message": "You are not using binary logging"
+  },
+  "slowSettings": {
+    "ok": true,
+    "rows": [
+      {
+        "slow_query_log": 0,
+        "long_query_time": 10,
+        "slow_query_log_file": "/var/log/mysql/mariadb-slow.log",
+        "log_output": "FILE"
+      }
+    ]
+  },
+  "status": {
+    "ok": true,
+    "rows": [
+      {
+        "Variable_name": "Aborted_connects",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Connection_errors_max_connections",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_dirty",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_free",
+        "Value": "15758"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_total",
+        "Value": "16054"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_read_requests",
+        "Value": "1455"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_reads",
+        "Value": "166"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_wait_free",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_row_lock_time_avg",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_row_lock_waits",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Max_used_connections",
+        "Value": "1"
+      },
+      {
+        "Variable_name": "Queries",
+        "Value": "10"
+      },
+      {
+        "Variable_name": "Slow_queries",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Threads_connected",
+        "Value": "1"
+      },
+      {
+        "Variable_name": "Threads_running",
+        "Value": "6"
+      },
+      {
+        "Variable_name": "Uptime",
+        "Value": "25"
+      }
+    ]
+  },
+  "bufferPool": {
+    "ok": true,
+    "rows": [
+      {
+        "bytes": 268435456,
+        "instances": 1
+      }
+    ]
+  },
+  "processlist": {
+    "ok": true,
+    "rows": [
+      {
+        "id": 8,
+        "user": "root",
+        "host": "192.168.65.1:41667",
+        "db": null,
+        "command": "Query",
+        "seconds": 0,
+        "state": "Filling schema table",
+        "info": "SELECT ID AS id, USER AS user, HOST AS host, DB AS db, COMMAND AS command,\n    TIME AS seconds, STATE AS state, LEFT(INFO, 200) AS info\n    FROM information_schema.PROCESSLIST WHERE COMMAND <> 'Sleep'"
+      },
+      {
+        "id": 5,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Daemon",
+        "seconds": 0,
+        "state": "InnoDB shutdown handler",
+        "info": null
+      },
+      {
+        "id": 4,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Daemon",
+        "seconds": 0,
+        "state": "InnoDB purge worker",
+        "info": null
+      },
+      {
+        "id": 3,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Daemon",
+        "seconds": 0,
+        "state": "InnoDB purge worker",
+        "info": null
+      },
+      {
+        "id": 2,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Daemon",
+        "seconds": 0,
+        "state": "InnoDB purge worker",
+        "info": null
+      },
+      {
+        "id": 1,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Daemon",
+        "seconds": 0,
+        "state": "InnoDB purge coordinator",
+        "info": null
+      }
+    ]
+  },
+  "sizes": {
+    "ok": true,
+    "rows": []
+  }
+}

@@ -1,6 +1,8 @@
 import net from 'node:net'
 import { Buffer } from 'node:buffer'
+import { randomBytes } from 'node:crypto'
 import { mkdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { VpnErrorCode, VpnPrompt, VpnState, VpnStats, VpnStatus } from '../../../shared/vpn'
 import { VpnError, classifyEngineLine } from './errors'
@@ -251,9 +253,6 @@ export interface OpenVpnManagementHooks {
 }
 
 export interface OpenVpnManagementOptions {
-  /** The run directory. On POSIX the socket is created in a 0700 subdirectory
-   *  of it; on Windows it is unused. */
-  runDir: string
   /** Defaults to `process.platform`. Injectable so the Windows branch is
    *  reachable from a test on any host. */
   platform?: NodeJS.Platform
@@ -273,7 +272,6 @@ export type OpenVpnSignal = 'SIGTERM' | 'SIGINT' | 'SIGHUP' | 'SIGUSR1' | 'SIGUS
 export class OpenVpnManagement {
   private readonly hooks: OpenVpnManagementHooks
   private readonly platform: NodeJS.Platform
-  private readonly runDir: string
   private readonly maxLineBytes: number
 
   private server: net.Server | null = null
@@ -309,7 +307,6 @@ export class OpenVpnManagement {
 
   constructor(hooks: OpenVpnManagementHooks, options: OpenVpnManagementOptions) {
     this.hooks = hooks
-    this.runDir = options.runDir
     this.platform = options.platform ?? process.platform
     this.maxLineBytes = options.maxLineBytes ?? MANAGEMENT_MAX_LINE_BYTES
     this.ready = new Promise<void>((resolve, reject) => {
@@ -356,14 +353,27 @@ export class OpenVpnManagement {
       return { args: ['--management', '127.0.0.1', String(port)], port }
     }
 
-    // 0700: on POSIX nothing else authenticates this channel, and anyone who
-    // can open the socket can ask openvpn for the running config.
-    const dir = join(this.runDir, 'mgmt')
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    // NOT under the run directory, which is where this used to be and is why
+    // OpenVPN could not start on macOS at all.
+    //
+    // sun_path is 104 bytes and the run directory alone is longer than that:
+    // `~/Library/Application Support/ShellPilot/vpn-run/vpn-<uuid>-<8 hex>` is
+    // 111 bytes for a seven-character username, so the socket came to 123 and
+    // the length guard below rejected it before openvpn was ever launched. No
+    // shorter username saves it — the floor is 117.
+    //
+    // The per-user temp directory is the shortest private location there is:
+    // 48 bytes here, and macOS makes it 0700 and owned by the user, which is
+    // the same protection the run directory gave. A random leaf keeps runs
+    // apart, and `mkdirSync` WITHOUT `recursive` is deliberate — it throws on
+    // an existing path, so a pre-created directory or symlink is refused
+    // rather than adopted.
+    const dir = join(tmpdir(), `sp-${randomBytes(8).toString('hex')}`)
+    mkdirSync(dir, { mode: 0o700 })
     this.mgmtDir = dir
     const path = join(dir, 'm.sock')
-    // sun_path is 104 bytes on macOS and 108 on Linux. Failing here with the
-    // length named beats a bind() error that says only ENAMETOOLONG.
+    // Kept as a backstop, not as the mechanism: a host with an unusually long
+    // temp directory would otherwise reach bind() and get only ENAMETOOLONG.
     const length = Buffer.byteLength(path)
     if (length > 100) {
       throw new VpnError('internal', `The management socket path is ${length} bytes, which is too long: ${path}`)

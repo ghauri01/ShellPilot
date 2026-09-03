@@ -41,7 +41,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       # electron-builder takes the artifact version from package.json, while
@@ -200,6 +200,41 @@ jobs:
               echo "checking $bin"
               codesign --verify --strict "$bin"
             done
+
+            # The engines must hash to what the manifest says, or the app
+            # refuses to exec them — every VPN and frp profile then fails with
+            # "does not match its expected checksum" and reinstalling cannot
+            # help. That shipped in every macOS release up to 0.9.4: the build
+            # scripts hash each binary, electron-builder then SIGNS it, and
+            # signing rewrites the file. scripts/after-sign.cjs re-hashes after
+            # signing; this is the assertion that it actually ran.
+            #
+            # Checked here rather than trusted, because the failure is invisible
+            # in every other check: the binary is present, correctly signed, and
+            # the bundle verifies. Only the app's own comparison fails, and only
+            # once a user presses Connect.
+            MAN="$APP/Contents/Resources/bin/manifest.json"
+            if [ -f "$MAN" ]; then
+              for bin in "$APP/Contents/Resources/bin"/*/*; do
+                [ -f "$bin" ] || continue
+                case "$bin" in *manifest.json) continue ;; esac
+                KEY="$(basename "$(dirname "$bin")")/$(basename "$bin")"
+                # readFileSync, not require: require() resolves relative to the
+                # script, so a relative "$APP" makes it throw and every key look
+                # absent — a guard that fails the build whether or not the bug
+                # is present. Caught by running it against a build that was
+                # already correct.
+                WANT=$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8")).binaries[process.argv[2]];process.stdout.write(m?m.sha256:"")' "$MAN" "$KEY")
+                if [ -z "$WANT" ]; then
+                  echo "::error::$KEY ships but is not in manifest.json — the app cannot exec it"; exit 1
+                fi
+                GOT=$(shasum -a 256 "$bin" | awk '{print $1}')
+                if [ "$WANT" != "$GOT" ]; then
+                  echo "::error::$KEY hashes to $GOT but manifest.json records $WANT — the app will refuse to run it"; exit 1
+                fi
+                echo "  manifest ok: $KEY"
+              done
+            fi
 
             # node-pty's binding and its spawn-helper live outside the asar
             # (asarUnpack), so a config change that stops unpacking them is

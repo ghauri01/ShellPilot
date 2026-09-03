@@ -1,0 +1,13 @@
+{
+  "extension": {
+    "q": "SELECT extversion FROM pg_extension WHERE extname='pg_stat_statements'",
+    "ok": true,
+    "rows": []
+  },
+  "statements": {
+    "q": "SELECT count(*) FROM pg_stat_statements",
+    "ok": false,
+    "code": "42P01",
+    "message": "relation \"pg_stat_statements\" does not exist"
+  }
+}

@@ -50,10 +50,19 @@ export function FleetSearch({
   const [query, setQuery] = useState('')
   const samples = useFleet((s) => s.samples)
   const errors = useFleet((s) => s.errors)
+  // Hourly, and independent of the samples above. An empty record is the
+  // honest input for an estate whose facts have not been collected yet — the
+  // coverage sentence then says so rather than the search quietly answering
+  // "ubuntu" with nothing.
+  const facts = useFleet((s) => s.facts)
 
   const result = useMemo(
-    () => searchFleet({ servers: servers.map((s) => ({ id: s.id, name: s.name })), hosts: samples, errors }, query),
-    [servers, samples, errors, query]
+    () =>
+      searchFleet(
+        { servers: servers.map((s) => ({ id: s.id, name: s.name })), hosts: samples, errors, facts },
+        query
+      ),
+    [servers, samples, errors, facts, query]
   )
   const coverage = coverageSentence(result.coverage)
   const active = query.trim() !== ''
@@ -68,7 +77,7 @@ export function FleetSearch({
         <Search size={14} className="faint" />
         <input
           className="input"
-          placeholder="Search units, ports and hosts across the workspace…"
+          placeholder="Search units, ports, distributions and hosts across the workspace…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />

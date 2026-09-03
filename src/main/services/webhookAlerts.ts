@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { setSecret, getSecret, deleteSecret } from './secrets'
-import { validateWebhookUrl } from '../../shared/webhook'
+import { ALERT_KINDS, validateWebhookUrl } from '../../shared/webhook'
 import type {
   AlertPayload,
   WebhookConfig,
@@ -99,9 +99,15 @@ function allowedByRateLimit(now: number): boolean {
 // from a machine that may itself be compromised; a unit named `<!channel>`
 // posts a workspace-wide ping into someone's incident channel on a loop, from
 // an integration they trust.
+//
+// `kind` is NOT a second hand-written list. It was, and adding a kind upstream
+// then meant every alert of that kind was silently rejected here — a whitelist
+// that quietly says no to its own product is indistinguishable from a broken
+// endpoint, except that nothing was recorded and the settings pane still said
+// the webhook was healthy.
 const LITERAL = {
   event: ['raised', 'resolved'],
-  kind: ['cpu', 'memory', 'unit-failed']
+  kind: ALERT_KINDS
 } as const
 
 const MAX_TEXT = 200
@@ -140,6 +146,11 @@ export function sanitisePayload(raw: unknown): AlertPayload | null {
   if (value !== undefined) out.value = value
   if (threshold !== undefined) out.threshold = threshold
   if (minutes !== undefined) out.minutes = minutes
+  // A boolean, checked as one. `if (r.damped)` would let any truthy value
+  // through and write `damped: true` for a string the sender never meant as a
+  // flag — the same reason `num()` refuses a non-finite number rather than
+  // coercing it.
+  if (r.damped === true) out.damped = true
 
   if (Array.isArray(r.units)) {
     out.units = r.units
@@ -147,6 +158,19 @@ export function sanitisePayload(raw: unknown): AlertPayload | null {
       // A unit name is [A-Za-z0-9._@:-] plus the `\x2d` escapes systemd uses.
       // Anything else is not a unit name, whatever the host claims.
       .map((u) => text(u, MAX_UNIT_NAME).replace(/[^A-Za-z0-9._@:\-\\]/g, ''))
+      // `@` has to stay in the class for template units (`getty@tty1.service`),
+      // but a name that STARTS with it is not one. systemd agrees: it loads
+      // `getty@tty1.service` and rejects `@everyone.service` as "neither a
+      // valid invocation ID nor unit name" — the prefix before `@` cannot be
+      // empty. So dropping a leading `@` costs no real unit name.
+      //
+      // What it buys is the other half of the threat above. `<!channel>` is
+      // Slack's mass ping and the character class already removes it; Discord's
+      // is the literal text `@everyone`, which is all name characters and
+      // survived. Same attack — a unit name on a host we do not trust becoming
+      // a mass ping in a channel that trusts this integration — so it gets the
+      // same answer.
+      .map((u) => u.replace(/^@+/, ''))
       .filter((u) => u.length > 0)
   }
   return out
@@ -218,7 +242,15 @@ export function webhookNotify(raw: unknown): void {
   if (!enabled) return
   // Rebuilt from a whitelist, never forwarded as received. See sanitisePayload.
   const payload = sanitisePayload(raw)
-  if (!payload) return
+  if (!payload) {
+    // Recorded for the same reason the missing-URL branch below is: an
+    // alerting path that discards without saying so is worse than one that
+    // does not exist, because it is trusted. This branch is how a kind added
+    // upstream but not to ALERT_KINDS would present — as a webhook that looks
+    // perfectly healthy and delivers nothing.
+    status.lastError = 'An alert did not match the payload shape and was not sent.'
+    return
+  }
   if (payload.event === 'resolved' && !notifyOnResolved) return
   const url = getSecret(SECRET_ID)
   if (!url) {

@@ -139,6 +139,14 @@ export interface AppSettings {
   // enabled for the same reason; the two must agree, so only an explicit user
   // toggle may ever persist `false`.
   localTerminalEnabled: boolean
+  // Whether a job may detach from its channel and run on under a marker
+  // directory (roadmap B2). Absence reads as ENABLED, in both the store and
+  // main, for localTerminalEnabled's reason a few lines above: a `false` that
+  // ever shipped as a default would be written into every install's data file
+  // and outrank a later change. Off yields B1's behaviour — nothing whatsoever
+  // is written to a host, and a job that was running when ShellPilot stopped is
+  // abandoned, which for a package operation means dpkg took a SIGHUP.
+  jobsDetached: boolean
   // Keyboard shortcut overrides, command id -> canonical combo ("Ctrl+Shift+P").
   // Only commands the user actually rebound are stored, so later releases can
   // change a default and have it reach existing installs. An empty string is a
@@ -165,6 +173,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   externalEditorCommand: 'code',
   openFilesExternally: false,
   localTerminalEnabled: true,
+  jobsDetached: true,
   shortcuts: {}
 }
 export type ModalKind = 'add-server' | 'workspaces' | 'route-editor' | 'add-database' | 'import-ssh' | null

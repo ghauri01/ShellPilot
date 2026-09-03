@@ -371,7 +371,17 @@ describe('ovpnArgs', () => {
       expect(pullFilters(args)).toContainEqual(['reject', f])
     }
     expect(args).toContain('--script-security')
-    expect(args[args.indexOf('--script-security') + 1]).toBe('0')
+    // 1, and the reason matters in both directions. openvpn's levels are
+    // 0 = no external programs at all, 1 = built-ins such as ifconfig only,
+    // 2 = built-ins AND user scripts.
+    //
+    // 0 shipped, and it forbids the ifconfig openvpn runs for its own tun
+    // interface, so no tunnel could come up on macOS. 2 would let a script
+    // directive run, which is the thing the reject rules exist to stop.
+    const level = args[args.indexOf('--script-security') + 1]
+    expect(level).toBe('1')
+    expect(level).not.toBe('0')
+    expect(level).not.toBe('2')
     expect(args).toContain('--auth-nocache')
   })
 

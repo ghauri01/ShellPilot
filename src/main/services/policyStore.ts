@@ -31,6 +31,21 @@ function allowAll(overrides: Partial<AccessGroup['capabilities']> = {}): AccessG
     databaseAccess: 'allow',
     sudo: 'allow',
     serverMetrics: 'allow',
+    // Denied on every seeded group, and NONE of them opts in below — the only
+    // capability here of which that is true.
+    //
+    // It returns how many unpatched security updates a host is carrying and
+    // against which distribution, which is a vulnerability report rather than a
+    // health check, and the roadmap settled it explicitly: a new capability
+    // backfills to DENY for every existing group. Seeding it at 'ask' on the
+    // three permissive groups would have made the backfill hand it to upgraded
+    // installs at 'ask' rather than 'deny', because backfillCapabilities gives
+    // a built-in group whatever a fresh install would have given it.
+    //
+    // The cost is that a fresh install must switch it on deliberately, which is
+    // the same posture the optional modules ship with and is the intended one
+    // for the most attacker-useful thing the bridge can return.
+    hostFacts: 'deny',
     // Not 'allow', despite the name. Every other capability here is an action
     // performed ON a server the user already added; this one edits ShellPilot's
     // own connection list and stores a credential. Groups that predate it never

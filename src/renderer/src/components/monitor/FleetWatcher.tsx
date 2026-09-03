@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useApp, useWorkspaceServers } from '../../store/app'
 import { useFleet } from '../../store/fleet'
 import { useFleetStatus } from '../../store/fleetStatus'
-import { checkResourceAlerts, checkUnitAlerts } from '../../store/alerts'
+import { checkResourceAlerts, checkUnitAlerts, hydrateAlerts } from '../../store/alerts'
 import { bridgeHas, bridgeOn } from '../../lib/bridge'
 import { sshHopsFor } from '../../lib/ssh'
 import type { FleetTarget } from '../../../../shared/fleet'
@@ -58,6 +58,8 @@ export function FleetWatcher(): null {
   const webhookOnResolved = useApp((s) => s.settings.webhookNotifyOnResolved)
   const report = useFleet((s) => s.report)
   const reportError = useFleet((s) => s.reportError)
+  const reportFacts = useFleet((s) => s.reportFacts)
+  const reportFactsError = useFleet((s) => s.reportFactsError)
 
   // Demo servers have nothing to sample, and an offline one is a connection
   // attempt per sweep that will not succeed — main reports the failure rather
@@ -67,11 +69,37 @@ export function FleetWatcher(): null {
     [servers]
   )
 
+  // Read the durable alert log back before anything is allowed to speak.
+  //
+  // Everything the alert store remembers — the repeat window, the value last
+  // announced, whether the endpoint is holding an alarm from us — used to live
+  // only in renderer memory, so a disk that has been at 91% for a month
+  // announced itself once per app launch forever. Until this resolves the store
+  // updates its chips and says nothing out loud; see hydrateAlerts.
+  //
+  // Here rather than at module scope because this component is the one thing
+  // mounted once at the app root that already owns the alerting path, and a
+  // module-scope IPC call would fire in every test that imports the store.
+  useEffect(() => {
+    void hydrateAlerts()
+  }, [])
+
   // Results arrive whether or not anything is on screen, so the subscription
   // is separate from the configuration below and is never torn down by a
   // settings change.
   useEffect(() => {
     const off = bridgeOn('fleet.onSample', window.shellpilot?.fleet?.onSample, (e) => {
+      // Host facts ride on roughly one sweep in thirty — they are collected
+      // hourly, metrics every couple of minutes. Handled BEFORE the `!e.host`
+      // return and independently of it, because the two are independent: a
+      // sweep can carry facts and an error, and a facts probe can fail on a
+      // host whose metrics sample was perfect.
+      //
+      // Absence is never treated as news. An event with no `facts` means "not
+      // collected on this sweep", and clearing on it would make the panel
+      // forget the estate every two minutes.
+      if (e.facts) reportFacts(e.serverId, e.facts, e.at)
+      else if (e.factsError) reportFactsError(e.serverId, e.factsError, e.at)
       if (!e.host) {
         // Recorded, not dropped. A host refusing SSH for six hours used to be
         // indistinguishable from one that is fine, because this returned here.
@@ -86,7 +114,23 @@ export function FleetWatcher(): null {
       // the monitor's own poll — so an alert could only fire while the user
       // was already looking at the screen that would have shown the problem.
       const name = serversRef.current.find((s) => s.id === e.serverId)?.name ?? e.serverId
-      checkResourceAlerts(e.serverId, name, e.host.cpu, e.host.memPct)
+      // `null`, not 0, when df reported nothing: a failed probe yields diskPct
+      // 0, and passing that would resolve a disk alert on a host that is still
+      // full — a false all-clear manufactured out of a measurement failure.
+      checkResourceAlerts(e.serverId, name, {
+        cpu: e.host.cpu,
+        ram: e.host.memPct,
+        disk: e.host.diskTotal > 0 ? e.host.diskPct : null,
+        // Null, not zero, for both. `df -i` is absent on some busybox
+        // userlands and btrfs and zfs honestly report no inode table; a
+        // container without /proc has no load average. Zero for either would be
+        // an empty filesystem and an idle machine.
+        inode: e.host.inodePct ?? null,
+        load:
+          e.host.load1 === null || e.host.load1 === undefined
+            ? null
+            : e.host.load1 / Math.max(1, e.host.cores)
+      })
       // The reason the feature exists. A failed unit does not move a CPU or
       // memory graph, so thresholds would never have caught the case this was
       // built for. `null` stays null: "systemd was not visible" is not "nothing
@@ -100,7 +144,33 @@ export function FleetWatcher(): null {
       )
     })
     return () => off?.()
-  }, [report, reportError])
+  }, [report, reportError, reportFacts, reportFactsError])
+
+  // Seed the facts the sampler ALREADY holds.
+  //
+  // The subscription above only ever sees the next hourly collection, so
+  // without this a freshly started app shows "not collected yet" for an estate
+  // main has had facts for since its first sweep — up to an hour of the
+  // inventory and of fleet search being wrong about what is known.
+  //
+  // Keyed on the server set rather than run once, so a server added to the
+  // workspace picks up whatever main has for it. Cheap by construction: it is a
+  // read of an in-memory map in main, not a connection, and `fleet.facts` is
+  // documented as never being a trigger.
+  useEffect(() => {
+    if (!bridgeHas(window.shellpilot?.fleet as Record<string, unknown> | undefined, 'facts')) return
+    let live = true
+    for (const t of targets) {
+      void window.shellpilot?.fleet?.facts(t.serverId).then((r) => {
+        if (!live || !r) return
+        if (r.facts && r.at !== undefined) reportFacts(t.serverId, r.facts, r.at)
+        if (r.error) reportFactsError(t.serverId, r.error, r.errorAt ?? Date.now())
+      })
+    }
+    return () => {
+      live = false
+    }
+  }, [targets, reportFacts, reportFactsError])
 
   // Reconfigure whenever what should be watched changes. Main treats this as
   // the complete desired state, so removing a server here stops sampling it.

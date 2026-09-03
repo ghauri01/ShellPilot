@@ -629,18 +629,43 @@ recovery. A count also appears in the status bar. A **systemd unit that has
 failed** raises one too, on the transition into failure rather than every check,
 so a service that has been down for a week does not re-announce itself.
 
+A **root filesystem more than 85% full** raises one as well — the same 85% at
+which the Fleet Monitor lists the host as needing attention and turns its disk
+bar red, so the alert and the screen it sends you to can never disagree. The
+status-bar count is that same figure and nothing else: clean a disk from 90% to
+82% and the chip goes as soon as the next sample lands, because the Fleet
+Monitor has stopped listing the host. It repeats **every six hours**, not every
+minute: a disk does not empty itself, and a minute-long window is roughly ten
+thousand notifications a week for one host that nobody can fix before Monday. It
+does speak up sooner if the disk gets **5 percentage points worse** than the
+figure it last reported, and again immediately if a disk that had recovered
+fills a second time. Only `/` is measured — the probe is `df -kP /` and nothing
+else, so a full `/var` on its own partition raises nothing here.
+
+**Recovery has a margin, for CPU and memory only.** They clear five points below
+the threshold rather than at it, so a host hovering on the line does not flicker
+between alerting and clear on every two-second sample. Disk has no such gap: it
+clears at 85% or below, the moment the Fleet Monitor stops flagging it.
+
 **Turning alerts on or off.** Go to **Settings → Monitoring** and use the
 **Alerts** toggle. It is the master switch: it is **on by default**, and
-switching it off stops every CPU, memory and failed-unit notification for every
-server — and, because webhooks are sent from inside an alert, all webhook
-delivery with them. The setting is global — it applies to all hosts, not one at
-a time — and it persists across restarts.
+switching it off stops every CPU, memory, disk and failed-unit notification for
+every server — and, because webhooks are sent from inside an alert, all webhook
+delivery with them. **Switching it off also removes the alerts already showing**
+in the status bar, and forgets the repeat windows behind them: a chip cannot
+outlive the feature that raised it, and switching back on starts a clean slate
+rather than resuming a six-hour disk window that began before the toggle. The
+setting is global — it applies to all hosts, not one at a time — and it persists
+across restarts.
 
 Under it, **Alert threshold** sets how hard a host has to be working before it
 counts as high: **70%**, **80%** (default), **90%** or **95%**. The same
 threshold applies to both CPU and RAM. Raise it if busy-but-healthy servers are
 noisy, lower it if you want earlier warning. The threshold buttons are greyed
-out while alerts are switched off.
+out while alerts are switched off. **Disk is not configurable**: it alerts above
+**85%**, because that number is also what colours the bar and fills the Fleet
+Monitor's attention list, and a slider that could pull one away from the other
+would be a way to make the app contradict itself.
 
 The last toggle in the section, **Show monitor under the terminal**, is
 independent: it controls the live CPU/memory/disk/network strip docked below the

@@ -1,0 +1,379 @@
+{
+  "overview": {
+    "ok": true,
+    "rows": [
+      {
+        "version": "8.0.46",
+        "version_comment": "MySQL Community Server - GPL",
+        "server_id": 2,
+        "read_only": 1,
+        "max_connections": 151,
+        "hostname": "7673cb941bf9"
+      }
+    ]
+  },
+  "superReadOnly": {
+    "ok": true,
+    "rows": [
+      {
+        "super_read_only": 0
+      }
+    ]
+  },
+  "replicaStatus": {
+    "ok": true,
+    "rows": [
+      {
+        "Replica_IO_State": "",
+        "Source_Host": "nosuchhost.invalid",
+        "Source_User": "repl",
+        "Source_Port": 3306,
+        "Connect_Retry": 1,
+        "Source_Log_File": "",
+        "Read_Source_Log_Pos": 4,
+        "Relay_Log_File": "7673cb941bf9-relay-bin.000001",
+        "Relay_Log_Pos": 4,
+        "Relay_Source_Log_File": "",
+        "Replica_IO_Running": "No",
+        "Replica_SQL_Running": "Yes",
+        "Replicate_Do_DB": "",
+        "Replicate_Ignore_DB": "",
+        "Replicate_Do_Table": "",
+        "Replicate_Ignore_Table": "",
+        "Replicate_Wild_Do_Table": "",
+        "Replicate_Wild_Ignore_Table": "",
+        "Last_Errno": 0,
+        "Last_Error": "",
+        "Skip_Counter": 0,
+        "Exec_Source_Log_Pos": 0,
+        "Relay_Log_Space": 157,
+        "Until_Condition": "None",
+        "Until_Log_File": "",
+        "Until_Log_Pos": 0,
+        "Source_SSL_Allowed": "No",
+        "Source_SSL_CA_File": "",
+        "Source_SSL_CA_Path": "",
+        "Source_SSL_Cert": "",
+        "Source_SSL_Cipher": "",
+        "Source_SSL_Key": "",
+        "Seconds_Behind_Source": 0,
+        "Source_SSL_Verify_Server_Cert": "No",
+        "Last_IO_Errno": 2005,
+        "Last_IO_Error": "Error connecting to source 'repl@nosuchhost.invalid:3306'. This was attempt 1/1, with a delay of 1 seconds between attempts. Message: Unknown MySQL server host 'nosuchhost.invalid' (-2)",
+        "Last_SQL_Errno": 0,
+        "Last_SQL_Error": "",
+        "Replicate_Ignore_Server_Ids": "",
+        "Source_Server_Id": 0,
+        "Source_UUID": "",
+        "Source_Info_File": "mysql.slave_master_info",
+        "SQL_Delay": 0,
+        "SQL_Remaining_Delay": null,
+        "Replica_SQL_Running_State": "Replica has read all relay log; waiting for more updates",
+        "Source_Retry_Count": 1,
+        "Source_Bind": "",
+        "Last_IO_Error_Timestamp": "260903 03:35:36",
+        "Last_SQL_Error_Timestamp": "",
+        "Source_SSL_Crl": "",
+        "Source_SSL_Crlpath": "",
+        "Retrieved_Gtid_Set": "",
+        "Executed_Gtid_Set": "3585bf83-a748-11f1-a95a-c6bf93e8217d:1-5,\nd8300e9d-a747-11f1-887b-0e42ec0ee1ee:1-12",
+        "Auto_Position": 1,
+        "Replicate_Rewrite_DB": "",
+        "Channel_Name": "",
+        "Source_TLS_Version": "",
+        "Source_public_key_path": "",
+        "Get_Source_public_key": 1,
+        "Network_Namespace": ""
+      }
+    ]
+  },
+  "slaveStatus": {
+    "ok": true,
+    "rows": [
+      {
+        "Slave_IO_State": "",
+        "Master_Host": "nosuchhost.invalid",
+        "Master_User": "repl",
+        "Master_Port": 3306,
+        "Connect_Retry": 1,
+        "Master_Log_File": "",
+        "Read_Master_Log_Pos": 4,
+        "Relay_Log_File": "7673cb941bf9-relay-bin.000001",
+        "Relay_Log_Pos": 4,
+        "Relay_Master_Log_File": "",
+        "Slave_IO_Running": "No",
+        "Slave_SQL_Running": "Yes",
+        "Replicate_Do_DB": "",
+        "Replicate_Ignore_DB": "",
+        "Replicate_Do_Table": "",
+        "Replicate_Ignore_Table": "",
+        "Replicate_Wild_Do_Table": "",
+        "Replicate_Wild_Ignore_Table": "",
+        "Last_Errno": 0,
+        "Last_Error": "",
+        "Skip_Counter": 0,
+        "Exec_Master_Log_Pos": 0,
+        "Relay_Log_Space": 157,
+        "Until_Condition": "None",
+        "Until_Log_File": "",
+        "Until_Log_Pos": 0,
+        "Master_SSL_Allowed": "No",
+        "Master_SSL_CA_File": "",
+        "Master_SSL_CA_Path": "",
+        "Master_SSL_Cert": "",
+        "Master_SSL_Cipher": "",
+        "Master_SSL_Key": "",
+        "Seconds_Behind_Master": 0,
+        "Master_SSL_Verify_Server_Cert": "No",
+        "Last_IO_Errno": 2005,
+        "Last_IO_Error": "Error connecting to source 'repl@nosuchhost.invalid:3306'. This was attempt 1/1, with a delay of 1 seconds between attempts. Message: Unknown MySQL server host 'nosuchhost.invalid' (-2)",
+        "Last_SQL_Errno": 0,
+        "Last_SQL_Error": "",
+        "Replicate_Ignore_Server_Ids": "",
+        "Master_Server_Id": 0,
+        "Master_UUID": "",
+        "Master_Info_File": "mysql.slave_master_info",
+        "SQL_Delay": 0,
+        "SQL_Remaining_Delay": null,
+        "Slave_SQL_Running_State": "Replica has read all relay log; waiting for more updates",
+        "Master_Retry_Count": 1,
+        "Master_Bind": "",
+        "Last_IO_Error_Timestamp": "260903 03:35:36",
+        "Last_SQL_Error_Timestamp": "",
+        "Master_SSL_Crl": "",
+        "Master_SSL_Crlpath": "",
+        "Retrieved_Gtid_Set": "",
+        "Executed_Gtid_Set": "3585bf83-a748-11f1-a95a-c6bf93e8217d:1-5,\nd8300e9d-a747-11f1-887b-0e42ec0ee1ee:1-12",
+        "Auto_Position": 1,
+        "Replicate_Rewrite_DB": "",
+        "Channel_Name": "",
+        "Master_TLS_Version": "",
+        "Master_public_key_path": "",
+        "Get_master_public_key": 1,
+        "Network_Namespace": ""
+      }
+    ]
+  },
+  "logBin": {
+    "ok": true,
+    "rows": [
+      {
+        "log_bin": 1
+      }
+    ]
+  },
+  "binlogExpireSeconds": {
+    "ok": true,
+    "rows": [
+      {
+        "expire_seconds": 2592000
+      }
+    ]
+  },
+  "binlogExpireDays": {
+    "ok": true,
+    "rows": [
+      {
+        "expire_days": 0
+      }
+    ]
+  },
+  "binaryLogs": {
+    "ok": true,
+    "rows": [
+      {
+        "Log_name": "binlog.000001",
+        "File_size": 180,
+        "Encrypted": "No"
+      },
+      {
+        "Log_name": "binlog.000002",
+        "File_size": 2997942,
+        "Encrypted": "No"
+      },
+      {
+        "Log_name": "binlog.000003",
+        "File_size": 2999691,
+        "Encrypted": "No"
+      }
+    ]
+  },
+  "slowSettings": {
+    "ok": true,
+    "rows": [
+      {
+        "slow_query_log": 0,
+        "long_query_time": 10,
+        "slow_query_log_file": "/var/lib/mysql/7673cb941bf9-slow.log",
+        "log_output": "FILE"
+      }
+    ]
+  },
+  "status": {
+    "ok": true,
+    "rows": [
+      {
+        "Variable_name": "Aborted_connects",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Connection_errors_max_connections",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_dirty",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_free",
+        "Value": "6471"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_total",
+        "Value": "8192"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_read_requests",
+        "Value": "426628"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_reads",
+        "Value": "1084"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_wait_free",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_row_lock_time_avg",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_row_lock_waits",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Max_used_connections",
+        "Value": "1"
+      },
+      {
+        "Variable_name": "Queries",
+        "Value": "7156"
+      },
+      {
+        "Variable_name": "Slow_queries",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Threads_connected",
+        "Value": "1"
+      },
+      {
+        "Variable_name": "Threads_running",
+        "Value": "2"
+      },
+      {
+        "Variable_name": "Uptime",
+        "Value": "140"
+      }
+    ]
+  },
+  "bufferPool": {
+    "ok": true,
+    "rows": [
+      {
+        "bytes": 134217728,
+        "instances": 1
+      }
+    ]
+  },
+  "processlist": {
+    "ok": true,
+    "rows": [
+      {
+        "id": 5,
+        "user": "event_scheduler",
+        "host": "localhost",
+        "db": null,
+        "command": "Daemon",
+        "seconds": 140,
+        "state": "Waiting on empty queue",
+        "info": null
+      },
+      {
+        "id": 24,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Connect",
+        "seconds": 9,
+        "state": "Waiting for an event from Coordinator",
+        "info": null
+      },
+      {
+        "id": 25,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Connect",
+        "seconds": 9,
+        "state": "Waiting for an event from Coordinator",
+        "info": null
+      },
+      {
+        "id": 21,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Query",
+        "seconds": 9,
+        "state": "Replica has read all relay log; waiting for more updates",
+        "info": null
+      },
+      {
+        "id": 22,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Connect",
+        "seconds": 9,
+        "state": "Waiting for an event from Coordinator",
+        "info": null
+      },
+      {
+        "id": 23,
+        "user": "system user",
+        "host": "",
+        "db": null,
+        "command": "Connect",
+        "seconds": 9,
+        "state": "Waiting for an event from Coordinator",
+        "info": null
+      },
+      {
+        "id": 26,
+        "user": "root",
+        "host": "192.168.65.1:18296",
+        "db": null,
+        "command": "Query",
+        "seconds": 0,
+        "state": "executing",
+        "info": "SELECT ID AS id, USER AS user, HOST AS host, DB AS db, COMMAND AS command,\n    TIME AS seconds, STATE AS state, LEFT(INFO, 200) AS info\n    FROM information_schema.PROCESSLIST WHERE COMMAND <> 'Sleep'"
+      }
+    ]
+  },
+  "sizes": {
+    "ok": true,
+    "rows": [
+      {
+        "schema": "shop",
+        "name": "orders",
+        "engine": "InnoDB",
+        "table_rows": 0,
+        "data_bytes": 16384,
+        "index_bytes": 16384,
+        "free_bytes": 0
+      }
+    ]
+  }
+}

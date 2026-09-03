@@ -55,6 +55,10 @@ const ALLOWED_TOOLS = [
   'write_file',
   'list_files',
   'get_server_metrics',
+  // Roadmap item C. Reads over SSH on a configured server, like every other
+  // tool here, and reaches no shell on this machine. Gated on its own
+  // `hostFacts` capability rather than serverMetrics.
+  'get_host_facts',
   'list_databases',
   'query_database',
   'list_tunnels',
@@ -370,6 +374,10 @@ describe('the AI permission model has no word for a local shell', () => {
     'databaseAccess',
     'sudo',
     'serverMetrics',
+    // Roadmap item C. Reviewed and added deliberately: it is its OWN capability
+    // rather than a widening of serverMetrics, because a count of unpatched
+    // vulnerabilities is materially different from CPU and memory.
+    'hostFacts',
     'manageServers',
     'vpnControl'
   ]

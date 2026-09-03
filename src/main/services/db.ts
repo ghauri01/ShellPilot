@@ -252,6 +252,31 @@ async function buildDriver(cfg: DbConnectConfig): Promise<Conn> {
   }
 }
 
+/**
+ * A connection of one's own, outside the cache.
+ *
+ * `ensure()` below hands every caller the SAME client object per connection id:
+ * the query editor, the shell and the operations panel all share it. That is
+ * right for the things a user drives, and wrong for anything that configures a
+ * session or can fail inside someone else's transaction:
+ *
+ *  * `SET statement_timeout = 8000` is a SESSION setting with no reset. Set on
+ *    the shared client it survives until db:close, so an operator who opened
+ *    Operations once got `canceling statement due to statement timeout` on a
+ *    thirty-second report in the query tab, on a connection they never
+ *    configured, with nothing on screen explaining it.
+ *  * A question that raises 42501 ABORTS the surrounding transaction. The
+ *    operations panel promises "nothing on this page changes the server"; run
+ *    on the shared client, one denied read rolls back the `BEGIN; UPDATE …` the
+ *    operator had open and had not committed.
+ *
+ * The caller owns what comes back and must close() it. That also tears down the
+ * SSH or VPN forward it opened, because the close() build() returns is wrapped.
+ */
+export async function openTransient(cfg: DbConnectConfig): Promise<Conn> {
+  return build(cfg)
+}
+
 export async function ensure(cfg: DbConnectConfig): Promise<Conn> {
   const existing = conns.get(cfg.id)
   if (existing) return existing

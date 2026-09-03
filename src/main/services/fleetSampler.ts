@@ -5,12 +5,19 @@ import type {
   FleetSamplerStatus,
   FleetTarget
 } from '../../shared/fleet'
+import type { HostFacts } from '../../shared/hostFacts'
 import type { HostMetrics } from '../../shared/ssh'
 import {
   FLEET_INTERVAL_DEFAULT_MS,
   FLEET_INTERVAL_MAX_MS,
   FLEET_INTERVAL_MIN_MS
 } from '../../shared/fleet'
+import {
+  HOST_FACTS_INTERVAL_MIN_MS,
+  HOST_FACTS_INTERVAL_MS,
+  HOST_FACT_PREFIX,
+  hostFactsToFacts
+} from '../../shared/hostFacts'
 
 // Samples the estate on a schedule, in main, whether or not anyone is looking.
 //
@@ -36,9 +43,113 @@ import {
 
 type Sampler = (key: string, cfg: FleetTarget['cfg']) => Promise<{ ok: boolean; data?: unknown; error?: string }>
 
+/**
+ * The host-facts probe, injected exactly as `sample` is.
+ *
+ * Never a direct import of main/services/hostFacts.ts: the sampler's tests
+ * construct it with doubles and would otherwise drag ssh2 and a pooled
+ * connection into every one of them.
+ */
+type FactsSampler = (
+  key: string,
+  cfg: FleetTarget['cfg']
+) => Promise<{ ok: boolean; facts?: HostFacts; error?: string }>
+
+/**
+ * The slice of the durable store this file uses.
+ *
+ * Declared structurally here rather than imported from history.ts on purpose:
+ * a direct import would drag node:sqlite and app.getPath('userData') into every
+ * test that constructs a sampler, and there are a lot of them. HistoryStore
+ * satisfies this shape, so main/index.ts hands over the real thing and the
+ * tests hand over nothing.
+ */
+export interface HistoryWriter {
+  transaction<T>(fn: () => T & (T extends PromiseLike<unknown> ? never : unknown)): T
+  recordSamples(hostId: string, at: number, values: Record<string, number>): void
+  upsertFact(hostId: string, key: string, value: string, at: number): unknown
+  retireFacts(hostId: string, at: number, prefix: string, keep: Iterable<string>): number
+  recordEvent(kind: string, hostId: string | null, payload?: unknown, at?: number): void
+  /** Read, because reachability has to survive a restart — see seedReachable.
+   *  Optional: this interface is the WRITE slice the sampler needs, and a
+   *  double that only records is still a valid one. A writer without it simply
+   *  starts each session with no memory of who was down. */
+  readEvents?(filter: { hostId?: string; kind?: string; limit?: number }): { ts: number }[]
+}
+
+/**
+ * The eight numeric series worth keeping per sample.
+ *
+ * Everything else on HostMetrics is a fact — see metricsToFacts. memTotal,
+ * diskTotal, cores and kernel do not change between sweeps, and storing them as
+ * series would be paying the metric budget for a constant.
+ */
+export function metricsToSamples(host: HostMetrics): Record<string, number> {
+  return {
+    cpu: host.cpu,
+    memPct: host.memPct,
+    memUsed: host.memUsed,
+    diskPct: host.diskPct,
+    diskUsed: host.diskUsed,
+    netRx: host.netRx,
+    netTx: host.netTx,
+    uptime: host.uptime
+  }
+}
+
+/**
+ * The parts of a sample that are facts.
+ *
+ * `services` and `listeners` are the reason this function exists. They are
+ * re-sampled every sweep and almost never change; a host with forty units
+ * stored as samples is 28,800 rows a day for ONE host, five times the entire
+ * metric budget for the estate. As facts they cost one timestamp bump per
+ * sweep, and a real change becomes an event.
+ *
+ * Prefixes are the retirement scope: `unit:` and `port:` are swept against the
+ * probe's own output so a decommissioned unit stops being a current fact.
+ */
+export const UNIT_FACT_PREFIX = 'unit:'
+export const PORT_FACT_PREFIX = 'port:'
+
+export function metricsToFacts(host: HostMetrics): Record<string, string> {
+  const facts: Record<string, string> = {
+    hostname: host.hostname,
+    kernel: host.kernel,
+    cores: String(host.cores),
+    memTotal: String(host.memTotal),
+    diskTotal: String(host.diskTotal)
+  }
+  if (host.listenerSource) facts.listenerSource = host.listenerSource
+  // null is not empty. A host with no systemd reports null and must not have
+  // its (nonexistent) unit facts recorded OR retired — the monitor already
+  // respects that distinction and it has to survive into the store, or history
+  // will confidently report that every unit was removed the day the probe broke.
+  for (const u of host.services ?? []) {
+    facts[`${UNIT_FACT_PREFIX}${u.name}`] = `${u.active}/${u.sub}`
+  }
+  for (const l of host.listeners ?? []) {
+    facts[`${PORT_FACT_PREFIX}${l.proto}/${l.address}:${l.port}`] = l.process ?? ''
+  }
+  return facts
+}
+
 export interface FleetSamplerDeps {
   // metricsSample, injected so the schedule can be tested without SSH.
   sample: Sampler
+  /**
+   * The hourly host-facts probe. Optional: a sampler built without it behaves
+   * exactly as it did before facts existed, which is what keeps every existing
+   * test valid rather than making them all declare a probe they do not use.
+   *
+   * It runs INSIDE the metrics sweep, per target, when that target's facts are
+   * due — not on a second timer. The sweep already handles the vault re-check,
+   * the generation guard and disposal, and a parallel loop would have to
+   * re-derive all three. It also only runs after a SUCCESSFUL metrics sample:
+   * a host that just refused a metrics channel will refuse this one too, and
+   * paying a 45-second timeout to find that out again helps nobody.
+   */
+  sampleFacts?: FactsSampler
   // metricsDisconnect. Called for every target the sampler stops watching.
   //
   // metricsSample holds a pooled connection per key and only releases it when
@@ -68,6 +179,16 @@ export interface FleetSamplerDeps {
   // cannot, sweeping every target would produce one failure per server per
   // interval, forever, plus an audit entry each — so the loop parks instead.
   vaultUnlocked: () => boolean
+  /**
+   * The durable store, resolved per sweep rather than captured once.
+   *
+   * A function and not the store itself because loadHistory() is async and the
+   * sampler is constructed at module scope in main/index.ts, long before the
+   * database has opened. Returning null is the normal state on a machine where
+   * history is disabled or would not open, and every sweep behaves exactly as
+   * it does today.
+   */
+  history?: () => HistoryWriter | null | undefined
   now?: () => number
   setTimer?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>
   clearTimer?: (t: ReturnType<typeof setTimeout>) => void
@@ -80,6 +201,20 @@ export function clampInterval(ms: number): number {
   // Infinity is not garbage, it is an extreme, so it clamps like any other.
   if (Number.isNaN(ms)) return FLEET_INTERVAL_DEFAULT_MS
   return Math.min(FLEET_INTERVAL_MAX_MS, Math.max(FLEET_INTERVAL_MIN_MS, Math.round(ms)))
+}
+
+/**
+ * The facts cadence, clamped separately from the metrics one.
+ *
+ * There is no maximum: a user who wants facts once a day is asking for
+ * something reasonable about data that changes when somebody runs an upgrade.
+ * The minimum exists because the probe is a 45-second-budget round trip that
+ * shells out to a package manager, and running it at the metrics cadence would
+ * put `dnf check-update` on every host every two minutes.
+ */
+export function clampFactsInterval(ms: number | undefined): number {
+  if (ms === undefined || Number.isNaN(ms)) return HOST_FACTS_INTERVAL_MS
+  return Math.max(HOST_FACTS_INTERVAL_MIN_MS, Math.round(ms))
 }
 
 // A key distinct from the one a mounted card uses, so a background sweep and a
@@ -104,12 +239,42 @@ export interface FleetCacheEntry {
   /** Set when the most recent attempt failed; cleared by a success. */
   error?: string
   errorAt?: number
+  /**
+   * The last successful host-facts collection. Kept on the SAME entry as the
+   * metrics sample but on its own clock: facts are collected hourly, so
+   * `factsAt` is normally much older than `at`, and anything reading them has
+   * to say which age it is quoting.
+   */
+  facts?: HostFacts
+  factsAt?: number
+  /** Set when the most recent facts probe failed; cleared by a success, and
+   *  kept ALONGSIDE the last good facts for the same reason `error` is kept
+   *  alongside the last good sample. */
+  factsError?: string
+  factsErrorAt?: number
+}
+
+/** One host's contribution to a sweep, held until the whole sweep is written. */
+interface PendingWrite {
+  serverId: string
+  at: number
+  host?: HostMetrics
+  error?: string
+  /** True when this success follows a recorded failure, so the store gets a
+   *  'host-recovered' event rather than nothing at all. */
+  recovered?: boolean
+  /** Present only on the sweeps where the facts probe was also due. */
+  facts?: HostFacts
 }
 
 export interface FleetLookup {
   entry: FleetCacheEntry
   /** The configured sweep interval, so a caller can judge what "stale" means. */
   intervalMs: number
+  /** The facts cadence, which is a different number entirely — quoting the
+   *  metrics interval against a facts timestamp would call an hour-old fact
+   *  thirty intervals stale when it is exactly on schedule. */
+  factsIntervalMs: number
 }
 
 // The MCP bridge reads the cache through this rather than being handed the
@@ -130,6 +295,11 @@ export class FleetSampler {
   private cfg: FleetSamplerConfig = { enabled: false, intervalMs: FLEET_INTERVAL_MIN_MS, targets: [] }
   private timer: ReturnType<typeof setTimeout> | null = null
   private sweeping = false
+  // The sweep currently in flight, so dispose() can hand a caller something to
+  // wait on. A sweep persists in its finally, and main/index.ts closes the
+  // store right after dispose() returns — without this the last sweep of every
+  // session lands after the close and is dropped.
+  private inFlight: Promise<void> | null = null
   // Set when a scheduled run was refused because a sweep was already going.
   // Without it, that refusal loses the obligation to reschedule and the loop
   // stops for good. See sweep().
@@ -145,8 +315,62 @@ export class FleetSampler {
   // entries for anything no longer watched, in the same pass that hands back
   // its connection.
   private samples = new Map<string, FleetCacheEntry>()
+  // Last known reachability per server, kept separately from `samples` because
+  // that map deliberately KEEPS the last good sample across a failure — so it
+  // cannot answer "was this host up on the previous sweep", which is the
+  // question that turns a permanent failure into one event instead of one per
+  // sweep forever. Bounded by the same target list.
+  private reachable = new Map<string, boolean>()
+  // When each server's host facts are next due, per target and NOT on a timer
+  // of its own. The sweep checks this inline; see the note on deps.sampleFacts.
+  //
+  // A server with no entry is due immediately, which is what makes the first
+  // sweep after a restart collect facts rather than waiting an hour for a
+  // schedule the process cannot remember. Bounded by the target list, cleared
+  // in the same pass as `samples`.
+  private factsDueAt = new Map<string, number>()
+  // Servers whose last known reachability has already been looked up in the
+  // store. Once per server per process: the in-memory map is the answer after
+  // that, and a lookup on every sweep would be two reads per host forever.
+  private seeded = new Set<string>()
 
   constructor(private readonly deps: FleetSamplerDeps) {}
+
+  /**
+   * Recover what the last session knew about one server's reachability.
+   *
+   * `reachable` is in-memory, so without this the sequence "host goes down, app
+   * restarts, host is still down" raises host-unreachable a second time — and,
+   * because the transition it thinks it saw is undefined->false rather than
+   * true->false, never emits the matching host-recovered when the host comes
+   * back. An alert that can be raised twice and closed never.
+   *
+   * Best-effort by construction, like every other use of the store here: a
+   * missing or throwing store leaves the map exactly as it was.
+   */
+  private seedReachable(serverId: string): void {
+    if (this.seeded.has(serverId)) return
+    this.seeded.add(serverId)
+    try {
+      const store = this.deps.history?.()
+      if (!store) {
+        // Not seeded after all — the store may open later in this session.
+        this.seeded.delete(serverId)
+        return
+      }
+      if (!store.readEvents) return
+      const last = (kind: string): number | undefined =>
+        store.readEvents?.({ hostId: serverId, kind, limit: 1 })[0]?.ts
+      const down = last('host-unreachable')
+      const up = last('host-recovered')
+      if (down === undefined) return
+      // A recovery newer than the outage means it was up when we last looked;
+      // no recovery at all, or an older one, means it was down.
+      this.reachable.set(serverId, up !== undefined && up > down)
+    } catch (err) {
+      console.error('[fleet] could not read last known reachability (not fatal):', err)
+    }
+  }
 
   private get now(): number {
     return (this.deps.now ?? Date.now)()
@@ -169,6 +393,8 @@ export class FleetSampler {
       // Drop what we knew about it too. A server removed from the workspace
       // must not keep answering MCP questions from a sample nobody can refresh.
       this.samples.delete(id)
+      this.reachable.delete(id)
+      this.factsDueAt.delete(id)
     }
 
     this.stopTimer()
@@ -182,7 +408,13 @@ export class FleetSampler {
   /** What this sampler last learned about one server. */
   lookup(serverId: string): FleetLookup | undefined {
     const entry = this.samples.get(serverId)
-    return entry ? { entry, intervalMs: this.cfg.intervalMs } : undefined
+    return entry
+      ? {
+          entry,
+          intervalMs: this.cfg.intervalMs,
+          factsIntervalMs: clampFactsInterval(this.cfg.factsIntervalMs)
+        }
+      : undefined
   }
 
   /**
@@ -246,14 +478,145 @@ export class FleetSampler {
   }
 
   // A success clears the recorded error; a failure keeps the last good sample.
+  //
+  // The facts half is carried across UNTOUCHED in both directions. Facts are
+  // collected on their own hourly clock, so nearly every metrics sample lands
+  // between two collections — rebuilding the entry without them would erase an
+  // hour-old fact set thirty times an hour and leave the inventory permanently
+  // empty except in the one sweep that had just refreshed it.
   private remember(serverId: string, next: FleetCacheEntry): void {
     const previous = this.samples.get(serverId)
+    const facts = {
+      facts: previous?.facts,
+      factsAt: previous?.factsAt,
+      factsError: previous?.factsError,
+      factsErrorAt: previous?.factsErrorAt
+    }
     this.samples.set(
       serverId,
       next.host
-        ? { host: next.host, at: next.at }
-        : { host: previous?.host, at: previous?.at, error: next.error, errorAt: next.errorAt }
+        ? { ...facts, host: next.host, at: next.at }
+        : { ...facts, host: previous?.host, at: previous?.at, error: next.error, errorAt: next.errorAt }
     )
+  }
+
+  /**
+   * Record one host-facts collection, on the entry the metrics sample owns.
+   *
+   * A success clears the facts error and a failure keeps the last good facts,
+   * mirroring `remember` — "this host's inventory was read an hour ago and the
+   * probe is failing now" is two facts and both matter.
+   */
+  private rememberFacts(serverId: string, at: number, facts?: HostFacts, error?: string): void {
+    const entry = this.samples.get(serverId) ?? {}
+    this.samples.set(
+      serverId,
+      facts
+        ? { ...entry, facts, factsAt: at, factsError: undefined, factsErrorAt: undefined }
+        : { ...entry, factsError: error ?? 'unavailable', factsErrorAt: at }
+    )
+  }
+
+  /** What this sampler last collected about one server's identity, for the IPC
+   *  surface the inventory view reads. Separate from `lookup` so a caller that
+   *  wants only facts is not handed a whole metrics sample to ignore. */
+  factsFor(serverId: string): {
+    facts?: HostFacts
+    at?: number
+    error?: string
+    errorAt?: number
+    intervalMs: number
+  } {
+    const entry = this.samples.get(serverId)
+    return {
+      facts: entry?.facts,
+      at: entry?.factsAt,
+      error: entry?.factsError,
+      errorAt: entry?.factsErrorAt,
+      intervalMs: clampFactsInterval(this.cfg.factsIntervalMs)
+    }
+  }
+
+  /**
+   * Write one sweep to the durable store, in one transaction.
+   *
+   * Everything here is best-effort by construction. A store that is absent
+   * (disabled, or it would not open) or that throws mid-write leaves the
+   * sampler, the renderer and the MCP cache exactly as they are today — the
+   * history is the feature that degrades, never the sweep.
+   */
+  private persist(writes: PendingWrite[]): void {
+    if (writes.length === 0) return
+    try {
+      // Inside the try, not above it. persist() is called from the sweep's
+      // finally, before `sweeping = false` and before the reschedule — so a
+      // resolver that throws (any future provider that can fail) aborts the
+      // finally, leaves `sweeping` true forever and stops sampling for good
+      // while status() goes on reporting `running`. That is the silent-death
+      // mode the long comment in sweep() exists to prevent, through a new door.
+      const store = this.deps.history?.()
+      if (!store) return
+      store.transaction(() => {
+        for (const w of writes) {
+          if (!w.host) {
+            store.recordEvent('host-unreachable', w.serverId, { error: w.error }, w.at)
+            continue
+          }
+          if (w.recovered) store.recordEvent('host-recovered', w.serverId, undefined, w.at)
+          store.recordSamples(w.serverId, w.at, metricsToSamples(w.host))
+
+          const facts = metricsToFacts(w.host)
+          for (const [key, value] of Object.entries(facts)) {
+            store.upsertFact(w.serverId, key, value, w.at)
+          }
+          // Retire only what the probe could actually see. `services: null`
+          // means "no systemd here / the probe failed", which is not the same
+          // as "there are no units" — retiring on null would record forty
+          // fact-removed events the first time a probe broke.
+          if (w.host.services) {
+            store.retireFacts(
+              w.serverId,
+              w.at,
+              UNIT_FACT_PREFIX,
+              Object.keys(facts).filter((k) => k.startsWith(UNIT_FACT_PREFIX))
+            )
+          }
+          if (w.host.listeners) {
+            store.retireFacts(
+              w.serverId,
+              w.at,
+              PORT_FACT_PREFIX,
+              Object.keys(facts).filter((k) => k.startsWith(PORT_FACT_PREFIX))
+            )
+          }
+
+          // Host facts, into the SAME store — item A's, not a second one, and
+          // never into shellpilot-data.json, which is the encrypted backup
+          // payload rather than a place to keep an hourly inventory.
+          //
+          // Written only on the sweeps where the probe actually ran. `w.facts`
+          // absent means "not due this sweep", so retiring here would delete a
+          // complete inventory thirty times an hour and record a fact-removed
+          // event for each key every time.
+          if (w.facts) {
+            const hostFacts = hostFactsToFacts(w.facts)
+            for (const [key, value] of Object.entries(hostFacts)) {
+              store.upsertFact(w.serverId, key, value, w.at)
+            }
+            // Retired against the probe's own output, so a host that switches
+            // package manager — or stops being able to answer something it used
+            // to answer — loses the stale key instead of keeping it next to a
+            // fresher one. Safe to sweep unconditionally here, unlike units and
+            // ports: hostFactsToFacts writes a key for EVERY field, storing the
+            // source's status where the value is null, so a failed probe still
+            // produces a complete key set rather than an empty one.
+            store.retireFacts(w.serverId, w.at, HOST_FACT_PREFIX, Object.keys(hostFacts))
+          }
+        }
+      })
+    } catch (err) {
+      console.error('[fleet] history write failed (sampling is unaffected):', err)
+    }
   }
 
   private async sweep(reason: FleetSampleReason): Promise<void> {
@@ -280,7 +643,16 @@ export class FleetSampler {
     this.restartPending = false
     const gen = this.generation
     this.sweeping = true
+    // Published before the first await so a dispose() arriving mid-sweep has
+    // something to hand back to a caller that must not close the store yet.
+    let finished = (): void => undefined
+    this.inFlight = new Promise<void>((resolve) => (finished = resolve))
     const started = this.now
+    // Buffered, not written per host: the whole sweep goes into the store in
+    // one BEGIN/COMMIT below. Fifteen hosts is ~120 sample rows plus facts, and
+    // writing them one statement at a time is 120 fsyncs where one will do —
+    // on the same disk this app exists to warn people about filling.
+    const writes: PendingWrite[] = []
 
     try {
       // Sequential, not Promise.all. Fifteen servers behind two bastions means
@@ -297,27 +669,96 @@ export class FleetSampler {
         try {
           const res = await this.deps.sample(fleetKey(t.serverId), t.cfg)
           if (gen !== this.generation || this.disposed) return
+          const at = this.now
+          // Read BEFORE remember() overwrites it: reachability is a transition,
+          // and an event per sweep for a host that has been down since Tuesday
+          // is 720 rows a day saying the same thing.
+          if (!this.reachable.has(t.serverId)) this.seedReachable(t.serverId)
+          const wasReachable = this.reachable.get(t.serverId)
+          // Empty on the ~29 sweeps in 30 where facts were not due. Spread into
+          // the emitted event, so a listener sees the field only when there is
+          // something to say — an always-present `facts: undefined` would read
+          // as "collected, and this host has none".
+          let factsEvent: { facts?: HostFacts; factsError?: string } = {}
           if (res.ok && res.data) {
-            this.remember(t.serverId, { host: res.data as HostMetrics, at: this.now })
+            const host = res.data as HostMetrics
+            this.remember(t.serverId, { host, at })
+            this.reachable.set(t.serverId, true)
+            const write: PendingWrite = {
+              serverId: t.serverId,
+              at,
+              host,
+              recovered: wasReachable === false
+            }
+
+            // The slow probe, inline in this same sequential loop rather than
+            // on a second timer. The sweep already owns the vault re-check, the
+            // generation guard and disposal; a parallel facts loop would have to
+            // re-derive all three, and duplicating that reasoning is how it
+            // breaks.
+            //
+            // Only after a successful metrics sample, and only when this
+            // target's hour is up.
+            if (this.deps.sampleFacts && at >= (this.factsDueAt.get(t.serverId) ?? 0)) {
+              // Set BEFORE the probe, not after. A probe that throws, times out
+              // or is abandoned by a reconfigure must still push the next
+              // attempt an hour out — otherwise a host that reliably fails is
+              // retried on every sweep with a 45-second budget, which is the
+              // whole estate's sweep time spent on one broken box.
+              this.factsDueAt.set(t.serverId, at + clampFactsInterval(this.cfg.factsIntervalMs))
+              const probe = await this.deps.sampleFacts(fleetKey(t.serverId), t.cfg).catch((err) => ({
+                ok: false as const,
+                error: err instanceof Error ? err.message : String(err)
+              }))
+              if (gen !== this.generation || this.disposed) return
+              const factsAt = this.now
+              if (probe.ok && probe.facts) {
+                this.rememberFacts(t.serverId, factsAt, probe.facts)
+                write.facts = probe.facts
+                factsEvent = { facts: probe.facts }
+              } else {
+                const error = probe.error ?? 'unavailable'
+                this.rememberFacts(t.serverId, factsAt, undefined, error)
+                factsEvent = { factsError: error }
+              }
+            }
+            writes.push(write)
           } else {
-            this.remember(t.serverId, { error: res.error ?? 'unavailable', errorAt: this.now })
+            const error = res.error ?? 'unavailable'
+            this.remember(t.serverId, { error, errorAt: at })
+            this.reachable.set(t.serverId, false)
+            if (wasReachable !== false) writes.push({ serverId: t.serverId, at, error })
           }
           this.deps.emit(
             res.ok && res.data
-              ? { serverId: t.serverId, reason, at: this.now, host: res.data as FleetSampleEvent['host'] }
+              ? {
+                  serverId: t.serverId,
+                  reason,
+                  at: this.now,
+                  host: res.data as FleetSampleEvent['host'],
+                  ...factsEvent
+                }
               : { serverId: t.serverId, reason, at: this.now, error: res.error ?? 'unavailable' }
           )
         } catch (err) {
           // One unreachable host must not end the sweep: the others are the
           // reason it is running.
           const message = err instanceof Error ? err.message : String(err)
-          this.remember(t.serverId, { error: message, errorAt: this.now })
-          this.deps.emit({ serverId: t.serverId, reason, at: this.now, error: message })
+          const at = this.now
+          const wasReachable = this.reachable.get(t.serverId)
+          this.remember(t.serverId, { error: message, errorAt: at })
+          this.reachable.set(t.serverId, false)
+          if (wasReachable !== false) writes.push({ serverId: t.serverId, at, error: message })
+          this.deps.emit({ serverId: t.serverId, reason, at, error: message })
         }
       }
       this.lastSweepAt = this.now
       this.lastSweepMs = this.lastSweepAt - started
     } finally {
+      // In the finally, so a sweep cut short by a reconfigure still persists
+      // what it did learn. Inside its own try, because a store that will not
+      // write is a degraded feature and never a broken sweep.
+      this.persist(writes)
       this.sweeping = false
       if (!this.disposed && this.shouldRun()) {
         if (gen === this.generation) {
@@ -332,16 +773,35 @@ export class FleetSampler {
           this.schedule(0)
         }
       }
+      this.inFlight = null
+      // Last, so anything awaiting dispose() sees a sweep that has finished
+      // persisting AND finished deciding whether to reschedule.
+      finished()
     }
   }
 
-  dispose(): void {
+  /**
+   * Stop sampling. The returned promise settles once any in-flight sweep has
+   * finished writing what it had already collected.
+   *
+   * Callers that only want the loop stopped can ignore it, exactly as before.
+   * A caller that is about to close the store must await it: dispose() marks
+   * the sweep abandoned, but the sweep still persists what it learned in its
+   * finally, and a store closed before that lands drops those writes — which is
+   * precisely what the comment above historyStore.close() in main/index.ts says
+   * must not happen.
+   */
+  dispose(): Promise<void> {
     this.disposed = true
     this.generation++
     this.stopTimer()
     // Stopping the timer is not enough: the pooled connections outlive it.
     for (const t of this.cfg.targets) this.deps.release(fleetKey(t.serverId))
     this.samples.clear()
+    this.reachable.clear()
+    this.factsDueAt.clear()
+    this.seeded.clear()
     if (active === this) active = null
+    return this.inFlight ?? Promise.resolve()
   }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseServices, parseListeners } from '../src/main/services/metrics'
+import { parseServices, parseListeners, sumNetwork } from '../src/main/services/metrics'
 
 // Real output shapes from the two probes, including the awkward ones: dual
 // stack rows, IPv6 endpoints, udp rows that have no LISTEN state, and hosts
@@ -164,5 +164,51 @@ describe('when neither probe exists', () => {
     const { listeners, source } = parseListeners([])
     expect(source).toBeNull()
     expect(listeners).toEqual([])
+  })
+})
+
+// Real /proc/net/dev lines from a host running k3s and Docker. Copied verbatim
+// rather than composed, because the shape of this file — the leading spaces on
+// short names, the sixteen columns, the veth names — is the whole difficulty.
+const NET = [
+  '    lo: 34828634   76373    0    0    0     0          0         0 34828634   76373    0    0    0    0       0          0',
+  '  eth0: 4612042408 2345155    0    1    0     0          0         0 278195406 1813928    0    0    0    0       0          0',
+  'docker0: 101948839  237472    0    0    0     0          0         0 53049184  269059    0    0    0    0       0          0',
+  'veth6802495: 43974884   43395    0    0    0     0          0         0 10157324   53754    0    0    0    0       0          0',
+  'flannel.1:       0       0    0    0    0     0          0         0        0       0    0    5    0    0       0          0',
+  '  cni0: 10197601   34119    0    0    0     0          0       140  7083309   38317    0    0    0    0       0          0',
+  'vethbf86cd0a: 9679005   23646    0    0    0     0          0         0  6082462   27670    0    0    0    0       0          0'
+]
+
+describe('network totals on a host with bridges', () => {
+  it('counts only the physical interface when sysfs names one', () => {
+    // The bug: a packet for a container is counted on eth0, again on the
+    // bridge, and again on the veth. Measured at 5-9x the truth on a real
+    // k3s host, on a number the fleet view shows as fact.
+    const { netRx, netTx } = sumNetwork(NET, ['eth0'])
+    expect(netRx).toBe(4612042408)
+    expect(netTx).toBe(278195406)
+  })
+
+  it('falls back to every non-loopback interface when sysfs names none', () => {
+    // A container has no physical interface — its veth IS the wire — and a
+    // host whose sysfs we could not read should not silently report zero.
+    const { netRx } = sumNetwork(NET, [])
+    expect(netRx).toBe(4612042408 + 101948839 + 43974884 + 0 + 10197601 + 9679005)
+  })
+
+  it('never counts loopback', () => {
+    // 34MB of loopback on this host, which is not network traffic by any
+    // reading, and is exactly the kind of number that makes an idle host look
+    // busy.
+    // Loopback alone must total zero, in both modes.
+    const lo = ['    lo: 34828634 1 0 0 0 0 0 0 34828634 1 0 0 0 0 0 0']
+    expect(sumNetwork(lo, []).netRx).toBe(0)
+    expect(sumNetwork(lo, ['eth0']).netRx).toBe(0)
+  })
+
+  it('reads transmitted bytes from the ninth column, not a receive one', () => {
+    const { netTx } = sumNetwork(['  eth0: 100 1 0 0 0 0 0 0 999 2 0 0 0 0 0 0'], ['eth0'])
+    expect(netTx).toBe(999)
   })
 })

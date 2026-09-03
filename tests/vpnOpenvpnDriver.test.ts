@@ -247,23 +247,48 @@ afterEach(async () => {
 // -------------------------------------------------------------------- argv
 
 describe('OpenVPN driver argv', () => {
+  it('puts the management socket somewhere sun_path can hold', async () => {
+    // OpenVPN could not start on macOS at all: the socket lived under the run
+    // directory, which is `~/Library/Application Support/ShellPilot/vpn-run/
+    // vpn-<uuid>-<8 hex>` — 111 bytes for a seven-character username, so the
+    // socket came to 123 and was refused before openvpn was ever launched. The
+    // floor for that layout is 117, so no username made it fit.
+    //
+    // sun_path is 104 bytes on macOS and 108 on Linux; the code refuses over
+    // 100. This asserts the number, not the directory, because the number is
+    // the thing that was wrong.
+    const h = makeHarness({ fail: ['--tick-ms', '25'] })
+    await h.driver.start(h.profile, h.ctx)
+    const args = h.spawned[0].args
+    const sock = args[args.indexOf('--management') + 1]
+
+    expect(Buffer.byteLength(sock)).toBeLessThanOrEqual(100)
+    expect(sock.endsWith('/m.sock')).toBe(true)
+    // Not under the run directory — that is what made it too long.
+    expect(sock.startsWith(h.runDir)).toBe(false)
+  })
+
   it('emits the pull-filter reject set, the split-tunnel filters and no secret', async () => {
     const h = makeHarness({ fail: ['--tick-ms', '25'] })
     await h.driver.start(h.profile, h.ctx)
 
     expect(h.spawned).toHaveLength(1)
     expect(h.spawned[0].command).toBe(process.execPath)
+    // The socket path is deliberately random and NOT under the run directory,
+    // so it is read out of argv rather than reconstructed. What it has to be is
+    // asserted on its own below.
+    const sock = h.spawned[0].args[h.spawned[0].args.indexOf('--management') + 1]
     expect(h.spawned[0].args).toEqual([
       '--config',
       '/dev/stdin',
       '--management',
-      join(h.runDir, 'mgmt', 'm.sock'),
+      sock,
       'unix',
       '--management-client',
       '--management-query-passwords',
       '--management-hold',
       '--script-security',
-      '0',
+      '1',
       '--pull-filter',
       'reject',
       'script-security',

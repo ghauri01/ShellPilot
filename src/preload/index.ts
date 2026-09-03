@@ -10,14 +10,25 @@ import type {
   MetricsResult,
   SshCloseInfo
 } from '../shared/ssh'
+import type { HostFacts } from '../shared/hostFacts'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
+import type {
+  JobDetail,
+  JobHostCapabilityReport,
+  JobOutput,
+  JobProgress,
+  JobRecord,
+  JobRunRequest,
+  JobsBridge
+} from '../shared/jobs'
 import type { LogLine, LogSource, LogTailState, UnitChoice } from '../shared/logtail'
 import type { CronEntry, CronSourceReport } from '../shared/cron'
 import type {
   DockerAction,
   DockerActionResult,
   DockerBridge,
+  DockerDiskDetailProbe,
   DockerDiskProbe,
   DockerInspectProbe,
   DockerLogsOptions,
@@ -34,6 +45,8 @@ import type {
 } from '../shared/kubernetes'
 import type {
   AlertPayload,
+  StoredAlertEvent,
+  StoredAlertRow,
   WebhookConfig,
   WebhookDeliveryStatus,
   WebhookTestResult
@@ -56,6 +69,7 @@ export interface SshPromptRequest {
 }
 import type { DbConnectConfig, DbInfo, DbQueryResult, DbTestResult } from '../shared/db'
 import type { DbShellResult } from '../shared/dbshell'
+import type { DbOpsReport } from '../shared/dbOps'
 import type { VaultEntry, VaultListResult, VaultResult, VaultStatus } from '../shared/vault'
 import type { TunnelConfig, TunnelResult, TunnelSshConfig, TunnelStatus } from '../shared/tunnel'
 import type {
@@ -92,6 +106,45 @@ import type {
 
 type WindowAction = 'minimize' | 'toggle-maximize' | 'close'
 type ThemeMode = 'dark' | 'light' | 'system'
+
+// Declared out here rather than inline in `api` so it can carry the JobsBridge
+// annotation. See the comment at `jobs:` below for why the annotation is the
+// point.
+const jobsBridge: JobsBridge = {
+  list: (limit?: number): Promise<JobRecord[]> => ipcRenderer.invoke('jobs:list', limit),
+  get: (jobId: string): Promise<JobDetail | null> => ipcRenderer.invoke('jobs:get', jobId),
+  // The request carries a `CommandApproval` — B3. It is not decoration and the
+  // preload does not check it: main re-derives `planJob` over this very spec
+  // and target list and refuses the run if the record disagrees, so a caller
+  // that forges or omits one gets a sentence back rather than a job. Verifying
+  // it here as well would be a second copy of the rule in the one place that
+  // has no more information than the sender.
+  run: (req: JobRunRequest): Promise<JobDetail> => ipcRenderer.invoke('jobs:run', req),
+  cancel: (jobId: string): Promise<boolean> => ipcRenderer.invoke('jobs:cancel', jobId),
+  // Pushed from the renderer's settings the way ssh.setPoolIdle is, because
+  // that is where the switch the user flicks lives. Main holds the value and
+  // the detached executor reads it per LAUNCH, so turning it off never
+  // interferes with a job already running — and a job being reclaimed after a
+  // restart is followed to its end either way, because there is a real process
+  // on that host whatever this switch now says.
+  setDetached: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke('jobs:setDetached', enabled),
+  capabilities: (): Promise<JobHostCapabilityReport[]> => ipcRenderer.invoke('jobs:capabilities'),
+  onProgress: (fn: (p: JobProgress) => void): (() => void) => {
+    const h = (_e: IpcRendererEvent, p: JobProgress): void => fn(p)
+    ipcRenderer.on('jobs:progress', h)
+    return () => ipcRenderer.removeListener('jobs:progress', h)
+  },
+  // A separate channel from progress, not a variant of it. Output is high
+  // volume and coalesced per tick; job and host transitions are rare and must
+  // never be dropped behind a burst of apt chatter. One channel would make the
+  // state machine share a queue with the noise.
+  onOutput: (fn: (o: JobOutput) => void): (() => void) => {
+    const h = (_e: IpcRendererEvent, o: JobOutput): void => fn(o)
+    ipcRenderer.on('jobs:output', h)
+    return () => ipcRenderer.removeListener('jobs:output', h)
+  }
+}
 
 const api = {
   platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke('app:platform'),
@@ -259,6 +312,17 @@ const api = {
     test: (): Promise<WebhookTestResult> => ipcRenderer.invoke('webhook:test'),
     notify: (payload: AlertPayload): Promise<void> => ipcRenderer.invoke('webhook:notify', payload)
   },
+  // The durable side of alerting — roadmap item 19b.
+  //
+  // Two methods, both named. `record` writes one raise or resolve; `history`
+  // reads the log newest-first. There is no filter or query argument on
+  // purpose: the history store's rule is that no SQL crosses its boundary, and
+  // a general read surface here would be the first step to losing it.
+  alerts: {
+    record: (event: StoredAlertEvent, at?: number): Promise<boolean> =>
+      ipcRenderer.invoke('alerts:record', event, at),
+    history: (limit?: number): Promise<StoredAlertRow[]> => ipcRenderer.invoke('alerts:history', limit)
+  },
   k8s: {
     read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>
       ipcRenderer.invoke('k8s:read', cfg, context, namespace),
@@ -310,6 +374,10 @@ const api = {
       ipcRenderer.invoke('docker:logs', cfg, ref, lines, opts),
     disk: (cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }): Promise<DockerDiskProbe> =>
       ipcRenderer.invoke('docker:disk', cfg, opts),
+    diskDetail: (
+      cfg: unknown,
+      opts?: { sudo?: boolean; autoSudo?: boolean }
+    ): Promise<DockerDiskDetailProbe> => ipcRenderer.invoke('docker:disk-detail', cfg, opts),
     inspect: (
       cfg: unknown,
       ref: string,
@@ -374,6 +442,18 @@ const api = {
       return () => ipcRenderer.removeListener('broadcast:progress', h)
     }
   },
+  // Roadmap item B1. A broadcast that outlives its panel: the row is in the
+  // store before the first host is touched, so closing the window loses the
+  // view and not the record.
+  //
+  // Annotated against JobsBridge rather than left to `typeof api` to infer.
+  // Main and the preload are two halves of one interface and nothing else
+  // checks that they agree: a handler added in one and forgotten in the other
+  // is `undefined is not a function` the first time someone presses the button,
+  // in a packaged app, with no stack worth reading. With the annotation it is a
+  // compile error in both directions — a missing method fails to satisfy the
+  // interface, an extra one is an excess property.
+  jobs: jobsBridge,
   // Background sampling of the whole estate, scheduled in main so it continues
   // when the monitor is not on screen. `metrics` above is the foreground path:
   // one server, fast cadence, driven by a mounted card.
@@ -382,6 +462,15 @@ const api = {
       ipcRenderer.invoke('fleet:configure', cfg),
     status: (): Promise<FleetSamplerStatus> => ipcRenderer.invoke('fleet:status'),
     sampleNow: (): Promise<FleetSamplerStatus> => ipcRenderer.invoke('fleet:sample-now'),
+    // Host facts as the sampler last collected them — roadmap item C. Read-only
+    // and never a trigger: `at` is when the collection happened and is normally
+    // much older than a metrics sample, because facts are collected hourly.
+    // `error` is set independently of the metrics error, since a host can
+    // answer a metrics sample perfectly and still refuse this probe.
+    facts: (
+      serverId: string
+    ): Promise<{ facts?: HostFacts; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
+      ipcRenderer.invoke('fleet:facts', serverId),
     onSample: (cb: (event: FleetSampleEvent) => void): (() => void) => {
       const h = (_e: IpcRendererEvent, event: FleetSampleEvent): void => cb(event)
       ipcRenderer.on('fleet:sample', h)
@@ -395,7 +484,10 @@ const api = {
     info: (cfg: DbConnectConfig): Promise<DbInfo> => ipcRenderer.invoke('db:info', cfg),
     shell: (cfg: DbConnectConfig, line: string): Promise<DbShellResult> =>
       ipcRenderer.invoke('db:shell', cfg, line),
-    close: (id: string): Promise<void> => ipcRenderer.invoke('db:close', id)
+    close: (id: string): Promise<void> => ipcRenderer.invoke('db:close', id),
+    // Read-only operational answers for PostgreSQL and MySQL/MariaDB. There is
+    // no write counterpart and there is not meant to be one.
+    ops: (cfg: DbConnectConfig): Promise<DbOpsReport> => ipcRenderer.invoke('db:ops', cfg)
   },
   notify: {
     show: (title: string, body: string): Promise<boolean> =>
