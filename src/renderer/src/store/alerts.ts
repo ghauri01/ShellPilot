@@ -176,13 +176,14 @@ function evaluate(
 ): void {
   const k = key(serverId, kind)
 
-  // Hysteresis. Clearing at exactly the threshold means a host hovering around
-  // it crosses repeatedly, and each crossing used to reset the repeat window —
-  // so at the foreground 2s cadence that is a desktop notification every few
-  // seconds and roughly thirty webhooks a minute, which is exactly the delivery
-  // rate limit. The alerting path then starts dropping real alerts to keep up
-  // with its own noise. A value has to fall meaningfully below the line before
-  // it counts as recovered.
+  // Hysteresis, and it applies to the TALKING only. Treating a host that has
+  // merely stepped back over the line as recovered means it re-raises on the
+  // next sample, and at the foreground 2s cadence that is a desktop
+  // notification every few seconds and roughly thirty webhooks a minute —
+  // exactly the delivery rate limit, past which the path starts dropping real
+  // alerts to keep up with its own noise. So the escalation memory survives
+  // until the value is meaningfully below the line. The CHIP does not use this
+  // number: see the `!over` branch for why holding it here was a bug.
   const clearAt = clearLine(threshold)
 
   if (!over) {

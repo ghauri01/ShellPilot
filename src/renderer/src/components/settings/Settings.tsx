@@ -501,7 +501,7 @@ export function Settings(): React.JSX.Element {
                   webhook is posted from inside one of the two. */}
               <SettingSwitch
                 label="Alerts"
-                desc="The master switch. Covers CPU and memory at or above the threshold, a root filesystem more than 85% full, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. CPU and memory repeat once a minute while the condition lasts; a full disk repeats every six hours, or sooner if it gets 5 points worse. All of them clear themselves on recovery."
+                desc="The master switch. Covers CPU and memory at or above the threshold, a root filesystem more than 85% full, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. CPU and memory repeat once a minute while the condition lasts; a full disk repeats every six hours, or sooner if it gets 5 points worse. They clear themselves on recovery: a disk as soon as it is back to 85% or below, CPU and memory once they are 5 points under the threshold, so a host sitting exactly on the line does not flicker on and off. Switching this off also takes down any alerts already showing."
                 checked={settings.resourceAlertsEnabled}
                 onChange={(v) => setSettings({ resourceAlertsEnabled: v })}
               />
