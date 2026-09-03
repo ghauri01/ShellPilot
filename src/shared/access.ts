@@ -2885,7 +2885,14 @@ function buildStagedWrite(o: {
     // different problem with a different fix.
     'mkdir "$SP_LOCK" 2>/dev/null || { [ -d "$SP_LOCK" ] && { echo "another key change is starting on this host right now; nothing was changed" >&2; exit 6; }; echo "a lock could not be created in ~/.ssh, so nothing was changed" >&2; exit 3; }',
     'trap \'rmdir "$SP_LOCK" 2>/dev/null\' EXIT INT TERM HUP',
-    'for SP_OLD in "$HOME"/.ssh/*.shellpilot-*.bak; do [ -e "$SP_OLD" ] || continue; echo "a key change staged earlier is still waiting for its rollback window to close ($SP_OLD); nothing was changed" >&2; exit 6; done',
+    // THE MESSAGE NAMES THE FILE AND THE REMEDY, because there is one case
+    // where this does not clear itself: a host whose watchdog was killed after
+    // it armed — the case the launcher preference above exists to make rare and
+    // cannot make impossible. There the change is live, unprotected, and the
+    // backup stays. Refusing further automated changes on that host is the
+    // right answer and a person should look at it, so the sentence says which
+    // file and what checking it means.
+    'for SP_OLD in "$HOME"/.ssh/*.shellpilot-*.bak; do [ -e "$SP_OLD" ] || continue; echo "a key change staged earlier is still waiting for its rollback window to close ($SP_OLD); nothing was changed. If that window has already passed, its rollback did not run on this host: compare that file against the live authorized_keys and remove it by hand once you are satisfied." >&2; exit 6; done',
 
     // Refuse before touching anything. A file this account cannot write is a
     // file the change cannot make, and finding that out after the backup is

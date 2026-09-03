@@ -983,6 +983,12 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     )
     expect(second.code).not.toBe(0)
     expect(second.out).toMatch(/still waiting for its rollback window/)
+    // The one case that does not clear itself is a host whose watchdog was
+    // killed after it armed — rare now, not impossible — and there the change
+    // is live and unprotected. Refusing is right and a person has to look, so
+    // the message names the file and says what looking at it means.
+    expect(second.out).toContain('authorized_keys.shellpilot-x1.bak')
+    expect(second.out).toMatch(/remove it by hand/)
     // Untouched, and — the part that matters — the first change's backup is
     // still the only one on the host, so its watchdog still holds the file it
     // was armed to restore.
