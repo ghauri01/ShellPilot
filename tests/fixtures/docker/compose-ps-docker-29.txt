@@ -1,0 +1,4 @@
+NAME                  IMAGE               COMMAND                  SERVICE   CREATED          STATUS          PORTS
+edge-cache-1          redis:7.2-alpine    "docker-entrypoint.s…"   cache     2 minutes ago    Up 2 minutes    6379/tcp
+edge-worker-1         busybox:1.37        "sh -c 'sleep 3600'"     worker    16 seconds ago   Up 15 seconds   
+edge-gateway-pinned   nginx:1.27-alpine   "/docker-entrypoint.…"   gateway   2 minutes ago    Up 2 minutes    0.0.0.0:18080->80/tcp, [::]:18080->80/tcp

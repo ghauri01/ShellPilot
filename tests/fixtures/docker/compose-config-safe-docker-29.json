@@ -1,0 +1,80 @@
+{
+  "name": "edge",
+  "networks": {
+    "default": {
+      "name": "edge_default"
+    }
+  },
+  "services": {
+    "cache": {
+      "command": [
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no"
+      ],
+      "environment": {
+        "REDIS_PASSWORD": "${REDIS_PASSWORD}"
+      },
+      "image": "redis:7.2-alpine",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "source": "cachedata",
+          "target": "/data",
+          "type": "volume",
+          "volume": {}
+        }
+      ]
+    },
+    "gateway": {
+      "container_name": "edge-gateway-pinned",
+      "depends_on": {
+        "cache": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "environment": [
+        "UPSTREAM=http://api:8000"
+      ],
+      "image": "nginx:1.27-alpine",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "18080",
+          "target": 80
+        }
+      ]
+    },
+    "worker": {
+      "command": [
+        "sh",
+        "-c",
+        "sleep 3600"
+      ],
+      "env_file": [
+        {
+          "path": "/srv/edge/worker.env",
+          "required": true
+        }
+      ],
+      "image": "busybox:1.36",
+      "networks": {
+        "default": null
+      }
+    }
+  },
+  "volumes": {
+    "cachedata": {
+      "name": "edge_cachedata"
+    }
+  }
+}
