@@ -946,7 +946,28 @@ second backup path beside `backup.ts` is exactly the two-schedulers mistake in a
 
 ---
 
-### 19. Alerting, completed
+### 19. Alerting, completed — BUILT
+
+**19a (disk) shipped in `7f4e1e2` and was hardened in `1a4cfaa`. 19b is now built**, in six
+commits: durable suppression, flap damping, inodes and load, the kinds that have no number, their
+producers, the inbox, snooze and acknowledge, and per-host thresholds. Ten kinds fire today —
+`cpu`, `ram`, `disk`, `inode`, `load`, `host-unreachable`, `job-failed`, `tunnel-down`,
+`db-alarm`, `db-watch` — plus `unit-failed`, which is a set of unit names rather than a crossing
+and has always been its own shape.
+
+**Two named kinds are deliberately NOT built**, and the reason is the same for both, first written
+down in `a2b06a5`: each needs a new remote probe whose SCOPE is a product decision nobody has taken
+— which journal window counts as "recent" for an OOM kill, and which certificates on which paths
+count as "ours" for expiry. A half-probe that reports "no OOM kills" when it could not read the
+journal is precisely the alert this item spends its length refusing to ship, because a metric that
+could not be measured is not zero. They are a separate item, not a loose end in this one.
+
+"Backup failed" is not built either, for a shorter reason: item 5 has not been built, so there is
+no backup that could fail. "Replication lag from item 18" IS built, as `db-alarm` and `db-watch` —
+item 18 already decides the level and writes it to the durable store with the numbers attached, and
+alerting reads that verdict rather than reaching one of its own.
+
+The write-up below is kept as the reasoning, in the past tense where it describes what was wrong.
 
 Three kinds fire today: `cpu`, `memory`, `unit-failed`.
 
@@ -1225,7 +1246,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** (pg+mysql) | mongo/redis remain | Part done |
 | 17 | **Patch management** | 100% | weekly | 5 | strong | **10** | 3.5 wk | A, B, C | Flagship |
 | 5 | **Backups to real targets** | 90% | weekly | 5 | strong | **8** | 3.5 wk | B, scheduler | Invest |
-| 19b | **Alerting, the rest** | 100% | continuous | 4 | none | **8** | 2.5 wk | A | Invest |
+| 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | OOM kills, cert expiry remain | Part done |
 | 23 | **Fleet key management** | 100% | quarterly | 5 | very strong | **7** | 1 wk read / 2.5 wk full | C (read), B (write) | Differentiator |
 | 20 | **Compose** | 60% | daily | 3 | some | **6** | 2 wk | B (redeploy only) | Invest |
 | 6e | **Cron editing** | 80% | monthly | 3 | some | **5** | 2.5 wk | B | Invest |
