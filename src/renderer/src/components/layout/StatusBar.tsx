@@ -1,6 +1,6 @@
 import { GitBranch, Wifi, Bell, Cpu, AlertTriangle } from 'lucide-react'
 import { useApp } from '../../store/app'
-import { useAlerts } from '../../store/alerts'
+import { LABEL, useAlerts } from '../../store/alerts'
 import { useFleetStatus, samplerWarning } from '../../store/fleetStatus'
 import { openSettings } from '../../store/nav'
 import { colorVar } from './WorkspaceSwitcher'
@@ -41,7 +41,9 @@ export function StatusBar(): React.JSX.Element {
         <button
           className="item resource-alert"
           title={`${Object.values(alerts)
-            .map((a) => `${a.serverName}: ${a.kind === 'cpu' ? 'CPU' : 'Memory'} ${a.value.toFixed(0)}%`)
+            // The store's own labels, not a ternary here. A third kind made
+            // that ternary label every disk alert "Memory".
+            .map((a) => `${a.serverName}: ${LABEL[a.kind]} ${a.value.toFixed(0)}%`)
             .join('\n')}\n\nClick to open the Fleet Monitor.`}
           onClick={() => setActivity('monitor')}
         >

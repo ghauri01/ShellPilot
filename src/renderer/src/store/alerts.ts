@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { useApp } from './app'
 import { onServerForgotten } from './serverCleanup'
+import { DISK_DANGER, isDiskCritical } from '../components/monitor/hostHealth'
+import type { AlertKind as WebhookAlertKind } from '../../../shared/webhook'
 
 // Stamped into every outbound payload so a shared endpoint can tell which
 // version posted. Read once: app.getVersion() is an IPC round trip and this is
@@ -20,7 +22,7 @@ void window.shellpilot?.getVersion?.().then((v) => {
 // Sampling is not driven from here — alerts are evaluated from metrics that are
 // already being collected, so enabling them never adds SSH load.
 
-export type AlertKind = 'cpu' | 'ram'
+export type AlertKind = 'cpu' | 'ram' | 'disk'
 
 export interface ActiveAlert {
   serverId: string
@@ -47,19 +49,63 @@ export const useAlerts = create<AlertState>((set, get) => ({
     }))
 }))
 
-// Repeat interval while a host stays over the threshold.
-const REPEAT_MS = 60_000
+// Repeat interval while a host stays over the line, per kind.
+//
+// Not one number, because the three conditions do not behave alike. CPU and
+// memory spike and recover, so a minute is a live readout of something that is
+// still moving. A disk does not empty itself: the same minute would be 60
+// notifications an hour and about 10,000 a week for one host that nobody can
+// fix before Monday, and the only thing that survives that is the mute button.
+// Six hours is roughly "twice a working day" — often enough that a filling disk
+// is not forgotten, rare enough to still be read. Escalation (see evaluate)
+// covers the case where six hours is too long to wait.
+const REPEAT: Record<AlertKind, number> = {
+  cpu: 60_000,
+  ram: 60_000,
+  disk: 6 * 60 * 60 * 1000
+}
 
 // How far below the threshold a value must fall to count as recovered. Without
 // it, a host sitting at the line flaps between raised and resolved on every
 // sample. See evaluate().
 const RECOVER_MARGIN = 5
 
-// Last notification time per server+metric, so a sustained problem repeats once
-// a minute instead of on every 2s sample.
+// A rise of this many points since the last thing we said re-opens the repeat
+// window. See evaluate() for why a six-hour window needs it.
+const ESCALATE_BY = 5
+
+/** Below this, a value counts as recovered rather than merely lower. */
+const clearLine = (threshold: number): number => Math.max(0, threshold - RECOVER_MARGIN)
+
+// Last notification time per server+metric, so a sustained problem repeats on
+// its kind's window instead of on every 2s sample.
 const lastNotified = new Map<string, number>()
 
-const LABEL: Record<AlertKind, string> = { cpu: 'CPU', ram: 'Memory' }
+// The value we last said out loud, per server+metric. Deleted on a real
+// resolve, which is what lets a genuine re-raise speak immediately instead of
+// waiting out a window it did not earn. See evaluate().
+const lastNotifiedValue = new Map<string, number>()
+
+/** Short, for the status-bar chip and the notification title. */
+export const LABEL: Record<AlertKind, string> = { cpu: 'CPU', ram: 'Memory', disk: 'Disk' }
+
+// What the number is measuring, for the sentences a person reads. Disk says
+// "root filesystem" and means it: metrics.ts probes `df -kP /` and nothing
+// else, so a host with a full /var and a roomy / raises nothing here, and an
+// alert that said "disk" would be claiming to have looked at more than it did.
+const SUBJECT: Record<AlertKind, string> = {
+  cpu: 'CPU',
+  ram: 'Memory',
+  disk: 'Root filesystem'
+}
+
+// The wire name for each kind. A Record rather than a ternary, so adding a kind
+// is a type error here instead of a metric quietly posting as 'memory'.
+const WEBHOOK_KIND: Record<AlertKind, WebhookAlertKind> = {
+  cpu: 'cpu',
+  ram: 'memory',
+  disk: 'disk'
+}
 
 function evaluate(
   serverId: string,
@@ -67,7 +113,16 @@ function evaluate(
   kind: AlertKind,
   value: number,
   threshold: number,
-  now: number
+  now: number,
+  /**
+   * Whether this sample is over the line for this kind. Passed in rather than
+   * compared here, because the comparison is not the same for every kind and
+   * having two of them written down in two files is what put the disk alert
+   * and the Fleet Monitor's attention list a hair's breadth out of agreement.
+   * Disk passes hostHealth's isDiskCritical; CPU and memory pass the
+   * comparison this function has always used.
+   */
+  over: boolean
 ): void {
   const k = key(serverId, kind)
 
@@ -78,9 +133,9 @@ function evaluate(
   // rate limit. The alerting path then starts dropping real alerts to keep up
   // with its own noise. A value has to fall meaningfully below the line before
   // it counts as recovered.
-  const clearAt = Math.max(0, threshold - RECOVER_MARGIN)
+  const clearAt = clearLine(threshold)
 
-  if (value < clearAt) {
+  if (!over && value < clearAt) {
     // Recovered: drop the alert and allow an immediate notification if it
     // crosses again later.
     if (useAlerts.getState().active[k]) {
@@ -89,28 +144,45 @@ function evaluate(
         delete active[k]
         return { active }
       })
-      // Only on an actual transition, so a host sitting comfortably below the
-      // threshold does not post "resolved" on every sample. An alert with no
-      // resolution leaves the reader to work out whether it is still
-      // happening, which is why this is worth sending at all.
-      void window.shellpilot?.webhook?.notify({
-        source: 'shellpilot',
-        version: APP_VERSION,
-        event: 'resolved',
-        kind: kind === 'cpu' ? 'cpu' : 'memory',
-        server: serverName,
-        summary: `${serverName}: ${LABEL[kind]} back below ${threshold}%`,
-        at: new Date(now).toISOString(),
-        value: Math.round(value),
-        threshold
-      })
+      // Whether we ever said this host had a problem. A "resolved" for an alert
+      // nobody was told about is a message about nothing — and with a six-hour
+      // disk window a host oscillating around the line would send a stream of
+      // all-clears against a single raise.
+      const announced = lastNotifiedValue.has(k)
+      // Only the escalation memory is cleared, and only here — on a real
+      // resolve rather than on every below-threshold sample. That is what makes
+      // a later re-raise a new event rather than a continuation.
+      lastNotifiedValue.delete(k)
+      if (announced) {
+        // Only on an actual transition, so a host sitting comfortably below the
+        // threshold does not post "resolved" on every sample. An alert with no
+        // resolution leaves the reader to work out whether it is still
+        // happening, which is why this is worth sending at all.
+        void window.shellpilot?.webhook?.notify({
+          source: 'shellpilot',
+          version: APP_VERSION,
+          event: 'resolved',
+          kind: WEBHOOK_KIND[kind],
+          server: serverName,
+          summary: `${serverName}: ${SUBJECT[kind]} back below ${threshold}%`,
+          at: new Date(now).toISOString(),
+          value: Math.round(value),
+          threshold
+        })
+      }
     }
-    // NOT cleared. Deleting it here let the next crossing notify immediately,
-    // which is the other half of the flapping problem: hysteresis stops the
-    // oscillation, and keeping the window stops a genuine re-cross seconds
-    // later from arriving as if nothing had been said. It expires on its own.
+    // `lastNotified` is NOT cleared. Deleting it here let the next crossing
+    // notify immediately, which is the other half of the flapping problem:
+    // hysteresis stops the oscillation, and keeping the window stops a genuine
+    // re-cross seconds later from arriving as if nothing had been said. It
+    // expires on its own.
     return
   }
+
+  // Between the line and the clear line, on the way down: keep the chip, say
+  // nothing new. Raising here would mean a disk at exactly DISK_DANGER alerting
+  // while the Fleet Monitor lists it as fine.
+  if (!over) return
 
   const existing = useAlerts.getState().active[k]
   useAlerts.setState((s) => ({
@@ -120,15 +192,33 @@ function evaluate(
     }
   }))
 
+  // Three ways a sample earns a notification, and all three are needed once a
+  // window can be six hours long:
+  //
+  //  - Nothing outstanding. Either the first crossing ever, or the first since
+  //    a real recovery. `clearAt` is what makes the second safe to trust: a
+  //    resolve only registers below `threshold - RECOVER_MARGIN`, so a value
+  //    back over the line after one is a round trip through recovery, not flap.
+  //  - It got materially worse. A disk at 96% is not the 86% we last mentioned,
+  //    and waiting out the rest of a six-hour window to say so is how a full
+  //    disk becomes an outage. Comparing against the last value we SENT, not
+  //    the previous sample, is what keeps 86 → 88 → 90 from escalating on
+  //    every one.
+  //  - The window has expired, which is the ordinary "still going" repeat.
   const last = lastNotified.get(k) ?? 0
-  if (now - last < REPEAT_MS) return
+  const said = lastNotifiedValue.get(k)
+  const reRaised = said === undefined
+  const worsened = said !== undefined && value >= said + ESCALATE_BY
+  const due = now - last >= REPEAT[kind]
+  if (!reRaised && !worsened && !due) return
   lastNotified.set(k, now)
+  lastNotifiedValue.set(k, value)
 
   const mins = existing ? Math.round((now - existing.since) / 60000) : 0
   const forHow = mins >= 1 ? ` for ${mins} min` : ''
   void window.shellpilot?.notify.show(
     `${serverName}: ${LABEL[kind]} at ${value.toFixed(0)}%`,
-    `${LABEL[kind]} has been at or above ${threshold}%${forHow}.`
+    `${SUBJECT[kind]} has been at or above ${threshold}%${forHow}.`
   )
   // Same repeat window as the desktop notification, so the endpoint sees the
   // same cadence a person does rather than one message per sample.
@@ -136,9 +226,9 @@ function evaluate(
     source: 'shellpilot',
     version: APP_VERSION,
     event: 'raised',
-    kind: kind === 'cpu' ? 'cpu' : 'memory',
+    kind: WEBHOOK_KIND[kind],
     server: serverName,
-    summary: `${serverName}: ${LABEL[kind]} at ${value.toFixed(0)}% (threshold ${threshold}%)`,
+    summary: `${serverName}: ${SUBJECT[kind]} at ${value.toFixed(0)}% (threshold ${threshold}%)`,
     at: new Date(now).toISOString(),
     value: Math.round(value),
     threshold,
@@ -226,23 +316,70 @@ export function clearUnitAlerts(serverId: string): void {
 onServerForgotten((serverId) => {
   clearUnitAlerts(serverId)
   useAlerts.getState().clearServer(serverId)
-  // The repeat window too: otherwise a re-added server inherits a suppression
-  // it never earned.
+  // The repeat window and the escalation memory too: otherwise a re-added
+  // server inherits a suppression it never earned.
   for (const k of [...lastNotified.keys()]) {
     if (k.startsWith(`${serverId}:`)) lastNotified.delete(k)
   }
+  for (const k of [...lastNotifiedValue.keys()]) {
+    if (k.startsWith(`${serverId}:`)) lastNotifiedValue.delete(k)
+  }
 })
 
-// Called from the metrics hook on each sample.
+// Switching alerts off has to take the chips with it.
+//
+// checkResourceAlerts returns before evaluate when the setting is false, so
+// nothing on the sampling path can ever clear what is already up. A CPU chip
+// survived that until the next restart; a disk chip, whose repeat window is six
+// hours and which does not recover on its own, would sit in the status bar
+// pointing at a feature the user has just switched off.
+useApp.subscribe((s, prev) => {
+  if (prev.settings.resourceAlertsEnabled && !s.settings.resourceAlertsEnabled) {
+    useAlerts.setState({ active: {} })
+  }
+})
+
+/**
+ * Called from the metrics hook on each sample.
+ *
+ * `disk` is null when the host reported no disk at all — `df` failing yields a
+ * diskPct of 0, and 0 here would post a "back below 85%" all-clear for a host
+ * that may well still be full. A measurement failure must never be able to
+ * manufacture good news, so null skips the disk evaluation entirely rather than
+ * resolving it.
+ */
 export function checkResourceAlerts(
   serverId: string,
   serverName: string,
   cpu: number,
-  ram: number
+  ram: number,
+  disk: number | null
 ): void {
   const { resourceAlertsEnabled, resourceAlertThreshold } = useApp.getState().settings
   if (!resourceAlertsEnabled) return
   const now = Date.now()
-  evaluate(serverId, serverName, 'cpu', cpu, resourceAlertThreshold, now)
-  evaluate(serverId, serverName, 'ram', ram, resourceAlertThreshold, now)
+  const line = clearLine(resourceAlertThreshold)
+  evaluate(serverId, serverName, 'cpu', cpu, resourceAlertThreshold, now, cpu >= line)
+  evaluate(serverId, serverName, 'ram', ram, resourceAlertThreshold, now, ram >= line)
+  // Fixed at DISK_DANGER rather than the configurable threshold: this is the
+  // number the Fleet Monitor colours a bar red at and lists a host under, and
+  // an alert that fired at a different number from the screen it sends you to
+  // is worse than no alert. isDiskCritical is that number's only comparison.
+  if (disk !== null) {
+    evaluate(serverId, serverName, 'disk', disk, DISK_DANGER, now, isDiskCritical(disk))
+  }
+}
+
+/**
+ * Drops everything this module remembers between samples.
+ *
+ * For tests only. The maps and the store are module state that outlives a
+ * single test, and a repeat window or a chip left over from the previous case
+ * makes the next one depend on the order the file happens to run in.
+ */
+export function resetAlertsForTests(): void {
+  lastNotified.clear()
+  lastNotifiedValue.clear()
+  failedUnits.clear()
+  useAlerts.setState({ active: {} })
 }

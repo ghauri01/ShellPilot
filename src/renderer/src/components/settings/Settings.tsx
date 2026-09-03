@@ -501,7 +501,7 @@ export function Settings(): React.JSX.Element {
                   webhook is posted from inside one of the two. */}
               <SettingSwitch
                 label="Alerts"
-                desc="The master switch. Covers CPU and memory at or above the threshold, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. Alerts repeat once a minute while a condition lasts, and clear themselves on recovery."
+                desc="The master switch. Covers CPU and memory at or above the threshold, a root filesystem more than 85% full, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. CPU and memory repeat once a minute while the condition lasts; a full disk repeats every six hours, or sooner if it gets 5 points worse. All of them clear themselves on recovery."
                 checked={settings.resourceAlertsEnabled}
                 onChange={(v) => setSettings({ resourceAlertsEnabled: v })}
               />
@@ -509,7 +509,10 @@ export function Settings(): React.JSX.Element {
                 <div className="s-info">
                   <div className="s-title">Alert threshold</div>
                   <div className="s-desc">
-                    The same figure applies to CPU and to memory.{' '}
+                    The same figure applies to CPU and to memory. Disk has its own, fixed at{' '}
+                    <strong>85%</strong>: a root filesystem past that alerts, which is the same
+                    85% at which the Fleet Monitor lists the host as needing attention and turns
+                    its disk bar red. Only the root filesystem is measured.{' '}
                     {alertCoverageText(fleetStatus?.running, settings.fleetSamplingEnabled)}
                   </div>
                 </div>

@@ -86,7 +86,16 @@ export function FleetWatcher(): null {
       // the monitor's own poll — so an alert could only fire while the user
       // was already looking at the screen that would have shown the problem.
       const name = serversRef.current.find((s) => s.id === e.serverId)?.name ?? e.serverId
-      checkResourceAlerts(e.serverId, name, e.host.cpu, e.host.memPct)
+      // `null`, not 0, when df reported nothing: a failed probe yields diskPct
+      // 0, and passing that would resolve a disk alert on a host that is still
+      // full — a false all-clear manufactured out of a measurement failure.
+      checkResourceAlerts(
+        e.serverId,
+        name,
+        e.host.cpu,
+        e.host.memPct,
+        e.host.diskTotal > 0 ? e.host.diskPct : null
+      )
       // The reason the feature exists. A failed unit does not move a CPU or
       // memory graph, so thresholds would never have caught the case this was
       // built for. `null` stays null: "systemd was not visible" is not "nothing

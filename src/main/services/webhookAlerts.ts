@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { setSecret, getSecret, deleteSecret } from './secrets'
-import { validateWebhookUrl } from '../../shared/webhook'
+import { ALERT_KINDS, validateWebhookUrl } from '../../shared/webhook'
 import type {
   AlertPayload,
   WebhookConfig,
@@ -99,9 +99,15 @@ function allowedByRateLimit(now: number): boolean {
 // from a machine that may itself be compromised; a unit named `<!channel>`
 // posts a workspace-wide ping into someone's incident channel on a loop, from
 // an integration they trust.
+//
+// `kind` is NOT a second hand-written list. It was, and adding a kind upstream
+// then meant every alert of that kind was silently rejected here — a whitelist
+// that quietly says no to its own product is indistinguishable from a broken
+// endpoint, except that nothing was recorded and the settings pane still said
+// the webhook was healthy.
 const LITERAL = {
   event: ['raised', 'resolved'],
-  kind: ['cpu', 'memory', 'unit-failed']
+  kind: ALERT_KINDS
 } as const
 
 const MAX_TEXT = 200
@@ -231,7 +237,15 @@ export function webhookNotify(raw: unknown): void {
   if (!enabled) return
   // Rebuilt from a whitelist, never forwarded as received. See sanitisePayload.
   const payload = sanitisePayload(raw)
-  if (!payload) return
+  if (!payload) {
+    // Recorded for the same reason the missing-URL branch below is: an
+    // alerting path that discards without saying so is worse than one that
+    // does not exist, because it is trusted. This branch is how a kind added
+    // upstream but not to ALERT_KINDS would present — as a webhook that looks
+    // perfectly healthy and delivers nothing.
+    status.lastError = 'An alert did not match the payload shape and was not sent.'
+    return
+  }
   if (payload.event === 'resolved' && !notifyOnResolved) return
   const url = getSecret(SECRET_ID)
   if (!url) {

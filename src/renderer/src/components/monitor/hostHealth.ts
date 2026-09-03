@@ -26,6 +26,25 @@ export function level(v: number): 'ok' | 'warn' | 'danger' {
  */
 export const DISK_DANGER = 85
 
+/**
+ * The one disk predicate. The attention list, the alert path and this docstring
+ * all have to mean the same thing by "low on disk", and they did not: this file
+ * asked `> DISK_DANGER` while the alert store raised at `>= threshold`. At
+ * exactly 85.000 the alert fired, the attention list stayed empty and the bar
+ * stayed amber — the one state where a notification points at a screen that
+ * disagrees with it. Both paths call this now, so the disagreement cannot come
+ * back without someone editing this line.
+ *
+ * `diskTotal` is what separates a genuinely empty disk from a df that returned
+ * nothing: a host that reported no disk at all must not read as 0% full, and
+ * certainly must not raise an alarm. Callers that have already established the
+ * disk was measured — the alert path, whose `null` says exactly that — may omit
+ * it.
+ */
+export function isDiskCritical(diskPct: number, diskTotal = 1): boolean {
+  return diskTotal > 0 && diskPct > DISK_DANGER
+}
+
 export interface HostRow {
   id: string
   name: string
@@ -104,9 +123,7 @@ function isFailed(u: ServiceUnit): boolean {
 function toRow(server: ServerRef, host: HostMetrics): HostRow {
   const failed = host.services === null ? null : host.services.filter(isFailed)
   const running = host.services === null ? null : host.services.filter((u) => u.sub === 'running').length
-  // A host that reported no disk at all (an unusual df) must not read as 0%
-  // full and certainly must not raise an alarm.
-  const diskCritical = host.diskTotal > 0 && host.diskPct > DISK_DANGER
+  const diskCritical = isDiskCritical(host.diskPct, host.diskTotal)
   return {
     id: server.id,
     name: server.name,

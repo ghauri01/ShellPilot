@@ -116,7 +116,10 @@ export function useServerMetrics(server: Server, active: boolean): LiveMetrics {
           }
           // Evaluated from samples that are already being collected, so
           // alerting never adds SSH load of its own.
-          checkResourceAlerts(server.id, server.name, d.cpu, d.memPct)
+          // A disk of null rather than 0 when df reported nothing: see
+          // checkResourceAlerts. 0 would read as an empty disk and clear a
+          // real alert.
+          checkResourceAlerts(server.id, server.name, d.cpu, d.memPct, d.diskTotal > 0 ? d.diskPct : null)
           // Publish capacity so the Fleet Monitor can total the estate without
           // sampling anything itself.
           useFleet.getState().report(server.id, d)

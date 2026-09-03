@@ -11,7 +11,18 @@
 // number, or a name the user typed themselves.
 
 export type AlertEvent = 'raised' | 'resolved'
-export type AlertKind = 'cpu' | 'memory' | 'unit-failed'
+
+/**
+ * Every kind that may leave the machine, as a value rather than only a type.
+ *
+ * The main-process sanitiser rebuilds the payload from a whitelist, and that
+ * whitelist used to be a second, hand-written copy of this list. A kind added
+ * here and not there was dropped in main with nothing recorded — the alert did
+ * not arrive and the settings pane still showed a healthy webhook. One array,
+ * consumed by both, is the only version of this that cannot drift.
+ */
+export const ALERT_KINDS = ['cpu', 'memory', 'disk', 'unit-failed'] as const
+export type AlertKind = (typeof ALERT_KINDS)[number]
 
 export interface AlertPayload {
   // Lets a shared endpoint tell ShellPilot's posts from anything else's.
