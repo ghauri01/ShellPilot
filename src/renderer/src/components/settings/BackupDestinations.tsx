@@ -215,6 +215,19 @@ export function BackupDestinations(): React.JSX.Element {
         </div>
       </div>
 
+      {file?.corrupt && (
+        <div className="backup-banner warn" style={{ marginBottom: 12 }}>
+          <AlertTriangle size={16} />
+          <div>
+            <div className="s-title">Your destinations could not be read</div>
+            <div className="s-desc">
+              {file.corrupt} Saving a destination from here moves the unreadable file aside rather
+              than writing over it, so what was in it stays recoverable by hand.
+            </div>
+          </div>
+        </div>
+      )}
+
       {destinations.length === 0 && !editing && (
         <p className="s-desc" style={{ marginBottom: 10 }}>
           No destinations yet. Backups still work through the file you download above.

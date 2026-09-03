@@ -372,6 +372,15 @@ export interface BackupTargetsFile {
   lastRunAt: Record<string, number>
   /** Destination id -> the last run, success or failure, for the panel. */
   lastReport: Record<string, BackupRunReport>
+  /**
+   * Set when the file exists but could not be read.
+   *
+   * Distinct from "no destinations", and the distinction is the point: a
+   * corrupt file that read as an empty list would stop every scheduled backup
+   * without a word, and the next save would write that empty list over the
+   * configuration.
+   */
+  corrupt?: string
 }
 
 export interface RemoteListResult {

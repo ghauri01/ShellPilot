@@ -349,9 +349,37 @@ const EMPTY_TARGETS: BackupTargetsFile = {
   lastReport: {}
 }
 
+/**
+ * The destinations, and whether the file that holds them could be read.
+ *
+ * `readJson` treats an unreadable file as absent, which is right for the
+ * backup payload — a missing known_hosts should not fail an export. It is
+ * wrong here, and dangerously so: a corrupt file would read as "no
+ * destinations", every scheduled backup would silently stop, and the next save
+ * would write an empty list over the configuration. That is the same failure
+ * this feature exists to prevent, one layer down.
+ *
+ * So this reads the file itself and reports which of the three states it is
+ * in: absent, readable, or there-but-unreadable.
+ */
 export function readTargets(): BackupTargetsFile {
-  const raw = readJson(TARGETS_FILE) as Partial<BackupTargetsFile> | null
-  if (!raw || !Array.isArray(raw.destinations)) return { ...EMPTY_TARGETS }
+  const p = userFile(TARGETS_FILE)
+  if (!existsSync(p)) return { ...EMPTY_TARGETS }
+  let raw: Partial<BackupTargetsFile> | null = null
+  try {
+    raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<BackupTargetsFile>
+  } catch (err) {
+    return {
+      ...EMPTY_TARGETS,
+      corrupt: `${TARGETS_FILE} could not be read (${err instanceof Error ? err.message : String(err)}), so no destination is configured and nothing is being backed up on a schedule.`
+    }
+  }
+  if (!raw || !Array.isArray(raw.destinations)) {
+    return {
+      ...EMPTY_TARGETS,
+      corrupt: `${TARGETS_FILE} does not hold a list of destinations, so nothing is being backed up on a schedule.`
+    }
+  }
   return {
     version: 1,
     destinations: raw.destinations,
@@ -368,6 +396,18 @@ export function writeTargets(file: BackupTargetsFile): void {
  *  that survived and dropping the history of the ones that did not. */
 export function saveDestinations(destinations: BackupDestination[]): BackupTargetsFile {
   const current = readTargets()
+  // A file we could not parse still held somebody's configuration. Move it
+  // aside rather than write over it: the destinations in it are recoverable by
+  // hand, and they are not recoverable once this function has replaced them
+  // with whatever the panel was showing after it read nothing.
+  if (current.corrupt) {
+    const p = userFile(TARGETS_FILE)
+    try {
+      renameSync(p, `${p}.corrupt-${Date.now()}`)
+    } catch {
+      /* if it cannot be moved it cannot be overwritten either */
+    }
+  }
   const live = new Set(destinations.map((d) => d.id))
   const prune = <T>(m: Record<string, T>): Record<string, T> =>
     Object.fromEntries(Object.entries(m).filter(([id]) => live.has(id)))

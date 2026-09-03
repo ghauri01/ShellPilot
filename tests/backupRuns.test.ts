@@ -1007,3 +1007,50 @@ describe('a destination that starts failing', () => {
     expect(newlyFailing).toEqual([])
   })
 })
+
+// ---------------------------------------------------------------------------
+// The file that says where backups go
+// ---------------------------------------------------------------------------
+
+describe('a destinations file that cannot be read', () => {
+  const path = join(USER_DATA, 'shellpilot-backup-targets.json')
+
+  it('is not the same thing as having no destinations', () => {
+    // A corrupt file reading as "no destinations" would stop every scheduled
+    // backup without a word — the same silent failure this feature exists to
+    // prevent, one layer down.
+    writeFileSync(path, '{"version":1,"destinations":[{"id":"a"')
+    const read = readTargets()
+    expect(read.destinations).toEqual([])
+    expect(read.corrupt).toContain('shellpilot-backup-targets.json could not be read')
+    expect(read.corrupt).toContain('nothing is being backed up on a schedule')
+  })
+
+  it('reports a file holding something that is not a destination list', () => {
+    writeFileSync(path, '{"version":1,"destinations":"all of them"}')
+    expect(readTargets().corrupt).toBe(
+      'shellpilot-backup-targets.json does not hold a list of destinations, so nothing is being backed up on a schedule.'
+    )
+  })
+
+  it('says nothing about a file that simply is not there yet', () => {
+    expect(readTargets().corrupt).toBe(undefined)
+  })
+
+  it('is moved aside rather than written over', () => {
+    // The destinations in it are recoverable by hand. They are not recoverable
+    // once a save has replaced them with whatever the panel showed after
+    // reading nothing.
+    writeFileSync(path, '{"version":1,"destinations":[{"id":"a"')
+    saveDestinations([localDest('/tmp/new')])
+
+    const kept = readdirSync(USER_DATA).filter((f) =>
+      f.startsWith('shellpilot-backup-targets.json.corrupt-')
+    )
+    expect(kept).toHaveLength(1)
+    expect(readFileSync(join(USER_DATA, kept[0]), 'utf8')).toBe(
+      '{"version":1,"destinations":[{"id":"a"'
+    )
+    expect(readTargets().destinations.map((d) => d.id)).toEqual(['dest-local'])
+  })
+})

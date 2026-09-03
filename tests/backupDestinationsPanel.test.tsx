@@ -412,3 +412,26 @@ describe('database dumps', () => {
     )
   })
 })
+
+describe('when the destinations file cannot be read', () => {
+  it('says so, rather than showing an empty list that looks deliberate', async () => {
+    stubBridge(
+      bridge({
+        destinations: vi.fn(async () =>
+          targets({
+            destinations: [],
+            corrupt:
+              'shellpilot-backup-targets.json could not be read (Unexpected end of JSON input), so no destination is configured and nothing is being backed up on a schedule.'
+          })
+        )
+      })
+    )
+    render(<BackupDestinations />)
+
+    await screen.findByText('Your destinations could not be read')
+    expect(screen.getByText(/nothing is being backed up on a schedule/)).toBeTruthy()
+    // The reassuring reading of an empty list must not be the only thing on
+    // screen.
+    expect(screen.getByText(/moves the unreadable file aside/)).toBeTruthy()
+  })
+})
