@@ -465,6 +465,30 @@ describe('what a detached launch writes to a host', () => {
     expect(host.countVerb('reap')).toBe(1)
   })
 
+  it('never runs the wrapper itself under sudo, so reaping needs no escalation', async () => {
+    // The decision recorded at JOB_SUDO_NOTE. Only the CONTENTS of `cmd` may
+    // say sudo; the wrapper that creates all five marker files runs as the
+    // connecting user, so the directory is user-owned for a sudo job exactly
+    // as for any other and `rm -rf` on it needs nothing special.
+    const host = new FakeHost()
+    const h = harness(host)
+    const { req } = request({ command: 'sudo apt full-upgrade -y' })
+    const p = h.exec(req)
+    await h.flush()
+    const launch = host.commands.find((c) => c.startsWith('SP_JOB_VERB=launch;')) as string
+    // The command the user typed is in the heredoc, and nowhere else.
+    expect(host.marker(host.dir).cmd).toBe('sudo apt full-upgrade -y')
+    expect(launch.slice(0, launch.indexOf('<<'))).not.toContain('sudo')
+    for (const verb of ['setsid sudo', 'sudo setsid', 'sudo sh -c', 'sudo mkdir']) {
+      expect(launch, `the wrapper must not run under ${verb}`).not.toContain(verb)
+    }
+    host.exit(host.dir, 0)
+    await h.tick()
+    await p
+    const reap = host.commands.find((c) => c.startsWith('SP_JOB_VERB=reap;')) as string
+    expect(reap, 'a user-owned marker is removed without escalation').not.toContain('sudo')
+  })
+
   it('refuses to launch a command carrying its own heredoc delimiter', async () => {
     // Belt and braces on the one way a command could break out of the wrapper.
     const host = new FakeHost()

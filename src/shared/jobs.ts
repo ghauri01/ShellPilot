@@ -762,6 +762,48 @@ export const JOB_RECORD_RETENTION_DAYS = 365
 // is the whole answer.
 
 /**
+ * SUDO, AND WHY REAPING NEVER NEEDS IT.
+ *
+ * The question this item was handed was "sudo jobs write root-owned marker
+ * files into a user-owned directory, so reaping them needs sudo too — decide
+ * and document". Reading the wrapper decides it differently, and the reason is
+ * worth writing down because the premise is the thing that turns out to be
+ * false here:
+ *
+ * THE WRAPPER IS NEVER RUN UNDER SUDO. `setsid sh -c '…'` runs as the
+ * connecting user, and every one of the five files is created by THAT shell:
+ * `cmd` and `instance` before the launch, `pid` and `pgid` by the wrapper
+ * itself, `out` by a redirection the wrapper opens, `rc` from `$?` in the
+ * wrapper. Only the CONTENTS of `cmd` — the command the user typed — may say
+ * `sudo`, and a sudo'd process inheriting an already-open file descriptor
+ * writes through it as the user who opened it. So the marker directory is
+ * user-owned for a sudo job exactly as it is for any other, and
+ * `rm -rf` on it needs no escalation.
+ *
+ * That is the better of the two available answers rather than a lucky one. The
+ * alternative — a root-owned marker root, reaped with `sudo -n` — would mean
+ * every job that so much as mentions sudo leaves root-owned state behind, and
+ * would make cleanup depend on a sudoers rule that may not exist. It would also
+ * invert the risk model the same way `systemd-run --system` would: the wrapper
+ * would run as root, so the command would be assessed as the user typed it and
+ * executed as somebody else.
+ *
+ * WHAT A DETACHED JOB CANNOT DO, and it is the same limit the rest of this app
+ * already documents in cron.ts and docker.ts: it cannot answer a sudo password
+ * prompt. The wrapper's stdin is `/dev/null` and there is no tty, so `sudo`
+ * either passes without a password — passwordless sudoers, or `sudo -n`, which
+ * this codebase uses everywhere precisely because it CANNOT prompt — or it
+ * fails immediately and says so in the output. That is not a regression from
+ * the attached path, which has no tty either; it is the same rule, and it is
+ * stated here so nobody discovers it nine minutes into an estate upgrade.
+ */
+export const JOB_SUDO_NOTE =
+  'A detached job runs its command with no terminal and no stdin, so sudo cannot ask for a ' +
+  'password: use a passwordless sudoers rule, or expect the command to fail immediately and say ' +
+  'so. The job’s own marker files always belong to the connecting user, never to root, so ' +
+  'cleaning them up never needs sudo.'
+
+/**
  * Why the launching instance is recorded, and what happens when it is not us.
  *
  * DETECT AND DEGRADE, DO NOT LOCK. Two ShellPilots against one estate is a
