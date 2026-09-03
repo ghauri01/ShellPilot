@@ -20,6 +20,7 @@ import type { SettingsSection } from '../../store/nav'
 import { useVault } from '../../store/vault'
 import { useVaultPrompt } from '../../store/vaultPrompt'
 import { clsx, duration } from '../../lib/format'
+import { JOB_DETACHED_SETTING_NOTE } from '../../../../shared/jobs'
 import { bridgeOn } from '../../lib/bridge'
 import { ShortcutManager } from './ShortcutManager'
 import { BackupPanel } from './BackupPanel'
@@ -601,6 +602,18 @@ export function Settings(): React.JSX.Element {
               <h2>SSH</h2>
               <div className="sub">Connection reuse and re-authentication policy.</div>
               <SshSessions />
+              {/* Spelled out rather than summarised, because it is the one
+                  setting here that decides whether ShellPilot writes anything
+                  to your machines. An operator is owed the exact list, and the
+                  honest description of what turning it OFF costs — which is not
+                  "less is written", it is "a long command dies with the
+                  connection, and apt and dpkg do not survive that". */}
+              <SettingSwitch
+                label="Let jobs keep running when the connection drops"
+                desc={JOB_DETACHED_SETTING_NOTE}
+                checked={settings.jobsDetached !== false}
+                onChange={(v) => setSettings({ jobsDetached: v })}
+              />
             </div>
           )}
 

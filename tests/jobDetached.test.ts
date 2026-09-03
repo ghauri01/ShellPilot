@@ -18,6 +18,7 @@ import {
   JOB_RECONNECT_BASE_MS,
   JOB_RECONNECT_GLOBAL_MAX,
   JOB_RECONNECT_MAX_MS,
+  buildJobPoll,
   buildJobProbe,
   isJobDetachedHandle,
   nextRetryDelay,
@@ -1022,6 +1023,24 @@ describe('the capability probe', () => {
     // indistinguishable from "the job never ran" in the one case — a host that
     // rebooted — where the difference is the whole answer.
     expect(probe).not.toMatch(/(?<!\/var)\/tmp\/shellpilot/)
+  })
+
+  it('reads rc BEFORE the output, which is what makes a finished poll complete', () => {
+    // The fake answers polls from its own marker state, so it cannot enforce
+    // the ORDER of two reads inside the shell — this asserts it on the text
+    // instead, because getting it backwards is a silent bug rather than a
+    // failure. `rc` exists only after the command has exited, so if it is there
+    // before `out` is read, nothing can append to `out` afterwards and what
+    // comes back is all of it. Reading rc last leaves a window where the final
+    // lines were written between the two reads and reported as finished
+    // without them — and there is no later poll to catch up, because a poll
+    // that sees rc is the last one.
+    const poll = buildJobPoll({ dir: '/var/tmp/x/j.1', offset: 0, base64: true })
+    expect(poll.indexOf('rc=')).toBeLessThan(poll.indexOf('tail -c'))
+    // And the window is closed on the HOST rather than by counting what
+    // arrived, so a file the job is still appending to cannot be re-sent.
+    expect(poll).toContain('SP_N=$((SP_SIZE - SP_JOB_OFF))')
+    expect(poll).toContain('head -c "$SP_N"')
   })
 
   it('sweeps only old markers whose process is gone', () => {
