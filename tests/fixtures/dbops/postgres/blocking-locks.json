@@ -1,0 +1,34 @@
+{
+  "locks": {
+    "ok": true,
+    "rows": [
+      {
+        "pid": 253,
+        "username": "postgres",
+        "state": "active",
+        "waiting_seconds": "3",
+        "blocked_by": [
+          252
+        ],
+        "wait_event_type": "Lock",
+        "wait_event": "transactionid",
+        "query": "UPDATE orders SET note='waiting' WHERE id=1"
+      }
+    ]
+  },
+  "connections": {
+    "ok": true,
+    "rows": [
+      {
+        "state": "active",
+        "n": 2,
+        "oldest_seconds": "3"
+      },
+      {
+        "state": "idle in transaction",
+        "n": 1,
+        "oldest_seconds": "3"
+      }
+    ]
+  }
+}

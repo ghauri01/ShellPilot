@@ -66,6 +66,7 @@ export interface SshPromptRequest {
 }
 import type { DbConnectConfig, DbInfo, DbQueryResult, DbTestResult } from '../shared/db'
 import type { DbShellResult } from '../shared/dbshell'
+import type { DbOpsReport } from '../shared/dbOps'
 import type { VaultEntry, VaultListResult, VaultResult, VaultStatus } from '../shared/vault'
 import type { TunnelConfig, TunnelResult, TunnelSshConfig, TunnelStatus } from '../shared/tunnel'
 import type {
@@ -454,7 +455,10 @@ const api = {
     info: (cfg: DbConnectConfig): Promise<DbInfo> => ipcRenderer.invoke('db:info', cfg),
     shell: (cfg: DbConnectConfig, line: string): Promise<DbShellResult> =>
       ipcRenderer.invoke('db:shell', cfg, line),
-    close: (id: string): Promise<void> => ipcRenderer.invoke('db:close', id)
+    close: (id: string): Promise<void> => ipcRenderer.invoke('db:close', id),
+    // Read-only operational answers for PostgreSQL and MySQL/MariaDB. There is
+    // no write counterpart and there is not meant to be one.
+    ops: (cfg: DbConnectConfig): Promise<DbOpsReport> => ipcRenderer.invoke('db:ops', cfg)
   },
   notify: {
     show: (title: string, body: string): Promise<boolean> =>

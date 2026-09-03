@@ -9,6 +9,7 @@ import {
   ChevronDown,
   FileCode2,
   TerminalSquare,
+  Activity,
   Loader2,
   Pencil,
   Trash2,
@@ -18,6 +19,7 @@ import { useApp, useWorkspaceServers } from '../../store/app'
 import { clsx } from '../../lib/format'
 import { useClickOutside } from '../../hooks/useClickOutside'
 import { DbShell } from './DbShell'
+import { DbOpsPanel } from './DbOpsPanel'
 import { toast } from '../../store/toast'
 import { KIND_COLOR, KIND_SHORT } from './DatabaseSidebar'
 import { sshHopFor } from '../../lib/ssh'
@@ -25,6 +27,7 @@ import { withVaultUnlock } from '../../lib/withVaultUnlock'
 import { classifyConnectionError, errorText } from '../../lib/connectionError'
 import { openDatabaseCreator, openDatabaseEditor } from '../../store/dbEditor'
 import { openSettings } from '../../store/nav'
+import { supportsDbOps } from '../../../../shared/dbOps'
 import type { DatabaseConn, DbKind, Server } from '../../types'
 import type { DbConnectConfig, DbInfo, DbQueryResult, DbTestResult } from '../../../../shared/db'
 
@@ -104,7 +107,12 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
   // just the ones matching the currently selected name.
   const [pickerOpen, setPickerOpen] = useState(false)
   const [typed, setTyped] = useState(false)
-  const [mode, setMode] = useState<'query' | 'shell'>('query')
+  const [mode, setMode] = useState<'query' | 'shell' | 'ops'>('query')
+  // Operational reads exist for PostgreSQL and MySQL/MariaDB only. MongoDB and
+  // Redis answer completely different questions (replica-set state and oplog
+  // window; eviction policy and persistence) and get their own pass rather than
+  // a thin imitation of this one, so the tab is absent rather than empty.
+  const hasOps = supportsDbOps(db.kind)
   const pickerRef = useRef<HTMLDivElement>(null)
   useClickOutside(pickerRef, () => setPickerOpen(false), pickerOpen)
 
@@ -301,6 +309,11 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
           <button className={`btn sm${mode === 'shell' ? ' primary' : ''}`} onClick={() => setMode('shell')}>
             <TerminalSquare size={13} /> Shell
           </button>
+          {hasOps && (
+            <button className={`btn sm${mode === 'ops' ? ' primary' : ''}`} onClick={() => setMode('ops')}>
+              <Activity size={13} /> Operations
+            </button>
+          )}
         </div>
         <span className="spacer" />
         {conn.phase === 'connecting' && <Loader2 size={14} className="spin" />}
@@ -381,7 +394,9 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-          {mode === 'shell' ? (
+          {mode === 'ops' && hasOps ? (
+            <DbOpsPanel cfg={cfgWith(dbName)} kind={db.kind} />
+          ) : mode === 'shell' ? (
             <DbShell
               cfg={cfgWith(dbName)}
               kind={db.kind}

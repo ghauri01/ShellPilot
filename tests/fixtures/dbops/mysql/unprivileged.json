@@ -1,0 +1,186 @@
+{
+  "overview": {
+    "ok": true,
+    "rows": [
+      {
+        "version": "8.0.46",
+        "version_comment": "MySQL Community Server - GPL",
+        "server_id": 1,
+        "read_only": 0,
+        "max_connections": 151,
+        "hostname": "bff0413350bd"
+      }
+    ]
+  },
+  "superReadOnly": {
+    "ok": true,
+    "rows": [
+      {
+        "super_read_only": 0
+      }
+    ]
+  },
+  "replicaStatus": {
+    "ok": false,
+    "code": "ER_SPECIFIC_ACCESS_DENIED_ERROR",
+    "errno": 1227,
+    "sqlState": "42000",
+    "message": "Access denied; you need (at least one of) the SUPER, REPLICATION CLIENT privilege(s) for this operation"
+  },
+  "slaveStatus": {
+    "ok": false,
+    "code": "ER_SPECIFIC_ACCESS_DENIED_ERROR",
+    "errno": 1227,
+    "sqlState": "42000",
+    "message": "Access denied; you need (at least one of) the SUPER, REPLICATION CLIENT privilege(s) for this operation"
+  },
+  "binlogEnabled": {
+    "ok": true,
+    "rows": [
+      {
+        "log_bin": 1
+      }
+    ]
+  },
+  "binlogExpire8": {
+    "ok": true,
+    "rows": [
+      {
+        "expire_seconds": 2592000
+      }
+    ]
+  },
+  "binlogExpireLegacy": {
+    "ok": true,
+    "rows": [
+      {
+        "expire_days": 0
+      }
+    ]
+  },
+  "binaryLogs": {
+    "ok": false,
+    "code": "ER_SPECIFIC_ACCESS_DENIED_ERROR",
+    "errno": 1227,
+    "sqlState": "42000",
+    "message": "Access denied; you need (at least one of) the SUPER, REPLICATION CLIENT privilege(s) for this operation"
+  },
+  "slowSettings": {
+    "ok": true,
+    "rows": [
+      {
+        "slow_query_log": 1,
+        "long_query_time": 1,
+        "slow_query_log_file": "/var/lib/mysql/bff0413350bd-slow.log",
+        "log_output": "FILE"
+      }
+    ]
+  },
+  "status": {
+    "ok": true,
+    "rows": [
+      {
+        "Variable_name": "Aborted_connects",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Connection_errors_max_connections",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_dirty",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_free",
+        "Value": "6982"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_pages_total",
+        "Value": "8192"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_read_requests",
+        "Value": "18080"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_reads",
+        "Value": "1052"
+      },
+      {
+        "Variable_name": "Innodb_buffer_pool_wait_free",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_row_lock_time_avg",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Innodb_row_lock_waits",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Max_used_connections",
+        "Value": "2"
+      },
+      {
+        "Variable_name": "Queries",
+        "Value": "44"
+      },
+      {
+        "Variable_name": "Slow_queries",
+        "Value": "0"
+      },
+      {
+        "Variable_name": "Threads_connected",
+        "Value": "2"
+      },
+      {
+        "Variable_name": "Threads_running",
+        "Value": "3"
+      },
+      {
+        "Variable_name": "Uptime",
+        "Value": "309"
+      }
+    ]
+  },
+  "bufferPoolSize": {
+    "ok": true,
+    "rows": [
+      {
+        "bytes": 134217728,
+        "instances": 1
+      }
+    ]
+  },
+  "processlist": {
+    "ok": true,
+    "rows": [
+      {
+        "id": 11,
+        "user": "app",
+        "host": "192.168.65.1:64048",
+        "db": null,
+        "command": "Query",
+        "seconds": 0,
+        "state": "executing",
+        "info": "SELECT ID AS id, USER AS user, HOST AS host, DB AS db, COMMAND AS command,\n    TIME AS seconds, STATE AS state, LEFT(INFO, 200) AS info\n    FROM information_schema.PROCESSLIST WHERE COMMAND <> 'Sleep'"
+      }
+    ]
+  },
+  "sizes": {
+    "ok": true,
+    "rows": [
+      {
+        "schema": "shop",
+        "name": "orders",
+        "engine": "InnoDB",
+        "table_rows": 0,
+        "data_bytes": 16384,
+        "index_bytes": 16384,
+        "free_bytes": 0
+      }
+    ]
+  }
+}

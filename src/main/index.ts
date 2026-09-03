@@ -80,7 +80,9 @@ import {
 import type { AlertPayload } from '../shared/webhook'
 import { dbTest, dbQuery, dbInfo, dbClose, dbDisposeAll } from './services/db'
 import { dbShell } from './services/dbshell'
+import { dbOps } from './services/dbOps'
 import type { DbConnectConfig } from '../shared/db'
+import { notableDbEvents } from '../shared/dbOps'
 import { setSecret, getSecret, deleteSecret, secretsAvailable } from './services/secrets'
 import {
   vaultStatus,
@@ -1244,6 +1246,19 @@ ipcMain.handle('db:shell', (_e, cfg: DbConnectConfig, line: string) =>
   dbShell(withVpnTransportDb(resolveDbSecrets(cfg)), line)
 )
 ipcMain.handle('db:close', (_e, id: string) => dbClose(id))
+// Operational reads (roadmap 18). Strictly read-only — see the refusal written
+// down at the top of src/shared/dbOps.ts. Notable states are recorded as
+// history events so item 19b can alert on them later; the alerting itself is
+// deliberately NOT here.
+ipcMain.handle('db:ops', async (_e, cfg: DbConnectConfig) => {
+  const report = await dbOps(withVpnTransportDb(resolveDbSecrets(cfg)))
+  if (report.ok) {
+    // hostId is null: a database connection is not a fleet host, and inventing
+    // one would put rows in a host's timeline that host never produced.
+    for (const event of notableDbEvents(report)) historyStore?.recordEvent(event.kind, null, event.payload)
+  }
+  return report
+})
 
 // ---- SSH config import ----
 ipcMain.handle('sshconfig:read', () => {

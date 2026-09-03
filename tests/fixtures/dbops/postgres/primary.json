@@ -1,0 +1,216 @@
+{
+  "overview": {
+    "ok": true,
+    "rows": [
+      {
+        "server_version": "16.15 (Debian 16.15-1.pgdg13+2)",
+        "version_num": 160015,
+        "in_recovery": false,
+        "max_connections": 100,
+        "freeze_max_age": "200000000",
+        "archive_mode": "on",
+        "wal_level": "replica",
+        "database": "postgres",
+        "username": "postgres",
+        "uptime_seconds": "195"
+      }
+    ]
+  },
+  "replication": {
+    "ok": true,
+    "rows": [
+      {
+        "application_name": "walreceiver",
+        "client_addr": "172.21.0.4/32",
+        "state": "streaming",
+        "sync_state": "async",
+        "write_lag_seconds": "0.000208",
+        "flush_lag_seconds": "0.000551",
+        "replay_lag_seconds": "0.000645",
+        "sent_lag_bytes": "0",
+        "replay_lag_bytes": "7448",
+        "reply_age_seconds": "-0.000138"
+      }
+    ]
+  },
+  "standby": {
+    "ok": false,
+    "code": "55000",
+    "message": "recovery is not in progress",
+    "severity": "ERROR"
+  },
+  "archiver": {
+    "ok": true,
+    "rows": [
+      {
+        "archived_count": "0",
+        "last_archived_wal": null,
+        "last_archived_age_seconds": null,
+        "failed_count": "28",
+        "last_failed_wal": "000000010000000000000001",
+        "last_failed_age_seconds": "33.085156",
+        "stats_reset_age_seconds": "198"
+      }
+    ]
+  },
+  "vacuum": {
+    "ok": true,
+    "rows": [
+      {
+        "schema": "public",
+        "name": "audit_log",
+        "xid_age": "16",
+        "dead_tuples": "0",
+        "live_tuples": "20000",
+        "last_autovacuum_age_seconds": "115",
+        "last_vacuum_age_seconds": null,
+        "last_autoanalyze_age_seconds": "115"
+      },
+      {
+        "schema": "public",
+        "name": "orders",
+        "xid_age": "2",
+        "dead_tuples": "0",
+        "live_tuples": "33334",
+        "last_autovacuum_age_seconds": "115",
+        "last_vacuum_age_seconds": null,
+        "last_autoanalyze_age_seconds": "115"
+      }
+    ]
+  },
+  "connections": {
+    "ok": true,
+    "rows": [
+      {
+        "state": "active",
+        "n": 1,
+        "oldest_seconds": "0"
+      }
+    ]
+  },
+  "locks": {
+    "ok": true,
+    "rows": []
+  },
+  "databases": {
+    "ok": true,
+    "rows": [
+      {
+        "name": "postgres",
+        "bytes": "14564375"
+      },
+      {
+        "name": "template1",
+        "bytes": "7765015"
+      }
+    ]
+  },
+  "tables": {
+    "ok": true,
+    "rows": [
+      {
+        "schema": "public",
+        "name": "orders",
+        "total_bytes": "3399680",
+        "heap_bytes": "2220032",
+        "index_bytes": "1138688"
+      },
+      {
+        "schema": "public",
+        "name": "audit_log",
+        "total_bytes": "3334144",
+        "heap_bytes": "2826240",
+        "index_bytes": "466944"
+      }
+    ]
+  },
+  "extension": {
+    "ok": true,
+    "rows": [
+      {
+        "extversion": "1.10"
+      }
+    ]
+  },
+  "statements": {
+    "ok": true,
+    "rows": [
+      {
+        "query": "INSERT INTO orders(note) SELECT $1||g FROM generate_series($2,$3) g",
+        "calls": "1",
+        "total_exec_time": 45.549125000000004,
+        "mean_exec_time": 45.549125000000004,
+        "rows": "50000"
+      },
+      {
+        "query": "checkpoint",
+        "calls": "2",
+        "total_exec_time": 19.855083999999998,
+        "mean_exec_time": 9.927541999999999,
+        "rows": "0"
+      },
+      {
+        "query": "INSERT INTO audit_log(body) SELECT repeat($1,$2) FROM generate_series($3,$4)",
+        "calls": "1",
+        "total_exec_time": 17.806209,
+        "mean_exec_time": 17.806209,
+        "rows": "20000"
+      },
+      {
+        "query": "CREATE EXTENSION IF NOT EXISTS pg_stat_statements",
+        "calls": "1",
+        "total_exec_time": 5.754667,
+        "mean_exec_time": 5.754667,
+        "rows": "0"
+      },
+      {
+        "query": "DELETE FROM orders WHERE id % $1 = $2",
+        "calls": "1",
+        "total_exec_time": 4.976249999999999,
+        "mean_exec_time": 4.976249999999999,
+        "rows": "16666"
+      },
+      {
+        "query": "CREATE TABLE orders(id serial primary key, note text)",
+        "calls": "1",
+        "total_exec_time": 3.476833,
+        "mean_exec_time": 3.476833,
+        "rows": "0"
+      },
+      {
+        "query": "CREATE TABLE audit_log(id bigserial primary key, body text)",
+        "calls": "1",
+        "total_exec_time": 2.500542,
+        "mean_exec_time": 2.500542,
+        "rows": "0"
+      },
+      {
+        "query": "CREATE ROLE repl WITH REPLICATION LOGIN PASSWORD 'repl'",
+        "calls": "1",
+        "total_exec_time": 2.451625,
+        "mean_exec_time": 2.451625,
+        "rows": "0"
+      },
+      {
+        "query": "CREATE ROLE app LOGIN PASSWORD 'app'",
+        "calls": "1",
+        "total_exec_time": 2.20825,
+        "mean_exec_time": 2.20825,
+        "rows": "0"
+      },
+      {
+        "query": "SELECT datname AS name, pg_database_size(oid)::bigint AS bytes\n  FROM pg_database WHERE datallowconn ORDER BY 2 DESC",
+        "calls": "1",
+        "total_exec_time": 0.88925,
+        "mean_exec_time": 0.88925,
+        "rows": "2"
+      }
+    ]
+  },
+  "statementsLegacy": {
+    "ok": false,
+    "code": "42703",
+    "message": "column \"total_time\" does not exist",
+    "severity": "ERROR"
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "overview": {
+    "ok": true,
+    "rows": [
+      {
+        "server_version": "16.15 (Debian 16.15-1.pgdg13+2)",
+        "version_num": 160015,
+        "in_recovery": true,
+        "max_connections": 100,
+        "freeze_max_age": "200000000",
+        "archive_mode": "off",
+        "wal_level": "replica",
+        "database": "postgres",
+        "username": "postgres",
+        "uptime_seconds": "106"
+      }
+    ]
+  },
+  "replication": {
+    "ok": true,
+    "rows": []
+  },
+  "standby": {
+    "ok": true,
+    "rows": [
+      {
+        "receive_lsn": "0/60277F0",
+        "replay_lsn": "0/60277F0",
+        "last_replay_at": null,
+        "replay_age_seconds": null,
+        "replay_paused": false,
+        "apply_lag_bytes": "0"
+      }
+    ]
+  },
+  "archiver": {
+    "ok": true,
+    "rows": [
+      {
+        "archived_count": "0",
+        "last_archived_wal": null,
+        "last_archived_age_seconds": null,
+        "failed_count": "0",
+        "last_failed_wal": null,
+        "last_failed_age_seconds": null,
+        "stats_reset_age_seconds": "106"
+      }
+    ]
+  },
+  "vacuum": {
+    "ok": true,
+    "rows": [
+      {
+        "schema": "public",
+        "name": "audit_log",
+        "xid_age": "16",
+        "dead_tuples": "0",
+        "live_tuples": "0",
+        "last_autovacuum_age_seconds": null,
+        "last_vacuum_age_seconds": null,
+        "last_autoanalyze_age_seconds": null
+      },
+      {
+        "schema": "public",
+        "name": "orders",
+        "xid_age": "2",
+        "dead_tuples": "0",
+        "live_tuples": "0",
+        "last_autovacuum_age_seconds": null,
+        "last_vacuum_age_seconds": null,
+        "last_autoanalyze_age_seconds": null
+      }
+    ]
+  },
+  "connections": {
+    "ok": true,
+    "rows": [
+      {
+        "state": "active",
+        "n": 1,
+        "oldest_seconds": "0"
+      }
+    ]
+  },
+  "locks": {
+    "ok": true,
+    "rows": []
+  },
+  "databases": {
+    "ok": true,
+    "rows": [
+      {
+        "name": "postgres",
+        "bytes": "14564375"
+      },
+      {
+        "name": "template1",
+        "bytes": "7602703"
+      }
+    ]
+  },
+  "tables": {
+    "ok": true,
+    "rows": [
+      {
+        "schema": "public",
+        "name": "orders",
+        "total_bytes": "3399680",
+        "heap_bytes": "2220032",
+        "index_bytes": "1138688"
+      },
+      {
+        "schema": "public",
+        "name": "audit_log",
+        "total_bytes": "3334144",
+        "heap_bytes": "2826240",
+        "index_bytes": "466944"
+      }
+    ]
+  },
+  "extension": {
+    "ok": true,
+    "rows": [
+      {
+        "extversion": "1.10"
+      }
+    ]
+  },
+  "statements": {
+    "ok": false,
+    "code": "55000",
+    "message": "pg_stat_statements must be loaded via shared_preload_libraries",
+    "severity": "ERROR"
+  },
+  "statementsLegacy": {
+    "ok": false,
+    "code": "42703",
+    "message": "column \"total_time\" does not exist",
+    "severity": "ERROR"
+  }
+}
