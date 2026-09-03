@@ -1687,3 +1687,83 @@ export function parseCronWriteResult(stdout: string): CronWriteResult {
     detail
   }
 }
+
+// ---- Reading the one file we are willing to write -----------------------
+
+/**
+ * `crontab -l`, byte for byte, plus what happened.
+ *
+ * A separate command from the collector, deliberately, and the difference is
+ * the point. The collector reads five sources into one blob and its sections
+ * are re-printed through `printf '%s\n'`, which is fine for a list of jobs and
+ * useless here: it appends a newline a file may not have had, and an edit
+ * planned against bytes that are not the file's bytes is an edit the host will
+ * refuse — or worse, one it will accept while writing back a file that gained a
+ * byte nobody asked for.
+ *
+ * THE STATUS COMES FIRST and the body last, which is the opposite of the
+ * collector and is required rather than stylistic. The body has to be the last
+ * thing on stdout for its trailing bytes to survive; and a status printed after
+ * it could be forged by a line inside the operator's own crontab. Putting the
+ * status first gets both: nothing that comes out of the file is ever read as
+ * status, and the file's last byte is the command's last byte.
+ */
+export function buildCronReadCommand(): string {
+  return [
+    'LC_ALL=C',
+    'export LC_ALL',
+    resolveBinary('crontab'),
+    'SP_CRONTAB=""',
+    'command -v "$SP_BIN" >/dev/null 2>&1 && SP_CRONTAB="$SP_BIN"',
+    `printf '===SHELLPILOT-CRON-READ===\\n'`,
+    'if [ -z "$SP_CRONTAB" ]; then',
+    `printf 'no-tool\\n'`,
+    'elif "$SP_CRONTAB" -l >/dev/null 2>&1; then',
+    `printf 'ok\\n'`,
+    'else',
+    // Non-zero from `crontab -l` is overwhelmingly "no crontab for <user>",
+    // which is an EMPTY crontab and completely normal — it is what an account
+    // that has never scheduled anything looks like, and the first job anybody
+    // adds is added to it. Anything else is a refusal and must not be planned
+    // against as though the file were empty.
+    'SP_ERR=$("$SP_CRONTAB" -l 2>&1 >/dev/null || true)',
+    'case "$SP_ERR" in',
+    `*"no crontab for"*) printf 'absent\\n' ;;`,
+    `*) printf 'unknown %s\\n' "$(printf '%s' "$SP_ERR" | tr '\\r\\n' '  ')" ;;`,
+    'esac',
+    'fi',
+    `printf '===SHELLPILOT-CRON-BODY===\\n'`,
+    // Last, and unquoted by any printf, so the file's own trailing bytes are
+    // the command's trailing bytes.
+    '[ -n "$SP_CRONTAB" ] && "$SP_CRONTAB" -l 2>/dev/null',
+    'exit 0'
+  ].join('\n')
+}
+
+export interface CronReadResult {
+  status: 'ok' | 'absent' | 'no-tool' | 'unknown'
+  /** The crontab, byte for byte. Empty on `absent`, which IS an empty crontab. */
+  text: string
+  detail?: string
+}
+
+/** Split `buildCronReadCommand`'s output. Anything unrecognised is `unknown`. */
+export function parseCronRead(output: string): CronReadResult {
+  const m = output.match(/===SHELLPILOT-CRON-READ===\n([^\n]*)\n===SHELLPILOT-CRON-BODY===\n([\s\S]*)$/)
+  if (!m) {
+    return {
+      status: 'unknown',
+      text: '',
+      detail: 'the host did not answer with a crontab at all, so nothing was read.'
+    }
+  }
+  const [word, ...rest] = m[1].trim().split(/\s+/)
+  const detail = rest.join(' ').trim()
+  const status =
+    word === 'ok' || word === 'absent' || word === 'no-tool' ? word : ('unknown' as const)
+  return {
+    status,
+    text: status === 'ok' ? m[2] : '',
+    ...(detail === '' ? {} : { detail })
+  }
+}
