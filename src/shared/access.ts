@@ -306,6 +306,18 @@ export interface AuthorizedKey {
   /** 1-based line number in the file, so a finding can be pointed at. */
   line: number
   problem: KeyProblem | null
+  /**
+   * The base64 body, kept verbatim, and ONLY for a key that fingerprinted.
+   *
+   * Carried because the write half removes a key by matching its exact body:
+   * a fingerprint cannot be computed in POSIX sh, and removing by line number
+   * would edit whatever happens to be on that line now rather than the key that
+   * was there when the inventory was read. It costs ~700 characters per RSA key
+   * in memory and is the difference between a precise removal and an
+   * approximate one — and nothing approximate is run against an
+   * authorized_keys file.
+   */
+  blob: string | null
 }
 
 // ---- Accounts -------------------------------------------------------------
@@ -438,6 +450,16 @@ export interface HostAccess {
   /** The account this collection ran as, so "the key I am connected with"
    *  can be identified without a second round trip. */
   collectedAs: string | null
+  /**
+   * The fingerprint of the key THIS session authenticated with, from sshd's own
+   * `SSH_AUTH_INFO_0`.
+   *
+   * null when the host would not say — `ExposeAuthInfo` is off by default, and
+   * on most hosts this will be null. That is not a gap to paper over: it is the
+   * difference between "this revoke provably does not remove the key I am on"
+   * and "nobody can tell", and `planAccessChange` treats the two differently.
+   */
+  sessionKeyFingerprint: string | null
   /** Epoch milliseconds by OUR clock. */
   collectedAt: number
   /** The host's own clock at collection, epoch ms, when it said. Kept because a
@@ -573,6 +595,18 @@ export function buildAccessCommand(opts: AccessCollectOptions = {}): string {
     `sp_val now "$(date +%s 2>/dev/null || true)"`,
     `sp_val tz "$(date +%z 2>/dev/null || true)"`,
     `sp_val self "$(id -un 2>/dev/null || true)"`,
+    // Which key THIS session authenticated with, straight from sshd.
+    //
+    // The only authoritative answer to that question, and the reason it is
+    // collected here rather than guessed later: revoking a key is the one write
+    // this app can make that locks you out of the host you would use to undo
+    // it, and "do not remove the key I am on" needs a fact rather than an
+    // inference. sshd sets SSH_AUTH_INFO_0 to the authentication method and, for
+    // publickey, the key itself — but only where `ExposeAuthInfo yes` is set,
+    // which is not the default. So it is asked for, used when it is there, and
+    // its ABSENCE is a first-class state that changes what a revoke is allowed
+    // to do. See planAccessChange.
+    `sp_val authinfo "$SSH_AUTH_INFO_0"`,
 
     // ---- sshd: where does it actually look for keys? ---------------------
     // First, because it decides whether everything below is the whole story.
@@ -1035,7 +1069,8 @@ export function parseAuthorizedKeyLine(
     options: [],
     restricted: false,
     line,
-    problem: 'malformed'
+    problem: 'malformed',
+    blob: null
   }
 
   let body = text
@@ -1105,13 +1140,17 @@ export function parseAuthorizedKeyLine(
     type,
     fingerprint: sshFingerprint(blob, sha256),
     bits: keyBits(type, blob),
-    problem: null
+    problem: null,
+    // Only on a key that decoded and whose declared type matched the type
+    // inside it. A blob kept for a line that failed either check would be a
+    // blob the write half might one day match on.
+    blob: blob64
   }
 }
 
 // ---- The whole collection --------------------------------------------------
 
-const SCALAR_KEYS = ['now', 'tz', 'self', 'keyfile', 'keycmd', 'lltool'] as const
+const SCALAR_KEYS = ['now', 'tz', 'self', 'keyfile', 'keycmd', 'lltool', 'authinfo'] as const
 type ScalarKey = (typeof SCALAR_KEYS)[number]
 
 const USER_FIELDS = ['name', 'uid', 'shell', 'home', 'path', 'keys', 'keys2', 'groups', 'expires'] as const
@@ -1324,6 +1363,17 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
   const selfRaw = (last('self') ?? '').trim()
   const collectedAs = USER_RE.test(selfRaw) ? selfRaw : null
 
+  // `SSH_AUTH_INFO_0` is `<method> [<keytype> <blob>]`, one line per factor.
+  // Fingerprinted through exactly the same path an authorized_keys line takes,
+  // so a match against one is a match on identical terms rather than on two
+  // implementations that agree today.
+  const authInfo = last('authinfo')
+  let sessionKeyFingerprint: string | null = null
+  if (authInfo !== undefined) {
+    const m = /^publickey\s+(\S+\s+\S+)/.exec(authInfo.trim())
+    if (m) sessionKeyFingerprint = parseAuthorizedKeyLine(m[1], 0, deps.sha256)?.fingerprint ?? null
+  }
+
   // Every directive line seen, in file order, with the directive word stripped.
   const directiveValues = (k: 'keyfile' | 'keycmd'): string[] => {
     const out: string[] = []
@@ -1501,6 +1551,7 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
     keyFileIsDefault,
     authorizedKeysCommand,
     collectedAs,
+    sessionKeyFingerprint,
     collectedAt: now,
     hostNow,
     sources: [
@@ -1714,4 +1765,541 @@ export function accessToFacts(access: HostAccess): Record<string, string> {
     }
   }
   return out
+}
+
+// ---------------------------------------------------------------------------
+// The write half — roadmap item 23, stage 2
+// ---------------------------------------------------------------------------
+//
+// Writing `authorized_keys` is the highest-consequence write this app can make.
+// Every other write it does is recoverable from the terminal it opened; a bad
+// one here locks you out of the host you would use to fix it, and if it is
+// rolled across a selection it locks you out of all of them at once, in the
+// order they were healthy.
+//
+// So this half is built as a PROTOCOL rather than a command, and the protocol
+// is the feature. Three rules, none of them optional, none of them a warning:
+//
+//  1. NEVER REMOVE THE KEY THE CURRENT SESSION IS AUTHENTICATED WITH.
+//     Enforced as a hard block on the plan, not a dialog. Where sshd will say
+//     which key that is (`ExposeAuthInfo`, collected as
+//     `sessionKeyFingerprint`), the check is exact. Where it will not — the
+//     default on most hosts — the plan says so, and a revoke against the
+//     account this session is running as is blocked outright rather than
+//     attempted on a guess. Revoking a DIFFERENT account's key cannot lock this
+//     session out and is allowed; that distinction is what keeps the rule from
+//     being either useless or a lie.
+//
+//  2. NEVER COMMIT WITHOUT A SECOND, INDEPENDENT SESSION.
+//     Implemented as a dead-man's switch rather than as verify-then-commit,
+//     because verify-then-commit still has a window: the verifier passes, the
+//     next connection does not, and nothing on the host is watching. Here the
+//     staged write ARMS a restore on the host itself. If nobody disarms it
+//     within the deadline the host puts the old file back with no help from us
+//     — which is the only form of safety that survives us being the thing that
+//     is locked out. The disarm command is returned separately from the job and
+//     is the ONLY thing that makes the change permanent.
+//
+//  3. ALWAYS LEAVE A TIMESTAMPED BACKUP ON THE HOST.
+//     `cp -p` before anything else, into a name carrying the collection's own
+//     timestamp, and the write does not proceed if the backup did not land. A
+//     backup the operator can find in a shell is worth more than any rollback
+//     this app can offer, because it works when this app is not the thing
+//     holding the connection.
+//
+// ---------------------------------------------------------------------------
+// What is deliberately NOT here, and will not be added casually
+// ---------------------------------------------------------------------------
+//
+// The same shape as the docker module's refusal to ship `prune`, for the same
+// reason: the argument has to be written down where the next person will read
+// it before adding the button.
+//
+//  * ANYTHING THAT ISSUES THE DISARM. `accessDisarmCommand()` exists and
+//    nothing in this repository calls it. Rule 2 is only real if the disarm
+//    happens after a genuinely independent AUTHENTICATION — a new connection
+//    that presented a key to sshd and was accepted — and the job engine cannot
+//    provide one: steps share a pooled, already-authenticated transport, so a
+//    step that "verifies" proves only that the session which wrote the file can
+//    still write files. Shipping a disarm that runs as another job step would
+//    turn rule 2 into a comment. What has to exist first is a connection test
+//    that forcibly drops any pooled connection for the host and re-authenticates
+//    from scratch; until it does, the change is staged, the host's own watchdog
+//    is the safety net, and nothing here makes anything permanent.
+//
+//  * REPLACING A FILE WHOLESALE. Add and revoke are both edits to the file as
+//    it was READ this hour, expressed as an append or as an exact-blob removal.
+//    A "set the keys on this host to exactly these" operation cannot be made
+//    safe from an inventory that may be an hour old: it would silently delete a
+//    key added since, and the person who added it is the person who most needs
+//    it to be there.
+//
+//  * REVOKING FROM AN ACCOUNT WHOSE FILE WAS NOT READ. There is no line to
+//    remove and no count to check afterwards, so the operation cannot verify
+//    itself. It is a block, not a skip — an account quietly left out of a
+//    fleet-wide revocation is the exact failure the read half exists to prevent.
+//
+//  * `sudo` IN THE WRITE. The read half escalates because reading another
+//    account's key file is normal and harmless. Writing one is not, and an
+//    escalated write is a write nobody watching the sudo log can distinguish
+//    from an attacker with the same access. Every command built here runs as
+//    the connecting account, against files it can already write, and a host
+//    where that is not enough is a host this should refuse rather than force.
+
+/** How long the host waits for a disarm before putting the old file back.
+ *
+ *  Long enough for a person to try a real connection from a real terminal, and
+ *  short enough that a forgotten stage does not leave a machine in a half-state
+ *  overnight. It is a restore, so erring long costs an unwanted rollback and
+ *  erring short costs nothing but a retry. */
+export const ACCESS_ROLLBACK_SECONDS = 300
+
+/** The marker whose EXISTENCE disarms the watchdog. Named per change, so two
+ *  overlapping stages on one host cannot disarm each other. */
+export function accessCommitMarker(token: string): string {
+  return `.shellpilot-access-${token}.commit`
+}
+
+export type AccessChangeKind = 'add' | 'revoke'
+
+export interface AccessChangeRequest {
+  kind: AccessChangeKind
+  /**
+   * For `add`: the authorized_keys line to append, exactly as it will be
+   * written. For `revoke`: unused — the key is named by fingerprint.
+   */
+  keyLine?: string
+  /** For `revoke`: which key, by the fingerprint the read half computed. */
+  fingerprint?: string
+  /** One entry per host and account the change applies to. */
+  targets: AccessChangeTarget[]
+  /** Milliseconds, used to name the backup and the change token. Injected so a
+   *  test pins it and so two hosts in one run share one name. */
+  now: number
+  /** Fingerprints that must never be removed, whatever else is asked.
+   *  The caller adds anything it knows; the session key is added here. */
+  protect?: string[]
+  /** How long the host waits before restoring itself. Injected ONLY so a test
+   *  can watch a real rollback happen rather than assert on the text of a
+   *  `sleep`; nothing in the app passes it. */
+  rollbackSeconds?: number
+}
+
+export interface AccessChangeTarget {
+  serverId: string
+  serverName: string
+  /** The collection this change is derived from. A change is always an edit to
+   *  a file that was READ, never to one that was assumed. */
+  access: HostAccess
+  /** Which account on that host. */
+  user: string
+}
+
+/** A refusal. Never a warning and never overridable: every one of these is a
+ *  case where proceeding could remove the only way back into the host. */
+export interface AccessBlock {
+  serverId: string
+  serverName: string
+  user: string
+  kind:
+    /** Rule 1, exactly: the key asked for is the key this session is on. */
+    | 'is-session-key'
+    /** Rule 1, conservatively: the host will not say which key this session is
+     *  on, and this revoke targets the account the session runs as. */
+    | 'session-key-unknown'
+    /** The account's file was not read, so there is nothing to edit and no
+     *  count to check afterwards. */
+    | 'not-read'
+    /** The key is not on this account, so removing it would be a no-op the run
+     *  would nevertheless report as a change. */
+    | 'not-present'
+    /** The key is already on this account. */
+    | 'already-present'
+    /** sshd reads keys from somewhere this does not, so an edit here may not be
+     *  the edit that matters. */
+    | 'not-the-file-sshd-reads'
+  reason: string
+}
+
+/**
+ * A `JobSpec` and a `JobTargetRef`, declared structurally rather than imported.
+ *
+ * NOT a style choice. tests/jobsNotExposed.test.ts walks the import closure of
+ * everything the MCP bridge and the CLI can reach and fails if any of it
+ * imports the job engine — because `denyAllPending()`, the stop-all-AI-access
+ * switch, works by resolving PENDING requests, and a job already running on
+ * fifteen hosts has nothing pending. This file is reached from the fleet
+ * sampler, which the bridge reads, so importing `./jobs` for two type aliases
+ * would put the job vocabulary inside that closure for the sake of a compiler
+ * convenience.
+ *
+ * The shapes are still checked against the real ones: tests/accessWrite.test.ts
+ * assigns a produced spec to a `JobSpec` and a produced target list to
+ * `JobTargetRef[]`, so a drift between the two is a compile error in a place
+ * that is allowed to import both.
+ */
+export interface AccessJobSpec {
+  kind: 'command'
+  title: string
+  steps: { command: string }[]
+  concurrency?: number
+}
+
+export interface AccessJobTarget {
+  serverId: string
+  serverName: string
+}
+
+export interface AccessChangePlan {
+  /** The job, or null when every target was blocked. */
+  spec: AccessJobSpec | null
+  targets: AccessJobTarget[]
+  blocks: AccessBlock[]
+  /** Per host, what the disarm would be. Returned separately from the job on
+   *  purpose — see the refusal above. Nothing in this repository calls it. */
+  disarm: { serverId: string; command: string }[]
+  /** The token naming this change's backup and marker on every host. */
+  token: string
+  /** Seconds the host will wait before restoring itself. */
+  rollbackSeconds: number
+}
+
+/** Used where a line is being validated rather than identified. */
+const SHAPE_ONLY_HASH: Sha256 = () => new Uint8Array(32)
+
+// A base64 key blob and nothing else. Applied before the blob is put anywhere
+// near a command: it is the one value from the collection that reaches a shell,
+// and the character class is narrow enough that no quoting question arises.
+const BLOB_RE = /^[A-Za-z0-9+/]{32,4096}={0,2}$/
+// An authorized_keys line safe to append. Deliberately narrower than what sshd
+// accepts: no quotes, no backticks, no dollars, no backslashes, nothing that
+// changes meaning inside the single-quoted context it is written into. A key
+// with an option value this rejects is a key to add by hand.
+const APPENDABLE_RE = /^[A-Za-z0-9+/=@._:,\- ]{16,2048}$/
+
+/**
+ * Turn a requested change into a job, or into the reasons it is not one.
+ *
+ * Every refusal is a BLOCK. There is no path here that returns a warning for
+ * something a person could click past, because the three rules at the top of
+ * this section are the whole reason the feature is shippable and a rule with an
+ * override is a default.
+ */
+export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
+  const token = String(req.now)
+  const blocks: AccessBlock[] = []
+  const targets: AccessJobTarget[] = []
+  const disarm: { serverId: string; command: string }[] = []
+  const commands: string[] = []
+
+  const key = req.kind === 'revoke' ? (req.fingerprint ?? '') : ''
+  // Blobs, per host: the same key can be written with different comments on
+  // different hosts, and the removal matches the BLOB.
+  const perHost: { t: AccessChangeTarget; blob: string; path: string; count: number }[] = []
+
+  for (const t of req.targets) {
+    const account = t.access.accounts.find((a) => a.user === t.user)
+    const block = (kind: AccessBlock['kind'], reason: string): void => {
+      blocks.push({ serverId: t.serverId, serverName: t.serverName, user: t.user, kind, reason })
+    }
+
+    if (!account || account.keys === null || account.keyPath === null) {
+      block(
+        'not-read',
+        `${t.user}'s authorized_keys on ${t.serverName} was not read in the last collection, so there is nothing to edit and no way to check the result. Reading it is the fix; guessing is not.`
+      )
+      continue
+    }
+
+    // sshd reading from somewhere else makes this edit possibly irrelevant —
+    // and an irrelevant revocation is worse than no revocation, because it is
+    // reported as done.
+    if (t.access.keyFileIsDefault !== true || t.access.authorizedKeysCommand !== null) {
+      block(
+        'not-the-file-sshd-reads',
+        `sshd on ${t.serverName} is not known to read ${account.keyPath}. Editing it may not change who can log in, and a revocation that is reported as done and did nothing is worse than none.`
+      )
+      continue
+    }
+
+    if (req.kind === 'revoke') {
+      const protect = new Set([...(req.protect ?? [])])
+      if (t.access.sessionKeyFingerprint !== null) protect.add(t.access.sessionKeyFingerprint)
+
+      // RULE 1, exactly.
+      if (protect.has(key)) {
+        block(
+          'is-session-key',
+          `that key is the one this session is authenticated with on ${t.serverName}. Removing it would end ShellPilot's own way back into the host, so it is refused here rather than confirmed anywhere.`
+        )
+        continue
+      }
+      // RULE 1, conservatively. `collectedAs` is the account this session runs
+      // as; another account's keys cannot lock this session out, so the refusal
+      // is scoped to the one that can.
+      if (t.access.sessionKeyFingerprint === null && t.access.collectedAs === t.user) {
+        block(
+          'session-key-unknown',
+          `${t.serverName} does not report which key this session authenticated with (sshd's ExposeAuthInfo is off), and this would edit the keys of the very account ShellPilot connects as. Without that fact nothing can prove the key being removed is not the one holding this connection open.`
+        )
+        continue
+      }
+
+      const matches = account.keys.filter((k) => k.fingerprint === key)
+      if (matches.length === 0) {
+        block(
+          'not-present',
+          `that key is not on ${t.user}@${t.serverName}. It is left out rather than counted as removed — a revocation report that includes hosts nothing happened on is not a revocation report.`
+        )
+        continue
+      }
+      // The blob is recovered from the line the read half kept. Validated
+      // before it goes anywhere near a command; the character class is why no
+      // quoting question arises.
+      const blob = blobOf(account, key)
+      if (blob === null || !BLOB_RE.test(blob)) {
+        block(
+          'not-read',
+          `the stored copy of that key on ${t.serverName} is not in a form this can match exactly, so the removal could not be made precise. Nothing approximate is run against an authorized_keys file.`
+        )
+        continue
+      }
+      perHost.push({ t, blob, path: account.keyPath, count: matches.length })
+    } else {
+      const line = (req.keyLine ?? '').trim()
+      // A constant hash, because only the SHAPE of the line is being checked
+      // here — that it parses, that its type is one this build knows, and that
+      // its body decodes and matches. The fingerprint of a key being ADDED is
+      // computed by the next collection, off the host, where it belongs.
+      const parsed = parseAuthorizedKeyLine(line, 1, SHAPE_ONLY_HASH)
+      if (!parsed || parsed.problem !== null || !APPENDABLE_RE.test(line)) {
+        block(
+          'not-read',
+          `the key to add is not a line this will write. It has to be a single authorized_keys entry this build can parse, using only characters that cannot change meaning inside a shell command.`
+        )
+        continue
+      }
+      const blob = line.split(/\s+/).find((p) => BLOB_RE.test(p)) ?? ''
+      if (blob === '') {
+        block('not-read', `the key to add has no readable body, so there is nothing to write.`)
+        continue
+      }
+      if (account.keys.some((k) => k.fingerprint !== null && blobOfLine(k) === blob)) {
+        block(
+          'already-present',
+          `that key is already on ${t.user}@${t.serverName}. Adding it again would leave a duplicate line and report a change that did not happen.`
+        )
+        continue
+      }
+      perHost.push({ t, blob: line, path: account.keyPath, count: 0 })
+    }
+  }
+
+  for (const h of perHost) {
+    targets.push({ serverId: h.t.serverId, serverName: h.t.serverName })
+    disarm.push({
+      serverId: h.t.serverId,
+      command: accessDisarmCommand(h.path, token)
+    })
+  }
+
+  // One job, one step list, one command — so `verifyApproval` can compare the
+  // approved text against what runs. That means every host in the job must get
+  // the SAME command, which is why the path is not interpolated per host: the
+  // step resolves `$HOME` on the host instead. A selection spanning accounts
+  // with different home directories is still one command, and a selection
+  // spanning different ACCOUNTS is refused by construction — see the caller.
+  let spec: AccessJobSpec | null = null
+  if (perHost.length > 0) {
+    const first = perHost[0]
+    const command =
+      req.kind === 'revoke'
+        ? buildRevokeKeyCommand({
+            path: first.path,
+            blob: first.blob,
+            token,
+            expectRemoved: first.count,
+            rollbackSeconds: req.rollbackSeconds
+          })
+        : buildAddKeyCommand({ path: first.path, line: first.blob, token, rollbackSeconds: req.rollbackSeconds })
+    commands.push(command)
+    spec = {
+      kind: 'command',
+      title:
+        req.kind === 'revoke'
+          ? `Stage revocation of ${key.slice(0, 22)}… from ${first.t.user}`
+          : `Stage a new key for ${first.t.user}`,
+      steps: [{ command }],
+      // One host at a time. A key change rolled across a selection in parallel
+      // is the case where a mistake reaches every machine before the first
+      // failure is visible; serialised, the second host is still reachable
+      // while the first is being looked at.
+      concurrency: 1
+    }
+  }
+
+  return { spec, targets, blocks, disarm, token, rollbackSeconds: ACCESS_ROLLBACK_SECONDS }
+}
+
+/** The base64 body of one stored key, for an exact-match removal. */
+function blobOfLine(k: AuthorizedKey): string | null {
+  return k.blob
+}
+
+function blobOf(account: AccessAccount, fingerprint: string): string | null {
+  for (const k of account.keys ?? []) {
+    if (k.fingerprint === fingerprint) return blobOfLine(k)
+  }
+  return null
+}
+
+/**
+ * Stage a removal: back up, filter, replace, and arm the host's own restore.
+ *
+ * Nothing about this is atomic across the three, and it does not need to be —
+ * what it needs is that no step can leave the file in a state the host cannot
+ * get out of by itself. `cp -p` first so the backup exists before anything is
+ * touched. `grep -v -F` into a NEW file so a failed filter cannot truncate the
+ * original. `mv` last, which is atomic within the filesystem. And the watchdog
+ * armed before the command returns, so a connection that dies in the next
+ * second still ends with the old file back.
+ */
+export function buildRevokeKeyCommand(o: {
+  path: string
+  blob: string
+  token: string
+  expectRemoved: number
+  rollbackSeconds?: number
+}): string {
+  if (!BLOB_RE.test(o.blob)) throw new Error('refusing to build a removal from an unvalidated key body')
+  return buildStagedWrite({
+    path: o.path,
+    token: o.token,
+    rollbackSeconds: o.rollbackSeconds,
+    // -F is fixed-string and -v inverts: every line carrying this exact body
+    // goes, and nothing else can match because a base64 body is not a
+    // substring of anything else in the file.
+    // `|| [ $? = 1 ]` and not `|| true`, and the difference is the whole point.
+    // `grep -v` exits 1 when it selects NO lines, which is exactly what
+    // revoking the last key on an account looks like — so a bare `||` failure
+    // branch turns the most final revocation there is into "the new file could
+    // not be built", and the count check that would have caught a real problem
+    // never runs. Exit 2 is a real error and still stops the change.
+    produce: `{ grep -v -F -- '${o.blob}' "$SP_F" > "$SP_T" || [ $? = 1 ]; }`,
+    // The count is checked, not assumed. A filter that removed the wrong number
+    // of lines is a filter that did something nobody asked for, and the answer
+    // is to put the backup back rather than to report success.
+    expect: `SP_WANT=$((SP_BEFORE-${o.expectRemoved}))`
+  })
+}
+
+/** Stage an addition: back up, copy, append, replace, arm. */
+export function buildAddKeyCommand(o: {
+  path: string
+  line: string
+  token: string
+  rollbackSeconds?: number
+}): string {
+  if (!APPENDABLE_RE.test(o.line)) throw new Error('refusing to build an append from an unvalidated line')
+  return buildStagedWrite({
+    path: o.path,
+    token: o.token,
+    rollbackSeconds: o.rollbackSeconds,
+    // The trailing newline is not decoration: plenty of authorized_keys files
+    // ship without one, and appending to such a file without adding it first
+    // glues the new key onto the end of the last one — which sshd then reads as
+    // one malformed line, silently removing the key that was already working.
+    produce: `cp -p "$SP_F" "$SP_T" && { [ -s "$SP_T" ] && [ "$(tail -c1 "$SP_T")" != "" ] && printf '\\n' >> "$SP_T"; printf '%s\\n' '${o.line}' >> "$SP_T"; }`,
+    expect: 'SP_WANT=$((SP_BEFORE+1))'
+  })
+}
+
+/**
+ * The shape both changes share.
+ *
+ * No `set -e`, as everywhere else in this file — but note that every step here
+ * is chained with `&&` rather than being independent, which is the opposite
+ * discipline and the right one: a read may fail and still leave a useful
+ * collection, whereas a write whose backup failed must not proceed to the part
+ * that replaces the file.
+ */
+function buildStagedWrite(o: {
+  path: string
+  token: string
+  produce: string
+  expect: string
+  rollbackSeconds?: number
+}): string {
+  const marker = accessCommitMarker(o.token)
+  const wait = o.rollbackSeconds ?? ACCESS_ROLLBACK_SECONDS
+  return [
+    'LC_ALL=C',
+    'export LC_ALL',
+    // The path is resolved on the host from $HOME, never interpolated, so one
+    // approved command text covers every host in the selection and
+    // verifyApproval has something to compare.
+    `SP_F="$HOME/.ssh/authorized_keys"`,
+    `SP_B="$SP_F.shellpilot-${o.token}.bak"`,
+    `SP_T="$SP_F.shellpilot-${o.token}.new"`,
+    `SP_M="$HOME/.ssh/${marker}"`,
+    // Refuse before touching anything. A file this account cannot write is a
+    // file the change cannot make, and finding that out after the backup is
+    // written leaves litter for no reason.
+    '[ -f "$SP_F" ] || { echo "no authorized_keys to change" >&2; exit 3; }',
+    '[ -w "$SP_F" ] || { echo "authorized_keys is not writable by this account" >&2; exit 3; }',
+    // RULE 3. Before anything else, and the run stops if it did not land.
+    'cp -p "$SP_F" "$SP_B" || { echo "could not write a backup; nothing was changed" >&2; exit 3; }',
+    '[ -s "$SP_B" ] || { echo "the backup is empty; nothing was changed" >&2; exit 3; }',
+    // `|| echo 0` would be a bug here, and it is worth naming because it is
+    // the obvious way to write it: `grep -c` PRINTS its count and then exits 1
+    // when the count is zero, so `$(grep -c . f || echo 0)` yields the two-line
+    // string "0\n0" on an empty file. The comparison below then fails against a
+    // count that was right, and the most final revocation there is — taking the
+    // last key off an account — reports that the file came out the wrong size.
+    'SP_BEFORE=$(grep -c . "$SP_F" 2>/dev/null || true)',
+    "case \"$SP_BEFORE\" in ''|*[!0-9]*) SP_BEFORE=0 ;; esac",
+    o.expect,
+    `${o.produce} || { rm -f "$SP_T"; echo "the new file could not be built; nothing was changed" >&2; exit 3; }`,
+    'SP_AFTER=$(grep -c . "$SP_T" 2>/dev/null || true)',
+    "case \"$SP_AFTER\" in ''|*[!0-9]*) SP_AFTER=0 ;; esac",
+    // The count check, before the replacement rather than after it. A file that
+    // came out the wrong size never becomes the live file at all.
+    '[ "$SP_AFTER" = "$SP_WANT" ] || { rm -f "$SP_T"; echo "the new file has $SP_AFTER lines and $SP_WANT were expected; nothing was changed" >&2; exit 4; }',
+    'chmod 600 "$SP_T" 2>/dev/null || true',
+    // RULE 2, armed BEFORE the replacement. If the mv succeeds and this session
+    // dies in the same instant, the watchdog is already running and the host
+    // puts the old file back on its own.
+    'rm -f "$SP_M"',
+    `nohup sh -c 'sleep ${wait}; [ -f "$0" ] || cp -p "$1" "$2"; rm -f "$0" "$1"' "$SP_M" "$SP_B" "$SP_F" >/dev/null 2>&1 &`,
+    'mv "$SP_T" "$SP_F" || { echo "the file could not be replaced" >&2; exit 3; }',
+    // Said out loud, in the job output, so the operator reading the pane knows
+    // the change is NOT permanent and knows how long they have.
+    `echo "STAGED: $SP_F changed from $SP_BEFORE to $SP_AFTER lines. The previous file is at $SP_B and will be put back automatically in ${wait}s unless a new session confirms this change."`
+  ].join('\n')
+}
+
+/**
+ * Make a staged change permanent.
+ *
+ * Nothing in this repository calls it, and that is the point — see the refusal
+ * at the top of this section. It exists so the protocol is complete and
+ * testable, and so the thing that eventually issues it has something correct to
+ * issue rather than something invented at the call site.
+ *
+ * It must only ever be run over a connection that authenticated AFTER the
+ * staged write. Run over the session that made the change it proves nothing at
+ * all, and rule 2 becomes a comment.
+ */
+export function accessDisarmCommand(path: string, token: string): string {
+  const marker = accessCommitMarker(token)
+  return [
+    'LC_ALL=C',
+    'export LC_ALL',
+    `SP_M="$HOME/.ssh/${marker}"`,
+    // Creating the marker is the whole commit. The watchdog is already asleep
+    // holding the backup path; it wakes, sees the marker, and leaves the new
+    // file alone.
+    ': > "$SP_M" || { echo "could not confirm the change" >&2; exit 3; }',
+    `echo "COMMITTED: ${path}"`
+  ].join('\n')
 }
