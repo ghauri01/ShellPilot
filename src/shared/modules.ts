@@ -17,7 +17,14 @@
 // does not silently switch itself on for an existing install — see
 // `backfillModules`, which mirrors `backfillCapabilities`.
 
-export type ModuleId = 'docker' | 'kubernetes' | 'cron' | 'logTail' | 'broadcast' | 'fleetSearch'
+export type ModuleId =
+  | 'docker'
+  | 'kubernetes'
+  | 'cron'
+  | 'logTail'
+  | 'broadcast'
+  | 'fleetSearch'
+  | 'inventory'
 
 export interface ModuleDef {
   id: ModuleId
@@ -46,6 +53,22 @@ export const MODULES: ModuleDef[] = [
     detail:
       'Search systemd units, listening ports and hosts across the workspace, from data the monitor already collects.',
     defaultEnabled: true
+  },
+  {
+    id: 'inventory',
+    label: 'Inventory',
+    detail:
+      'What every host is — distribution, architecture, CPU, virtualisation — and what it needs: pending updates, security updates where the distribution publishes them, and whether a reboot is owed. Read-only, and nothing is refreshed: package caches are read, never updated, and their age is reported alongside the counts.',
+    // OFF for a fresh install too, not merely for upgrades.
+    //
+    // Enabling it means running the host's package manager on every host once
+    // an hour — `apt-get -s upgrade`, `dnf -C check-update`, `zypper
+    // list-updates`. Each is cheap, none mutates and none touches the network,
+    // but "we now run your package manager on all of your servers" is a thing a
+    // person should switch on rather than discover. `backfillModules` already
+    // guarantees an upgrade never switches it on for an existing install;
+    // `defaultEnabled: false` extends the same courtesy to a new one.
+    defaultEnabled: false
   },
   {
     id: 'broadcast',

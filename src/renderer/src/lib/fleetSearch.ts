@@ -1,3 +1,4 @@
+import { factSource, type HostFacts } from '../../../shared/hostFacts'
 import type { HostMetrics } from '../../../shared/ssh'
 
 // Search across everything the fleet sampler already knows.
@@ -83,6 +84,42 @@ export interface FleetCoverage {
   noProbes: string[]
   /** Answered before and is failing now; its rows are marked stale. */
   unreachable: string[]
+
+  // -------------------------------------------------------------------------
+  // Host facts — roadmap item C.
+  //
+  // A second axis, and it needed its own buckets rather than a share of the
+  // ones above. `notChecked` is about the two-minute metrics sweep; facts are
+  // collected HOURLY, so a host can be sampled forty times and still have no
+  // facts, and folding the two together would tell someone their estate had
+  // not been checked when it is being checked constantly.
+  //
+  // The four below are mutually disjoint and, with `notChecked`, complete: a
+  // host reaches exactly one of them. The chain is deliberate — a host with no
+  // facts cannot also be missing a package manager, because we do not know
+  // whether it has one.
+  // -------------------------------------------------------------------------
+
+  /** Facts were collected, so distro, package manager and the rest were
+   *  searched on this host. The facts counterpart of `searched`. */
+  factsSearched: string[]
+  /** No facts yet. Normal for a host added within the last hour, and NOT the
+   *  same as "this host has no distribution". */
+  noFacts: string[]
+  /** Facts collected, and none of the six package managers is installed. No
+   *  update count of any kind can exist here. */
+  noPackageManager: string[]
+  /**
+   * Facts collected, a package manager is present, and it CANNOT report a
+   * security count — Arch and Alpine have no security channel, and dnf cannot
+   * answer where the repositories publish no updateinfo.
+   *
+   * The bucket that justifies the rest of them. Someone searching `security`,
+   * seeing three hits and concluding the estate has three security problems is
+   * wrong by however many hosts are named here, and nothing else on screen
+   * would tell them.
+   */
+  securityUnsupported: string[]
 }
 
 export interface FleetSearchResult {
@@ -96,6 +133,17 @@ export interface FleetSearchInput {
   servers: { id: string; name: string }[]
   hosts: Record<string, { host: HostMetrics; at: number }>
   errors: Record<string, { error: string; at: number }>
+  /**
+   * Host facts per server, on their own hourly clock — roadmap item C.
+   *
+   * REQUIRED rather than optional, and an absent entry means "never collected"
+   * rather than "this caller does not do facts". An optional field would let a
+   * caller silently opt out of the coverage buckets below, which is exactly the
+   * lie-by-omission the coverage structure exists to prevent: the search would
+   * report a clean bill of health for an estate it had not looked at half of.
+   * Pass `{}` and every host is honestly reported as having no facts.
+   */
+  facts: Record<string, { facts?: HostFacts; at?: number }>
 }
 
 // A fleet-wide substring can match thousands of rows; the list is for reading,
@@ -166,7 +214,11 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
     noServiceView: [],
     noPortView: [],
     noProbes: [],
-    unreachable: []
+    unreachable: [],
+    factsSearched: [],
+    noFacts: [],
+    noPackageManager: [],
+    securityUnsupported: []
   }
   const matches: FleetMatch[] = []
   if (q === '') return { matches, coverage, truncated: 0 }
@@ -184,6 +236,11 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
 
     const entry = input.hosts[server.id]
     if (!entry) {
+      // Reported once, here, rather than under `notChecked` AND `noFacts`. The
+      // sampler only probes facts after a successful metrics sample, so a host
+      // nothing has ever sampled has never had facts collected either, and
+      // naming it twice under two gaps says less than naming it once under the
+      // gap that explains both.
       coverage.notChecked.push(server.name)
       continue
     }
@@ -210,21 +267,79 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
       stale: stale || undefined
     }
 
-    // The host itself — so "ubuntu" or a hostname finds the box, not just
-    // things on it.
+    // What the host IS, as opposed to what is running on it. Facts are hourly
+    // and independent of the sample above, so their absence is its own gap and
+    // never a claim about the host.
+    const facts = input.facts[server.id]?.facts
+    if (!facts) {
+      coverage.noFacts.push(server.name)
+    } else {
+      coverage.factsSearched.push(server.name)
+      if (facts.packageManager === null) {
+        // No package manager means no update count of any kind, so the security
+        // question never arises here — which is why this is `else if` and not a
+        // second push. The collector reports `no-tool` rather than `unsupported`
+        // for exactly this case; the branch keeps the two buckets disjoint even
+        // if a partial or forged set of facts ever says otherwise.
+        coverage.noPackageManager.push(server.name)
+      } else if (factSource(facts, 'security-updates').status === 'unsupported') {
+        coverage.securityUnsupported.push(server.name)
+      }
+    }
+
+    // The host itself — so "ubuntu", "rocky", "kvm", "apt" or a hostname finds
+    // the box, not just things on it.
+    //
+    // The fact terms are appended to the same `host` match kind rather than
+    // given a kind of their own: "which hosts are Ubuntu" is a question about
+    // hosts, and a fourth icon in the result list would say it was not.
     const nameTerm = norm(server.name)
     const hostTerm = norm(host.hostname || '')
     const kernelTerm = norm(host.kernel || '')
-    if (nameTerm.includes(q) || hostTerm.includes(q) || kernelTerm.includes(q)) {
+    // Every allow-listed and free-text fact the host reported about itself.
+    // `prettyName` and `cpuModel` are the host's own words and arrive already
+    // stripped of control characters and bidi marks by parseHostFacts.
+    const factTerms = facts
+      ? [
+          facts.distroId,
+          facts.distroVersion,
+          facts.prettyName,
+          facts.packageManager,
+          facts.virtualisation,
+          facts.arch,
+          facts.cpuModel
+        ]
+          .filter((t): t is string => t !== null && t !== '')
+          .map(norm)
+      : []
+    const hostTerms = [nameTerm, hostTerm, kernelTerm, ...factTerms]
+    if (hostTerms.some((t) => t.includes(q))) {
+      // Distro and package manager earn a place in the detail line for the same
+      // reason the kernel already has one: a host found by typing "kvm" that
+      // does not say "kvm" anywhere on the row looks like a bug.
+      const detail = [
+        host.hostname,
+        facts?.prettyName ??
+          (facts?.distroId
+            ? `${facts.distroId}${facts.distroVersion ? ` ${facts.distroVersion}` : ''}`
+            : null),
+        host.kernel,
+        facts?.virtualisation && facts.virtualisation !== 'none' ? facts.virtualisation : null,
+        facts?.packageManager,
+        `${host.cores} vCPU`
+      ]
+        .filter((p): p is string => !!p)
+        .join(' · ')
       matches.push({
         ...base,
         kind: 'host',
         label: server.name,
-        detail: `${host.hostname} · ${host.kernel} · ${host.cores} vCPU`,
+        detail,
         badge: stale ? 'unreachable' : undefined,
-        // Ranked on whichever of the three the query hit, so a host found by an
-        // exact hostname sorts above a unit that merely contains the query.
-        score: bestRank([nameTerm, hostTerm, kernelTerm], q)
+        // Ranked on whichever term the query hit, so a host found by an exact
+        // distro id or hostname sorts above a unit that merely contains the
+        // query. Ranking on the label alone put every one of these last.
+        score: bestRank(hostTerms, q)
       })
     }
 
@@ -305,10 +420,18 @@ export function searchFleet(input: FleetSearchInput, rawQuery: string): FleetSea
  * The count leads with units and ports rather than with hosts, because that is
  * what the number is true of: a host with no probes contributed nothing but its
  * own name, and calling it "searched" put a reassuring number on screen that
- * the results behind it did not support.
+ * the results behind it did not support. Host facts get a second count for the
+ * same reason they get their own buckets — they are a different sweep on a
+ * different clock, and one number covering both would be true of neither.
  *
- * Returns null only when every server in the workspace was searched with both
- * probes working — the one case where silence is accurate.
+ * Every clause names HOSTS rather than counting them. "3 hosts could not be
+ * searched" prompts the question this is supposed to answer.
+ *
+ * Returns null only when every server was searched with both probes working AND
+ * every one of them had facts that could answer every question — the one case
+ * where silence is accurate. That is a higher bar than it was before facts
+ * existed, and deliberately so: an estate with five Arch boxes in it can never
+ * clear it, and a search for `security` on that estate must never look complete.
  */
 export function coverageSentence(c: FleetCoverage): string | null {
   const parts: string[] = []
@@ -320,8 +443,19 @@ export function coverageSentence(c: FleetCoverage): string | null {
   if (c.noProbes.length) parts.push(`neither systemd nor a port probe on ${list(c.noProbes)}`)
   if (c.noServiceView.length) parts.push(`no systemd on ${list(c.noServiceView)}`)
   if (c.noPortView.length) parts.push(`no port probe on ${list(c.noPortView)}`)
+  // Facts last, and each in its own words. "No facts yet" is a schedule, "no
+  // package manager" is a property of the host, and "can never report security
+  // updates" is a property of the DISTRIBUTION that no amount of waiting or
+  // privilege will change — three different things a reader does three
+  // different things about.
+  if (c.noFacts.length) parts.push(`no host facts collected yet for ${list(c.noFacts)}`)
+  if (c.noPackageManager.length) parts.push(`no package manager on ${list(c.noPackageManager)}`)
+  if (c.securityUnsupported.length) {
+    parts.push(`${list(c.securityUnsupported)} can never report security updates`)
+  }
   if (parts.length === 0) return null
 
   const n = c.searched.length
-  return `Units and ports searched on ${n} host${n === 1 ? '' : 's'} — ${parts.join('; ')}.`
+  const f = c.factsSearched.length
+  return `Units and ports searched on ${n} host${n === 1 ? '' : 's'}, host facts on ${f} — ${parts.join('; ')}.`
 }

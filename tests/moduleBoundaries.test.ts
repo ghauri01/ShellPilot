@@ -27,6 +27,14 @@ const ROOT = resolve(__dirname, '..')
 // here, deliberately, in a diff a reviewer sees.
 const MODULE_FILES: Record<string, string[]> = {
   fleetSearch: ['src/renderer/src/lib/fleetSearch.ts', 'src/renderer/src/components/monitor/FleetSearch.tsx'],
+  // The main-process half (src/shared/hostFacts.ts, src/main/services/hostFacts.ts)
+  // is not listed: it is collected by the fleet sampler on every install
+  // whether or not this module is on, so it is not the module's to own. What
+  // the module adds is the renderer that reads it.
+  inventory: [
+    'src/renderer/src/lib/inventory.ts',
+    'src/renderer/src/components/monitor/InventoryPanel.tsx'
+  ],
   broadcast: [
     'src/shared/broadcast.ts',
     'src/main/services/broadcast.ts',

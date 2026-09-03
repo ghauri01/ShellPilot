@@ -18,6 +18,7 @@ import { bytes, clsx } from '../../lib/format'
 import type { MonitorGroup, Server } from '../../types'
 import { FleetHealth } from './FleetHealth'
 import { FleetSearch } from './FleetSearch'
+import { InventoryPanel } from './InventoryPanel'
 import { BroadcastPanel } from './BroadcastPanel'
 import { LogTailPanel } from './LogTailPanel'
 import { CronPanel } from './CronPanel'
@@ -321,8 +322,8 @@ export function FleetMonitor(): React.JSX.Element {
           would teach people to ignore this row. */}
       {tabs.length === 0 && (
         <div className="s-desc" style={{ marginBottom: 12 }}>
-          Search, running a command across servers, log tailing, scheduled jobs, Docker and
-          Kubernetes are available and switched off.{' '}
+          Search, estate inventory, running a command across servers, log tailing, scheduled
+          jobs, Docker and Kubernetes are available and switched off.{' '}
           <button className="btn ghost sm" onClick={() => openSettings('modules')}>
             Choose modules
           </button>
@@ -352,6 +353,11 @@ export function FleetMonitor(): React.JSX.Element {
       {moduleEnabled(modules, 'fleetSearch') && (
         <div style={show('fleetSearch')}>
           <FleetSearch servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'inventory') && (
+        <div style={show('inventory')}>
+          <InventoryPanel servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
         </div>
       )}
       {moduleEnabled(modules, 'broadcast') && (

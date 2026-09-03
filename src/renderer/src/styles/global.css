@@ -2860,3 +2860,87 @@ details[open] > .disclosure-head .chev {
   background: var(--accent);
   color: #fff;
 }
+
+/* Inventory — roadmap item C.
+
+   Built on `.table`, which already owns the header case, the row rule and the
+   tabular numerals. Everything below is what a thirteen-column estate table
+   needs on top of that, and nothing below is a new visual language: `.chip
+   warn` is the badge idiom the rest of the monitor uses, and the "no value"
+   treatment borrows the muted italic the app already uses for absence.
+
+   The one deliberate exception is `.inv-na.loud`. `unsupported` and `denied`
+   are the two gaps a reader must not skim past — the first because reading it
+   as zero is the failure this whole feature exists to prevent — so they get the
+   warning colour a count never gets. A number and a reason must not be able to
+   look like each other. */
+.inv-scroll {
+  margin-top: 8px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.inv-table {
+  /* Wider than the pane once hardware columns are open; the wrapper scrolls
+     rather than the page, so the surrounding panel keeps its shape. */
+  min-width: 100%;
+  white-space: nowrap;
+}
+.inv-table th,
+.inv-table td {
+  padding: 5px 10px;
+}
+.inv-table th.num,
+.inv-table td.num {
+  text-align: right;
+}
+.inv-table th.sorted .inv-sort {
+  color: var(--text);
+}
+/* The header is the sort control, so it has to be a real button: a click
+   handler on a <th> is invisible to the keyboard. */
+.inv-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.inv-sort:hover {
+  color: var(--text);
+}
+.inv-host {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+}
+.inv-host:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+/* Absence, in words. Italic and dotted-underlined so it cannot be mistaken for
+   a value at a glance, and the dotted underline says there is a sentence behind
+   it on hover. */
+.inv-na {
+  font-style: italic;
+  color: var(--text-faint);
+  border-bottom: 1px dotted var(--border);
+  cursor: help;
+}
+.inv-na.loud {
+  color: var(--warn);
+  border-bottom-color: currentColor;
+}
+.inv-stale {
+  margin-left: 6px;
+  cursor: help;
+}
