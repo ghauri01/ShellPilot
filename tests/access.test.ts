@@ -58,6 +58,41 @@ const ED25519_B_FP = 'SHA256:Kh/dB+J46zzk3b+72O1DqnLW16xNkYitzUOrofTSSL8'
 const RSA2048 =
   'AAAAB3NzaC1yc2EAAAADAQABAAABAQCtKQ/AOy0hzFSfCbl8vjq+z0WVWCTt+eZob+hiLwhaiIB4qnSt1wCBgy7UrrhY49IqYcfhJyd1NMgek0ffNl+rwPFs2dN5tTRXdKRY4CdVSrOi5ZAb2nfp5gOxQXcuXMSk+lpJa3B7fhR6IZDPUBJqf9UU3pg5try0ZwhYs1U7zFYar9zKoZi0cDR7XktHwXJq5yJdF24jS+r6n+GAnHMSOAJd2i+UE8N3CT4yEhDMzlP0F5m7V1cOlXw0QqO5Hvfua34kaUmpiYHg6Lf7V4t4Hckv7yRQaGDEvt0a0pZF6VJ9t7VBh7SaIppT2GpY/cuURwbiu7PtVpg0kSzxwI7R'
 const RSA2048_FP = 'SHA256:eQGY4iY48MSjqJHIkXpciUEwUlg0uv4zP3nnNFzMzxY'
+
+// ---------------------------------------------------------------------------
+// Certificates, from real ssh-keygen output
+// ---------------------------------------------------------------------------
+//
+// Generated with `ssh-keygen -s ca -I … <key>.pub`, and the fingerprints below
+// are what `ssh-keygen -l` prints for BOTH the certificate and the plain key it
+// certifies — because that is what a certificate is: a signature wrapped around
+// a public key, and the key inside it is the thing a fleet-wide "where is this
+// key trusted" question is about.
+//
+// Nothing of this shape reached parseAuthorizedKeyLine before. The one cert
+// test in this file passed an RSA blob under a cert type name, which exercises
+// the type-mismatch short-circuit and never the certificate path at all — which
+// is why the certificate blob was being fingerprinted whole, producing a value
+// that is per-certificate (the nonce is random) and matches nothing anywhere.
+
+const ED25519_CERT =
+  'AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIIrQXaEc5/+ytaTzD1zi8Je/zv6vKCsqRDPF8j+fVjBtAAAAIFPcms7SlRCx9tF7C19deCyX/wZe+lTm4afHbHljUa6JAAAAAAAAAAAAAAABAAAAA29wcwAAAAcAAAADb3BzAAAAAGqZVywAAAAAbHk5jAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIBW4FTgMQy75BqNzjwFoRSrnt/PmsMpEotGHqm7MrsVqAAAAUwAAAAtzc2gtZWQyNTUxOQAAAEBhckJEMGGZyZrBrS1X4VSErhjDcNhcvGzDPxphaxq1q9hdw+NruopYisw0Fx0omzT7u1zRYwc8ZovmmoykTAUH'
+/** What `ssh-keygen -l` prints for ED25519_CERT — and for the plain key. */
+const ED25519_CERT_FP = 'SHA256:w6jcjwf1BKla85KDOsNAWdBD/Yg/8RqwzUAwuVellko'
+const ED25519_CERT_INNER =
+  'AAAAC3NzaC1lZDI1NTE5AAAAIFPcms7SlRCx9tF7C19deCyX/wZe+lTm4afHbHljUa6J'
+
+const RSA_CERT =
+  'AAAAHHNzaC1yc2EtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgiJywqzc54YQKtnGjahSd0fJ1iR2nRvtrL3TAoLLddB8AAAADAQABAAABAQCiIajlc/Ahpf3yDfVaMcH88zgs1+7C8dALsl0hN8Y29V0/nuVEjWF7PjssM2S7kdeF80Oncc0oOm6t9SB/xK842R2DV47ITIpCPtnrg9OBk/wfWObBdm/SY5/vc7UdHA50TdgbM++74GamVGAlNuB00qQdhgjHM4Kddlxw2MH8uwgnITxZZ9pCsLE4DqW5IbQcoDk1R3h0KklZTNLfUPolYbIhi4qKnNfP6lw5Cc5gbJifleKri14tjb12kevqfNnF8rUCDCAJI819NRbjQipNuV6+DND0FqgvMfcIy61XC5VmrheCDcVgu3faWWVLkzAYXvFpRElub52TjWn9X9aPAAAAAAAAAAAAAAABAAAAA3JzYQAAAAcAAAADb3BzAAAAAGqZVywAAAAAbHk5jAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIBW4FTgMQy75BqNzjwFoRSrnt/PmsMpEotGHqm7MrsVqAAAAUwAAAAtzc2gtZWQyNTUxOQAAAEDVh2PXsIFfh5ZYAKtX1vHaJLDkueWUOJQY8Zvg16xJGmumOpJaa3FLXlhzeMElf5HHa+r1asalB7TcFZcsfhYF'
+const RSA_CERT_FP = 'SHA256:124k69rmaFn2zwy4VB1WhP9G/+ATN8IfER4441fO6M4'
+const RSA_CERT_INNER =
+  'AAAAB3NzaC1yc2EAAAADAQABAAABAQCiIajlc/Ahpf3yDfVaMcH88zgs1+7C8dALsl0hN8Y29V0/nuVEjWF7PjssM2S7kdeF80Oncc0oOm6t9SB/xK842R2DV47ITIpCPtnrg9OBk/wfWObBdm/SY5/vc7UdHA50TdgbM++74GamVGAlNuB00qQdhgjHM4Kddlxw2MH8uwgnITxZZ9pCsLE4DqW5IbQcoDk1R3h0KklZTNLfUPolYbIhi4qKnNfP6lw5Cc5gbJifleKri14tjb12kevqfNnF8rUCDCAJI819NRbjQipNuV6+DND0FqgvMfcIy61XC5VmrheCDcVgu3faWWVLkzAYXvFpRElub52TjWn9X9aP'
+
+const EC384_CERT =
+  'AAAAKGVjZHNhLXNoYTItbmlzdHAzODQtY2VydC12MDFAb3BlbnNzaC5jb20AAAAgsR/kbrPaj6A8zA9KBYmiJO5faV4vLWADVGatp4JaXaoAAAAIbmlzdHAzODQAAABhBBR8p/bKSqlyR+aLXGd2IyxVwmX8JsBSY+HryN7A7h6oi7oSg6d7Bh/UZbUZvNBL1DMkWuLxbiWWIAZbJ4qgPp6rm9pxuHZSjm3eUiGyxIWCvqcpXXg+BkXkNQo/nWcnDQAAAAAAAAAAAAAAAQAAAAJlYwAAAAcAAAADb3BzAAAAAGqZVywAAAAAbHk5jAAAAAAAAACCAAAAFXBlcm1pdC1YMTEtZm9yd2FyZGluZwAAAAAAAAAXcGVybWl0LWFnZW50LWZvcndhcmRpbmcAAAAAAAAAFnBlcm1pdC1wb3J0LWZvcndhcmRpbmcAAAAAAAAACnBlcm1pdC1wdHkAAAAAAAAADnBlcm1pdC11c2VyLXJjAAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIBW4FTgMQy75BqNzjwFoRSrnt/PmsMpEotGHqm7MrsVqAAAAUwAAAAtzc2gtZWQyNTUxOQAAAEAStV7QHJiOIGjV35WVD5LS2I/DToycb1huIiEcezVePJLNR45emYGlZLxE2JwODdzBz3tniyaN1w08JoESgkoG'
+const EC384_CERT_FP = 'SHA256:gtWoyOmo2i7ZLipEy3jUGRqEbkQL8cz2mSTvNCNXrxc'
+const EC384_CERT_INNER =
+  'AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBBR8p/bKSqlyR+aLXGd2IyxVwmX8JsBSY+HryN7A7h6oi7oSg6d7Bh/UZbUZvNBL1DMkWuLxbiWWIAZbJ4qgPp6rm9pxuHZSjm3eUiGyxIWCvqcpXXg+BkXkNQo/nWcnDQ=='
 const ECDSA384 =
   'AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBMmWJrQwHGkavmhaNvBw/5aX7grH2ANdGwvWDVFE/Xxt3nagdDUjaG1pUV+A0sKHfYR2lP8UEYcahL33yFxIbMxCp7SgQoKRsXeaHiP6wVsXvyUC+Eq1Vtpa7BymMO/kkA=='
 const ECDSA384_FP = 'SHA256:IDlE8LLk5Dn2TEciFeo2RY9Ef+3lWdZYDnjVlx+rd2o'
@@ -171,7 +206,94 @@ describe('fingerprinting, against ssh-keygen’s own answers', () => {
   })
 
   it('leaves a certificate blob’s bit count null rather than reading the wrong field', () => {
+    // A PLAIN RSA blob under a cert type name: not a certificate at all, so
+    // there is no nonce to step over and nothing to measure.
     expect(keyBits('ssh-rsa-cert-v01@openssh.com', decodeBase64(RSA2048)!)).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // Certificates
+  // -------------------------------------------------------------------------
+  //
+  // THE finding this whole group exists for. `ssh-keygen -l` on a certificate
+  // prints the fingerprint of the key INSIDE it, identical to the plain key's.
+  // Fingerprinting the certificate blob instead produces a value that is
+  // per-certificate — the nonce is random — and matches nothing on any other
+  // host, while `problem` stays null so `certain` stays true beside it.
+  //
+  // The consequence is the silent third answer this module exists to prevent:
+  // "which of my hosts still trusts the laptop I sold" answers NO for every
+  // host that trusts it through a certificate, with `certain: true` beside it.
+
+  it.each([
+    ['ssh-ed25519-cert-v01@openssh.com', ED25519_CERT, ED25519_CERT_FP, ED25519_CERT_INNER, 256],
+    ['ssh-rsa-cert-v01@openssh.com', RSA_CERT, RSA_CERT_FP, RSA_CERT_INNER, 2048],
+    ['ecdsa-sha2-nistp384-cert-v01@openssh.com', EC384_CERT, EC384_CERT_FP, EC384_CERT_INNER, 384]
+  ])('fingerprints %s over the key inside it, as ssh-keygen -l does', (type, cert, fp, inner, bits) => {
+    const k = parseAuthorizedKeyLine(`${type} ${cert} ops@laptop`, 1, sha256)!
+    // The fingerprint FIRST, because it is the lie: the value below is what
+    // `ssh-keygen -l` prints, and what the certificate blob hashes to instead
+    // is a number with no meaning on any other host.
+    expect(k.fingerprint).toBe(fp)
+    expect(k.problem).toBeNull()
+    expect(k.type).toBe(type)
+    expect(k.certificate).toBe(true)
+    expect(k.bits).toBe(bits)
+    // And the plain key it certifies fingerprints to the SAME value, which is
+    // the whole point: one key, one identity, however a host chose to trust it.
+    const plain = parseAuthorizedKeyLine(`${type.replace(/-cert-v01@openssh\.com$/, '')} ${inner} ops@laptop`, 1, sha256)!
+    expect(plain.fingerprint).toBe(fp)
+  })
+
+  it('does not keep a certificate body for the write half to match on', () => {
+    // A fingerprint now names the key inside, and one key can be certified any
+    // number of times with different bodies. A removal that matched ONE of
+    // those bodies while the plan expected to remove all of them would fail its
+    // own count check and roll the host back — safe, and a confusing report.
+    // Refusing to hand over a body is the honest form of the same refusal.
+    const k = parseAuthorizedKeyLine(`ssh-ed25519-cert-v01@openssh.com ${ED25519_CERT} x`, 1, sha256)!
+    expect(k.blob).toBeNull()
+  })
+
+  it('reports a certificate it cannot read the key out of rather than guessing one', () => {
+    // Truncated after the algorithm name and the nonce: structurally a
+    // certificate, with no key in it. This is a hole in the inventory and it is
+    // counted as one — never fingerprinted from whatever bytes are present.
+    const stunted = 'AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIIrQXaEc5/+ytaTzD1zi8Je/zv6vKCsqRDPF8j+fVjBt'
+    const k = parseAuthorizedKeyLine(`ssh-ed25519-cert-v01@openssh.com ${stunted} x`, 1, sha256)!
+    expect(k.problem).toBe('certificate')
+    expect(k.fingerprint).toBeNull()
+  })
+
+  it('files cert-authority as broadening trust, never as restricting it', () => {
+    // `cert-authority` is the one option in an authorized_keys file that makes
+    // the host trust MORE than the line in front of it: everything that CA will
+    // ever sign, including keys that do not exist yet. Counting it as a
+    // restriction inverts its meaning in the one column an operator scans.
+    const k = parseAuthorizedKeyLine(`cert-authority ssh-ed25519 ${ED25519} the-ca`, 1, sha256)!
+    expect(k.options).toEqual(['cert-authority'])
+    expect(k.restricted).toBe(false)
+    expect(k.broadened).toBe(true)
+    // And it is still read as an options prefix, not as a key of type
+    // "cert-authority" — the bare-token form has no comma or equals in it.
+    expect(k.type).toBe('ssh-ed25519')
+    expect(k.fingerprint).toBe(ED25519_FP)
+  })
+
+  it('keeps cert-authority out of the restricted count and in its own', () => {
+    const a = collected([
+      'U 1 keys ok -',
+      'U 1 name ops',
+      `K 1 1 90 cert-authority ssh-ed25519 ${ED25519} the-ca`,
+      `K 1 2 90 command="/bin/true" ssh-ed25519 ${ED25519_B} pinned`
+    ], OK_STATUS)
+    const s = summariseAccess(a)
+    expect(s.restricted).toBe(1)
+    expect(s.certificateAuthorities).toBe(1)
+    // A CA line means this host will accept keys that are in no file anywhere,
+    // so no count taken from the files is an answer about the host.
+    expect(s.certain).toBe(false)
+    expect(s.uncertainty.join(' ')).toMatch(/certificate authority/i)
   })
 })
 

@@ -62,6 +62,14 @@ interface KeyRow {
    *  that is `command=`-restricted on four hosts and unrestricted on a fifth is
    *  a different situation from one restricted everywhere. */
   restrictedEverywhere: boolean
+  /** ANY appearance carries `cert-authority`. The opposite of restricted and
+   *  reported on any appearance rather than all of them: one host delegating to
+   *  a CA is the finding, whatever the other ten do. */
+  authority: boolean
+  /** ANY appearance is a certificate rather than a bare key. The fingerprint is
+   *  the key inside it either way — which is why the same key shows one row
+   *  here whether a host trusts it plainly or through a certificate. */
+  viaCertificate: boolean
 }
 
 function statusChip(status: AccessStatus): React.JSX.Element | null {
@@ -308,10 +316,14 @@ export function AccessPanel({
             type: k.type ?? 'unknown',
             bits: k.bits,
             on: [],
-            restrictedEverywhere: true
+            restrictedEverywhere: true,
+            authority: false,
+            viaCertificate: false
           }
           if (k.comment && !row.labels.includes(k.comment)) row.labels.push(k.comment)
           if (!k.restricted) row.restrictedEverywhere = false
+          if (k.broadened) row.authority = true
+          if (k.certificate) row.viaCertificate = true
           const existing = row.on.find((o) => o.server === h.server.name)
           if (existing) {
             if (!existing.users.includes(a.user)) existing.users.push(a.user)
@@ -569,6 +581,27 @@ export function AccessPanel({
                             title="Every line carrying this key restricts it — a command=, from= or restrict option. It is not a general-purpose login on any host where it was found."
                           >
                             restricted
+                          </span>
+                        )}
+                        {k.viaCertificate && (
+                          <span
+                            className="chip"
+                            title="At least one host trusts this key through a certificate rather than as a bare key. The fingerprint is the key inside the certificate, which is what ssh-keygen -l prints — so it is the same key either way."
+                          >
+                            certificate
+                          </span>
+                        )}
+                        {/* The loudest thing on this table, and it is not a
+                            restriction. A cert-authority line means the host
+                            accepts everything this signer will ever sign,
+                            including keys that do not exist yet. */}
+                        {k.authority && (
+                          <span
+                            className="chip warn"
+                            data-testid={`ca-${k.fingerprint}`}
+                            title="This is a cert-authority line: the host trusts this key as a signer, so it also accepts every key this authority signs — including keys that do not exist yet and are in no file anywhere. Revoking one signed key does not change that."
+                          >
+                            certificate authority
                           </span>
                         )}
                       </td>

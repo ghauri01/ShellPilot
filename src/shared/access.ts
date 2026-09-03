@@ -229,6 +229,15 @@ export type KeyProblem =
   /** The line was longer than the collector's per-line cap and arrived cut, so
    *  the blob cannot be trusted to be whole. */
   | 'truncated'
+  /** The line trusts a CERTIFICATE and the public key inside it could not be
+   *  read out. A certificate is a signature wrapped around a key, and the key
+   *  is the thing an estate-wide "where is this trusted" question is about —
+   *  so a certificate whose inner key cannot be recovered is a hole in the
+   *  inventory, exactly like an unreadable file. It is NEVER fingerprinted
+   *  from the certificate blob instead: that value is per-certificate, because
+   *  the nonce is random, and it would match nothing anywhere while looking
+   *  like an answer. */
+  | 'certificate'
 
 export const KEY_PROBLEM_HELP: Record<KeyProblem, string> = {
   malformed:
@@ -239,7 +248,9 @@ export const KEY_PROBLEM_HELP: Record<KeyProblem, string> = {
   'type-mismatch':
     'The algorithm named at the start of the line is not the algorithm inside the key itself. sshd rejects lines like this; a person reading the file would not notice.',
   truncated:
-    'This line was longer than the collector transmits and arrived cut short, so its fingerprint would be wrong. The line is reported and deliberately not fingerprinted.'
+    'This line was longer than the collector transmits and arrived cut short, so its fingerprint would be wrong. The line is reported and deliberately not fingerprinted.',
+  certificate:
+    'This line trusts a certificate, and the public key inside the certificate could not be read out of it. The certificate itself is deliberately not fingerprinted: that value is different for every certificate issued to the same key, so it would match nothing on any other host while looking like an answer.'
 }
 
 /**
@@ -264,7 +275,6 @@ export const RESTRICTING_OPTIONS = [
   'permitopen',
   'permitlisten',
   'tunnel',
-  'cert-authority',
   'verify-required',
   'environment',
   'agent-forwarding',
@@ -275,6 +285,30 @@ export const RESTRICTING_OPTIONS = [
   'touch-required',
   'no-touch-required'
 ] as const
+
+/**
+ * Options that BROADEN what a line trusts, rather than restricting it.
+ *
+ * One member, and it needs its own category rather than a footnote.
+ * `cert-authority` does not say "this key, under these conditions" — it says
+ * "anything this CA will ever sign", including keys that do not exist yet and
+ * that no inventory of any file on any host could enumerate. Filed under
+ * RESTRICTING_OPTIONS, as it was, it counted toward `summary.restricted` and
+ * inverted its own meaning in the one column an operator scans for "which of
+ * these are limited".
+ *
+ * It is also why `summariseAccess` refuses to be `certain` about a host that
+ * has one: the count of keys in the files is not a count of who can log in.
+ */
+export const BROADENING_OPTIONS = ['cert-authority'] as const
+
+/**
+ * Every option name this build recognises, for the one place the DISTINCTION
+ * does not matter: deciding whether a bare first token is an options prefix at
+ * all. `cert-authority ssh-ed25519 AAAA…` has no comma and no equals in it, so
+ * without this list it reads as a key of type `cert-authority`.
+ */
+const KNOWN_OPTIONS: readonly string[] = [...RESTRICTING_OPTIONS, ...BROADENING_OPTIONS]
 
 /** One line of one authorized_keys file. */
 export interface AuthorizedKey {
@@ -303,6 +337,17 @@ export interface AuthorizedKey {
   options: string[]
   /** True when any option restricts the key rather than merely describing it. */
   restricted: boolean
+  /** True when an option BROADENS what this line trusts — `cert-authority`.
+   *  Never folded into `restricted`: they point in opposite directions. */
+  broadened: boolean
+  /**
+   * This line trusts a certificate rather than a bare key.
+   *
+   * `fingerprint` then names the key INSIDE the certificate, which is what
+   * `ssh-keygen -l` prints for a certificate and what makes the same key
+   * recognisable across hosts however each one chose to trust it.
+   */
+  certificate: boolean
   /** 1-based line number in the file, so a finding can be pointed at. */
   line: number
   problem: KeyProblem | null
@@ -316,6 +361,13 @@ export interface AuthorizedKey {
    * in memory and is the difference between a precise removal and an
    * approximate one — and nothing approximate is run against an
    * authorized_keys file.
+   *
+   * null for a CERTIFICATE line even though it fingerprinted. The fingerprint
+   * names the key inside, and one key can be certified any number of times
+   * with different bodies — so a body here would be one of several lines the
+   * fingerprint matches, and a removal built from it would remove fewer lines
+   * than the plan expected. Refusing to supply one turns that into a block
+   * with a sentence, which is the honest form of the same refusal.
    */
   blob: string | null
 }
@@ -976,6 +1028,97 @@ export function keyBits(type: string, blob: Uint8Array): number | null {
   return bits
 }
 
+// ---- Certificates ---------------------------------------------------------
+
+/**
+ * For each certificate type, the plain key it certifies and how many of the
+ * certificate's length-prefixed fields — the ones straight after the nonce —
+ * make up that key.
+ *
+ * A certificate blob is `string type, string nonce, <the key's own fields>,
+ * uint64 serial, …`. The key's fields are exactly the ones that follow its own
+ * algorithm name in a plain blob, so the inner public key is recovered by
+ * putting the plain type name back in front of them — which is why this table
+ * is field COUNTS and not offsets.
+ *
+ * Sizes, per PROTOCOL.certkeys: RSA is `e, n`; DSA is `p, q, g, y`; Ed25519 is
+ * the key alone; ECDSA is `curve, point`; and the security-key variants carry
+ * one more field, the application string, which is part of the key blob and
+ * therefore part of what is fingerprinted.
+ */
+const CERT_INNER: Record<string, { type: KeyType; fields: number }> = {
+  'ssh-rsa-cert-v01@openssh.com': { type: 'ssh-rsa', fields: 2 },
+  'ssh-dss-cert-v01@openssh.com': { type: 'ssh-dss', fields: 4 },
+  'ssh-ed25519-cert-v01@openssh.com': { type: 'ssh-ed25519', fields: 1 },
+  'ecdsa-sha2-nistp256-cert-v01@openssh.com': { type: 'ecdsa-sha2-nistp256', fields: 2 },
+  'ecdsa-sha2-nistp384-cert-v01@openssh.com': { type: 'ecdsa-sha2-nistp384', fields: 2 },
+  'ecdsa-sha2-nistp521-cert-v01@openssh.com': { type: 'ecdsa-sha2-nistp521', fields: 2 },
+  'sk-ssh-ed25519-cert-v01@openssh.com': { type: 'sk-ssh-ed25519@openssh.com', fields: 2 },
+  'sk-ecdsa-sha2-nistp256-cert-v01@openssh.com': {
+    type: 'sk-ecdsa-sha2-nistp256@openssh.com',
+    fields: 3
+  }
+}
+
+/** Is this type a certificate rather than a bare key? */
+export function isCertificateType(type: string): boolean {
+  return Object.prototype.hasOwnProperty.call(CERT_INNER, type)
+}
+
+/** The inverse of `sshFields` for the fields it hands back. */
+function sshEncode(parts: Uint8Array[]): Uint8Array {
+  let n = 0
+  for (const p of parts) n += 4 + p.length
+  const out = new Uint8Array(n)
+  let i = 0
+  for (const p of parts) {
+    out[i++] = (p.length >>> 24) & 0xff
+    out[i++] = (p.length >>> 16) & 0xff
+    out[i++] = (p.length >>> 8) & 0xff
+    out[i++] = p.length & 0xff
+    out.set(p, i)
+    i += p.length
+  }
+  return out
+}
+
+const asciiBytes = (s: string): Uint8Array => Uint8Array.from(s, (c) => c.charCodeAt(0) & 0xff)
+
+/**
+ * The public key a certificate certifies, as a plain key blob.
+ *
+ * THE fix for the finding this exists to close. `ssh-keygen -l` on a
+ * certificate prints the fingerprint of the key inside it, identical to the
+ * fingerprint of the plain key — because that is the identity anybody cares
+ * about. Hashing the certificate blob instead produces a value that is
+ * different for every certificate ever issued to the same key, since the nonce
+ * is random by design: it matches nothing on any other host, and it looks
+ * exactly like an answer.
+ *
+ * Returns null rather than a partial reconstruction whenever the structure does
+ * not hold — an unknown certificate type, an algorithm name inside that is not
+ * the one on the line, or a blob too short for the fields the type requires.
+ * The caller reports `certificate` and fingerprints nothing.
+ */
+export function certifiedKeyBlob(
+  certType: string,
+  cert: Uint8Array
+): { type: KeyType; blob: Uint8Array } | null {
+  const inner = CERT_INNER[certType]
+  if (!inner) return null
+  // name, nonce, then the key's own fields — and no more, so a cert whose key
+  // fields run into the serial is caught by the length check rather than
+  // silently absorbing the wrong bytes.
+  const want = 2 + inner.fields
+  const fields = sshFields(cert, want)
+  if (fields === null || fields.length !== want) return null
+  if (ascii(fields[0]) !== certType) return null
+  return {
+    type: inner.type,
+    blob: sshEncode([asciiBytes(inner.type), ...fields.slice(2)])
+  }
+}
+
 // ---- One authorized_keys line ---------------------------------------------
 
 /**
@@ -1068,6 +1211,8 @@ export function parseAuthorizedKeyLine(
     comment: null,
     options: [],
     restricted: false,
+    broadened: false,
+    certificate: false,
     line,
     problem: 'malformed',
     blob: null
@@ -1088,13 +1233,17 @@ export function parseAuthorizedKeyLine(
   const firstToken = text.split(/[ \t]+/)[0]
   const looksLikeOptions =
     split !== null &&
-    (/[=,]/.test(split.options) ||
-      (RESTRICTING_OPTIONS as readonly string[]).includes(split.options.toLowerCase()))
+    (/[=,]/.test(split.options) || KNOWN_OPTIONS.includes(split.options.toLowerCase()))
   const hasOptions = !(KEY_TYPES as readonly string[]).includes(firstToken) && looksLikeOptions
   if (hasOptions && split) {
     base.options = parseKeyOptionNames(split.options)
     base.restricted = base.options.some((o) =>
       (RESTRICTING_OPTIONS as readonly string[]).includes(o)
+    )
+    // Separate, and never OR'd into the line above. `cert-authority` is the one
+    // option that makes a line trust more rather than less.
+    base.broadened = base.options.some((o) =>
+      (BROADENING_OPTIONS as readonly string[]).includes(o)
     )
     body = split.rest
   }
@@ -1133,6 +1282,23 @@ export function parseAuthorizedKeyLine(
     // sshd rejects these outright. A person reading the file would not notice,
     // which is exactly why it is worth saying.
     return { ...base, type, problem: 'type-mismatch' }
+  }
+
+  if (isCertificateType(type)) {
+    // The key INSIDE the certificate, which is what `ssh-keygen -l` prints and
+    // the only value that means anything across hosts. See certifiedKeyBlob.
+    const certified = certifiedKeyBlob(type, blob)
+    if (certified === null) return { ...base, type, certificate: true, problem: 'certificate' }
+    return {
+      ...base,
+      type,
+      certificate: true,
+      fingerprint: sshFingerprint(certified.blob, sha256),
+      bits: keyBits(certified.type, certified.blob),
+      problem: null,
+      // Deliberately not the certificate's own body — see the field's own note.
+      blob: null
+    }
   }
 
   return {
@@ -1582,6 +1748,16 @@ export interface AccessSummary {
   /** Keys carrying a restricting option. */
   restricted: number
   /**
+   * Lines carrying `cert-authority` — trust delegated to a certificate
+   * authority rather than granted to a key.
+   *
+   * Its own number and NOT part of `restricted`, which it used to be counted
+   * in. It points the other way: a CA line makes the host accept everything
+   * that CA will ever sign, including keys nobody has generated yet, and no
+   * inventory of files on hosts can enumerate them.
+   */
+  certificateAuthorities: number
+  /**
    * Whether a "no unknown keys here" conclusion may be drawn at all.
    *
    * False when ANY account could not be read, when sshd is configured with an
@@ -1610,12 +1786,14 @@ export function summariseAccess(access: HostAccess): AccessSummary {
   let keys = 0
   let unfingerprinted = 0
   let restricted = 0
+  let certificateAuthorities = 0
   for (const a of readAccounts) {
     for (const k of a.keys ?? []) {
       keys++
       if (k.fingerprint === null) unfingerprinted++
       else fingerprints.add(k.fingerprint)
       if (k.restricted) restricted++
+      if (k.broadened) certificateAuthorities++
     }
   }
 
@@ -1650,6 +1828,14 @@ export function summariseAccess(access: HostAccess): AccessSummary {
       `${unfingerprinted} line${unfingerprinted === 1 ? '' : 's'} in a file that was read could not be fingerprinted, so ${unfingerprinted === 1 ? 'it' : 'they'} cannot be matched against other hosts`
     )
   }
+  // The one uncertainty that no amount of reading can remove. A cert-authority
+  // line delegates trust to a signer, so the set of keys this host accepts is
+  // not written down on this host — or on any other.
+  if (certificateAuthorities > 0) {
+    uncertainty.push(
+      `${certificateAuthorities} line${certificateAuthorities === 1 ? '' : 's'} trust${certificateAuthorities === 1 ? 's' : ''} a certificate authority, so this host also accepts every key that authority signs — including keys that do not exist yet and are in no file anywhere`
+    )
+  }
 
   return {
     accountsRead: readAccounts.length,
@@ -1658,6 +1844,7 @@ export function summariseAccess(access: HostAccess): AccessSummary {
     fingerprints,
     unfingerprinted,
     restricted,
+    certificateAuthorities,
     certain: uncertainty.length === 0,
     uncertainty
   }
@@ -2160,11 +2347,25 @@ function blobOfLine(k: AuthorizedKey): string | null {
   return k.blob
 }
 
+/**
+ * The body to match on for one fingerprint, or null when there is not exactly
+ * one.
+ *
+ * EVERY line carrying the fingerprint is checked, not the first. A certificate
+ * line fingerprints to the key inside it and deliberately keeps no body — so an
+ * account trusting a key both plainly and through a certificate has two lines
+ * for one fingerprint and only one body, and taking the first one would build a
+ * removal that deletes one line while the plan's count expects two. The host
+ * would catch it and roll back, which is safe and reads as a mystery. Refusing
+ * here makes it a block with a sentence instead.
+ */
 function blobOf(account: AccessAccount, fingerprint: string): string | null {
+  const bodies: (string | null)[] = []
   for (const k of account.keys ?? []) {
-    if (k.fingerprint === fingerprint) return blobOfLine(k)
+    if (k.fingerprint === fingerprint) bodies.push(blobOfLine(k))
   }
-  return null
+  if (bodies.length !== 1) return null
+  return bodies[0]
 }
 
 /**

@@ -232,6 +232,33 @@ describe('the by-key view', () => {
     })
     expect((await screen.findByText('no label')).textContent).toBe('no label')
   })
+
+  it('calls a cert-authority line what it is, and refuses to be certain beside it', async () => {
+    // The inversion this test exists to catch: `cert-authority` used to be
+    // filed under RESTRICTING_OPTIONS, so the one line in an authorized_keys
+    // file that BROADENS trust to everything a signer will ever sign rendered
+    // under the chip that means "this key is limited".
+    mount([server('a', 'web-1')], {
+      a: {
+        access: collected([
+          'U 1 keys ok -',
+          'U 1 name ops',
+          `K 1 1 90 cert-authority ssh-ed25519 ${ED25519} the-ca`
+        ]),
+        at: 1
+      }
+    })
+    const chip = await screen.findByTestId(`ca-${ED25519_FP}`)
+    expect(chip.textContent).toBe('certificate authority')
+    expect(document.querySelector(`tr[data-fingerprint="${ED25519_FP}"]`)!.textContent).not.toContain(
+      'restricted'
+    )
+    // And a host with one is never a fully-answered host: the keys it accepts
+    // are not written down on it.
+    expect((await screen.findByTestId('not-an-answer')).textContent).toContain(
+      'not a complete picture'
+    )
+  })
 })
 
 describe('the by-host view', () => {
