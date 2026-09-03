@@ -28,6 +28,7 @@ export type ModuleId =
   | 'patch'
   | 'access'
   | 'posture'
+  | 'capacity'
 
 export interface ModuleDef {
   id: ModuleId
@@ -106,6 +107,20 @@ export const MODULES: ModuleDef[] = [
     // Every one of those reads is a read a person could do by hand, none of
     // them mutates anything, and no private key is touched anywhere. It is
     // still not something to discover after the fact.
+    defaultEnabled: false
+  },
+  {
+    id: 'capacity',
+    label: 'Capacity trends',
+    detail:
+      'How full a host is getting and when it runs out — "this disk fills in eleven days" — drawn from the samples the monitor already writes. It stores nothing of its own, schedules nothing and evaluates nothing in the background: every line is derived on demand from history that exists whether or not this is on. A forecast is never stated without the window it was drawn from, and a gap where a host was unreachable is left as a hole in the line rather than drawn across.',
+    // OFF for a fresh install too, and this one is the cheapest module in the
+    // list — it reads the local history store and opens no connection at all.
+    //
+    // Off anyway, for the reason `backfillModules` exists: an upgrade is not
+    // consent, and a fresh install that arrived with nine tabs already open
+    // would be the bloat this registry was built to avoid. Nothing here argues
+    // that a module has to be dangerous to be optional.
     defaultEnabled: false
   },
   {

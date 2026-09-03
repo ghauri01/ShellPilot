@@ -63,6 +63,17 @@ const MODULE_FILES: Record<string, string[]> = {
   // fleet-wide map of how to attack the estate. See
   // FleetSamplerDeps.postureEnabled.
   posture: ['src/renderer/src/components/monitor/PosturePanel.tsx'],
+  // Item 26. `src/shared/capacity.ts` and `src/renderer/src/lib/capacity.ts`
+  // are listed alongside the panel, unlike the collectors above, because they
+  // are not the sampler's — nothing runs them unless this panel asks. The
+  // history store they read from IS shared, and it is reached through the
+  // preload bridge rather than imported, which is what the second assertion
+  // below covers.
+  capacity: [
+    'src/shared/capacity.ts',
+    'src/renderer/src/lib/capacity.ts',
+    'src/renderer/src/components/monitor/CapacityPanel.tsx'
+  ],
   broadcast: [
     'src/shared/broadcast.ts',
     'src/main/services/broadcast.ts',
@@ -318,6 +329,32 @@ describe('what a module may not reach', () => {
     // A module with no entry in MODULE_FILES would be silently unchecked,
     // which is the same as having no boundary at all.
     expect(Object.keys(MODULE_FILES).sort()).toEqual(MODULES.map((m) => m.id).sort())
+  })
+
+  it('has a tab for every module, so nothing ships that a user cannot reach', () => {
+    // The OTHER direction, and it is not hypothetical: item 26 landed complete
+    // — a panel, its library, its IPC channel and fourteen passing renderer
+    // tests — and was mounted nowhere for as long as the three files that
+    // mount a tab were scoped to a different agent. A tested feature no user
+    // can open is the same waste as an untested one, pointing the other way,
+    // and this repo's own pre-release review named the mirror image of it
+    // ("main-process work the renderer never calls").
+    //
+    // Read off the source rather than by rendering: FleetMonitor pulls in the
+    // whole app store, and a test that mounted it to discover a missing tab
+    // would be testing zustand. What decides whether a tab exists is the
+    // `moduleEnabled(modules, 'x')` guard around it, and that is a literal.
+    const src = readFileSync(join(ROOT, 'src/renderer/src/components/monitor/FleetMonitor.tsx'), 'utf8')
+    const mounted = new Set([...src.matchAll(/moduleEnabled\(modules,\s*'([^']+)'\)/g)].map((m) => m[1]))
+    // Anti-vacuity: a regex that stopped matching would make this pass for
+    // every module at once.
+    expect(mounted.size, 'no module guards found in FleetMonitor — this regex is broken').toBeGreaterThan(0)
+    const unreachable = MODULES.map((m) => m.id).filter((id) => !mounted.has(id))
+    expect(
+      unreachable,
+      `These modules are in the registry and have no tab in FleetMonitor, so enabling them does ` +
+        `nothing a user can see: ${unreachable.join(', ')}`
+    ).toEqual([])
   })
 })
 
