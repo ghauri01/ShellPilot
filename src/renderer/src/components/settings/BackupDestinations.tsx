@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   CloudUpload,
+  Database,
   FolderOpen,
   Loader2,
   Plus,
@@ -26,7 +27,8 @@ import type {
   BackupGeneration,
   BackupRunReport,
   BackupSummary,
-  BackupTargetsFile
+  BackupTargetsFile,
+  DumpEngine
 } from '../../../../shared/backup'
 
 const MIN_PASSPHRASE = 8
@@ -85,6 +87,9 @@ export function BackupDestinations(): React.JSX.Element {
   const [staged, setStaged] = useState<{ path: string; summary: BackupSummary; name: string } | null>(
     null
   )
+  const [databases, setDatabases] = useState<{ id: string; name: string; engine: DumpEngine }[]>([])
+  const [dumpChoice, setDumpChoice] = useState<Record<string, string>>({})
+  const [dumpResult, setDumpResult] = useState<Record<string, string>>({})
 
   const load = useCallback(async (): Promise<void> => {
     const f = await window.shellpilot?.backup.destinations?.()
@@ -93,6 +98,7 @@ export function BackupDestinations(): React.JSX.Element {
 
   useEffect(() => {
     void load()
+    void window.shellpilot?.backup.dumpableDatabases?.().then((d) => setDatabases(d ?? []))
   }, [load])
 
   const destinations = file?.destinations ?? []
@@ -166,6 +172,20 @@ export function BackupDestinations(): React.JSX.Element {
     }
     toast('Backup restored — restarting', 'ok')
     setTimeout(() => void window.shellpilot?.backup.relaunch(), 700)
+  }
+
+  const dump = async (dest: BackupDestination): Promise<void> => {
+    const databaseId = dumpChoice[dest.id]
+    if (!databaseId) return
+    setBusy(dest.id)
+    const r = await window.shellpilot?.backup.dumpDatabase?.(dest.id, databaseId)
+    setBusy(null)
+    setDumpResult((p) => ({
+      ...p,
+      [dest.id]: r?.ok
+        ? `${r.name} written and read back (${r.bytes} bytes).`
+        : `Nothing was written: ${r?.error ?? 'the dump could not be taken.'}`
+    }))
   }
 
   const cancelStaged = (): void => {
@@ -282,6 +302,44 @@ export function BackupDestinations(): React.JSX.Element {
                   <Trash2 size={13} />
                 </button>
               </div>
+
+              {databases.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div className="row" style={{ gap: 8 }}>
+                    <select
+                      className="input"
+                      value={dumpChoice[dest.id] ?? ''}
+                      onChange={(e) => setDumpChoice((p) => ({ ...p, [dest.id]: e.target.value }))}
+                    >
+                      <option value="">Dump a database here…</option>
+                      {databases.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name} ({d.engine})
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="btn sm"
+                      disabled={!dumpChoice[dest.id] || busy !== null}
+                      onClick={() => void dump(dest)}
+                    >
+                      <Database size={13} /> Dump now
+                    </button>
+                  </div>
+                  {/* Said at the button, not in documentation: a dump is not a
+                      ShellPilot bundle and nothing encrypts it. Somebody who
+                      assumed otherwise has just put a database in a bucket in
+                      the clear. */}
+                  <div className="s-desc">
+                    A dump is plain SQL, written alongside the backups and encrypted by nothing.
+                    Retention does not touch it, and a restore cannot read it — it is for the
+                    database, not for this app.
+                  </div>
+                  {dumpResult[dest.id] && (
+                    <div className="s-desc" style={{ marginTop: 4 }}>{dumpResult[dest.id]}</div>
+                  )}
+                </div>
+              )}
 
               {browsing === dest.id && (
                 <div style={{ marginTop: 10 }}>

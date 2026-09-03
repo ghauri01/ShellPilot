@@ -3,12 +3,14 @@ import { readFile, writeFile, readdir, stat, unlink, rename, mkdir } from 'node:
 import { join } from 'node:path'
 import type { SFTPWrapper } from 'ssh2'
 import { acquire, release, type PooledConnection } from './ssh'
-import { resolveChainSecrets } from './credentialResolver'
+import { resolveChainSecrets, resolveDbSecrets } from './credentialResolver'
 import { vaultList, vaultStatus } from './vault'
 import { loadData } from './store'
 import type {
   BackupDestination,
   BackupGeneration,
+  DumpEngine,
+  DumpTarget,
   LocalBackupDestination,
   S3BackupDestination,
   SftpBackupDestination
@@ -533,5 +535,92 @@ export async function openTarget(dest: BackupDestination, deps: TargetDeps = {})
           fetch(url, init as RequestInit))
       return s3TargetFrom(dest, creds, f)
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A database as a backup source
+// ---------------------------------------------------------------------------
+
+interface StoredDatabase {
+  id: string
+  name?: string
+  kind?: string
+  host?: string
+  port?: number
+  username?: string
+  database?: string
+  uri?: boolean
+  sshServerId?: string | null
+  vpnProfileId?: string | null
+}
+
+/** Databases a dump can actually be taken from, for the panel to offer. Only
+ *  the two engines item 18 already knows how to reach, and only the ones this
+ *  machine can reach directly — see databaseDumpTarget for why. */
+export function dumpableDatabases(): { id: string; name: string; engine: DumpEngine }[] {
+  const data = loadData() as { databases?: StoredDatabase[] } | null
+  const out: { id: string; name: string; engine: DumpEngine }[] = []
+  for (const db of data?.databases ?? []) {
+    const engine = db.kind === 'postgres' ? 'postgres' : db.kind === 'mysql' ? 'mysql' : null
+    if (!engine) continue
+    if (db.sshServerId || db.vpnProfileId || db.uri) continue
+    if (!db.host || !db.database) continue
+    out.push({ id: db.id, name: db.name ?? db.database, engine })
+  }
+  return out
+}
+
+/**
+ * Everything `pg_dump`/`mysqldump` needs for one saved database, or the reason
+ * there is nothing to hand it.
+ *
+ * The refusals are deliberate and each names a thing this does not do rather
+ * than trying and failing halfway:
+ *
+ *  - A bastion or a VPN means the database is not reachable from this process
+ *    at that host and port. dbOps opens a forward for exactly this reason;
+ *    a dump that ignored it would sit there until the TCP connect timed out
+ *    and then report a network error about the wrong address.
+ *  - A connection defined by a URI carries its own credentials and options in
+ *    a string, and taking a host and port out of it to rebuild an argv is how
+ *    a dump ends up pointed at the wrong database.
+ *  - Only Postgres and MySQL: there is no mongodump or redis equivalent here,
+ *    and pretending otherwise would produce an empty file with a .sql name.
+ */
+export function databaseDumpTarget(
+  databaseId: string
+): { target: DumpTarget; password: string } | { error: string } {
+  const data = loadData() as { databases?: StoredDatabase[] } | null
+  const db = data?.databases?.find((d) => d.id === databaseId)
+  if (!db) return { error: 'That database is no longer configured.' }
+  const engine: DumpEngine | null =
+    db.kind === 'postgres' ? 'postgres' : db.kind === 'mysql' ? 'mysql' : null
+  if (!engine) {
+    return { error: `Dumps are only supported for PostgreSQL and MySQL, and this one is ${db.kind ?? 'of an unknown kind'}.` }
+  }
+  if (db.sshServerId || db.vpnProfileId) {
+    return {
+      error:
+        'This database is reached through a bastion or a VPN, and a dump runs from this machine directly — so it would be pointed at an address it cannot reach.'
+    }
+  }
+  if (db.uri) {
+    return {
+      error:
+        'This connection is defined by a connection string, and rebuilding a dump command out of one is how a dump ends up pointed at the wrong database.'
+    }
+  }
+  if (!db.host || !db.database) return { error: 'This database has no host or database name saved.' }
+  const resolved = resolveDbSecrets<{ id: string; password?: string; uri?: string }>({ id: db.id })
+  return {
+    target: {
+      engine,
+      host: db.host,
+      port: db.port ?? (engine === 'postgres' ? 5432 : 3306),
+      username: db.username ?? '',
+      database: db.database
+    },
+    password: resolved.password ?? ''
   }
 }

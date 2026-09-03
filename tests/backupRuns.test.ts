@@ -20,7 +20,11 @@ import {
   withNameTimes,
   writeTargets
 } from '../src/main/services/backup'
-import type { SftpIo } from '../src/main/services/backupTargets'
+import {
+  databaseDumpTarget,
+  dumpableDatabases,
+  type SftpIo
+} from '../src/main/services/backupTargets'
 import { vaultCreate, vaultDestroy, vaultDispose, vaultLock, vaultSave } from '../src/main/services/vault'
 import {
   dueDestinations,
@@ -846,5 +850,94 @@ describe('staged downloads', () => {
     discardStagedBackup(outsider)
     expect(existsSync(outsider)).toBe(true)
     unlinkSync(outsider)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Which databases a dump can come from
+// ---------------------------------------------------------------------------
+
+describe('databaseDumpTarget', () => {
+  function saveDatabases(databases: Record<string, unknown>[]): void {
+    writeFileSync(join(USER_DATA, 'shellpilot-data.json'), JSON.stringify({ databases }))
+  }
+
+  const direct = {
+    id: 'db-orders',
+    name: 'orders-prod',
+    kind: 'postgres',
+    host: 'db.internal',
+    port: 5432,
+    username: 'reporting',
+    database: 'orders',
+    uri: false,
+    sshServerId: null,
+    vpnProfileId: null
+  }
+
+  it('builds a dump target from a directly reachable database', () => {
+    saveDatabases([direct])
+    expect(databaseDumpTarget('db-orders')).toEqual({
+      target: {
+        engine: 'postgres',
+        host: 'db.internal',
+        port: 5432,
+        username: 'reporting',
+        database: 'orders'
+      },
+      password: ''
+    })
+  })
+
+  it('refuses a database behind a bastion, rather than dialling an address it cannot reach', () => {
+    // dbOps opens a forward for exactly this reason. A dump that ignored it
+    // would sit on a TCP connect until it timed out and then report a network
+    // error about the wrong address.
+    saveDatabases([{ ...direct, sshServerId: 'srv-bastion' }])
+    expect(databaseDumpTarget('db-orders')).toEqual({
+      error:
+        'This database is reached through a bastion or a VPN, and a dump runs from this machine directly — so it would be pointed at an address it cannot reach.'
+    })
+  })
+
+  it('refuses a database behind a VPN for the same reason', () => {
+    saveDatabases([{ ...direct, vpnProfileId: 'vpn-office' }])
+    expect('error' in databaseDumpTarget('db-orders')).toBe(true)
+  })
+
+  it('refuses a connection defined by a connection string', () => {
+    saveDatabases([{ ...direct, uri: true }])
+    expect(databaseDumpTarget('db-orders')).toEqual({
+      error:
+        'This connection is defined by a connection string, and rebuilding a dump command out of one is how a dump ends up pointed at the wrong database.'
+    })
+  })
+
+  it('refuses an engine there is no dump binary for, by name', () => {
+    saveDatabases([{ ...direct, kind: 'mongodb' }])
+    expect(databaseDumpTarget('db-orders')).toEqual({
+      error: 'Dumps are only supported for PostgreSQL and MySQL, and this one is mongodb.'
+    })
+  })
+
+  it('offers only the databases a dump could actually be taken from', () => {
+    saveDatabases([
+      direct,
+      { ...direct, id: 'db-mysql', name: 'billing', kind: 'mysql', port: 3306 },
+      { ...direct, id: 'db-mongo', name: 'events', kind: 'mongodb' },
+      { ...direct, id: 'db-bastion', name: 'behind-bastion', sshServerId: 'srv-1' },
+      { ...direct, id: 'db-uri', name: 'by-uri', uri: true }
+    ])
+    expect(dumpableDatabases()).toEqual([
+      { id: 'db-orders', name: 'orders-prod', engine: 'postgres' },
+      { id: 'db-mysql', name: 'billing', engine: 'mysql' }
+    ])
+  })
+
+  it('says so when the database has been deleted since the destination was set up', () => {
+    saveDatabases([])
+    expect(databaseDumpTarget('db-orders')).toEqual({
+      error: 'That database is no longer configured.'
+    })
   })
 })

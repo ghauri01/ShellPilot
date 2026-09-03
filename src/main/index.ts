@@ -166,6 +166,7 @@ import {
   backupInspect,
   deleteAllData,
   discardStagedBackup,
+  dumpToDestination,
   inspectRemoteBackup,
   listRemoteBackups,
   readTargets,
@@ -176,7 +177,8 @@ import {
   startBackupSchedule,
   stopBackupSchedule
 } from './services/backup'
-import type { BackupDestination } from '../shared/backup'
+import { databaseDumpTarget, dumpableDatabases } from './services/backupTargets'
+import type { BackupDestination, DumpRunReport } from '../shared/backup'
 import {
   checkForUpdates,
   getUpdaterStatus,
@@ -2194,6 +2196,27 @@ ipcMain.handle('backup:inspectRemote', async (_e, id: string, name: string, pass
   return inspectRemoteBackup(dest, name, password)
 })
 ipcMain.handle('backup:discardStaged', (_e, path: string) => discardStagedBackup(path))
+// A dump is a source, not a bundle: it is plaintext SQL and is named .sql, so
+// retention never counts it as a generation of an encrypted backup. The panel
+// says so where the button is.
+ipcMain.handle('backup:dumpableDatabases', () => dumpableDatabases())
+ipcMain.handle('backup:dumpDatabase', async (_e, destinationId: string, databaseId: string) => {
+  const stamp = new Date().toISOString()
+  const refuse = (error: string): DumpRunReport => ({
+    ok: false,
+    destinationId,
+    destinationName: destinationId,
+    verified: false,
+    error,
+    startedAt: stamp,
+    finishedAt: stamp
+  })
+  const dest = readTargets().destinations.find((d) => d.id === destinationId)
+  if (!dest) return refuse('That destination is no longer configured.')
+  const resolved = databaseDumpTarget(databaseId)
+  if ('error' in resolved) return refuse(resolved.error)
+  return dumpToDestination(dest, resolved.target, resolved.password)
+})
 ipcMain.handle('backup:chooseDirectory', async () => {
   const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
   const chosen = await dialog.showOpenDialog(win, {

@@ -338,3 +338,77 @@ describe('choosing a destination', () => {
     expect(screen.getByText(/only happen while the vault is unlocked/)).toBeTruthy()
   })
 })
+
+describe('database dumps', () => {
+  const withDbs = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+    bridge({
+      dumpableDatabases: vi.fn(async () => [
+        { id: 'db-orders', name: 'orders-prod', engine: 'postgres' as const }
+      ]),
+      ...over
+    })
+
+  it('says a dump is not encrypted, right where the button is', async () => {
+    stubBridge(withDbs())
+    render(<BackupDestinations />)
+
+    await screen.findByRole('button', { name: /Dump now/ })
+    expect(
+      screen.getByText(
+        /A dump is plain SQL, written alongside the backups and encrypted by nothing/
+      )
+    ).toBeTruthy()
+  })
+
+  it('reports what a dump wrote, in bytes it read back', async () => {
+    stubBridge(
+      withDbs({
+        dumpDatabase: vi.fn(async () => ({
+          ok: true,
+          destinationId: 'd-local',
+          destinationName: 'NAS folder',
+          name: 'shellpilot-dump-orders-20240506T070809Z.sql',
+          bytes: 81920,
+          verified: true,
+          startedAt: '',
+          finishedAt: ''
+        }))
+      })
+    )
+    render(<BackupDestinations />)
+
+    await userEvent.selectOptions(
+      await screen.findByRole('combobox'),
+      'db-orders'
+    )
+    await userEvent.click(screen.getByRole('button', { name: /Dump now/ }))
+
+    await screen.findByText(
+      'shellpilot-dump-orders-20240506T070809Z.sql written and read back (81920 bytes).'
+    )
+  })
+
+  it('says nothing was written when the dump failed', async () => {
+    stubBridge(
+      withDbs({
+        dumpDatabase: vi.fn(async () => ({
+          ok: false,
+          destinationId: 'd-local',
+          destinationName: 'NAS folder',
+          verified: false,
+          error: 'pg_dump exited cleanly but produced no output.',
+          startedAt: '',
+          finishedAt: ''
+        }))
+      })
+    )
+    render(<BackupDestinations />)
+
+    await userEvent.selectOptions(await screen.findByRole('combobox'), 'db-orders')
+    await userEvent.click(screen.getByRole('button', { name: /Dump now/ }))
+
+    await screen.findByText(
+      'Nothing was written: pg_dump exited cleanly but produced no output.'
+    )
+  })
+})

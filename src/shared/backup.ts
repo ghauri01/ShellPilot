@@ -445,6 +445,24 @@ export function dumpCommand(target: DumpTarget, password: string): DumpCommand {
   }
 }
 
+/** What a dump run proved. Not a BackupRunReport: a dump has no retention and
+ *  no restore test, because it is not an encrypted bundle and nothing here can
+ *  open it to check. What it does have is the read-back — a dump that cannot be
+ *  read off the destination is as useless as a bundle that cannot. */
+export interface DumpRunReport {
+  ok: boolean
+  destinationId: string
+  destinationName: string
+  name?: string
+  bytes?: number
+  digest?: string
+  verified: boolean
+  error?: string
+  failedStage?: BackupStage
+  startedAt: string
+  finishedAt: string
+}
+
 /** The object a dump is written under. Not `.spbackup`: a dump is plaintext
  *  SQL and is NOT one of our encrypted bundles, so retention must never see it
  *  as a generation of one. */

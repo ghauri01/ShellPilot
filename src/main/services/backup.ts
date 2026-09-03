@@ -28,6 +28,7 @@ import type {
   BackupTargetsFile,
   BackupVerification,
   DumpCommand,
+  DumpRunReport,
   DumpTarget,
   RemoteListResult
 } from '../../shared/backup'
@@ -723,20 +724,6 @@ export function discardStagedBackup(path: string): void {
  * Raising it is a decision about memory, and it should look like one.
  */
 export const MAX_DUMP_BYTES = 512 * 1024 * 1024
-
-export interface DumpRunReport {
-  ok: boolean
-  destinationId: string
-  destinationName: string
-  name?: string
-  bytes?: number
-  digest?: string
-  verified: boolean
-  error?: string
-  failedStage?: BackupStage
-  startedAt: string
-  finishedAt: string
-}
 
 export interface SpawnedDump {
   /** Everything the dump wrote to stdout. */

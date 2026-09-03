@@ -112,6 +112,8 @@ import type {
   BackupResult,
   BackupRunReport,
   BackupTargetsFile,
+  DumpEngine,
+  DumpRunReport,
   RemoteListResult
 } from '../shared/backup'
 import type { UpdatePrefs, UpdaterCapabilities, UpdaterStatus } from '../shared/updater'
@@ -609,7 +611,11 @@ const api = {
     inspectRemote: (id: string, name: string, password: string): Promise<BackupResult> =>
       ipcRenderer.invoke('backup:inspectRemote', id, name, password),
     discardStaged: (path: string): Promise<void> => ipcRenderer.invoke('backup:discardStaged', path),
-    chooseDirectory: (): Promise<string | null> => ipcRenderer.invoke('backup:chooseDirectory')
+    chooseDirectory: (): Promise<string | null> => ipcRenderer.invoke('backup:chooseDirectory'),
+    dumpableDatabases: (): Promise<{ id: string; name: string; engine: DumpEngine }[]> =>
+      ipcRenderer.invoke('backup:dumpableDatabases'),
+    dumpDatabase: (destinationId: string, databaseId: string): Promise<DumpRunReport> =>
+      ipcRenderer.invoke('backup:dumpDatabase', destinationId, databaseId)
   },
   updater: {
     check: (): Promise<void> => ipcRenderer.invoke('updater:check'),
