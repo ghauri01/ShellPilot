@@ -179,15 +179,115 @@ const SEED_FILES = [
   ...tsFilesIn(join(ROOT, 'src/cli'))
 ]
 
+// ---------------------------------------------------------------------------
+// What counts as the job engine, DERIVED rather than listed
+// ---------------------------------------------------------------------------
+//
+// This used to be a hand-written `/^(jobRunner|jobExec|jobs)$/i` whose own
+// docstring said "a file added to the engine goes here" — and then jobDetached
+// was added to the engine and did not go here, because a comment is not a
+// mechanism. A literal list of engine modules has exactly one failure mode and
+// it is the one that matters: it goes stale silently, and the guard keeps
+// passing while the thing it guards grows.
+//
+// So the set is SCANNED from the directory the engine lives in. Two
+// consequences, both wanted:
+//
+//   * A new `src/main/services/job*.ts` is covered by the import assertions the
+//     moment it exists, before anyone imports it.
+//   * `REVIEWED_JOB_FILES` below is compared against that scan, so a new engine
+//     file fails THE DAY IT IS ADDED rather than the day someone wires it up.
+//     The fix for that failure is one line and a reviewer reading it — which is
+//     the entire point, because "should this be reachable from the bridge?" is
+//     a question to answer when the file is written, not when it is imported.
+//
+// The shared/ half cannot be scanned the same way: `src/shared` is full of
+// modules the bridge legitimately uses, so the job-adjacent ones are named. The
+// three that matter beyond the runner itself are patch management (it plans and
+// approves estate-wide upgrades), the topology graph (it decides what a reboot
+// takes down), and the approval log (a job that could write its own approval
+// record could launder one). Two of them are reachable through `shared/jobs`
+// today by a single TYPE-ONLY import each — the kind a reviewer deletes with
+// "inline these three types and drop the dependency", after which patch
+// management is freely importable from the bridge and nothing goes red. Named
+// directly, that edge no longer carries the guarantee.
+
+const SERVICES_DIR = join(ROOT, 'src/main/services')
+
+/** Basenames of every `job*.ts` in the engine directory, right now. */
+function scanJobModules(): string[] {
+  return readdirSync(SERVICES_DIR)
+    .filter((f) => /^job.*\.tsx?$/i.test(f))
+    .map((f) => f.replace(/\.tsx?$/i, ''))
+    .sort()
+}
+
+/** The engine files a human has looked at. Compared against the scan below. */
+const REVIEWED_JOB_FILES = ['jobDetached', 'jobExec', 'jobRunner']
+
+/** Job-adjacent modules outside `src/main/services`, named because that
+ *  directory cannot be scanned wholesale. */
+const SHARED_JOB_MODULES = ['jobs', 'patch', 'topology', 'broadcast', 'approvalLog']
+
+const JOB_MODULE_NAMES = [...new Set([...scanJobModules(), ...SHARED_JOB_MODULES])]
+
 /** Every module the job engine is made of. Matched on the specifier's basename,
  *  so './jobRunner', '../services/jobRunner.js' and './jobRunner/index' all
- *  hit. A file added to the engine goes here. */
-const JOB_MODULE = /^(jobRunner|jobExec|jobs)$/i
+ *  hit. */
+const JOB_MODULE = new RegExp(`^(${JOB_MODULE_NAMES.join('|')})$`, 'i')
 
 function isForbiddenSpecifier(spec: string): boolean {
   const base = spec.replace(/\.[cm]?[jt]sx?$/i, '').split(/[/\\]/).pop() ?? ''
   return JOB_MODULE.test(base)
 }
+
+describe('the job engine is enumerated by scanning, not by memory', () => {
+  it('has no engine file nobody reviewed', () => {
+    const scanned = scanJobModules()
+    // Anti-vacuity first: a scan that found nothing would make every
+    // import assertion in this file pass against an empty alternation.
+    expect(
+      scanned.length,
+      `No job*.ts found in ${relative(ROOT, SERVICES_DIR)} — the scan is broken, and JOB_MODULE ` +
+        `below is built from it.`
+    ).toBeGreaterThan(0)
+
+    const unreviewed = scanned.filter((f) => !REVIEWED_JOB_FILES.includes(f))
+    expect(
+      unreviewed,
+      `New job engine files: ${unreviewed.join(', ')}.\n\n` +
+        `This fails on the day the file was ADDED, deliberately, rather than on the day someone ` +
+        `imports it from the bridge — because "may an agent reach this?" is a question to answer ` +
+        `while writing the file, not while debugging a red build later. The engine is not ` +
+        `agent-reachable (see the header: DURABILITY DEFEATS REVOCATION), and every job*.ts here ` +
+        `inherits that. Add it to REVIEWED_JOB_FILES in a diff a reviewer sees.`
+    ).toEqual([])
+
+    const gone = REVIEWED_JOB_FILES.filter((f) => !scanned.includes(f))
+    expect(
+      gone,
+      `REVIEWED_JOB_FILES names files that no longer exist: ${gone.join(', ')}. A stale entry ` +
+        `here is a hole: the list stops describing the directory it is supposed to mirror.`
+    ).toEqual([])
+  })
+
+  it('covers the whole engine, including the detached executor', () => {
+    // The specific miss this replaced: jobDetached — the executor that
+    // deliberately OUTLIVES the link, which is the exact property that makes a
+    // job unrevocable — was not in the hand-written alternation at all.
+    for (const name of ['jobRunner', 'jobExec', 'jobDetached', 'jobs', 'patch', 'topology']) {
+      expect(JOB_MODULE.test(name), name).toBe(true)
+    }
+    // And the walker's specifier form of the same names.
+    for (const spec of ['./jobDetached', '../services/jobDetached.js', '../../shared/patch']) {
+      expect(isForbiddenSpecifier(spec), spec).toBe(true)
+    }
+    // Not everything beginning with "job" out in the world: the match is on a
+    // basename, so an unrelated module is not swept up by accident.
+    expect(isForbiddenSpecifier('./jobsite')).toBe(false)
+    expect(isForbiddenSpecifier('node:path')).toBe(false)
+  })
+})
 
 /**
  * The path aliases the bundler resolves, so the walker resolves them too.
@@ -421,7 +521,22 @@ describe('what must NOT be able to reach this', () => {
       'createJob',
       'shared/jobs',
       'jobExec',
-      'attachedJobExecutor'
+      'attachedJobExecutor',
+      // The detached executor and its factory. Missing here for exactly as long
+      // as it was missing from JOB_MODULE above, and it is the half of the
+      // engine that keeps running after the link that started it is gone.
+      'jobDetached',
+      'detachedJobExecutor',
+      // Patch management and the topology graph: the two modules that decide
+      // what an estate-wide upgrade does and what a reboot takes down.
+      'shared/patch',
+      'planPatch',
+      'shared/topology',
+      'buildTopology',
+      // The approval record. A caller that can write one can launder consent
+      // for work it was never granted.
+      'approvalLog',
+      'recordJobApproval'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }

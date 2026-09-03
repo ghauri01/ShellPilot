@@ -16,6 +16,7 @@ import {
   buildRebootStep,
   buildRebootVerify,
   evaluateGate,
+  gateTimeoutReason,
   parseRebootBootId,
   parseRebootVerify,
   patchCommandFor,
@@ -121,6 +122,48 @@ describe('a host that cannot report security updates', () => {
     const s = summarisePatch([buildPatchRow(input('a', arch())), buildPatchRow(input('b', denied))])
     expect(s.securityUnanswerable).toBe(1)
     expect(s.securityUnknown).toBe(1)
+  })
+
+  it('will not answer "no work" for a host that could not answer', () => {
+    // THE NULL-IS-NOT-ZERO RULE, APPLIED TO hasWork. A boolean has no room for
+    // "cannot say", so it spends "cannot say" as "no" — and "select everything
+    // with work" then silently omits precisely the hosts nobody can vouch for,
+    // which are the ones an operator most needs to see.
+    expect(buildPatchRow(input('archbox', arch())).hasWork).toBe('unknown')
+    expect(buildPatchRow(input('never-collected', null)).hasWork).toBe('unknown')
+
+    const denied = facts({ securityUpdates: null, sources: sources({ 'security-updates': 'denied' }) })
+    expect(buildPatchRow(input('denied', denied)).hasWork).toBe('unknown')
+
+    const noReboot = facts({ rebootRequired: null, sources: sources({ 'reboot-required': 'no-tool' }) })
+    expect(buildPatchRow(input('no-tool', noReboot)).hasWork).toBe('unknown')
+  })
+
+  it('still says yes and no where there is an answer', () => {
+    expect(buildPatchRow(input('clean', facts())).hasWork).toBe('no')
+    expect(buildPatchRow(input('pending', facts({ pendingUpdates: 3 }))).hasWork).toBe('yes')
+    expect(buildPatchRow(input('sec', facts({ securityUpdates: 1 }))).hasWork).toBe('yes')
+    expect(buildPatchRow(input('reboot', facts({ rebootRequired: true }))).hasWork).toBe('yes')
+  })
+
+  it('says yes over unknown when one answer is a real number', () => {
+    // A host with 4 pending updates and an unreadable security count has work.
+    // "Unknown" is for a host where nothing positive was established at all.
+    const half = facts({
+      pendingUpdates: 4,
+      securityUpdates: null,
+      sources: sources({ 'security-updates': 'denied' })
+    })
+    expect(buildPatchRow(input('a', half)).hasWork).toBe('yes')
+  })
+
+  it('agrees with the summary about an estate nobody can vouch for', () => {
+    // The contradiction this fixes: the summary line says "that is not an
+    // all-clear: those hosts are unknown, not clean", while the button beside
+    // it is disabled because every host answered `hasWork: false`.
+    const rows = [buildPatchRow(input('archbox', arch())), buildPatchRow(input('b', null))]
+    expect(summarisePatch(rows).allClear).toBe(false)
+    expect(rows.every((r) => r.hasWork === 'no')).toBe(false)
   })
 
   it('uses the same words as the inventory panel for the same fact', () => {
@@ -318,8 +361,21 @@ describe('planning a patch run', () => {
     // One spec with a reboot step, one without: the step list IS the spec, so
     // they cannot be the same job.
     expect(plan.jobs).toHaveLength(2)
-    const withReboot = plan.jobs.find((j) => j.spec.steps.some((s) => s.reboot))
-    expect(withReboot!.targets.map((t) => t.serverId)).toEqual(['web'])
+    // BOTH jobs are checked, not only the one `.find` happened to land on.
+    // Asking the reboot-carrying job who its targets are proves web reboots; it
+    // does not prove app-1 does NOT, and putting a reboot step on both specs
+    // passed that assertion while restarting a host that never asked for one.
+    const rebooting = plan.jobs.filter((j) => j.spec.steps.some((s) => s.reboot === true))
+    const quiet = plan.jobs.filter((j) => !j.spec.steps.some((s) => s.reboot === true))
+    expect(rebooting).toHaveLength(1)
+    expect(quiet).toHaveLength(1)
+    expect(rebooting[0].targets.map((t) => t.serverId)).toEqual(['web'])
+    expect(quiet[0].targets.map((t) => t.serverId)).toEqual(['app'])
+    // And nothing that merely LOOKS like a restart is hiding in the quiet
+    // job's command text either — `reboot: true` is a declaration, not a
+    // guarantee that the other step list is inert.
+    expect(quiet[0].spec.steps.map((s) => s.command).join('\n')).not.toMatch(/reboot|shutdown -r/)
+    expect(plan.hosts.find((h) => h.serverId === 'app')!.reboot).toBe(false)
   })
 
   it('splits by package manager rather than substituting a command per host', () => {
@@ -370,6 +426,55 @@ describe('planning a patch run', () => {
     expect(plan.unmatchedNote).toContain('1 hop is not backed by a saved server')
   })
 
+  it('refuses the reboot when an "unmatched" hop is a host in this very run', () => {
+    // The one case where the hole is not hypothetical, and the one the counted
+    // note handled worst: web-1 routes through bare bastion.example, that
+    // machine IS saved as `bastion`, and this run is about to restart it. The
+    // note said "1 hop is not backed by a saved server (on web-1)" and never
+    // named the host standing in front of the operator.
+    const plan = planPatch({
+      scope: 'all',
+      hosts: [{ serverId: 'b', serverName: 'bastion', packageManager: 'apt' }],
+      waveSize: 1,
+      reboot: true,
+      healthGate: false,
+      servers: [
+        { id: 'b', name: 'bastion', host: 'bastion.example', port: 22 },
+        {
+          id: 'w',
+          name: 'web-1',
+          host: 'web.example',
+          port: 22,
+          route: [{ host: 'bastion.example', port: 22, username: 'ops' }]
+        }
+      ]
+    })
+    expect(plan.blocks.map((b) => b.serverName)).toEqual(['bastion'])
+    expect(plan.blocks[0].reason).toContain('web-1')
+    expect(plan.blocks[0].reason).toContain('bastion.example:22')
+    // Resolved, so it is no longer part of the hole. A note claiming a blind
+    // spot next to a refusal that just proved there is none teaches an
+    // operator to skip the note.
+    expect(plan.unmatchedNote).toBeNull()
+  })
+
+  it('refuses the reboot of a second saved record for the same machine', () => {
+    const plan = planPatch({
+      scope: 'all',
+      hosts: [{ serverId: 'id2', serverName: 'bastion-b', packageManager: 'apt' }],
+      waveSize: 1,
+      reboot: true,
+      healthGate: false,
+      servers: [
+        { id: 'id1', name: 'bastion-a', host: 'bastion.example', port: 22 },
+        { id: 'id2', name: 'bastion-b', host: 'bastion.example', port: 22 },
+        { id: 'x', name: 'x-1', host: 'x.example', port: 22, route: [{ serverId: 'id1' }] }
+      ]
+    })
+    expect(plan.blocks.map((b) => b.serverName)).toEqual(['bastion-b'])
+    expect(plan.blocks[0].reason).toContain('x-1')
+  })
+
   it('sets the gate on the spec only when the operator asked for one', () => {
     const of = (healthGate: boolean) =>
       planPatch({
@@ -396,7 +501,21 @@ describe('the reboot step', () => {
     expect(step).toContain('boot_id')
     // The output is flushed before the machine goes, or the boot id we are
     // about to compare against is never written down.
-    expect(step.indexOf('sync')).toBeLessThan(step.indexOf('systemctl reboot'))
+    //
+    // PRESENCE BEFORE ORDERING, and it is not pedantry: `indexOf` on an absent
+    // needle is -1, and -1 is less than everything. Asserting only the order
+    // meant deleting `sync;` from buildRebootStep left this green — the flush
+    // the whole reboot-verification story rests on was protected by nothing.
+    const flush = step.indexOf('sync;')
+    const restart = step.indexOf('systemctl reboot')
+    expect(flush, 'the reboot step does not flush before it goes down').toBeGreaterThanOrEqual(0)
+    expect(restart, 'the reboot step does not restart the machine').toBeGreaterThanOrEqual(0)
+    expect(flush).toBeLessThan(restart)
+    // And the fallback for a host without systemd is on the far side of the
+    // same flush, or half the estate gets the bug the ordering above forbids.
+    const fallback = step.indexOf('shutdown -r now')
+    expect(fallback).toBeGreaterThanOrEqual(0)
+    expect(flush).toBeLessThan(fallback)
     expect(parseRebootBootId(`some output\n${REBOOT_BOOT_ID_MARK}abc-123\nmore\n`)).toBe('abc-123')
     expect(parseRebootBootId('nothing here')).toBeNull()
   })
@@ -496,5 +615,19 @@ describe('the health gate between waves', () => {
   it('passes a clean wave', () => {
     const v = evaluateGate([gh('a'), gh('b')], { since: 1_000 })
     expect(v.ok).toBe(true)
+  })
+
+  it('names the sampler when it gives up, because that is the setting that fixes it', () => {
+    // THE FAILURE THIS SENTENCE IS FOR. Background checking is off by default.
+    // With it off there is no health observation of any kind, so every host is
+    // `stale`, the gate polls for five minutes and halts — and the operator is
+    // told there was "no health check newer than the wave" with no hint that
+    // the thing which would have produced one is a switch in Settings. Naming
+    // the wave and the symptom without naming the cause turns a two-click fix
+    // into a support question.
+    const msg = gateTimeoutReason('wave-1', 'No health check newer than this wave for web-1.')
+    expect(msg).toContain('wave-1')
+    expect(msg).toContain('Check servers in the background')
+    expect(msg).toContain('Settings')
   })
 })

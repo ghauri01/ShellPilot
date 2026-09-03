@@ -115,6 +115,149 @@ describe('the hole in the graph', () => {
   })
 })
 
+describe('a bastion the graph can only recognise by its address', () => {
+  // The hole above is real, but it has a floor: a hop that names no saved
+  // server is still an ADDRESS the user typed, and a saved server is still an
+  // address the user typed. When the two are the same string, the machine is
+  // not invisible — it is sitting in the list under another name, and a note
+  // saying "somewhere out there is a hop we cannot see" is the one sentence
+  // that is definitely wrong.
+
+  it('resolves a bare hop to the saved server at the same address', () => {
+    // web-1 routes through bare bastion.example. That machine is ALSO saved,
+    // as `bastion`. Rebooting `bastion` drops web-1 — and keying on serverId
+    // alone, nothing refuses it.
+    const topo = buildTopology([
+      { id: 'b', name: 'bastion', host: 'bastion.example', port: 22 },
+      {
+        id: 'w',
+        name: 'web-1',
+        host: 'web.example',
+        port: 22,
+        route: [{ host: 'bastion.example', port: 22, username: 'ops' }]
+      }
+    ])
+    expect(isJumpHost(topo, 'b')).toBe(true)
+    expect(dependentsOf(topo, 'b').map((d) => d.name)).toEqual(['web-1'])
+    expect(dependentsOf(topo, 'b')[0].matchedBy).toBe('address')
+    const block = rebootBlockFor(topo, 'b')
+    expect(block).not.toBeNull()
+    expect(block!.reason).toContain('web-1')
+    // And it says HOW it made the match, because an address match is a
+    // different claim from a saved reference and must not read as one.
+    expect(block!.reason).toContain('bastion.example:22')
+    expect(block!.reason).toContain('by the address')
+  })
+
+  it('stops counting a hop it resolved by address as part of the hole', () => {
+    // The note exists to say the graph cannot see something. Once it can, the
+    // note is a lie in the operator's favour, which is the direction that
+    // matters.
+    const topo = buildTopology([
+      { id: 'b', name: 'bastion', host: 'bastion.example', port: 22 },
+      { id: 'w', name: 'web-1', route: [{ host: 'bastion.example', port: 22 }] }
+    ])
+    expect(topo.unmatchedHops).toEqual([])
+    expect(unmatchedHopNote(topo)).toBeNull()
+  })
+
+  it('refuses a reboot of the second saved record for one machine', () => {
+    // bastion-a and bastion-b are the same box saved twice. X routes through
+    // bastion-a by serverId; nothing names bastion-b at all. Rebooting
+    // bastion-b takes X's connection down, and a serverId-only check returns
+    // null for it.
+    const topo = buildTopology([
+      { id: 'id1', name: 'bastion-a', host: 'bastion.example', port: 22 },
+      { id: 'id2', name: 'bastion-b', host: 'bastion.example', port: 22 },
+      { id: 'x', name: 'x-1', route: [{ serverId: 'id1', host: 'bastion.example', port: 22 }] }
+    ])
+    expect(rebootBlockFor(topo, 'id1')).not.toBeNull()
+    const second = rebootBlockFor(topo, 'id2')
+    expect(second, 'rebooting the duplicate record drops x-1 and nothing refused it').not.toBeNull()
+    expect(second!.reason).toContain('x-1')
+    expect(dependentsOf(topo, 'id2')[0].matchedBy).toBe('address')
+  })
+
+  it('finds the duplicate even when the hop carries only a serverId', () => {
+    // The hop names id1 and nothing else; the address comes from id1's own
+    // saved record. Without that step the duplicate is invisible whenever the
+    // route was built by picking a server from a list, which is how the app
+    // builds them.
+    const topo = buildTopology([
+      { id: 'id1', name: 'bastion-a', host: 'bastion.example', port: 22 },
+      { id: 'id2', name: 'bastion-b', host: 'bastion.example', port: 22 },
+      { id: 'x', name: 'x-1', route: [{ serverId: 'id1' }] }
+    ])
+    expect(rebootBlockFor(topo, 'id2')).not.toBeNull()
+  })
+
+  it('matches on host AND port, so a different service on one box is not one machine', () => {
+    const topo = buildTopology([
+      { id: 'b', name: 'bastion', host: 'shared.example', port: 2222 },
+      { id: 'w', name: 'web-1', route: [{ host: 'shared.example', port: 22 }] }
+    ])
+    expect(rebootBlockFor(topo, 'b')).toBeNull()
+    expect(topo.unmatchedHops).toHaveLength(1)
+  })
+
+  it('treats an omitted port as 22 on both sides, and ignores case', () => {
+    const topo = buildTopology([
+      { id: 'b', name: 'bastion', host: 'Bastion.Example' },
+      { id: 'w', name: 'web-1', route: [{ host: 'bastion.example' }] }
+    ])
+    expect(dependentsOf(topo, 'b').map((d) => d.name)).toEqual(['web-1'])
+  })
+
+  it('does not make a server its own dependent by matching its own address', () => {
+    // The self-referencing-hop rule, restated for the address path: a server
+    // whose route hop is its own address is a configuration mistake, not a
+    // dependency, and reading it as one makes that host permanently
+    // unrebootable for being its own bastion.
+    const topo = buildTopology([
+      { id: 'a', name: 'alpha', host: 'alpha.example', port: 22, route: [{ host: 'alpha.example' }] }
+    ])
+    expect(isJumpHost(topo, 'a')).toBe(false)
+    expect(rebootBlockFor(topo, 'a')).toBeNull()
+    // And it is not part of the hole either: the hop resolved, to the one
+    // machine it could not possibly be a hidden bastion for.
+    expect(topo.unmatchedHops).toEqual([])
+  })
+
+  it('resolves a dangling serverId by address rather than reporting a hole', () => {
+    // The reference is dead — deleted, or another workspace — but the address
+    // beside it is still a saved server. Demoting to unmatched here would
+    // print a note about a hop that is sitting in the list.
+    const topo = buildTopology([
+      { id: 'b', name: 'bastion', host: 'bastion.example', port: 22 },
+      { id: 'w', name: 'web-1', route: [{ serverId: 'ghost', host: 'bastion.example', port: 22 }] }
+    ])
+    expect(dependentsOf(topo, 'b').map((d) => d.name)).toEqual(['web-1'])
+    expect(topo.unmatchedHops).toEqual([])
+  })
+
+  it('still demotes a dangling serverId with no usable address to the hole', () => {
+    // Unchanged and load-bearing: refusing on a host nobody can name is worse
+    // than counting it.
+    const topo = buildTopology([{ id: 'w', name: 'web-1', route: [{ serverId: 'ghost' }] }])
+    expect(topo.unmatchedHops).toHaveLength(1)
+    expect(topo.unmatchedHops[0].where).toContain('ghost')
+  })
+
+  it('keeps blocking every link of a transitive chain on its own direct dependent', () => {
+    // Sound and must stay: a -> b -> c, every intermediate has a direct
+    // dependent, so each link refuses on its own without the graph ever
+    // claiming to compute reachability.
+    const topo = buildTopology([
+      { id: 'c', name: 'core', host: 'core.example' },
+      { id: 'b', name: 'mid', host: 'mid.example', route: [{ serverId: 'c' }] },
+      { id: 'a', name: 'edge', host: 'edge.example', route: [{ serverId: 'b' }] }
+    ])
+    expect(rebootBlockFor(topo, 'c')!.reason).toContain('mid')
+    expect(rebootBlockFor(topo, 'b')!.reason).toContain('edge')
+    expect(rebootBlockFor(topo, 'a')).toBeNull()
+  })
+})
+
 describe('saved databases on a host', () => {
   const servers = [srv('a', 'db-a'), srv('b', 'db-b'), srv('c', 'db-c')]
   const dbs = [

@@ -14,6 +14,7 @@ import {
   type FactStatus,
   type HostFacts
 } from '../src/shared/hostFacts'
+import { REBOOT_BOOT_ID_MARK } from '../src/shared/patch'
 import type { Server } from '../src/renderer/src/types'
 
 // The patch screen, rendered.
@@ -62,6 +63,11 @@ function hop(serverId: string | null): Server['route'][number] {
   }
 }
 
+/** A hop that names no saved server at all — only the address the user typed. */
+function bareHopTo(host: string, port: number): Server['route'][number] {
+  return { id: `hop-${host}`, label: 'jump', host, port, username: 'ops', auth: 'key' }
+}
+
 const sources = (over: Partial<Record<FactSourceId, FactStatus>> = {}): FactSourceReport[] =>
   FACT_SOURCE_IDS.map((id) => ({ id, label: FACT_SOURCE_LABEL[id], status: over[id] ?? 'ok' }))
 
@@ -88,8 +94,17 @@ function seedFacts(entries: Record<string, HostFacts>): void {
   for (const [id, f] of Object.entries(entries)) useFleet.getState().reportFacts(id, f, at)
 }
 
+function setSampling(on: boolean): void {
+  useApp.setState((s) => ({ settings: { ...s.settings, fleetSamplingEnabled: on } }))
+}
+
 beforeEach(() => {
   stubBridge({ jobs: { onProgress: () => () => {}, run: vi.fn() } })
+  useFleet.setState({ facts: {}, errors: {} })
+  useApp.setState({ databases: [] })
+  // The shipped default, restated per test so one test turning it on cannot
+  // make another pass for a reason it did not choose.
+  setSampling(false)
 })
 
 describe('the security column', () => {
@@ -189,6 +204,145 @@ describe('the hole in the topology', () => {
     // allowed. The note is what stops that reading as "checked and safe".
     expect(screen.queryByTestId('patch-block')).toBeNull()
   })
+
+  it('refuses instead of counting when the unmatched hop is a host on this screen', async () => {
+    // The panel end of blocker A. web-1's route names no saved server, but the
+    // address it names IS `bastion`, which the operator has just selected for a
+    // restart. The old screen printed "1 hop is not backed by a saved server
+    // (on web-1)" and let the run go: the note told them a hole existed, not
+    // that they were standing in it.
+    seedFacts({
+      bastion: facts({ pendingUpdates: 4, rebootRequired: true }),
+      web: facts({ pendingUpdates: 2 })
+    })
+    const bastion = server('bastion', 'bastion')
+    const web = { ...server('web', 'web-1'), route: [bareHopTo(bastion.host, bastion.port)] }
+    render(<PatchPanel servers={[bastion, web]} />)
+
+    const user = userEvent.setup()
+    await user.click(screen.getByLabelText('Select bastion'))
+    await user.click(screen.getByRole('checkbox', { name: /restart the hosts/i }))
+
+    const block = await screen.findByTestId('patch-block')
+    expect(block.textContent).toContain('web-1')
+    expect(block.textContent).toContain(`${bastion.host}:22`)
+    expect((screen.getByTestId('patch-run') as HTMLButtonElement).disabled).toBe(true)
+    // And it is no longer counted as a hole, because it is not one.
+    expect(screen.queryByTestId('patch-unmatched-hops')).toBeNull()
+  })
+})
+
+describe('the health gate and the sampler it needs', () => {
+  // THE OUT-OF-THE-BOX FAILURE. The gate checkbox defaulted to ON and
+  // background checking defaults to OFF, so `gateHealthFor` returned
+  // `sampledAt: null` for every host, `evaluateGate` said `stale`, and a 60-host
+  // staged run applied wave 1, sat silently for five minutes and halted with
+  // every remaining host "not run" — over a message that never mentioned the
+  // one switch that would have made it work.
+
+  it('will not offer a gate that cannot pass, and names the switch that would fix it', async () => {
+    setSampling(false)
+    seedFacts({ a: facts({ pendingUpdates: 2 }) })
+    render(<PatchPanel servers={[server('a', 'web-1')]} />)
+    const user = userEvent.setup()
+    await user.click(screen.getByLabelText('Select web-1'))
+
+    const gate = screen.getByRole('checkbox', { name: /hold between waves/i }) as HTMLInputElement
+    expect(gate.disabled, 'the gate is offered while nothing can ever satisfy it').toBe(true)
+    expect(gate.checked, 'a ticked gate here halts the run after wave 1, every time').toBe(false)
+
+    const note = screen.getByTestId('patch-gate-unavailable')
+    expect(note.textContent).toContain('Check servers in the background')
+    expect(note.textContent).toContain('Settings')
+  })
+
+  it('offers the gate, on by default, once the sampler is running', async () => {
+    setSampling(true)
+    seedFacts({ a: facts({ pendingUpdates: 2 }) })
+    render(<PatchPanel servers={[server('a', 'web-1')]} />)
+    const user = userEvent.setup()
+    await user.click(screen.getByLabelText('Select web-1'))
+
+    const gate = screen.getByRole('checkbox', { name: /hold between waves/i }) as HTMLInputElement
+    expect(gate.disabled).toBe(false)
+    expect(gate.checked).toBe(true)
+    expect(screen.queryByTestId('patch-gate-unavailable')).toBeNull()
+  })
+
+  it('sends a gate on the spec only when one can actually be evaluated', async () => {
+    // The end of the chain: with no sampler the JobSpec must not ask for a
+    // gate, because the runner would poll GATE_WAIT_MS and halt.
+    setSampling(false)
+    seedFacts({ a: facts({ pendingUpdates: 3 }) })
+    const run = vi.fn().mockResolvedValue({})
+    stubBridge({ jobs: { onProgress: () => () => {}, run } })
+    render(<PatchPanel servers={[server('a', 'web-1')]} />)
+
+    const user = userEvent.setup()
+    await user.click(screen.getByLabelText('Select web-1'))
+    await user.click(screen.getByTestId('patch-run'))
+    const confirm = screen.queryByTestId('patch-confirm')
+    if (confirm) await user.click(confirm)
+
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(1))
+    expect(run.mock.calls[0][0].spec.gate).toBe('none')
+  })
+})
+
+describe('selecting the hosts nobody can vouch for', () => {
+  it('offers the unanswerable hosts rather than quietly leaving them out', async () => {
+    // `hasWork` used to be a boolean, so "cannot say" was spent as "no" and
+    // this button silently omitted precisely the hosts an operator most needs
+    // to look at. Now they are offered, separately and with a count.
+    seedFacts({
+      a: facts({ pendingUpdates: 3 }),
+      b: facts({
+        distroId: 'arch',
+        packageManager: 'pacman',
+        securityUpdates: null,
+        sources: sources({ 'security-updates': 'unsupported' })
+      })
+    })
+    render(<PatchPanel servers={[server('a', 'web-1'), server('b', 'archbox')]} />)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByTestId('patch-select-needy'))
+    expect((screen.getByLabelText('Select web-1') as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByLabelText('Select archbox') as HTMLInputElement).checked).toBe(false)
+
+    const unknown = screen.getByTestId('patch-select-unknown')
+    expect(unknown.textContent).toContain('1')
+    await user.click(unknown)
+    expect((screen.getByLabelText('Select archbox') as HTMLInputElement).checked).toBe(true)
+    // Added to the selection, not swapped for it.
+    expect((screen.getByLabelText('Select web-1') as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('does not leave an all-unanswerable estate with nothing to press', async () => {
+    // The contradiction: the summary says "those hosts are unknown, not clean"
+    // and every control beside it was disabled, which reads as "nothing to do".
+    seedFacts({
+      b: facts({
+        distroId: 'arch',
+        packageManager: 'pacman',
+        securityUpdates: null,
+        sources: sources({ 'security-updates': 'unsupported' })
+      })
+    })
+    render(<PatchPanel servers={[server('b', 'archbox')]} />)
+    expect(await screen.findByTestId('patch-summary')).toHaveProperty('textContent')
+    expect(screen.getByTestId('patch-summary').textContent).toContain('not an all-clear')
+    expect((screen.getByTestId('patch-select-needy') as HTMLButtonElement).disabled).toBe(true)
+    const unknown = screen.getByTestId('patch-select-unknown') as HTMLButtonElement
+    expect(unknown.disabled).toBe(false)
+  })
+
+  it('offers nothing extra when every host answered', async () => {
+    seedFacts({ a: facts({ pendingUpdates: 1 }), b: facts() })
+    render(<PatchPanel servers={[server('a', 'one'), server('b', 'two')]} />)
+    await screen.findByTestId('patch-summary')
+    expect(screen.queryByTestId('patch-select-unknown')).toBeNull()
+  })
 })
 
 describe('what the screen refuses to offer', () => {
@@ -230,6 +384,13 @@ describe('running it', () => {
     const user = userEvent.setup()
     await user.click(screen.getByLabelText('Select web-1'))
     await user.click(screen.getByRole('checkbox', { name: /restart the hosts/i }))
+
+    // Read what the operator was SHOWN, off the screen, before anything runs.
+    // This is the independent record the approval is checked against below.
+    const shown = (
+      (await screen.findByTestId('patch-command')).querySelector('.mono')?.textContent ?? ''
+    ).split('\n')
+
     await user.click(screen.getByTestId('patch-run'))
 
     // A declared reboot is destructive, so the dialog demands the word.
@@ -241,13 +402,41 @@ describe('running it', () => {
     const req = run.mock.calls[0][0]
     expect(req.spec.kind).toBe('patch')
     expect(req.spec.steps).toHaveLength(2)
-    // The reboot is a STEP, with its own line, so it is inside the approval
-    // record's command text by construction. Nothing reboots that the operator
-    // was not shown.
     expect(req.spec.steps[1].reboot).toBe(true)
-    expect(req.approval.commands).toEqual(req.spec.steps.map((s: { command: string }) => s.command))
+
+    // NOTHING REBOOTS THAT THE OPERATOR WAS NOT SHOWN — and that claim is only
+    // worth making against an INDEPENDENT record of what was shown. Comparing
+    // `req.approval.commands` with `req.spec.steps` compares two halves of one
+    // object the panel minted from the other: it is true by construction, and
+    // it stayed true through any bug that put the wrong command in both.
+    //
+    // So the left-hand side here is the text rendered on the screen, read back
+    // out of the DOM.
+    expect(shown.some((c) => c.includes(REBOOT_BOOT_ID_MARK))).toBe(true)
+    expect(shown.some((c) => c.includes('systemctl reboot'))).toBe(true)
+    expect(req.approval.commands).toEqual(shown)
+    // Belt and braces on the reverse direction: the approval carries no command
+    // the screen did not print.
+    for (const c of req.approval.commands as string[]) expect(shown).toContain(c)
     expect(req.approval.phrase).toBe('RUN')
     expect(req.targets[0].cohort).toBe('wave-1')
+  })
+
+  it('shows on screen exactly the steps it is about to run, before any of it starts', async () => {
+    // The other half of the same guarantee, asserted where the operator lives:
+    // the mono block under the controls is the run, not a summary of it.
+    seedFacts({ a: facts({ pendingUpdates: 3, rebootRequired: true }) })
+    render(<PatchPanel servers={[server('a', 'web-1')]} />)
+    const user = userEvent.setup()
+    await user.click(screen.getByLabelText('Select web-1'))
+    await user.click(screen.getByRole('checkbox', { name: /restart the hosts/i }))
+
+    const block = await screen.findByTestId('patch-command')
+    const lines = (block.querySelector('.mono')?.textContent ?? '').split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain('apt-get')
+    expect(lines[1]).toContain(REBOOT_BOOT_ID_MARK)
+    expect(lines[1]).toContain('systemctl reboot')
   })
 
   it('prints main’s refusal instead of leaving the panel wedged', async () => {

@@ -498,9 +498,26 @@ export interface PatchHostRow {
   /** True when this host can never report a security count. Drives the
    *  exclusion from every total and from "all clear". */
   securityUnanswerable: boolean
-  /** Set when the host has something to install, as far as anyone can tell. */
-  hasWork: boolean
+  /**
+   * Whether this host has something to install — in THREE states, because two
+   * is the bug.
+   *
+   *  `yes`     — a count came back above zero, or a reboot is owed.
+   *  `no`      — every question was asked and answered, and the answer was
+   *              nothing.
+   *  `unknown` — at least one question this host could not answer. NOT "no".
+   *
+   * A boolean has no room for "cannot say", so it spends it as "no", and a
+   * screen that selects "everything with work" then silently omits exactly the
+   * hosts nobody can vouch for. It is the same null-is-not-zero rule the rest
+   * of this file follows; `summarisePatch` has always followed it, and this
+   * field used to contradict the summary printed beside it.
+   */
+  hasWork: PatchWorkState
 }
+
+/** @see PatchHostRow.hasWork */
+export type PatchWorkState = 'yes' | 'no' | 'unknown'
 
 function gapHelp(gap: PatchGap, detail?: string): string {
   const base =
@@ -549,6 +566,15 @@ export function buildPatchRow(input: PatchHostInput): PatchHostRow {
   // dnf is "maybe" would be inventing a gap the host does not have.
   const securityUnanswerable = security.gap === 'unsupported'
 
+  // `yes` wins over `unknown`: a host with 4 pending updates and an unreadable
+  // security count plainly has work, and burying it in "unknown" would lose a
+  // fact that was actually established. `unknown` is for a host where nothing
+  // positive was established AND something could not be asked.
+  const somethingToDo =
+    (pending.value ?? 0) > 0 || (security.value ?? 0) > 0 || facts?.rebootRequired === true
+  const unanswered = pending.gap !== null || security.gap !== null || rebootGap !== null
+  const hasWork: PatchWorkState = somethingToDo ? 'yes' : unanswered ? 'unknown' : 'no'
+
   return {
     serverId: input.serverId,
     serverName: input.serverName,
@@ -561,7 +587,7 @@ export function buildPatchRow(input: PatchHostInput): PatchHostRow {
     factsAt: input.factsAt,
     metadataAt: facts?.metadataAt ?? null,
     securityUnanswerable,
-    hasWork: (pending.value ?? 0) > 0 || (security.value ?? 0) > 0 || facts?.rebootRequired === true
+    hasWork
   }
 }
 
@@ -1050,11 +1076,37 @@ export const GATE_WAIT_MS = 5 * 60 * 1000
 /** How often the gate re-asks while it waits. */
 export const GATE_POLL_MS = 5_000
 
-/** What the row says when the gate never got a fresh answer in time. */
+/**
+ * The name of the setting that produces the health observations the gate reads.
+ *
+ * Spelled once, here, and quoted verbatim in the timeout message and on the
+ * patch screen, so the words an operator is told to look for are the words on
+ * the switch. Two paraphrases of one setting is how a person concludes there
+ * are two settings.
+ */
+export const GATE_SAMPLER_SETTING = 'Check servers in the background'
+
+/** Where that switch is, in the words the app uses for the place. */
+export const GATE_SAMPLER_NOTE =
+  `The health data this gate reads comes from the fleet sampler — ${GATE_SAMPLER_SETTING}, ` +
+  'under Settings → Monitoring. With that switch off nothing ever samples the estate, so no ' +
+  'observation is ever newer than the wave and the gate can only ever time out.'
+
+/**
+ * What the row says when the gate never got a fresh answer in time.
+ *
+ * It NAMES THE SAMPLER. The overwhelmingly likely cause of this message is not
+ * a slow estate, it is that background checking is off — it is off by default —
+ * in which case there has never been a health observation of any kind and the
+ * gate was doomed from the moment the run started. Reporting "there was still
+ * no health check newer than it" without saying what produces one turns a
+ * two-click fix into a support question, and leaves the operator staring at a
+ * halted run and a wave of hosts marked "not run".
+ */
 export function gateTimeoutReason(wave: string, detail: string): string {
   return (
     `${wave} finished, and ${Math.round(GATE_WAIT_MS / 60000)} minutes later there was still no ` +
     `health check newer than it. ${detail} Rather than roll on against data from before the ` +
-    'wave, the run stopped here.'
+    `wave, the run stopped here. ${GATE_SAMPLER_NOTE}`
   )
 }

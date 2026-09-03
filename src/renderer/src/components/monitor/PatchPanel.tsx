@@ -6,6 +6,7 @@ import { bridgeHas } from '../../lib/bridge'
 import { clsx } from '../../lib/format'
 import { sshHopsFor } from '../../lib/ssh'
 import {
+  GATE_SAMPLER_NOTE,
   PATCH_GAP_LABEL,
   PATCH_NO_AUTOMATION_NOTE,
   blockSummary,
@@ -31,7 +32,7 @@ import type { Server } from '../../types'
 // The most common recurring task in the job this app is named for, and the
 // first screen in ShellPilot that does it.
 //
-// THREE THINGS THIS SCREEN REFUSES TO DO, all of them argued in
+// FOUR THINGS THIS SCREEN REFUSES TO DO, all of them argued in
 // src/shared/patch.ts and src/shared/topology.ts rather than here:
 //
 //  1. It will not schedule. There is no "patch nightly" and there will not be
@@ -45,6 +46,11 @@ import type { Server } from '../../types'
 //     REFUSAL — the run cannot be started at all while one is in the plan — and
 //     it is enforced again in main, because a check that lives only in a panel
 //     is a check the next caller does not have.
+//  4. It will not offer a safeguard that cannot work. The wave health gate
+//     reads the fleet sampler's cache; with background checking off there is
+//     nothing to read, so the checkbox is withheld and the reason names the
+//     switch. A control that looks like extra care and behaves like a
+//     five-minute silence followed by a halt is worse than no control.
 //
 // The table itself is deliberately the SMALL half of this file. Everything that
 // decides anything is in shared/, where it can be tested without a DOM and
@@ -82,6 +88,8 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
   const reportFacts = useFleet((s) => s.reportFacts)
   const reportFactsError = useFleet((s) => s.reportFactsError)
   const databases = useApp((s) => s.databases)
+  // The gate's one dependency, read here rather than assumed. See `gateUsable`.
+  const samplingEnabled = useApp((s) => s.settings.fleetSamplingEnabled)
 
   const [selected, setSelected] = useState<Set<string>>(new Set())
   // `all`, not `security`, and it is a deliberate choice rather than a default
@@ -94,6 +102,11 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
   const [scope, setScope] = useState<PatchScope>('all')
   const [waveSize, setWaveSize] = useState(1)
   const [reboot, setReboot] = useState(false)
+  // Wanted, not effective. `gateUsable` below decides whether it can be had:
+  // the gate reads the fleet sampler's cache, and the sampler is off by
+  // default, so a gate ticked in that state is not a stricter run — it is a run
+  // that applies wave 1, waits GATE_WAIT_MS for a health observation that no
+  // process is producing, and halts with every remaining host "not run".
   const [healthGate, setHealthGate] = useState(true)
   const [phrase, setPhrase] = useState('')
   const [confirming, setConfirming] = useState(false)
@@ -121,6 +134,24 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
   )
 
   const summary = useMemo(() => summarisePatch(rows), [rows])
+
+  // A gate that CANNOT PASS is worse than no gate: it looks like extra care and
+  // behaves like a five-minute silence followed by a halt. `gateHealthFor` in
+  // main reads the fleet sampler's cache and nothing else — deliberately, so
+  // there is one implementation of "is this host healthy" — which means with
+  // background checking off every host is `sampledAt: null`, every wave is
+  // `stale`, and the run stops after wave 1 no matter how healthy the estate
+  // is. So the checkbox is not merely warned about, it is withheld, and the
+  // note says which switch to go and turn on.
+  const gateUsable = samplingEnabled
+  const gateOn = healthGate && gateUsable
+
+  // Hosts where at least one question had no answer: not selected by "select
+  // what needs something" (they are unknown, not known to need something) but
+  // offered explicitly, because silently omitting the hosts nobody can vouch
+  // for is how they stay unlooked-at.
+  const needy = useMemo(() => rows.filter((r) => r.hasWork === 'yes'), [rows])
+  const unanswerable = useMemo(() => rows.filter((r) => r.hasWork === 'unknown'), [rows])
   const byId = useMemo(() => new Map(rows.map((r) => [r.serverId, r])), [rows])
   const chosen = useMemo(
     () => servers.filter((s) => selected.has(s.id)),
@@ -138,12 +169,23 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
         })),
         waveSize,
         reboot,
-        healthGate,
+        healthGate: gateOn,
         // A host that is not asking for a reboot does not get one. "Restart
         // after upgrading" means restart the machines that say they need it,
         // not every machine in the selection.
         rebootWanted: (id) => byId.get(id)?.rebootRequired === true,
-        servers: servers.map((s) => ({ id: s.id, name: s.name, route: s.route })),
+        // host/port, not just id/name/route. A hop that names no saved server
+        // is still an address, and a saved server is still an address; when
+        // they match, the "invisible" bastion is sitting in this very list
+        // under another name. Dropping them here would hand buildTopology a
+        // graph that cannot express the question.
+        servers: servers.map((s) => ({
+          id: s.id,
+          name: s.name,
+          host: s.host,
+          port: s.port,
+          route: s.route
+        })),
         databases: databases.map((d) => ({
           id: d.id,
           name: d.name,
@@ -152,7 +194,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
           sshServerId: d.sshServerId
         }))
       }),
-    [scope, chosen, byId, waveSize, reboot, healthGate, servers, databases]
+    [scope, chosen, byId, waveSize, reboot, gateOn, servers, databases]
   )
 
   // The confirmation is sized against the LARGEST WAVE, not the total — see
@@ -287,15 +329,32 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
         <b className="grow">Patch and updates</b>
         <button
           className="btn ghost sm"
-          disabled={running || rows.every((r) => !r.hasWork)}
+          disabled={running || needy.length === 0}
           data-testid="patch-select-needy"
-          onClick={() =>
-            setSelected(new Set(rows.filter((r) => r.hasWork).map((r) => r.serverId)))
-          }
-          title="Selects the hosts that report something to install or a reboot they are owed. A host whose counts could not be read is NOT selected: it is unknown, not known to be clean, and picking it would be this screen deciding something for you."
+          onClick={() => setSelected(new Set(needy.map((r) => r.serverId)))}
+          title="Selects the hosts that report something to install or a reboot they are owed. A host whose counts could not be read is NOT selected here: it is unknown, not known to need something, and picking it would be this screen deciding something for you. The button beside this one offers those hosts separately."
         >
           Select what needs something
         </button>
+        {/* The hosts nobody can vouch for, OFFERED rather than omitted. They
+            are not selected by the button above — "unknown" is not "needs
+            something" and this screen does not decide that for anyone — but
+            leaving them out with no mention was the same silence in the other
+            direction, and on an estate where every host is unanswerable it left
+            a disabled button next to a summary saying the opposite. */}
+        {unanswerable.length > 0 && (
+          <button
+            className="btn ghost sm warn"
+            disabled={running}
+            data-testid="patch-select-unknown"
+            onClick={() =>
+              setSelected((prev) => new Set([...prev, ...unanswerable.map((r) => r.serverId)]))
+            }
+            title="Adds the hosts where at least one question had no answer — a count that could not be read, a security channel that does not exist, a reboot flag nothing could check. They are unknown, not known to be clean, and nothing here can tell you which. Adding them to the selection is a decision for you to make deliberately."
+          >
+            <ShieldQuestion size={13} /> Add {unanswerable.length} that could not answer
+          </button>
+        )}
         <button
           className="btn"
           disabled={busy || servers.length === 0}
@@ -427,12 +486,12 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
                 disabled={running}
               />
             </label>
-            <label>
+            <label title={gateUsable ? undefined : GATE_SAMPLER_NOTE}>
               <input
                 type="checkbox"
-                checked={healthGate}
+                checked={gateOn}
                 onChange={(e) => setHealthGate(e.target.checked)}
-                disabled={running}
+                disabled={running || !gateUsable}
               />{' '}
               hold between waves until the estate looks healthy
             </label>
@@ -446,6 +505,17 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
               restart the hosts that say they need it
             </label>
           </div>
+
+          {/* Said where the checkbox is, not in a log five minutes after the
+              run halted. A disabled control with no explanation is indistinguishable
+              from a broken one. */}
+          {!gateUsable && (
+            <div className="s-desc warn" data-testid="patch-gate-unavailable">
+              <AlertTriangle size={12} /> The wave gate is unavailable. {GATE_SAMPLER_NOTE} Until it
+              is on, the waves below roll on one after another with nothing checking the estate in
+              between — run them in small waves and watch, or turn the sampler on first.
+            </div>
+          )}
 
           <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
             {waves.length} wave{waves.length === 1 ? '' : 's'}:{' '}

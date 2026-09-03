@@ -1074,7 +1074,17 @@ function rebootOrderingRefusal(req: JobRunRequest): string | null {
   if (!restarts) return null
 
   const topo = buildTopology(
-    listCachedServers().map((srv) => ({ id: srv.id, name: srv.name, route: srv.route })),
+    // host/port travel with the record, and they are not decoration: they are
+    // how a bare hop is recognised as a saved machine and how two saved records
+    // are recognised as one. Trimming them here would put the serverId-only
+    // blind spot back at the door every job goes through.
+    listCachedServers().map((srv) => ({
+      id: srv.id,
+      name: srv.name,
+      host: srv.host,
+      port: srv.port,
+      route: srv.route
+    })),
     listCachedDatabases().map((db) => ({
       id: db.id,
       name: db.name,
