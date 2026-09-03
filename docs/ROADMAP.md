@@ -1294,6 +1294,28 @@ after those ship is how the gap becomes permanent.
 **Size.** A day for jsdom, testing-library and the first real component test. Then it is
 per-feature cost like any other test, rather than a project.
 
+### 30. Two gaps in the gates themselves
+
+Both found while building item 29, both predating it, and both the same species: a check that
+exists and does not check.
+
+**`npm audit` already fails, so the gate that runs it is decoration.** CI runs it as a step,
+and it exits non-zero today on three transitive advisories that have fixes available. A gate
+that is red before anyone touches it cannot report that a change made things worse — the
+signal is indistinguishable from the standing noise. Either fix the three, or pin them with a
+stated reason and make the gate assert *that* set rather than emptiness. **Half a day.**
+
+**None of the tests are type-checked.** `tests/` belongs to no tsconfig, so `npm run
+typecheck` covers `src/` and skips all 2333 test files. They are linted, which catches style
+and unused variables, and not type-checked, which is what catches a test asserting against a
+shape the code no longer has. A test that no longer compiles against its subject is the one
+most likely to be quietly wrong. **A day, plus whatever the first run turns up — and it will
+turn something up.**
+
+**Why these rank at all.** The stated goal is a tool stable enough to daily-drive, and both
+of these are places where the project believes it has a check and does not. That is worse
+than a known absence, because it is budgeted for.
+
 ---
 
 ## The plan — six months, one focused person
