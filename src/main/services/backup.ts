@@ -914,6 +914,15 @@ export interface TickResult {
   ran: BackupRunReport[]
   /** Destination id -> why it did not run. Never empty-and-silent. */
   skipped: Record<string, string>
+  /**
+   * Runs that failed where the previous one had not.
+   *
+   * The transition, not the state. A destination that has been broken for a
+   * week should say so once and then be visible in the panel — an hourly
+   * notification about the same failure is noise, and noise is exactly how a
+   * failing backup becomes one nobody reads.
+   */
+  newlyFailing: BackupRunReport[]
 }
 
 /**
@@ -926,7 +935,7 @@ export interface TickResult {
 export async function backupTick(now = Date.now(), opts: RunOptions = {}): Promise<TickResult> {
   const file = readTargets()
   const due = dueDestinations(file.destinations, file.lastRunAt, now)
-  const result: TickResult = { ran: [], skipped: {} }
+  const result: TickResult = { ran: [], skipped: {}, newlyFailing: [] }
   for (const dest of due) {
     const { password, skipped } = scheduledPassphrase(dest)
     if (!password) {
@@ -937,8 +946,10 @@ export async function backupTick(now = Date.now(), opts: RunOptions = {}): Promi
       // hourly backup into a daily one.
       continue
     }
+    const wasFailing = readTargets().lastReport[dest.id]?.ok === false
     const report = await runBackupToDestination(dest, password, opts)
     result.ran.push(report)
+    if (!report.ok && !wasFailing) result.newlyFailing.push(report)
     recordRun(dest.id, report, now)
   }
   return result
@@ -951,12 +962,21 @@ let scheduleTimer: ReturnType<typeof setInterval> | null = null
  *  to six hours runs within five minutes of being due. */
 export const TICK_MS = 5 * 60 * 1000
 
-export function startBackupSchedule(onRun?: (line: string) => void): void {
+export interface ScheduleHandlers {
+  /** Every run, for the log. */
+  onRun?: (line: string) => void
+  /** A destination that has just started failing, for something the user will
+   *  actually see. Only the transition — see TickResult.newlyFailing. */
+  onNewFailure?: (report: BackupRunReport) => void
+}
+
+export function startBackupSchedule(handlers: ScheduleHandlers = {}): void {
   if (scheduleTimer) return
   scheduleTimer = setInterval(() => {
     void backupTick()
-      .then(({ ran }) => {
-        for (const r of ran) onRun?.(describeRun(r))
+      .then(({ ran, newlyFailing }) => {
+        for (const r of ran) handlers.onRun?.(describeRun(r))
+        for (const r of newlyFailing) handlers.onNewFailure?.(r)
       })
       .catch((err: unknown) => {
         console.error('[backup] scheduled run failed:', err)

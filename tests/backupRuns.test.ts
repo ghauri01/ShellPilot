@@ -941,3 +941,69 @@ describe('databaseDumpTarget', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Which failures are worth interrupting somebody for
+// ---------------------------------------------------------------------------
+
+describe('a destination that starts failing', () => {
+  async function vaultWithPassphrase(): Promise<void> {
+    await vaultCreate('vault-master-pw')
+    vaultSave([
+      {
+        id: 'pw',
+        name: 'Backup passphrase',
+        kind: 'key',
+        url: '',
+        username: '',
+        password: PASSPHRASE,
+        notes: '',
+        tags: [],
+        fields: [],
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z'
+      }
+    ])
+  }
+
+  it('is reported once on the way in, and not on every tick after', async () => {
+    // The transition, not the state. An hourly notification about the same
+    // broken destination is noise, and noise is how a failing backup becomes
+    // one nobody reads.
+    await vaultWithPassphrase()
+    saveDestinations([localDest('', { everyHours: 1, passphraseVaultEntryId: 'pw' })])
+
+    const first = await backupTick(FIXED.getTime(), { now: () => FIXED })
+    expect(first.newlyFailing.map((r) => r.destinationId)).toEqual(['dest-local'])
+
+    const later = FIXED.getTime() + 3600_000
+    const second = await backupTick(later, { now: () => FIXED })
+    expect(second.ran).toHaveLength(1)
+    expect(second.ran[0].ok).toBe(false)
+    expect(second.newlyFailing).toEqual([])
+  })
+
+  it('is reported again once it has worked in between', async () => {
+    await vaultWithPassphrase()
+    const dir = temp()
+    saveDestinations([localDest('', { everyHours: 1, passphraseVaultEntryId: 'pw' })])
+    await backupTick(FIXED.getTime(), { now: () => FIXED })
+
+    // Fixed, runs, then breaks again.
+    saveDestinations([localDest(dir, { everyHours: 1, passphraseVaultEntryId: 'pw' })])
+    const fixed = await backupTick(FIXED.getTime() + 3600_000, { now: () => FIXED })
+    expect(fixed.ran[0].ok).toBe(true)
+
+    saveDestinations([localDest('', { everyHours: 1, passphraseVaultEntryId: 'pw' })])
+    const broken = await backupTick(FIXED.getTime() + 7200_000, { now: () => FIXED })
+    expect(broken.newlyFailing.map((r) => r.destinationId)).toEqual(['dest-local'])
+  })
+
+  it('never raises one for a run that worked', async () => {
+    await vaultWithPassphrase()
+    saveDestinations([localDest(temp(), { everyHours: 1, passphraseVaultEntryId: 'pw' })])
+    const { ran, newlyFailing } = await backupTick(FIXED.getTime(), { now: () => FIXED })
+    expect(ran[0].ok).toBe(true)
+    expect(newlyFailing).toEqual([])
+  })
+})

@@ -178,6 +178,7 @@ import {
   stopBackupSchedule
 } from './services/backup'
 import { databaseDumpTarget, dumpableDatabases } from './services/backupTargets'
+import { BACKUP_STAGE_LABEL } from '../shared/backup'
 import type { BackupDestination, DumpRunReport } from '../shared/backup'
 import {
   checkForUpdates,
@@ -2729,7 +2730,29 @@ app.whenReady().then(() => {
   // The tick only looks at the clock. Nothing runs until a destination has an
   // interval AND a vault entry holding its passphrase, and a tick that cannot
   // find one records why rather than doing nothing.
-  startBackupSchedule((line) => console.log('[backup]', line))
+  startBackupSchedule({
+    onRun: (line) => console.log('[backup]', line),
+    // Raised outside the window, because the panel that shows the failure is
+    // three clicks into Settings and nobody goes there to check that a backup
+    // they set up months ago is still working. Only on the transition into
+    // failing: an hourly notification about the same broken destination is
+    // noise, and noise is how a failing backup becomes one nobody reads.
+    onNewFailure: (report) => {
+      if (!Notification.isSupported()) return
+      const n = new Notification({
+        title: `Backup to ${report.destinationName} failed`,
+        body: `${report.failedStage ? BACKUP_STAGE_LABEL[report.failedStage] : 'the run'}: ${report.error ?? 'no reason given'}`,
+        icon: appIcon()
+      })
+      n.on('click', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore()
+          mainWindow.focus()
+        }
+      })
+      n.show()
+    }
+  })
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
