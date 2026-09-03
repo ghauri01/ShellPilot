@@ -54,12 +54,12 @@ const chips = (): string[] => alerts.useAlerts.getState().list().map((a) => a.ki
 
 /** One sample from one host. CPU and memory sit at 0 so only disk can speak. */
 function sample(disk: number | null): void {
-  alerts.checkResourceAlerts('s1', 'web-1', 0, 0, disk)
+  alerts.checkResourceAlerts('s1', 'web-1', { cpu: 0, ram: 0, disk, inode: null, load: null })
 }
 
 /** The mirror of `sample` for the kind that actually moves between samples. */
 function cpuSample(cpu: number): void {
-  alerts.checkResourceAlerts('s1', 'web-1', cpu, 0, null)
+  alerts.checkResourceAlerts('s1', 'web-1', { cpu, ram: 0, disk: null, inode: null, load: null })
 }
 
 const MINUTE = 60_000
@@ -152,7 +152,7 @@ describe('what a disk alert actually says', () => {
   })
 
   it('still calls memory memory, and CPU CPU', () => {
-    alerts.checkResourceAlerts('s2', 'web-2', 95, 96, null)
+    alerts.checkResourceAlerts('s2', 'web-2', { cpu: 95, ram: 96, disk: null, inode: null, load: null })
     expect(raises().map((p) => p.kind).sort()).toEqual(['cpu', 'memory'])
     expect(raises().find((p) => p.kind === 'memory')?.summary).toBe(
       'web-2: Memory at 96% (threshold 80%)'
@@ -178,19 +178,19 @@ describe('how often a disk alert repeats', () => {
   })
 
   it('leaves CPU and memory on the one-minute window', () => {
-    alerts.checkResourceAlerts('s2', 'web-2', 95, 10, null)
+    alerts.checkResourceAlerts('s2', 'web-2', { cpu: 95, ram: 10, disk: null, inode: null, load: null })
     expect(raises().length).toBe(1)
 
     // The whole minute in between, at the foreground 2s cadence, says nothing.
     // A count taken only at the two ends cannot tell one repeat from thirty.
     for (let t = 2_000; t < 60_000; t += 2_000) {
       vi.advanceTimersByTime(2_000)
-      alerts.checkResourceAlerts('s2', 'web-2', 95, 10, null)
+      alerts.checkResourceAlerts('s2', 'web-2', { cpu: 95, ram: 10, disk: null, inode: null, load: null })
       expect(raises().length).toBe(1)
     }
 
     vi.advanceTimersByTime(2_000)
-    alerts.checkResourceAlerts('s2', 'web-2', 95, 10, null)
+    alerts.checkResourceAlerts('s2', 'web-2', { cpu: 95, ram: 10, disk: null, inode: null, load: null })
     expect(raises().length).toBe(2)
     expect(raises()[1].kind).toBe('cpu')
   })

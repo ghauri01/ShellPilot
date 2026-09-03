@@ -117,13 +117,20 @@ export function FleetWatcher(): null {
       // `null`, not 0, when df reported nothing: a failed probe yields diskPct
       // 0, and passing that would resolve a disk alert on a host that is still
       // full — a false all-clear manufactured out of a measurement failure.
-      checkResourceAlerts(
-        e.serverId,
-        name,
-        e.host.cpu,
-        e.host.memPct,
-        e.host.diskTotal > 0 ? e.host.diskPct : null
-      )
+      checkResourceAlerts(e.serverId, name, {
+        cpu: e.host.cpu,
+        ram: e.host.memPct,
+        disk: e.host.diskTotal > 0 ? e.host.diskPct : null,
+        // Null, not zero, for both. `df -i` is absent on some busybox
+        // userlands and btrfs and zfs honestly report no inode table; a
+        // container without /proc has no load average. Zero for either would be
+        // an empty filesystem and an idle machine.
+        inode: e.host.inodePct ?? null,
+        load:
+          e.host.load1 === null || e.host.load1 === undefined
+            ? null
+            : e.host.load1 / Math.max(1, e.host.cores)
+      })
       // The reason the feature exists. A failed unit does not move a CPU or
       // memory graph, so thresholds would never have caught the case this was
       // built for. `null` stays null: "systemd was not visible" is not "nothing

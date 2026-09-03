@@ -92,6 +92,26 @@ export interface HostMetrics {
   diskPct: number
   diskUsed: number
   diskTotal: number
+  /**
+   * Inode usage of `/` as a percentage, or null.
+   *
+   * A filesystem can be 40% full and completely unwritable because it has run
+   * out of inodes — a mail spool or a build cache with millions of tiny files
+   * is the usual way — and `df -k` shows nothing wrong at all. Null, never
+   * zero, when it could not be measured: `df -i` is absent on some busybox
+   * userlands, and btrfs and zfs legitimately report no inode total. Zero
+   * there would read as an empty filesystem and post an all-clear.
+   */
+  inodePct?: number | null
+  /**
+   * One-minute load average, or null when /proc/loadavg could not be read.
+   *
+   * Raw, not divided by `cores`: the division belongs wherever the threshold
+   * is, and a caller that has both numbers can do it. A container without
+   * /proc mounted reports null rather than 0, which would be a perfectly idle
+   * machine.
+   */
+  load1?: number | null
   netRx: number // cumulative bytes
   netTx: number
   uptime: number // seconds

@@ -69,17 +69,42 @@ export const useAlerts = create<AlertState>((set, get) => ({
 const REPEAT: Record<AlertKind, number> = {
   cpu: 60_000,
   ram: 60_000,
-  disk: 6 * 60 * 60 * 1000
+  disk: 6 * 60 * 60 * 1000,
+  // Inodes behave like disk and for the same reason: a filesystem does not
+  // grow its own inode table back, so the six-hour argument transfers whole.
+  inode: 6 * 60 * 60 * 1000,
+  // Load moves like CPU because it largely IS CPU, plus uninterruptible I/O.
+  load: 60_000
 }
 
 // How far below the threshold a value must fall to count as recovered. Without
 // it, a host sitting at the line flaps between raised and resolved on every
 // sample. See evaluate().
-const RECOVER_MARGIN = 5
+//
+// Per kind, because five is five PERCENT for everything measured in percent and
+// is nonsense for a load average: a threshold of 2 per core less a margin of 5
+// is a clear line below zero, which no reading can ever reach, so a load alert
+// would raise once and never resolve. Half a runnable thread per core is the
+// same proportion of the line that five points is for a percentage.
+const RECOVER_MARGIN: Record<AlertKind, number> = {
+  cpu: 5,
+  ram: 5,
+  disk: 5,
+  inode: 5,
+  load: 0.5
+}
 
-// A rise of this many points since the last thing we said re-opens the repeat
-// window. See evaluate() for why a six-hour window needs it.
-const ESCALATE_BY = 5
+// A rise of this much since the last thing we said re-opens the repeat window.
+// See evaluate() for why a six-hour window needs it.
+const ESCALATE_BY: Record<AlertKind, number> = {
+  cpu: 5,
+  ram: 5,
+  disk: 5,
+  inode: 5,
+  // A whole extra runnable thread per core, which on a load average is the
+  // same size of step five points is on a percentage.
+  load: 1
+}
 
 // The floor under every reason to speak, per kind. Nothing may notify faster
 // than this, whatever justification it has.
@@ -96,11 +121,17 @@ const ESCALATE_BY = 5
 const MIN_GAP: Record<AlertKind, number> = {
   cpu: 60_000,
   ram: 60_000,
-  disk: 0
+  disk: 0,
+  // Zero for the same reason disk is zero: the re-raise and escalation
+  // bypasses are the feature for a condition that does not fix itself, and an
+  // inode table does not empty itself either.
+  inode: 0,
+  load: 60_000
 }
 
 /** Below this, a value counts as recovered rather than merely lower. */
-const clearLine = (threshold: number): number => Math.max(0, threshold - RECOVER_MARGIN)
+const clearLine = (kind: AlertKind, threshold: number): number =>
+  Math.max(0, threshold - RECOVER_MARGIN[kind])
 
 // Last notification time per server+metric, so a sustained problem repeats on
 // its kind's window instead of on every 2s sample.
@@ -367,7 +398,13 @@ export function hydrateAlerts(): Promise<void> {
 }
 
 /** Short, for the status-bar chip and the notification title. */
-export const LABEL: Record<AlertKind, string> = { cpu: 'CPU', ram: 'Memory', disk: 'Disk' }
+export const LABEL: Record<AlertKind, string> = {
+  cpu: 'CPU',
+  ram: 'Memory',
+  disk: 'Disk',
+  inode: 'Inodes',
+  load: 'Load'
+}
 
 // What the number is measuring, for the sentences a person reads. Disk says
 // "root filesystem" and means it: metrics.ts probes `df -kP /` and nothing
@@ -376,7 +413,11 @@ export const LABEL: Record<AlertKind, string> = { cpu: 'CPU', ram: 'Memory', dis
 const SUBJECT: Record<AlertKind, string> = {
   cpu: 'CPU',
   ram: 'Memory',
-  disk: 'Root filesystem'
+  disk: 'Root filesystem',
+  // Same probe, same caveat: `df -iP /` and nothing else, so a host that has
+  // exhausted the inodes on /var and has room on / raises nothing here.
+  inode: 'Root filesystem inodes',
+  load: 'Load average'
 }
 
 // How each kind's line reads in a sentence, because the kinds do not compare
@@ -386,12 +427,27 @@ const SUBJECT: Record<AlertKind, string> = {
 const OVER_WORD: Record<AlertKind, string> = {
   cpu: 'at or above',
   ram: 'at or above',
-  disk: 'above'
+  disk: 'above',
+  inode: 'above',
+  load: 'at or above'
 }
 const backBelow: Record<AlertKind, (threshold: number) => string> = {
   cpu: (t) => `back below ${t}%`,
   ram: (t) => `back below ${t}%`,
-  disk: (t) => `back to ${t}% or below`
+  disk: (t) => `back to ${t}% or below`,
+  inode: (t) => `back to ${t}% or below`,
+  load: (t) => `back below ${t} per core`
+}
+
+// The unit each kind's number is in. Not everything alerting measures is a
+// percentage, and a load average printed as "3%" is a wrong number rather than
+// an ugly one — which is what the status-bar chip showed before this existed.
+export const UNIT: Record<AlertKind, string> = {
+  cpu: '%',
+  ram: '%',
+  disk: '%',
+  inode: '%',
+  load: ' per core'
 }
 
 // One decimal at most, trailing zero dropped. Rounding to whole points made a
@@ -405,7 +461,9 @@ const fmt = (v: number): number => Number(v.toFixed(1))
 const WEBHOOK_KIND: Record<AlertKind, WebhookAlertKind> = {
   cpu: 'cpu',
   ram: 'memory',
-  disk: 'disk'
+  disk: 'disk',
+  inode: 'inode',
+  load: 'load'
 }
 
 function evaluate(
@@ -435,7 +493,7 @@ function evaluate(
   // alerts to keep up with its own noise. So the escalation memory survives
   // until the value is meaningfully below the line. The CHIP does not use this
   // number: see the `!over` branch for why holding it here was a bug.
-  const clearAt = clearLine(threshold)
+  const clearAt = clearLine(kind, threshold)
 
   if (!over) {
     // The chip tracks `over` and nothing else, so it can never say something
@@ -553,7 +611,7 @@ function evaluate(
   const last = lastNotified.get(k) ?? 0
   const said = lastNotifiedValue.get(k)
   const reRaised = said === undefined
-  const worsened = said !== undefined && value >= said + ESCALATE_BY
+  const worsened = said !== undefined && value >= said + ESCALATE_BY[kind]
   const due = now - last >= REPEAT[kind]
   if (!reRaised && !worsened && !due) return
   if (now - last < MIN_GAP[kind]) return
@@ -581,8 +639,8 @@ function evaluate(
       `The Alerts tab still lists every crossing.`
     : ''
   void window.shellpilot?.notify.show(
-    `${serverName}: ${LABEL[kind]} at ${fmt(value)}%`,
-    `${SUBJECT[kind]} has been ${OVER_WORD[kind]} ${threshold}%${forHow}.${quiet}`
+    `${serverName}: ${LABEL[kind]} at ${fmt(value)}${UNIT[kind]}`,
+    `${SUBJECT[kind]} has been ${OVER_WORD[kind]} ${threshold}${UNIT[kind]}${forHow}.${quiet}`
   )
   // Same repeat window as the desktop notification, so the endpoint sees the
   // same cadence a person does rather than one message per sample.
@@ -592,7 +650,9 @@ function evaluate(
     event: 'raised',
     kind: WEBHOOK_KIND[kind],
     server: serverName,
-    summary: `${serverName}: ${SUBJECT[kind]} at ${fmt(value)}% (threshold ${threshold}%)`,
+    summary:
+      `${serverName}: ${SUBJECT[kind]} at ${fmt(value)}${UNIT[kind]} ` +
+      `(threshold ${threshold}${UNIT[kind]})`,
     at: new Date(now).toISOString(),
     value: fmt(value),
     threshold,
@@ -742,21 +802,58 @@ useApp.subscribe((s, prev) => {
 })
 
 /**
- * Called from the metrics hook on each sample.
+ * One host's sample, as the alert path needs it.
  *
- * `disk` is null when the host reported no disk at all — `df` failing yields a
- * diskPct of 0, and 0 here would post a "back below 85%" all-clear for a host
- * that may well still be full. A measurement failure must never be able to
- * manufacture good news, so null skips the disk evaluation entirely rather than
- * resolving it.
+ * An object with every field REQUIRED rather than five positional numbers, and
+ * that is a correctness decision rather than a style one. 1a4cfaa records the
+ * bug: the disk predicate defaulted its "was this measured" argument, so the
+ * guard could be lost by forgetting a parameter. An optional field here would
+ * mean a caller that forgets `inode` silently disables inode alerting for its
+ * whole path, with both sides compiling. Every field is required, and `null` is
+ * how a caller says a thing could not be measured.
  */
-export function checkResourceAlerts(
-  serverId: string,
-  serverName: string,
-  cpu: number,
-  ram: number,
+export interface ResourceSample {
+  cpu: number
+  ram: number
+  /** Null when df reported no filesystem at all. A failed probe yields a
+   *  diskPct of 0, and 0 here would read as an empty disk and post an
+   *  all-clear for a host that may well still be full. */
   disk: number | null
-): void {
+  /** Null when inode accounting is unavailable — busybox without `df -i`, or
+   *  btrfs and zfs, which have no fixed inode table and honestly report none.
+   *  Zero would be an empty filesystem. */
+  inode: number | null
+  /** One-minute load average PER CORE, or null when /proc/loadavg could not be
+   *  read. Zero would be a perfectly idle machine. */
+  load: number | null
+}
+
+// Inodes get their own line rather than sharing the configurable resource
+// threshold, on the same argument disk uses: it is a different question with a
+// different consequence. 85% of blocks is "getting full"; 85% of inodes on a
+// host that makes small files is often an hour from unwritable, and the number
+// is not one a person tunes alongside a CPU percentage.
+export const INODE_DANGER = 85
+
+/** Strictly above, exactly like isDiskCritical, so the two filesystem alerts
+ *  cannot disagree about what "at the line" means. */
+export function isInodeCritical(pct: number): boolean {
+  return pct > INODE_DANGER
+}
+
+// Per CORE, so the number means the same thing on a 2-core VPS and a 64-core
+// box. Two is the classic "there is a queue": one runnable thread per core is
+// full utilisation, two is twice as much work as there is machine.
+export const LOAD_DANGER = 2
+
+/**
+ * Called from the metrics hook and from the fleet sampler on each sample.
+ *
+ * Every `null` here means "not measured", and a null is neither raised nor
+ * resolved nor read as healthy — the rule the whole of 19a is built on. There
+ * is no branch that turns one into a zero on the way in.
+ */
+export function checkResourceAlerts(serverId: string, serverName: string, s: ResourceSample): void {
   const { resourceAlertsEnabled, resourceAlertThreshold } = useApp.getState().settings
   if (!resourceAlertsEnabled) return
   const now = Date.now()
@@ -768,15 +865,21 @@ export function checkResourceAlerts(
   // a five-point band for CPU where the chip is down but the alert memory is
   // still held — the dead band that stranded disk chips at 82%. If you change
   // it, the `!over` branch in evaluate has to grow the disk case's handling.
-  const line = clearLine(resourceAlertThreshold)
-  evaluate(serverId, serverName, 'cpu', cpu, resourceAlertThreshold, now, cpu >= line)
-  evaluate(serverId, serverName, 'ram', ram, resourceAlertThreshold, now, ram >= line)
+  const line = clearLine('cpu', resourceAlertThreshold)
+  evaluate(serverId, serverName, 'cpu', s.cpu, resourceAlertThreshold, now, s.cpu >= line)
+  evaluate(serverId, serverName, 'ram', s.ram, resourceAlertThreshold, now, s.ram >= line)
   // Fixed at DISK_DANGER rather than the configurable threshold: this is the
   // number the Fleet Monitor colours a bar red at and lists a host under, and
   // an alert that fired at a different number from the screen it sends you to
   // is worse than no alert. isDiskCritical is that number's only comparison.
-  if (disk !== null) {
-    evaluate(serverId, serverName, 'disk', disk, DISK_DANGER, now, isDiskCritical(disk))
+  if (s.disk !== null) {
+    evaluate(serverId, serverName, 'disk', s.disk, DISK_DANGER, now, isDiskCritical(s.disk))
+  }
+  if (s.inode !== null) {
+    evaluate(serverId, serverName, 'inode', s.inode, INODE_DANGER, now, isInodeCritical(s.inode))
+  }
+  if (s.load !== null) {
+    evaluate(serverId, serverName, 'load', s.load, LOAD_DANGER, now, s.load >= LOAD_DANGER)
   }
 }
 

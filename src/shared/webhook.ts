@@ -21,7 +21,14 @@ export type AlertEvent = 'raised' | 'resolved'
  * not arrive and the settings pane still showed a healthy webhook. One array,
  * consumed by both, is the only version of this that cannot drift.
  */
-export const ALERT_KINDS = ['cpu', 'memory', 'disk', 'unit-failed'] as const
+export const ALERT_KINDS = [
+  'cpu',
+  'memory',
+  'disk',
+  'unit-failed',
+  'inode',
+  'load'
+] as const
 export type AlertKind = (typeof ALERT_KINDS)[number]
 
 export interface AlertPayload {
@@ -138,7 +145,7 @@ export function validateWebhookUrl(raw: string): { ok: true; url: string } | { o
  * kind added to one list and not the other is a type error rather than an alert
  * that posts under the wrong name.
  */
-export const STORE_ALERT_KINDS = ['cpu', 'ram', 'disk'] as const
+export const STORE_ALERT_KINDS = ['cpu', 'ram', 'disk', 'inode', 'load'] as const
 export type StoreAlertKind = (typeof STORE_ALERT_KINDS)[number]
 
 /** The history-store event kind every alert row is written under. One kind, so

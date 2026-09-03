@@ -55,7 +55,7 @@ const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 
 function sample(disk: number | null): void {
-  alerts.checkResourceAlerts('s1', 'web-1', 0, 0, disk)
+  alerts.checkResourceAlerts('s1', 'web-1', { cpu: 0, ram: 0, disk, inode: null, load: null })
 }
 
 /**
@@ -185,7 +185,7 @@ describe('what damping must not touch', () => {
     // CPU, where the window is a minute and ten repeats are expected.
     for (let i = 0; i < 10; i++) {
       vi.setSystemTime(T0 + i * 2 * MINUTE)
-      alerts.checkResourceAlerts('s2', 'db-1', 95, 0, null)
+      alerts.checkResourceAlerts('s2', 'db-1', { cpu: 95, ram: 0, disk: null, inode: null, load: null })
     }
     const cpu = raises().filter((p) => p.kind === 'cpu')
     expect(cpu.length).toBe(10)
@@ -195,7 +195,7 @@ describe('what damping must not touch', () => {
   it('damps one server+kind without silencing another host', () => {
     for (let i = 0; i < 8; i++) crossOnce(T0 + i * 5 * MINUTE)
     vi.setSystemTime(T0 + 45 * MINUTE)
-    alerts.checkResourceAlerts('s2', 'db-1', 0, 0, 93)
+    alerts.checkResourceAlerts('s2', 'db-1', { cpu: 0, ram: 0, disk: 93, inode: null, load: null })
     const other = raises().filter((p) => p.server === 'db-1')
     expect(other.length).toBe(1)
     expect(other[0].kind).toBe('disk')

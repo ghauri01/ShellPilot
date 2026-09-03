@@ -119,7 +119,17 @@ export function useServerMetrics(server: Server, active: boolean): LiveMetrics {
           // A disk of null rather than 0 when df reported nothing: see
           // checkResourceAlerts. 0 would read as an empty disk and clear a
           // real alert.
-          checkResourceAlerts(server.id, server.name, d.cpu, d.memPct, d.diskTotal > 0 ? d.diskPct : null)
+          checkResourceAlerts(server.id, server.name, {
+            cpu: d.cpu,
+            ram: d.memPct,
+            disk: d.diskTotal > 0 ? d.diskPct : null,
+            // Both already null when the host could not answer; passing them
+            // through unchanged is the point. `?? null` covers a sample taken
+            // by an older build of main, where the fields do not exist at all —
+            // which is "not measured", not "fine".
+            inode: d.inodePct ?? null,
+            load: d.load1 === null || d.load1 === undefined ? null : d.load1 / Math.max(1, d.cores)
+          })
           // Publish capacity so the Fleet Monitor can total the estate without
           // sampling anything itself.
           useFleet.getState().report(server.id, d)

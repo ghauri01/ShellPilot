@@ -66,7 +66,7 @@ const HOUR = 60 * 60 * 1000
 
 /** One disk sample. CPU and memory sit at 0 so only disk can speak. */
 function sample(disk: number | null): void {
-  alerts.checkResourceAlerts('s1', 'web-1', 0, 0, disk)
+  alerts.checkResourceAlerts('s1', 'web-1', { cpu: 0, ram: 0, disk, inode: null, load: null })
 }
 
 beforeEach(() => {
@@ -251,7 +251,7 @@ describe('the row is rebuilt from a whitelist', () => {
     expect(sanitiseStoredAlert({ event: 'raised', kind: 'disk', serverName: 'x' })).toBeNull()
   })
 
-  it('names cpu, ram and disk, and spells memory the store’s way', () => {
-    expect([...STORE_ALERT_KINDS]).toEqual(['cpu', 'ram', 'disk'])
+  it('names every kind the store measures, and spells memory the store’s way', () => {
+    expect([...STORE_ALERT_KINDS]).toEqual(['cpu', 'ram', 'disk', 'inode', 'load'])
   })
 })

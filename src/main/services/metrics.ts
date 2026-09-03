@@ -50,6 +50,14 @@ const script = (withSleep: boolean): string => [
   "grep -E '^(MemTotal|MemAvailable):' /proc/meminfo",
   'echo __DISK__',
   'df -kP / | tail -1',
+  // Inodes, separately from blocks. A filesystem that is 40% full and out of
+  // inodes is unwritable and `df -k` says nothing at all. Guarded: `df -i` is
+  // missing from some busybox userlands, and an absent section parses to null
+  // rather than to a comfortable zero.
+  'echo __INODE__',
+  'df -iP / 2>/dev/null | tail -1',
+  'echo __LOAD__',
+  'cat /proc/loadavg 2>/dev/null',
   'echo __NET__',
   'cat /proc/net/dev',
   // Which of those interfaces are real hardware.
@@ -270,6 +278,26 @@ function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: C
   const diskTotal = (parseInt(disk[1]) || 0) * 1024
   const diskUsed = (parseInt(disk[2]) || 0) * 1024
 
+  // Inodes. `df -iP` gives: Filesystem Inodes IUsed IFree IUse% Mounted.
+  //
+  // A total of zero is NOT an empty filesystem — btrfs and zfs have no fixed
+  // inode table and report 0, and so does an absent or refused `df -i`. Both
+  // are "could not be measured", and both must stay null: a zero here would
+  // divide to 0% and post an all-clear for a host nobody asked.
+  const ino = section(text, 'INODE')[0]?.trim().split(/\s+/) ?? []
+  const inodeTotal = parseInt(ino[1])
+  const inodeUsed = parseInt(ino[2])
+  const inodePct =
+    Number.isFinite(inodeTotal) && inodeTotal > 0 && Number.isFinite(inodeUsed)
+      ? (inodeUsed / inodeTotal) * 100
+      : null
+
+  // /proc/loadavg: "0.15 0.10 0.09 1/234 5678". A container without /proc
+  // mounted, or a kernel without it, emits nothing — which is not a load of
+  // zero, which is a perfectly idle machine.
+  const loadRaw = parseFloat(section(text, 'LOAD')[0]?.trim().split(/\s+/)[0] ?? '')
+  const load1 = Number.isFinite(loadRaw) ? loadRaw : null
+
   const { netRx, netTx } = sumNetwork(section(text, 'NET'), section(text, 'PHYS'))
 
   const uptime = parseFloat(section(text, 'UP')[0] ?? '0') || 0
@@ -294,6 +322,8 @@ function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: C
     diskPct: diskTotal ? (diskUsed / diskTotal) * 100 : 0,
     diskUsed,
     diskTotal,
+    inodePct,
+    load1,
     netRx,
     netTx,
     uptime,
@@ -307,6 +337,15 @@ function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: C
     listenerSource
   }
   return { data, snap: latest }
+}
+
+/** The parser, for tests. Read-only: it takes the text of one sample and
+ *  returns what was read out of it. Exported because the two things worth
+ *  pinning about the new sections are exactly what this returns — that a zero
+ *  inode total parses to null rather than to a comfortable 0%, and that an
+ *  absent /proc/loadavg is null rather than an idle machine. */
+export function parseMetricsForTests(text: string): HostMetrics {
+  return parse(text, null).data
 }
 
 // Last CPU snapshot per key, so the next poll has something to diff against.

@@ -502,7 +502,7 @@ export function Settings(): React.JSX.Element {
                   webhook is posted from inside one of the two. */}
               <SettingSwitch
                 label="Alerts"
-                desc="The master switch. Covers CPU and memory at or above the threshold, a root filesystem more than 85% full, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. CPU and memory repeat once a minute while the condition lasts; a full disk repeats every six hours, or sooner if it gets 5 points worse. They clear themselves on recovery: a disk as soon as it is back to 85% or below, CPU and memory once they are 5 points under the threshold, so a host sitting exactly on the line does not flicker on and off. Switching this off also takes down any alerts already showing."
+                desc="The master switch. Covers CPU and memory at or above the threshold, a root filesystem more than 85% full by blocks OR by inodes, a load average at or above 2 per core, and systemd units that have failed — and, since every webhook is sent from an alert, webhook delivery too. CPU, memory and load repeat once a minute while the condition lasts; a full disk or inode table repeats every six hours, or sooner if it gets 5 points worse. They clear themselves on recovery: a filesystem as soon as it is back to 85% or below, CPU and memory once they are 5 points under the threshold, so a host sitting exactly on the line does not flicker on and off. A host that crosses the same line five times in six hours is announced once more and then held quiet until it has gone six hours without crossing again. Anything the host could not measure — no inode accounting, no /proc/loadavg, no df — raises nothing and clears nothing, because a reading nobody could take is not a reading of zero. Switching this off also takes down any alerts already showing."
                 checked={settings.resourceAlertsEnabled}
                 onChange={(v) => setSettings({ resourceAlertsEnabled: v })}
               />
@@ -513,7 +513,10 @@ export function Settings(): React.JSX.Element {
                     The same figure applies to CPU and to memory. Disk has its own, fixed at{' '}
                     <strong>85%</strong>: a root filesystem past that alerts, which is the same
                     85% at which the Fleet Monitor lists the host as needing attention and turns
-                    its disk bar red. Only the root filesystem is measured.{' '}
+                    its disk bar red. Inodes use the same 85% and load its own fixed{' '}
+                    <strong>2 per core</strong>. Only the root filesystem is measured, for blocks
+                    and for inodes alike — a host that has filled /var and has room on / raises
+                    nothing here.{' '}
                     {alertCoverageText(fleetStatus?.running, settings.fleetSamplingEnabled)}
                   </div>
                 </div>
