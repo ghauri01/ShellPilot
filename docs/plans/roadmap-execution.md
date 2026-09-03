@@ -509,3 +509,43 @@ than a stretch of history.
 The audit is cheap enough to keep: clone at the commit, symlink `node_modules`, run the two
 typechecks. About twenty seconds each, and it is the only check that measures the artifact
 being recorded rather than the one on disk.
+
+### Three git hazards from concurrent agents, all the same shape
+
+Running several agents in one worktree produced three separate incidents, and they are worth
+naming together because they look unrelated and are not. Each is a **shared mutable resource
+that git offers no isolation for**, touched by a process that believed it was working alone.
+
+**One — `git add -A` swept another agent's work-in-progress into an unrelated commit.** The
+commit message described a roadmap edit and the commit contained someone's half-finished
+feature. Fixed by switching to explicit paths.
+
+**Two — explicit paths were not enough.** A commit naming its own files still carried another
+agent's *staged* rename, because naming paths on `git commit` does not unstage anything else.
+That shipped the only non-building commit on this branch. Fixed by inspecting the index, not
+just the working tree, before committing.
+
+**Three — a bare `git stash` swept two agents' uncommitted work into a shared stack.** The
+stash stack is shared across every worktree of a repository, which the environment
+documentation says plainly and which nothing enforces. `git stash pop` then failed, because
+one of the files had been rewritten by its owner in the meantime.
+
+The third was reported immediately and accurately by the agent that caused it, which is why
+nothing was lost: the stash was intact, and the affected file could be recovered with
+`git show 'stash@{0}:path'` and merged deliberately rather than restored wholesale.
+
+**What actually prevents this.** One writer per file is necessary and was already in place —
+all three incidents happened between agents whose *files* did not overlap. The state they
+collided on was not the files:
+
+- **Nothing is staged until commit time.** A staged change is visible to every other process
+  in the worktree and will join whichever commit happens next.
+- **No history-rewriting or state-shifting command, ever** — `stash`, `checkout --`,
+  `reset --hard`. Setting work aside means copying to a scratch directory.
+- **Verify the commit, not the tree.** A scratch clone at the commit is the only check that
+  measures what was recorded.
+
+All three are now stated in every implementation brief rather than assumed. The lesson that
+generalises past git: when several workers share a resource, the dangerous operations are not
+the ones that write to their own files, but the ones that touch state they think is private
+and is not.
