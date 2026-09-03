@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { parseServices, parseListeners, sumNetwork } from '../src/main/services/metrics'
+import {
+  parseServices,
+  parseListeners,
+  parseMetricsForTests,
+  sumNetwork
+} from '../src/main/services/metrics'
 
 // Real output shapes from the two probes, including the awkward ones: dual
 // stack rows, IPv6 endpoints, udp rows that have no LISTEN state, and hosts
@@ -210,5 +215,52 @@ describe('network totals on a host with bridges', () => {
   it('reads transmitted bytes from the ninth column, not a receive one', () => {
     const { netTx } = sumNetwork(['  eth0: 100 1 0 0 0 0 0 0 999 2 0 0 0 0 0 0'], ['eth0'])
     expect(netTx).toBe(999)
+  })
+})
+
+// The rule the whole of 19a and 19b runs on, applied to the two metrics that
+// never had it: a measurement that did not happen is not a measurement of zero.
+//
+// `parse()` never throws and `sample()` still returns `{ok: true}`, so a host
+// with no procfs, a `grep` that is not there, or a compound exec truncated on a
+// flaky link produced a perfectly well-formed sample reading 0% CPU and 0%
+// memory. `disk`, `inode` and `load` each already emit null out of this same
+// function; cpu and memory were the two that quietly reported an idle machine.
+describe('a sample that did not measure the CPU or the memory', () => {
+  it('reports null rather than an idle machine', () => {
+    // No __CPU__ section and no __MEM__ section at all, which is what a
+    // truncated compound exec leaves behind.
+    const parsed = parseMetricsForTests(['__UP__', '100', '__CORES__', '4'].join('\n'))
+    expect(parsed.cpu).toBeNull()
+    expect(parsed.memPct).toBeNull()
+  })
+
+  it('reports null for memory when MemTotal is missing or zero', () => {
+    // A cgroup-only container and a /proc/meminfo the probe could not read
+    // both land here, and 0/0 is not 0%.
+    const parsed = parseMetricsForTests(
+      ['__MEM__', 'MemTotal: 0', 'MemAvailable: 0', '__UP__', '1'].join('\n')
+    )
+    expect(parsed.memPct).toBeNull()
+  })
+
+  it('still reports a real reading as a number', () => {
+    // Paired with the negatives above so they cannot pass by everything
+    // becoming null. One CPU section is not enough to diff against on a first
+    // sample, so the probe sends two.
+    const parsed = parseMetricsForTests(
+      [
+        '__CPU__',
+        'cpu  0 0 0 0 0 0 0 0 0 0',
+        'cpu  50 0 50 100 0 0 0 0 0 0',
+        '__MEM__',
+        'MemTotal: 1000',
+        'MemAvailable: 250',
+        '__UP__',
+        '1'
+      ].join('\n')
+    )
+    expect(parsed.cpu).toBeCloseTo(50, 5)
+    expect(parsed.memPct).toBeCloseTo(75, 5)
   })
 })

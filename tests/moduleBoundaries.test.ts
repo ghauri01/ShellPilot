@@ -45,6 +45,14 @@ const MODULE_FILES: Record<string, string[]> = {
     'src/shared/topology.ts',
     'src/renderer/src/components/monitor/PatchPanel.tsx'
   ],
+  // The collector (src/shared/access.ts, src/main/services/access.ts) is not
+  // listed, for the same reason hostFacts is not listed under `inventory`: it
+  // lives in the sampler, not in the module. What differs, and is worth writing
+  // down here rather than only in modules.ts, is that this module's toggle
+  // gates the COLLECTION and not merely the panel — the probe reads other
+  // accounts' authorized_keys with `sudo -n`, which is not a thing to discover
+  // in a sudo log. See FleetSamplerDeps.accessEnabled.
+  access: ['src/renderer/src/components/monitor/AccessPanel.tsx'],
   broadcast: [
     'src/shared/broadcast.ts',
     'src/main/services/broadcast.ts',
@@ -263,6 +271,36 @@ describe('what a module may not reach', () => {
       // and review can.
       const offenders = files.flatMap((f) => bridgeUses(join(ROOT, f)).map((ns) => `${f} → shellpilot.${ns}`))
       expect(offenders, `${id} reaches: ${offenders.join(', ')}`).toEqual([])
+    })
+  }
+
+  // Fleet Monitor panels that are NOT modules, walked by the same closure.
+  //
+  // AlertsPanel is the one panel in the Fleet Monitor that this file used to
+  // miss, and it misses it for a defensible reason: it is deliberately not a
+  // module, so it has no entry in MODULE_FILES and nothing walked it. Being
+  // outside the registry is not the same as being outside the rule — it renders
+  // in the same shell, beside panels that are checked, and a `store/vault`
+  // import added to it would pass every test in this file.
+  //
+  // A list rather than a directory sweep, so adding a panel here is a decision
+  // somebody made rather than something a glob quietly picked up.
+  const FIXED_PANEL_FILES = ['src/renderer/src/components/monitor/AlertsPanel.tsx']
+
+  for (const f of FIXED_PANEL_FILES) {
+    it(`${f} cannot reach the vault, credentials, secrets or the local terminal`, () => {
+      const abs = join(ROOT, f)
+      expect(existsSync(abs), `${f} is listed as a fixed panel but does not exist`).toBe(true)
+      const reachable = [...closure(abs)].map((r) => relative(ROOT, r))
+      const violations = reachable.filter((r) =>
+        MODULE_FORBIDDEN_IMPORTS.some((forbidden) => r.includes(forbidden))
+      )
+      expect(violations, `${f} reaches: ${violations.join(', ')}`).toEqual([])
+    })
+
+    it(`${f} does not reach them through the preload bridge either`, () => {
+      const offenders = bridgeUses(join(ROOT, f)).map((ns) => `shellpilot.${ns}`)
+      expect(offenders, `${f} reaches: ${offenders.join(', ')}`).toEqual([])
     })
   }
 

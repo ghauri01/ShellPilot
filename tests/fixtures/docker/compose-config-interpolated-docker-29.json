@@ -1,0 +1,83 @@
+{
+  "name": "edge",
+  "networks": {
+    "default": {
+      "name": "edge_default",
+      "ipam": {}
+    }
+  },
+  "services": {
+    "cache": {
+      "command": [
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no"
+      ],
+      "entrypoint": null,
+      "environment": {
+        "REDIS_PASSWORD": "hunter2-not-a-real-password"
+      },
+      "image": "redis:7.2-alpine",
+      "networks": {
+        "default": null
+      },
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "cachedata",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    },
+    "gateway": {
+      "command": null,
+      "container_name": "edge-gateway-pinned",
+      "depends_on": {
+        "cache": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "UPSTREAM": "http://api:8000"
+      },
+      "image": "nginx:1.27-alpine",
+      "networks": {
+        "default": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 80,
+          "published": "18080",
+          "protocol": "tcp"
+        }
+      ]
+    },
+    "worker": {
+      "command": [
+        "sh",
+        "-c",
+        "sleep 3600"
+      ],
+      "entrypoint": null,
+      "environment": {
+        "WORKER_API_TOKEN": "tok-not-a-real-token",
+        "WORKER_CONCURRENCY": "4"
+      },
+      "image": "busybox:1.36",
+      "networks": {
+        "default": null
+      }
+    }
+  },
+  "volumes": {
+    "cachedata": {
+      "name": "edge_cachedata"
+    }
+  }
+}

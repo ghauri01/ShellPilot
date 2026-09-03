@@ -17,7 +17,8 @@ import {
   poolList,
   poolClose,
   sshExec,
-  sshExecStream
+  sshExecStream,
+  sshOpenFresh
 } from './services/ssh'
 import type { KeyboardRequest } from './services/ssh'
 import {
@@ -51,11 +52,27 @@ import {
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { HostFactsReader } from './services/hostFacts'
 import { FleetSampler, fleetCached, setActiveFleetSampler } from './services/fleetSampler'
-import { loadHistory, type HistoryStore } from './services/history'
+import { loadHistory, type EventCursor, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
+import { AccessCommitter, AccessReader } from './services/access'
+import type {
+  AccessChangePreview,
+  AccessChangeTarget,
+  AccessCommitReport,
+  AccessRefusal,
+  AccessRunRequest,
+  AccessRunResult,
+  AccessStagingFailure
+} from '../shared/access'
+import {
+  ACCESS_ROLLBACK_SECONDS,
+  ACCESS_WRITE_DISABLED_REASON,
+  ACCESS_WRITE_ENABLED,
+  planAccessChange
+} from '../shared/access'
 import type { JobHostCapabilityReport, JobRunRequest } from '../shared/jobs'
 import { JOB_DETACHED_STALL_GRACE_MS, jobCohorts, restartsTheMachine } from '../shared/jobs'
 import type { GateHost } from '../shared/patch'
@@ -70,8 +87,10 @@ import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
 import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSourceReport } from '../shared/cron'
 import { DockerReader } from './services/docker'
+import { ComposeReader } from './services/compose'
 import { buildDockerLogsCommand } from '../shared/docker'
 import type { DockerAction, DockerLogsOptions } from '../shared/docker'
+import type { ComposeImageWriteRequest, ComposeProjectRef } from '../shared/compose'
 
 // The one refusal worth retrying as root. Deliberately narrow: a container that
 // simply has no logs, or a dead daemon, is not something root fixes.
@@ -90,8 +109,8 @@ import {
   webhookTest,
   webhookNotify
 } from './services/webhookAlerts'
-import type { AlertPayload, StoredAlertRow } from '../shared/webhook'
-import { ALERT_HISTORY_KIND, sanitiseStoredAlert } from '../shared/webhook'
+import type { AlertPayload, StoredAlertRow, StoredDbAlertRow } from '../shared/webhook'
+import { ALERT_HISTORY_KIND, DB_ALERT_HISTORY_KINDS, sanitiseStoredAlert } from '../shared/webhook'
 import { dbTest, dbQuery, dbInfo, dbClose, dbDisposeAll } from './services/db'
 import { dbShell } from './services/dbshell'
 import { dbOps } from './services/dbOps'
@@ -808,6 +827,36 @@ const hostFactsReader = new HostFactsReader({
     sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
 })
 
+// Whether the key and access probe may run — roadmap item 23.
+//
+// Main is not given the renderer's settings, so this does what the local
+// terminal's kill switch already does a few hundred lines below: keeps its own
+// copy, refreshed from the same blob on every `data:save` and read once at
+// boot. Absent reads as OFF, matching `moduleEnabled` in shared/modules.ts, so
+// an upgrade never switches it on for an existing install.
+//
+// Gating the CHANNEL rather than the panel is the point — see the note on
+// FleetSamplerDeps.accessEnabled for why this probe is the exception.
+let accessModuleOn = false
+function syncAccessModule(data: unknown): void {
+  const modules = (data as { settings?: { modules?: Record<string, unknown> } } | null)?.settings?.modules
+  accessModuleOn = modules?.access === true
+}
+try {
+  syncAccessModule(loadData())
+} catch {
+  // A blob that will not parse is not consent. Off.
+  accessModuleOn = false
+}
+
+// Fleet key and access, on the same slow clock — roadmap item 23. One reader
+// for the whole process, for the reason HostFactsReader is one: it holds no
+// state beyond the exec function, and every probe is a single round trip.
+const accessReader = new AccessReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
+})
+
 const fleetSampler = new FleetSampler({
   // Secrets are resolved HERE, per sweep, not when targets are configured.
   // A config resolved at configure time would be stale the moment the vault
@@ -826,6 +875,15 @@ const fleetSampler = new FleetSampler({
   sampleFacts: async (_key, cfg) => {
     const probe = await hostFactsReader.read(resolveChainSecrets(cfg as SshConnectConfig))
     return probe.ok ? { ok: true, facts: probe.facts } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
+  },
+  // The key and access half — roadmap item 23. Injected like `sampleFacts`, and
+  // allowPrompt: false for the same reason: this is the unattended caller, and
+  // reading who can log in to a host must never be what raises a host-key trust
+  // dialog the user cannot connect to anything they just did.
+  accessEnabled: () => accessModuleOn,
+  sampleAccess: async (_key, cfg) => {
+    const probe = await accessReader.read(resolveChainSecrets(cfg as SshConnectConfig))
+    return probe.ok ? { ok: true, access: probe.access } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
   },
   release: (key) => metricsDisconnect(key),
   emit: (event) => {
@@ -860,6 +918,218 @@ ipcMain.handle('fleet:status', () => fleetSampler.status())
 // wants fresher facts asks for a sweep, so there is exactly one thing deciding
 // when a package manager is shelled out to.
 ipcMain.handle('fleet:facts', (_e, serverId: string) => fleetSampler.factsFor(serverId))
+// Who can get into one server, as the sweep last saw it — roadmap item 23.
+//
+// A read of what the sweep already has; it never triggers a probe, for the same
+// reason 'fleet:facts' does not. There is exactly one thing deciding how often
+// every home directory on every host gets stat'ed, and it is the sampler.
+ipcMain.handle('fleet:access', (_e, serverId: string) => fleetSampler.accessFor(serverId))
+
+// ---- Changing who can get in — roadmap item 23, the write half ----
+//
+// The most consequential write this app makes, and the only one built as a
+// protocol rather than as a command. shared/access.ts argues the three rules in
+// full; what lives here is the part that cannot live there.
+//
+// MAIN RE-DERIVES THE PLAN. The renderer says which key and which servers; it
+// does not say what will run. Everything that decides — which accounts were
+// read, whether sshd reads the file being edited, whether the key is the one
+// this session is on — comes from the collection MAIN holds, and the command is
+// built here from it. What the renderer sends back is the command text it
+// showed the operator, and if that does not match what main derived, nothing
+// runs. Same shape as `broadcast:run`, for the same reason B3 gave: a plan
+// computed in a `useMemo` and thrown away is not a record of anybody agreeing
+// to anything.
+//
+// NOT EXPOSED TO THE MCP BRIDGE, and this is the clearest case in the app for
+// that line. An agent gets `execute_command` gated per server; editing
+// authorized_keys across a selection is a different consent story entirely, and
+// the answer to "should an agent be able to revoke a key from twelve hosts" is
+// no, not "not yet".
+//
+// ONE ACCOUNT: THE ONE SHELLPILOT CONNECTS AS. The staged write resolves
+// `$HOME/.ssh/authorized_keys` on the host, so one approved command text covers
+// a whole selection — which also means it can only ever edit the connecting
+// account's file. `planAccessChange` permits a target on another account,
+// because another account's keys cannot lock this session out and rule 1 has no
+// reason to block it; the COMMAND cannot serve one. So the refusal is here, as
+// that file's own comment says it must be. Without it a revoke aimed at
+// `deploy` would back up and rewrite `ops`'s file instead — it would fail the
+// count check and change nothing, and it would report the wrong reason for
+// having done nothing, which on an access review is its own kind of lie.
+const accessCommitter = new AccessCommitter({
+  // The ONLY thing in this app that opens a connection which cannot be the one
+  // that wrote the file. See sshOpenFresh and rule 2.
+  openFresh: (cfg) => sshOpenFresh(resolveChainSecrets(cfg as SshConnectConfig))
+})
+
+/** How long one host's staged write is given. Longer than a read probe: it
+ *  copies a file, filters it, counts it and arms a watchdog. */
+const ACCESS_STAGE_TIMEOUT_MS = 45_000
+
+/** A preview may not be confirmed forever. The token IS the plan's clock, so
+ *  an old one is an old collection — and a command approved against last
+ *  week's inventory is exactly the stale-write this feature refuses. */
+const ACCESS_PREVIEW_MAX_AGE_MS = 10 * 60_000
+
+function deriveAccessPlan(
+  req: Pick<AccessRunRequest, 'kind' | 'fingerprint' | 'targets'>,
+  now: number
+): { plan: ReturnType<typeof planAccessChange>; refusals: AccessRefusal[] } {
+  const refusals: AccessRefusal[] = []
+  const targets: AccessChangeTarget[] = []
+  for (const t of req.targets) {
+    const held = fleetSampler.accessFor(t.serverId)
+    if (!held?.access) {
+      refusals.push({
+        serverId: t.serverId,
+        serverName: t.serverName,
+        user: t.user,
+        reason: `${t.serverName} has no collected authorized_keys to edit. A change is always an edit to a file that was READ, never to one that was assumed — collect it first.`
+      })
+      continue
+    }
+    if (held.access.collectedAs !== t.user) {
+      refusals.push({
+        serverId: t.serverId,
+        serverName: t.serverName,
+        user: t.user,
+        reason: `the change would run as ${held.access.collectedAs} on ${t.serverName} and can only edit that account's own authorized_keys, not ${t.user}'s. Connect as ${t.user} to change ${t.user}'s keys.`
+      })
+      continue
+    }
+    targets.push({
+      serverId: t.serverId,
+      serverName: t.serverName,
+      access: held.access,
+      user: t.user
+    })
+  }
+  return {
+    plan: planAccessChange({
+      kind: req.kind,
+      fingerprint: req.fingerprint,
+      targets,
+      now
+    }),
+    refusals
+  }
+}
+
+ipcMain.handle('access:plan', (_e, req: Omit<AccessRunRequest, 'token' | 'confirmedCommand'>): AccessChangePreview => {
+  // THE GATE, before anything is derived and before the module switch is even
+  // consulted. See ACCESS_WRITE_ENABLED in shared/access.ts for the argument.
+  //
+  // Here rather than only in the renderer because the renderer hiding a button
+  // is a courtesy and this is the boundary: it covers a renderer that lies
+  // about what it can do, a resumed job, and whatever calls this next.
+  if (!ACCESS_WRITE_ENABLED) throw new Error(ACCESS_WRITE_DISABLED_REASON)
+  if (!accessModuleOn) throw new Error('Key and access management is switched off in Settings.')
+  const now = Date.now()
+  const { plan, refusals } = deriveAccessPlan(req, now)
+  return {
+    token: plan.token,
+    command: plan.spec?.steps[0].command ?? '',
+    hosts: plan.targets.map((t) => ({
+      serverId: t.serverId,
+      serverName: t.serverName,
+      user: req.targets.find((x) => x.serverId === t.serverId)?.user ?? ''
+    })),
+    blocks: plan.blocks,
+    refusals,
+    rollbackSeconds: plan.rollbackSeconds
+  }
+})
+
+ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRunResult> => {
+  // The same gate, first, and not merely because `access:plan` already has one:
+  // a caller that never asked for a plan can reach this channel directly, and
+  // this is the one that writes.
+  if (!ACCESS_WRITE_ENABLED) throw new Error(ACCESS_WRITE_DISABLED_REASON)
+  if (!accessModuleOn) throw new Error('Key and access management is switched off in Settings.')
+
+  const at = Number(req.token)
+  if (!Number.isFinite(at) || !/^\d{10,16}$/.test(req.token)) {
+    throw new Error('This change was not started: its plan could not be identified.')
+  }
+  if (Date.now() - at > ACCESS_PREVIEW_MAX_AGE_MS) {
+    throw new Error(
+      'This change was not started: the plan it was confirmed against is more than ten minutes old, and the estate may have changed since. Look at it again.'
+    )
+  }
+
+  const { plan, refusals } = deriveAccessPlan(req, at)
+  const command = plan.spec?.steps[0].command ?? ''
+  if (command === '' || command !== req.confirmedCommand) {
+    // Not a warning and not a retry. What was agreed to is not what this would
+    // run, and there is no version of that worth resolving automatically.
+    throw new Error(
+      'This change was not started: what would run on the hosts is not what was confirmed. The collection has changed since the plan was shown, so look at it again.'
+    )
+  }
+
+  const notStaged: AccessStagingFailure[] = []
+  const reports: AccessCommitReport[] = []
+
+  // ONE HOST AT A TIME, as the plan asks. A key change rolled across a
+  // selection in parallel is the case where a mistake reaches every machine
+  // before the first failure is visible; serialised, the second host is still
+  // reachable while the first is being looked at.
+  for (const target of plan.targets) {
+    const t = req.targets.find((x) => x.serverId === target.serverId)
+    const account = fleetSampler
+      .accessFor(target.serverId)
+      ?.access?.accounts.find((a) => a.user === t?.user)
+    if (!t || !account?.keyPath) {
+      notStaged.push({
+        serverId: target.serverId,
+        serverName: target.serverName,
+        detail: 'the collection for this host changed while the change was being confirmed.'
+      })
+      continue
+    }
+
+    const staged = await sshExec(
+      resolveChainSecrets(t.cfg as SshConnectConfig),
+      command,
+      ACCESS_STAGE_TIMEOUT_MS,
+      // allowPrompt false. A key change must never be what raises a host-key
+      // trust dialog: a host this app has not connected to before is a host
+      // whose authorized_keys it has not read either.
+      false
+    )
+    // The moment the file changed on the host, as closely as this side can
+    // know it. Everything about rule 2 turns on the verifying session having
+    // authenticated after this, so it is taken here and not a line later.
+    const stagedAt = Date.now()
+    if (!staged.ok || staged.code !== 0) {
+      notStaged.push({
+        serverId: target.serverId,
+        serverName: target.serverName,
+        detail:
+          (staged.stderr || staged.error || `the host exited ${String(staged.code)}`)
+            .trim()
+            .split('\n')[0]
+            .slice(0, 200) || 'the staged write did not run'
+      })
+      continue
+    }
+
+    reports.push(
+      await accessCommitter.confirm(t.cfg, {
+        serverId: target.serverId,
+        serverName: target.serverName,
+        user: t.user,
+        token: plan.token,
+        keyPath: account.keyPath,
+        stagedAt,
+        rollbackSeconds: plan.rollbackSeconds ?? ACCESS_ROLLBACK_SECONDS
+      })
+    )
+  }
+
+  return { blocks: plan.blocks, refusals, notStaged, reports }
+})
 
 // ---- Run one command across many servers ----
 //
@@ -1430,6 +1700,60 @@ ipcMain.handle(
   ) => dockerReader.act(cfg, action, refs, opts ?? {})
 )
 
+// ---- Compose ----
+//
+// The FILE half of docker, and it registers next to it because it shares the
+// module toggle and the same exec. What it does NOT share is a verb: nothing on
+// these channels stops, removes or deletes anything. `pull` and `up -d` are not
+// here at all — they go through the job engine as a `JobSpec`, so they inherit
+// the approval record, the resume check and the audit row rather than growing
+// their own, and this file has no compose channel that runs either one.
+//
+// The one channel that writes is `compose:write-image-tag`, and it writes ONE
+// LINE of ONE file. The service re-reads the file and re-plans the edit against
+// what is on the host, then refuses when that disagrees with what the operator
+// was shown; a plan arriving over IPC is a claim about a file, not a fact about
+// one, and the renderer is not a trust boundary.
+//
+// There is no channel that returns the contents of a `.env`. `compose:env-names`
+// runs an awk program on the remote host that prints variable NAMES, and the
+// values are gone before the SSH channel sees them — so they are not in this
+// process, not in a rejected promise, and cannot reach an error detail. See the
+// header of shared/compose.ts for why that is the whole shape of the feature.
+const composeReader = new ComposeReader({
+  exec: (cfg, command, timeoutMs) =>
+    // allowPrompt true, matching Docker above and for the same reason: this is
+    // one server the operator just chose, not a fan-out, which is the only
+    // moment a trust-on-first-use dialog is answerable.
+    sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs)
+})
+
+ipcMain.handle(
+  'compose:list',
+  (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean; search?: boolean }) =>
+    composeReader.list(cfg, opts ?? {})
+)
+ipcMain.handle(
+  'compose:config',
+  (_e, cfg: unknown, project: ComposeProjectRef, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+    composeReader.config(cfg, project, opts ?? {})
+)
+// Names only. There is no form of this that returns a value; see the builder.
+ipcMain.handle(
+  'compose:env-names',
+  (_e, cfg: unknown, paths: string[], opts?: { sudo?: boolean; autoSudo?: boolean }) =>
+    composeReader.envNames(cfg, paths, opts ?? {})
+)
+ipcMain.handle('compose:read-file', (_e, cfg: unknown, path: string, opts?: { sudo?: boolean }) =>
+  composeReader.readFile(cfg, path, opts ?? {})
+)
+// The only compose channel that changes anything, and it changes one line.
+ipcMain.handle(
+  'compose:write-image-tag',
+  (_e, cfg: unknown, req: ComposeImageWriteRequest, opts?: { sudo?: boolean }) =>
+    composeReader.writeImageTag(cfg, req, opts ?? {})
+)
+
 // ---- What is scheduled across the estate ----
 //
 // Read-only. The command is a constant in shared/cron.ts, not built from any
@@ -1566,19 +1890,105 @@ ipcMain.handle('alerts:record', (_e, raw: unknown, at?: number) => {
   return true
 })
 
+/**
+ * How far back the alert log is read.
+ *
+ * A ROW COUNT was the wrong bound and it re-created the exact failure the
+ * durable half of item 19b exists to end. `ORDER BY ts DESC LIMIT 500` drops
+ * the OLDEST rows first, and the oldest rows are the chronic alerts this whole
+ * feature is for: six hundred rows of newer CPU noise — which one busy estate
+ * produces in an afternoon, since CPU's repeat window is sixty seconds — push
+ * a disk that has been at 91% for a month out of the window, and it
+ * re-announces itself immediately after every restart. Forever, because the
+ * replacement row is written with the ORIGINAL `at` and lands outside the
+ * newest-500 window again.
+ *
+ * So the bound is TIME. Thirty days is longer than any outstanding alert can
+ * plausibly go without a corroborating row — the longest repeat window in the
+ * store is six hours, a snooze is at most a day — and it is well inside what
+ * the history store keeps.
+ *
+ * ROW_BUDGET is a ceiling on the read, not the bound: it is what stops a
+ * pathological log from being loaded whole. It is five thousand rather than
+ * five hundred so that reaching it takes an estate that raises an alert every
+ * eight minutes for a month, and if it is ever reached the oldest rows are
+ * still what falls out — stated here rather than left to be rediscovered.
+ */
+const ALERT_HYDRATION_WINDOW_MS = 30 * 86_400_000
+const ALERT_HYDRATION_ROW_BUDGET = 5000
+
 ipcMain.handle('alerts:history', (_e, limit?: number): StoredAlertRow[] => {
   if (!historyStore) return []
+  // The page size, not the answer size. The caller's number is how much to ask
+  // for at a time; the window below is what decides when to stop.
   const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(2000, Math.floor(limit))) : 500
+  const from = Date.now() - ALERT_HYDRATION_WINDOW_MS
   const out: StoredAlertRow[] = []
-  for (const row of historyStore.readEvents({ kind: ALERT_HISTORY_KIND, limit: n })) {
-    // Sanitised on the way OUT as well as the way in. The rows on disk predate
-    // whatever version is reading them, and a kind this build does not know is
-    // not a kind it can render or reason about.
-    const event = sanitiseStoredAlert(row.payload)
-    if (event) out.push({ ...event, at: row.ts })
+  let cursor: EventCursor | undefined
+  while (out.length < ALERT_HYDRATION_ROW_BUDGET) {
+    const page = historyStore.readEvents({ kind: ALERT_HISTORY_KIND, limit: n, from, cursor })
+    if (page.length === 0) break
+    for (const row of page) {
+      // Sanitised on the way OUT as well as the way in. The rows on disk predate
+      // whatever version is reading them, and a kind this build does not know is
+      // not a kind it can render or reason about.
+      const event = sanitiseStoredAlert(row.payload)
+      if (event) out.push({ ...event, at: row.ts })
+    }
+    if (page.length < n) break
+    cursor = page[page.length - 1].cursor
   }
   return out
 })
+/**
+ * Item 18's database verdicts, for item 19b to alert on.
+ *
+ * `notableDbEvents` writes them under their own history kinds, so this is two
+ * named reads and a whitelist — the same shape as `alerts:history` above and
+ * for the same reason. It carries the connection id, the question and the
+ * store's timestamp, and nothing else: the payload also holds a headline and a
+ * "because" written for a person, and prose assembled from a report has no
+ * business on a path that ends in a Slack message.
+ *
+ * The verdict is NOT recomputed. The level is the kind the row was written
+ * under. An alert that re-derived it could disagree with the screen item 18
+ * renders, which is exactly the trap the disk alert avoided by making
+ * `isDiskCritical` the only comparison.
+ */
+ipcMain.handle('alerts:db-events', (_e, limit?: number): StoredDbAlertRow[] => {
+  if (!historyStore) return []
+  const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 200
+  // Bounded by the same window the alert log is hydrated over, and that pairing
+  // is the point rather than tidiness. `seenEvents` — the only thing that stops
+  // an occurrence being announced twice — is seeded from `alerts:history`, so a
+  // db row older than that window arrives with nothing to recognise it and is
+  // announced again on every launch. Offering a row this process cannot
+  // remember having announced is offering it forever.
+  const from = Date.now() - ALERT_HYDRATION_WINDOW_MS
+  const out: StoredDbAlertRow[] = []
+  for (const kind of DB_ALERT_HISTORY_KINDS) {
+    for (const row of historyStore.readEvents({ kind, limit: n, from })) {
+      const p = row.payload
+      if (typeof p !== 'object' || p === null) continue
+      const r = p as Record<string, unknown>
+      // Both are ours and both are short. A row missing either is dropped
+      // rather than filled in: a database alert naming no database and no
+      // question is a row nobody can act on.
+      if (typeof r.connectionId !== 'string' || r.connectionId === '') continue
+      if (typeof r.question !== 'string' || r.question === '') continue
+      out.push({
+        kind,
+        connectionId: r.connectionId.slice(0, 200),
+        question: r.question.slice(0, 200),
+        at: row.ts
+      })
+    }
+  }
+  // Two reads, one timeline. Newest first, like every other history read.
+  out.sort((a, b) => b.at - a.at)
+  return out.slice(0, n)
+})
+
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()
   return fleetSampler.status()
@@ -1601,12 +2011,48 @@ ipcMain.handle('db:close', (_e, id: string) => dbClose(id))
 // down at the top of src/shared/dbOps.ts. Notable states are recorded as
 // history events so item 19b can alert on them later; the alerting itself is
 // deliberately NOT here.
+/**
+ * The verdict each question was last recorded at, per connection.
+ *
+ * `db:ops` runs when somebody presses a button, and it used to write a fresh
+ * history row stamped `Date.now()` on every read. The alert store's dedupe key
+ * includes `at`, so six reads of ONE standing replication alarm were six
+ * distinct occurrences: five notifications, the fifth announcing "this has
+ * happened 5 times in 6 hours" about something that happened once and was read
+ * five times, and a flap damp earned by pressing Refresh.
+ *
+ * So an unchanged verdict is not a new occurrence. The row that already stands
+ * keeps its original `at`, which is the honest timestamp: it is when the
+ * condition was first seen, not when somebody last looked at it.
+ *
+ * In memory, and deliberately not seeded from the store. A restart is allowed
+ * to write one fresh row per standing verdict — that is once per launch rather
+ * than once per press, and the alternative is reading history back on a path
+ * that is already doing a database round trip. `ok` is tracked here even though
+ * it is never written, because it is what tells a later alarm on the same
+ * question that it is a NEW occurrence rather than the same one being re-read.
+ */
+const dbVerdictSeen = new Map<string, string>()
+
 ipcMain.handle('db:ops', async (_e, cfg: DbConnectConfig) => {
   const report = await dbOps(withVpnTransportDb(resolveDbSecrets(cfg)))
   if (report.ok) {
-    // hostId is null: a database connection is not a fleet host, and inventing
-    // one would put rows in a host's timeline that host never produced.
-    for (const event of notableDbEvents(report)) historyStore?.recordEvent(event.kind, null, event.payload)
+    // Every answer, not just the notable ones: a question that has gone back to
+    // `ok` has to be forgotten, or the next time it alarms it looks like the
+    // same alarm being re-read and is never written down.
+    const notable = new Map(
+      notableDbEvents(report).map((e) => [`${report.connectionId}\u0000${String(e.payload.question)}`, e])
+    )
+    for (const a of report.answers) {
+      const seenKey = `${report.connectionId}\u0000${a.id}`
+      const event = notable.get(seenKey)
+      const level = event ? String(event.payload.level) : a.verdict.level
+      if (dbVerdictSeen.get(seenKey) === level) continue
+      dbVerdictSeen.set(seenKey, level)
+      // hostId is null: a database connection is not a fleet host, and inventing
+      // one would put rows in a host's timeline that host never produced.
+      if (event) historyStore?.recordEvent(event.kind, null, event.payload)
+    }
   }
   return report
 })
@@ -1882,6 +2328,9 @@ ipcMain.handle('data:save', (_e, data: unknown) => {
   // local.connect() directly and never read it. So main keeps its own copy,
   // refreshed from the same blob, and every local:* handler consults that.
   syncLocalTerminalEnabled(data)
+  // Same pattern, same reason: a module that gates a background probe has to be
+  // read by the process that runs the probe. See syncAccessModule.
+  syncAccessModule(data)
   // The MCP bridge resolves friendly server/workspace names from this same
   // file (see mcpDataCache.ts) rather than round-tripping through the
   // renderer on every tool call, so its cache is refreshed right after the

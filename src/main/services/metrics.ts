@@ -263,7 +263,16 @@ function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: C
   const snaps = section(text, 'CPU').map(cpuTotals)
   const latest = snaps.length ? snaps[snaps.length - 1] : null
   const base = snaps.length >= 2 ? snaps[0] : prev
-  const cpu = base && latest ? cpuPct(base, latest) : 0
+  // Null, not zero, when there is nothing to diff.
+  //
+  // 19a's rule, and the two metrics that never had it. `parse()` never fails
+  // and `sample()` still returns `{ok: true}`, so a host with no procfs, no
+  // `grep`, or a compound exec truncated on a flaky link produced a
+  // well-formed sample reading a perfectly idle machine — and an idle reading
+  // arriving at the alert path posts an all-clear for a host that is still
+  // pegged. `disk`, `inode` and `load` each already emit null out of this same
+  // function for exactly this reason.
+  const cpu = base && latest ? cpuPct(base, latest) : null
 
   const mem = section(text, 'MEM')
   const kv: Record<string, number> = {}
@@ -316,7 +325,9 @@ function parse(text: string, prev: CpuSnap | null): { data: HostMetrics; snap: C
 
   const data: HostMetrics = {
     cpu,
-    memPct: memTotal ? (memUsed / memTotal) * 100 : 0,
+    // Same rule, same reason: a MemTotal of zero is /proc/meminfo we could not
+    // read, not a machine with no memory, and 0/0 is not 0%.
+    memPct: memTotal ? (memUsed / memTotal) * 100 : null,
     memUsed,
     memTotal,
     diskPct: diskTotal ? (diskUsed / diskTotal) * 100 : 0,

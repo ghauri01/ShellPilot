@@ -313,10 +313,35 @@ export interface JobHostResult {
  * the 14th and restarted — and a job list that could not tell one from an
  * ad-hoc `systemctl restart nginx` would be a change log nobody trusts.
  *
+ * `access` is item 23's, and it is here for the same reason `patch` is: a row
+ * that edited an `authorized_keys` file is the single most consequential thing
+ * this app writes, and a year later "when did we take that key off the estate"
+ * has to be answerable from the job list rather than by grepping command text
+ * for `grep -v -F`. It is also the one kind whose row can be TRUE and still not
+ * be the whole story — an access job STAGES a change behind the host's own
+ * dead-man's switch, and whether it became permanent is recorded separately by
+ * the confirmation that disarmed it. See src/shared/access.ts.
+ *
+ * It is declared HERE rather than beside the thing that produces it, and that
+ * is not a filing preference. `shared/access.ts` is reached from the fleet
+ * sampler, which the MCP bridge reads, and tests/jobsNotExposed.test.ts fails
+ * if anything in that closure imports the job engine — so access.ts declares
+ * its spec structurally and this file is where its kind can be named.
+ *
  * The kind changes nothing about how the job RUNS. The runner switches on
  * cohorts and on `gate`, never on this.
+ *
+ * A LIST rather than a bare union, and the type is derived FROM the list, for
+ * the reason JOB_TERMINAL_STATES is a list: `tsconfig.node.json` and
+ * `tsconfig.web.json` include `src/**` and nothing under `tests/`, so a type
+ * written only as a union is erased by esbuild before a test ever runs and an
+ * assignment in a test file proves nothing at all. A value survives, so a test
+ * can check what the kinds ARE, and a kind added here without being added to
+ * the list is not a kind.
  */
-export type JobKind = 'command' | 'patch'
+export const JOB_KINDS = ['command', 'patch', 'access'] as const
+
+export type JobKind = (typeof JOB_KINDS)[number]
 
 export interface JobStep {
   command: string

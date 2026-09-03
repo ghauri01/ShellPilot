@@ -2,8 +2,12 @@ import { create } from 'zustand'
 import { useApp } from './app'
 import { onServerForgotten } from './serverCleanup'
 import { DISK_DANGER, isDiskCritical } from '../components/monitor/hostHealth'
+import { EVENT_ALERT_KINDS } from '../../../shared/webhook'
 import type {
   AlertKind as WebhookAlertKind,
+  EventAlertKind,
+  NumericAlertKind,
+  StateAlertKind,
   StoreAlertKind,
   StoredAlertEvent,
   StoredAlertRow
@@ -35,8 +39,18 @@ export interface ActiveAlert {
   serverId: string
   serverName: string
   kind: AlertKind
-  value: number
+  /** Null for a kind that is a state rather than a reading. Not zero: this is
+   *  the same rule the whole item runs on, applied to the chip. */
+  value: number | null
   since: number
+  /** A short, already-scrubbed phrase for the tooltip and the inbox. Built from
+   *  our words and names the user typed, never from remote output. */
+  detail?: string
+  /** When a snooze on this server+kind ends, if one is running. On the chip so
+   *  the inbox can say so — the chip STAYS up during a snooze, because the
+   *  condition is still true and a chip that vanished would put the status bar
+   *  and the Fleet Monitor back into the disagreement 1a4cfaa ended. */
+  snoozedUntil?: number
 }
 
 interface AlertState {
@@ -46,6 +60,15 @@ interface AlertState {
 }
 
 const key = (serverId: string, kind: AlertKind): string => `${serverId}:${kind}`
+
+/** How a chip's number reads, in the unit that number is actually in. State
+ *  kinds have no number at all — a chip that printed one would be inventing a
+ *  measurement — so they read as their label alone. */
+export function chipValue(a: ActiveAlert): string {
+  if (a.value === null) return ''
+  const n = Number.isInteger(a.value) ? String(a.value) : a.value.toFixed(1)
+  return ` ${n}${UNIT[a.kind as NumericAlertKind] ?? ''}`
+}
 
 export const useAlerts = create<AlertState>((set, get) => ({
   active: {},
@@ -66,7 +89,7 @@ export const useAlerts = create<AlertState>((set, get) => ({
 // Six hours is roughly "twice a working day" — often enough that a filling disk
 // is not forgotten, rare enough to still be read. Escalation (see evaluate)
 // covers the case where six hours is too long to wait.
-const REPEAT: Record<AlertKind, number> = {
+const REPEAT: Record<NumericAlertKind, number> = {
   cpu: 60_000,
   ram: 60_000,
   disk: 6 * 60 * 60 * 1000,
@@ -77,16 +100,23 @@ const REPEAT: Record<AlertKind, number> = {
   load: 60_000
 }
 
-// How far below the threshold a value must fall to count as recovered. Without
-// it, a host sitting at the line flaps between raised and resolved on every
-// sample. See evaluate().
+// How far below the threshold a value must fall before a later crossing counts
+// as a NEW incident rather than the same one continuing.
+//
+// It governs the talking, not the line. A reading is over when it reaches the
+// threshold — the number the user typed — and the chip follows that and nothing
+// else. What this margin buys is that a host stepping back over the line has
+// not made a round trip through recovery, so `lastNotifiedValue` survives and
+// the re-raise bypass does not fire; the crossing waits out MIN_GAP and the
+// repeat window like any other. Without it a host sitting exactly on the line
+// would earn a fresh raise on every sample. See evaluate().
 //
 // Per kind, because five is five PERCENT for everything measured in percent and
 // is nonsense for a load average: a threshold of 2 per core less a margin of 5
 // is a clear line below zero, which no reading can ever reach, so a load alert
 // would raise once and never resolve. Half a runnable thread per core is the
 // same proportion of the line that five points is for a percentage.
-const RECOVER_MARGIN: Record<AlertKind, number> = {
+const RECOVER_MARGIN: Record<NumericAlertKind, number> = {
   cpu: 5,
   ram: 5,
   disk: 5,
@@ -96,7 +126,7 @@ const RECOVER_MARGIN: Record<AlertKind, number> = {
 
 // A rise of this much since the last thing we said re-opens the repeat window.
 // See evaluate() for why a six-hour window needs it.
-const ESCALATE_BY: Record<AlertKind, number> = {
+const ESCALATE_BY: Record<NumericAlertKind, number> = {
   cpu: 5,
   ram: 5,
   disk: 5,
@@ -118,7 +148,7 @@ const ESCALATE_BY: Record<AlertKind, number> = {
 // webhookAlerts.ts, past which genuine alerts are dropped to keep up with the
 // noise. Disk sits at zero because its own bypasses are the feature, and every
 // case its tests pin depends on them firing immediately.
-const MIN_GAP: Record<AlertKind, number> = {
+const MIN_GAP: Record<NumericAlertKind, number> = {
   cpu: 60_000,
   ram: 60_000,
   disk: 0,
@@ -130,7 +160,7 @@ const MIN_GAP: Record<AlertKind, number> = {
 }
 
 /** Below this, a value counts as recovered rather than merely lower. */
-const clearLine = (kind: AlertKind, threshold: number): number =>
+const clearLine = (kind: NumericAlertKind, threshold: number): number =>
   Math.max(0, threshold - RECOVER_MARGIN[kind])
 
 // Last notification time per server+metric, so a sustained problem repeats on
@@ -185,9 +215,24 @@ const announced = new Map<string, { serverId: string; serverName: string; kind: 
 //                      startup is the correct behaviour and is what happens.
 // ---------------------------------------------------------------------------
 
-/** How many rows the startup read asks for. Two hundred crossings is far more
- *  than a healthy estate produces in the ninety days the store keeps events,
- *  and small enough that the read is not something to think about. */
+/**
+ * The PAGE SIZE of the startup read, which is not the same as its bound.
+ *
+ * It used to be the bound, and a row count was the wrong bound: `alerts:history`
+ * returns rows newest-first, so a cap drops the OLDEST rows — and the oldest
+ * rows are the chronic alerts this whole feature exists for. Six hundred rows of
+ * newer CPU noise, which one busy estate produces in an afternoon because CPU's
+ * repeat window is sixty seconds, pushed a disk that had been at 91% for a month
+ * out of the window; it re-announced itself immediately after every restart,
+ * forever, because the replacement row carries the ORIGINAL `at` and lands
+ * outside the newest-500 window again. That is exactly the "announced itself
+ * once per app start forever" failure the durable half was written to end.
+ *
+ * The bound is now TIME, and it is applied in main — `alerts:history` pages
+ * backwards over a thirty-day window and treats this number as how much to ask
+ * for at a time. It stays 500 because the IPC signature could not grow a
+ * parameter without touching the preload.
+ */
 const HISTORY_LIMIT = 500
 
 /**
@@ -261,6 +306,42 @@ const raiseTimes = new Map<string, number[]>()
  *  that happens while it is damped. */
 const dampedUntil = new Map<string, number>()
 
+// ---------------------------------------------------------------------------
+// The two things a person can do about an alert, and why they are not one
+// thing with a duration.
+//
+// SNOOZE is a period. "Not for the next eight hours" — the condition is still
+// true, the reader knows, and they will look again after. The chip stays up
+// because the condition has not changed and a chip that disappeared would put
+// the status bar back into disagreement with the screen it links to.
+//
+// ACKNOWLEDGE is not a period, and giving it one is the mistake this pair is
+// split to avoid. "I have seen this and I am dealing with it" lasts exactly as
+// long as the condition does — a disk being cleaned takes as long as it takes,
+// and an acknowledgement that expired after eight hours would start shouting
+// again in the middle of the work it was acknowledging. So it ends when the
+// condition ends, and the chip goes with it: the person has taken the alert,
+// and a status bar still counting it is counting their own inbox back at them.
+//
+// Both are DURABLE, for the same reason the repeat window is. A snooze that
+// died with the renderer would be undone by a restart, which is the one thing
+// somebody does when an app is annoying them.
+//
+// Both are kept apart from `dampedUntil` rather than folded into it, even
+// though the suppression they want is identical, because the refresh is not:
+// a crossing that happens while DAMPED extends the damp to six hours, and a
+// thirty-minute snooze that silently became six hours because the host crossed
+// once more would be the app deciding how long the user meant.
+// ---------------------------------------------------------------------------
+
+/** When each snoozed server+kind may speak again. Set by the user, never
+ *  refreshed by anything the estate does. */
+const snoozedUntil = new Map<string, number>()
+
+/** Server+kinds the user has said they have seen. Cleared when the condition
+ *  clears, not on a clock. */
+const acknowledged = new Set<string>()
+
 /**
  * Whether the condition was true on the last sample, per server+kind.
  *
@@ -273,10 +354,114 @@ const dampedUntil = new Map<string, number>()
  */
 const conditionHeld = new Set<string>()
 
+// ---------------------------------------------------------------------------
+// When a held condition stops being a held condition.
+//
+// A state kind speaks only on a crossing — there is nothing to add about a
+// tunnel that is still in error that the first message did not say — and
+// `conditionHeld` is durable. Put together, a raise whose resolve never arrives
+// does not merely repeat itself: it poisons that key permanently and swallows
+// the NEXT occurrence, which is a different and much quieter failure.
+//
+// Both producers are reachable, and neither is exotic:
+//
+//   tunnel-down  The poll only ever passes `false` for tunnels that are IN
+//                `tunnel.list()`, and tunnelStop deletes the tunnel from the
+//                map — so stopping one while it is in error, or quitting the
+//                app at all (tunnelDisposeAll), makes it vanish with no
+//                resolve. Start it again under the same id and it fails again:
+//                nothing is said, ever.
+//   job-failed   Resolved only by a later `ok` on the same host. A job that
+//                fails on web-1 and is never re-run there leaves web-1's
+//                `job-failed` held forever, and a DIFFERENT job failing on
+//                that host a month later is silent.
+//
+// The fix is an expiry, and it is an expiry rather than a tunnel-side cleanup
+// hook on purpose. A hook on tunnel deletion fixes exactly one of the two
+// producers — `job-failed` has nothing to hook, and `onServerForgotten` cannot
+// help either, because it sweeps by `${serverId}:` and a tunnel key is
+// `tunnelId:tunnel-down`. Resolving tunnels that disappeared from the list is
+// worse than useless: quitting the app disposes every tunnel, so it would post
+// an all-clear for every outage on the way out. An expiry covers both
+// producers, needs no cross-process cleanup, and any state kind added later
+// inherits it.
+//
+// THE RULE. A hold is only a hold while something goes on corroborating it. A
+// raise older than this with no affirming sample since is no longer held, so
+// the next occurrence is a crossing and is heard.
+//
+// Six hours, matching the longest repeat window in the file. Every kind that
+// IS being observed refreshes far faster — the tunnel poll is ten seconds, the
+// sampler a couple of minutes — so this can only expire a hold nothing is
+// watching any more, which is exactly the case it is for. What it does not do
+// is post an all-clear: we know we stopped observing, which is not the same as
+// knowing it recovered, and 19a's rule holds at the last surface too. The
+// endpoint's view is a raise, then a second raise when the thing fails again.
+const STATE_HOLD_MAX_MS = 6 * 60 * 60 * 1000
+
+/** When each held condition was last affirmed by an observation. Written by
+ *  every raise, live or replayed, and cleared with the condition. Only the
+ *  state path reads it: the numeric kinds are told `over: false` on every
+ *  sample and so cannot get stuck this way. */
+const conditionSeen = new Map<string, number>()
+
+/** Whether a held state kind has gone unobserved for long enough to stop
+ *  counting as held. Unheld keys are not stale — they are simply not held. */
+function holdIsStale(k: string, now: number): boolean {
+  if (!conditionHeld.has(k)) return false
+  const seen = conditionSeen.get(k)
+  return seen === undefined || now - seen >= STATE_HOLD_MAX_MS
+}
+
+/**
+ * Occurrences already announced, as `serverId:kind:detail:at`.
+ *
+ * The event kinds have no condition to hold and no resolve to wait for, so the
+ * only thing that can stop the same occurrence being announced twice is knowing
+ * it has been announced. It is seeded from the durable log during hydration, so
+ * a restart does not replay a night of database alarms into the notification
+ * centre — which is the exact failure the durable half of this feature was
+ * written to end, in a different kind.
+ */
+const seenEvents = new Set<string>()
+
+const eventDedupeKey = (id: string, kind: AlertKind, detail: string, at: number): string =>
+  `${id}:${kind}:${detail}:${at}`
+
+/**
+ * The suppression key for an event kind: the connection, the level AND the
+ * question.
+ *
+ * `connectionId:kind` was per database and per level, which is not what any of
+ * the suppression is about. Five reads of one standing replication alarm damped
+ * the whole database, so a genuinely new question going into alarm on it was
+ * silent for six hours — refreshed by every further read, so potentially
+ * forever. A question is the thing a verdict is about, and it is what a damp,
+ * a snooze and an acknowledgement have to be about too.
+ *
+ * It shares the `${id}:` prefix every sweep in onServerForgotten matches on,
+ * so nothing that cleans up by server id has to know about the third segment.
+ */
+const eventKey = (id: string, kind: AlertKind, question: string): string =>
+  `${id}:${kind}:${question}`
+
+/** Whether a kind is one of the "something happened, once" kinds. Read off the
+ *  shared list rather than a second literal, so a kind added there cannot be
+ *  quietly left behind here. */
+const isEventKind = (k: AlertKind): boolean => (EVENT_ALERT_KINDS as readonly string[]).includes(k)
+
 function record(
   kind: AlertKind,
   event: StoredAlertEvent['event'],
-  a: { serverId: string; serverName: string; value?: number; threshold?: number; at: number }
+  a: {
+    serverId: string
+    serverName: string
+    value?: number
+    threshold?: number
+    detail?: string
+    until?: number
+    at: number
+  }
 ): void {
   void window.shellpilot?.alerts?.record?.(
     {
@@ -285,7 +470,12 @@ function record(
       serverId: a.serverId,
       serverName: a.serverName,
       ...(a.value === undefined ? {} : { value: fmt(a.value) }),
-      ...(a.threshold === undefined ? {} : { threshold: a.threshold })
+      ...(a.threshold === undefined ? {} : { threshold: a.threshold }),
+      // Written only when there is one. An empty string in the row would be a
+      // detail the inbox renders as a blank parenthesis rather than an absent
+      // one, and absent is what it is.
+      ...(a.detail ? { detail: a.detail } : {}),
+      ...(a.until === undefined ? {} : { until: a.until })
     },
     a.at
   )
@@ -307,7 +497,26 @@ function record(
  */
 export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
   for (const row of [...rows].reverse()) {
-    const k = key(row.serverId, row.kind)
+    const k = isEventKind(row.kind)
+      ? eventKey(row.serverId, row.kind, row.detail ?? '')
+      : key(row.serverId, row.kind)
+    if (isEventKind(row.kind)) {
+      // An event kind holds no condition and never writes a resolve, so every
+      // raise in the log is a separate occurrence rather than the start of one
+      // that is still running. Walking these down the branch below would mark
+      // the first one outstanding forever and then read every later one as a
+      // "still going" repeat — so the flap counter that exists to damp a
+      // database re-reporting the same alarm on every poll would never get past
+      // one, and damping would be the one piece of this that a restart undid.
+      //
+      // This mirrors noteAlertEvent exactly, including the refresh: a
+      // occurrence arriving while damped extends the quiet rather than being
+      // counted towards a new damp.
+      seenEvents.add(eventDedupeKey(row.serverId, row.kind, row.detail ?? '', row.at))
+      if (isDamped(k, row.at)) dampedUntil.set(k, row.at + FLAP_DAMP_MS)
+      else noteCrossing(k, row.at)
+      continue
+    }
     if (row.event === 'raised') {
       // A crossing is CLEAN when nothing was outstanding — the same test
       // evaluate() calls `reRaised`, and for the same reason: a "still going"
@@ -315,6 +524,9 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       // alert rather than a flapping one.
       if (!conditionHeld.has(k)) noteCrossing(k, row.at)
       conditionHeld.add(k)
+      // The row's own time, so a hold read back from the log ages from when it
+      // was affirmed rather than from the moment the app happened to start.
+      conditionSeen.set(k, row.at)
       lastNotified.set(k, row.at)
       // `undefined` here is the re-raise bypass, so a raise whose value did not
       // survive the whitelist must NOT land as "nothing outstanding" — it would
@@ -323,6 +535,24 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       // counts as outstanding, at the value the threshold implies.
       lastNotifiedValue.set(k, row.value ?? row.threshold ?? 0)
       announced.set(k, { serverId: row.serverId, serverName: row.serverName, kind: row.kind })
+    } else if (row.event === 'snoozed') {
+      // Absolute, so it means what it meant when it was set. An expired one is
+      // simply over — isSnoozed drops it lazily on the first read.
+      if (row.until !== undefined) snoozedUntil.set(k, row.until)
+      // And the acknowledgement it REPLACED, exactly as snoozeAlert does live.
+      // The two are alternatives, not layers, and a replay that only ever added
+      // made a restart the one thing that could put them back on top of each
+      // other: a stale acknowledgement outliving the snooze that replaced it is
+      // silence with no chip and no end, because an acknowledgement only ends
+      // when the condition does.
+      acknowledged.delete(k)
+    } else if (row.event === 'acknowledged') {
+      acknowledged.add(k)
+      // The other direction, and the same rule: acknowledgeAlert clears the
+      // snooze live, so the replay has to. A stale snooze read back from the
+      // log passes isQuiet before the all-clear is decided, which leaves the
+      // endpoint holding an alarm it will never be told about.
+      snoozedUntil.delete(k)
     } else if (row.event === 'stood-down') {
       // Alerting was switched off with this outstanding. Nothing is owed and
       // nothing is suppressed: the next crossing is a new conversation, which
@@ -331,8 +561,11 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       lastNotifiedValue.delete(k)
       announced.delete(k)
       conditionHeld.delete(k)
+      conditionSeen.delete(k)
       raiseTimes.delete(k)
       dampedUntil.delete(k)
+      snoozedUntil.delete(k)
+      acknowledged.delete(k)
     } else {
       // A resolve leaves the repeat window in place and clears the escalation
       // memory — exactly what evaluate()'s `!over` branch does, for the reason
@@ -342,6 +575,12 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       lastNotifiedValue.delete(k)
       announced.delete(k)
       conditionHeld.delete(k)
+      conditionSeen.delete(k)
+      // An acknowledgement lasts as long as its condition, and this row is the
+      // condition ending. A snooze is a period the user chose and outlives the
+      // thing it was about — otherwise a disk that cleared five minutes into an
+      // eight-hour snooze would be free to shout again for the other seven.
+      acknowledged.delete(k)
     }
   }
 }
@@ -378,6 +617,31 @@ function isDamped(k: string, now: number): boolean {
   return true
 }
 
+/** Whether the user has snoozed this server+kind. Same lazy expiry, same
+ *  reason. */
+function isSnoozed(k: string, now: number): boolean {
+  const until = snoozedUntil.get(k)
+  if (until === undefined) return false
+  if (now >= until) {
+    snoozedUntil.delete(k)
+    return false
+  }
+  return true
+}
+
+/**
+ * Whether anything at all should be said about this server+kind.
+ *
+ * One predicate over the three reasons for silence, so a code path cannot check
+ * two of them and miss the third. Every "should we speak" gate calls this; the
+ * only places that ask about damping specifically are the two that REFRESH a
+ * damp, because a snooze and an acknowledgement must not be extended by
+ * anything the estate does.
+ */
+function isQuiet(k: string, now: number): boolean {
+  return isDamped(k, now) || isSnoozed(k, now) || acknowledged.has(k)
+}
+
 export function hydrateAlerts(): Promise<void> {
   if (hydrating) return hydrating
   const read = window.shellpilot?.alerts?.history
@@ -403,14 +667,19 @@ export const LABEL: Record<AlertKind, string> = {
   ram: 'Memory',
   disk: 'Disk',
   inode: 'Inodes',
-  load: 'Load'
+  load: 'Load',
+  'host-unreachable': 'Unreachable',
+  'job-failed': 'Job failed',
+  'tunnel-down': 'Tunnel down',
+  'db-alarm': 'Database alarm',
+  'db-watch': 'Database watch'
 }
 
 // What the number is measuring, for the sentences a person reads. Disk says
 // "root filesystem" and means it: metrics.ts probes `df -kP /` and nothing
 // else, so a host with a full /var and a roomy / raises nothing here, and an
 // alert that said "disk" would be claiming to have looked at more than it did.
-const SUBJECT: Record<AlertKind, string> = {
+const SUBJECT: Record<NumericAlertKind, string> = {
   cpu: 'CPU',
   ram: 'Memory',
   disk: 'Root filesystem',
@@ -424,14 +693,14 @@ const SUBJECT: Record<AlertKind, string> = {
 // alike. Disk raises STRICTLY above DISK_DANGER — "at or above 85%" was a
 // claim the code does not implement — and correspondingly clears at 85 itself.
 // CPU and memory raise at or above their line.
-const OVER_WORD: Record<AlertKind, string> = {
+const OVER_WORD: Record<NumericAlertKind, string> = {
   cpu: 'at or above',
   ram: 'at or above',
   disk: 'above',
   inode: 'above',
   load: 'at or above'
 }
-const backBelow: Record<AlertKind, (threshold: number) => string> = {
+const backBelow: Record<NumericAlertKind, (threshold: number) => string> = {
   cpu: (t) => `back below ${t}%`,
   ram: (t) => `back below ${t}%`,
   disk: (t) => `back to ${t}% or below`,
@@ -442,7 +711,7 @@ const backBelow: Record<AlertKind, (threshold: number) => string> = {
 // The unit each kind's number is in. Not everything alerting measures is a
 // percentage, and a load average printed as "3%" is a wrong number rather than
 // an ugly one — which is what the status-bar chip showed before this existed.
-export const UNIT: Record<AlertKind, string> = {
+export const UNIT: Record<NumericAlertKind, string> = {
   cpu: '%',
   ram: '%',
   disk: '%',
@@ -458,18 +727,23 @@ const fmt = (v: number): number => Number(v.toFixed(1))
 
 // The wire name for each kind. A Record rather than a ternary, so adding a kind
 // is a type error here instead of a metric quietly posting as 'memory'.
-const WEBHOOK_KIND: Record<AlertKind, WebhookAlertKind> = {
+const WEBHOOK_KIND: Record<StoreAlertKind, WebhookAlertKind> = {
   cpu: 'cpu',
   ram: 'memory',
   disk: 'disk',
   inode: 'inode',
-  load: 'load'
+  load: 'load',
+  'host-unreachable': 'host-unreachable',
+  'job-failed': 'job-failed',
+  'tunnel-down': 'tunnel-down',
+  'db-alarm': 'db-alarm',
+  'db-watch': 'db-watch'
 }
 
 function evaluate(
   serverId: string,
   serverName: string,
-  kind: AlertKind,
+  kind: NumericAlertKind,
   value: number,
   threshold: number,
   now: number,
@@ -516,14 +790,22 @@ function evaluate(
     if (!hydrated) return
 
     conditionHeld.delete(k)
+    conditionSeen.delete(k)
 
-    // Damped: the crossing is real, the chip has already followed it, and the
+    // An acknowledgement ends with the condition it was about, and it is
+    // cleared HERE — before the quiet gate — so the all-clear still goes out.
+    // The person acknowledged the alert on their own screen; an endpoint left
+    // holding an alarm that nothing will ever close is a different lie from the
+    // one acknowledging was meant to stop.
+    acknowledged.delete(k)
+
+    // Damped, snoozed: the crossing is real, the chip has already followed it, and the
     // durable log records it. What is suppressed is the talking, and that has
     // to include the all-clear — half of a flap's noise is all-clears. The
     // outstanding alarm and the escalation memory are left standing on purpose,
     // so the endpoint's view is one raise, then silence, then whichever of a
     // repeat or an all-clear is true when the damp ends.
-    if (isDamped(k, now)) return
+    if (isQuiet(k, now)) return
 
     // The all-clear, once, and only if the endpoint is holding an alarm from
     // us. Without this gate a host crossing the line repeatedly without ever
@@ -560,12 +842,25 @@ function evaluate(
   }
 
   const existing = useAlerts.getState().active[k]
-  useAlerts.setState((s) => ({
-    active: {
-      ...s.active,
-      [k]: { serverId, serverName, kind, value, since: existing?.since ?? now }
-    }
-  }))
+  // An acknowledged alert keeps NO chip. The person has taken it, and a status
+  // bar still counting it is counting their own inbox back at them. Everything
+  // else about the condition goes on: the crossing counter, the durable log,
+  // and the all-clear when it finally clears.
+  if (!acknowledged.has(k)) {
+    useAlerts.setState((s) => ({
+      active: {
+        ...s.active,
+        [k]: {
+          serverId,
+          serverName,
+          kind,
+          value,
+          since: existing?.since ?? now,
+          ...(snoozedUntil.has(k) ? { snoozedUntil: snoozedUntil.get(k) } : {})
+        }
+      }
+    }))
+  }
 
   // Three ways a sample earns a notification, and all three are needed once a
   // window can be six hours long:
@@ -607,6 +902,10 @@ function evaluate(
     conditionHeld.add(k)
     if (isDamped(k, now)) dampedUntil.set(k, now + FLAP_DAMP_MS)
   }
+  // Not read on this path — a numeric kind is told `over: false` on every
+  // sample and so cannot get stuck held — but kept current so the two paths
+  // never disagree about what a hold means.
+  conditionSeen.set(k, now)
 
   const last = lastNotified.get(k) ?? 0
   const said = lastNotifiedValue.get(k)
@@ -618,7 +917,7 @@ function evaluate(
   // Escalation is the one thing a damp does not stop. A value five points worse
   // than the figure last announced is monotone movement, and monotone movement
   // is the one shape a flap never has.
-  if (!worsened && isDamped(k, now)) return
+  if (!worsened && isQuiet(k, now)) return
   // The crossing that trips the damp is still announced — that message is what
   // tells a person the feature has gone quiet on purpose.
   const tripped = crossing && noteCrossing(k, now)
@@ -661,6 +960,348 @@ function evaluate(
     // desktop does: an endpoint that stops receiving has no way to tell "damped"
     // from "ShellPilot died".
     ...(tripped ? { damped: true } : {})
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Kinds that are a state, not a reading.
+//
+// A host that will not answer, a job step that failed, a tunnel sitting in
+// error. None of them has a number, a threshold, a recovery margin or an
+// escalation step, and inventing a value of 1 so they could share the numeric
+// path would put "1 per core" in a person's notification. They do share
+// everything that matters: the chip, the repeat window, the outstanding-alarm
+// pairing that stops an all-clear for something nobody was told about, the
+// durable log, and flap damping — a tunnel that flaps is exactly as tiring as a
+// disk that does.
+//
+// The words are per kind and are built here, from our own sentences and from
+// names the user typed. Nothing a host, a job or a database said reaches them:
+// AlertPayload.summary is rendered by Slack, and secretRedaction.ts exists
+// because remote text in an outbound field is easy to get wrong.
+// ---------------------------------------------------------------------------
+
+const STATE_WORDS: Record<
+  StateAlertKind,
+  { raised: (name: string, detail: string) => string; resolved: (name: string) => string }
+> = {
+  'host-unreachable': {
+    raised: (name) => `${name} did not answer the last check`,
+    resolved: (name) => `${name} is answering again`
+  },
+  'job-failed': {
+    raised: (name, detail) => `${name} failed a job step${detail ? ` (${detail})` : ''}`,
+    resolved: (name) => `${name} has completed a job step since`
+  },
+  'tunnel-down': {
+    raised: (name) => `Tunnel ${name} is in error`,
+    resolved: (name) => `Tunnel ${name} is carrying traffic again`
+  }
+}
+
+const EVENT_WORDS: Record<EventAlertKind, (name: string, detail: string) => string> = {
+  'db-alarm': (name, detail) => `${name}: ${detail} is in alarm`,
+  'db-watch': (name, detail) => `${name}: ${detail} is worth watching`
+}
+
+// The same character class systemd unit names get, and for the same reason: a
+// `<!channel>` in a name that reaches `summary` is a mass ping in a workspace
+// that trusts this integration. Spaces are allowed because these are names the
+// user typed, and a job called "Upgrade the estate" should read as one.
+const cleanName = (v: string): string =>
+  v.slice(0, 128).replace(/[^A-Za-z0-9 ._@:-]/g, '').replace(/^@+/, '').trim()
+
+/**
+ * One state signal.
+ *
+ * `bad` is `boolean | null`, and the null is the whole point: a tunnel list
+ * that could not be read, a sweep that did not run, a job whose outcome is not
+ * in yet. Null raises nothing, resolves nothing, and leaves the chip exactly
+ * where it is — it is not "fine", it is "not asked".
+ */
+export function checkStateAlert(
+  id: string,
+  name: string,
+  kind: StateAlertKind,
+  bad: boolean | null,
+  detail = ''
+): void {
+  if (bad === null) return
+  if (!useApp.getState().settings.resourceAlertsEnabled) return
+  const now = Date.now()
+  const k = key(id, kind)
+  const who = cleanName(name) || 'A server'
+  const what = cleanName(detail)
+
+  if (!bad) {
+    if (useAlerts.getState().active[k]) {
+      useAlerts.setState((s) => {
+        const active = { ...s.active }
+        delete active[k]
+        return { active }
+      })
+    }
+    if (!hydrated) return
+    conditionHeld.delete(k)
+    conditionSeen.delete(k)
+    // An acknowledgement ends with the condition it was about, and it is
+    // cleared HERE — before the quiet gate — so the all-clear still goes out.
+    // The person acknowledged the alert on their own screen; an endpoint left
+    // holding an alarm that nothing will ever close is a different lie from the
+    // one acknowledging was meant to stop.
+    acknowledged.delete(k)
+    if (isQuiet(k, now)) return
+    if (announced.delete(k)) {
+      lastNotified.set(k, now)
+      void window.shellpilot?.webhook?.notify({
+        source: 'shellpilot',
+        version: APP_VERSION,
+        event: 'resolved',
+        kind: WEBHOOK_KIND[kind],
+        server: who,
+        summary: STATE_WORDS[kind].resolved(who),
+        at: new Date(now).toISOString()
+      })
+      record(kind, 'resolved', { serverId: id, serverName: who, at: now })
+    }
+    return
+  }
+
+  const existing = useAlerts.getState().active[k]
+  if (!acknowledged.has(k)) {
+    useAlerts.setState((s) => ({
+      active: {
+        ...s.active,
+        [k]: {
+          serverId: id,
+          serverName: who,
+          kind,
+          value: null,
+          since: existing?.since ?? now,
+          detail: what,
+          ...(snoozedUntil.has(k) ? { snoozedUntil: snoozedUntil.get(k) } : {})
+        }
+      }
+    }))
+  }
+  if (!hydrated) return
+
+  // A hold nothing has corroborated for STATE_HOLD_MAX_MS is no longer a hold.
+  // See the rule above: without this, one raise whose resolve never arrives
+  // swallows every later occurrence on that key forever.
+  const crossing = !conditionHeld.has(k) || holdIsStale(k, now)
+  if (crossing) {
+    conditionHeld.add(k)
+    if (isDamped(k, now)) dampedUntil.set(k, now + FLAP_DAMP_MS)
+  }
+  // This sample is the corroboration, whether or not anything is said about it
+  // — a snoozed or damped tunnel is still being watched.
+  conditionSeen.set(k, now)
+
+  // A state kind has no "still going" repeat and no escalation: there is
+  // nothing to say a second time about a host that is still not answering that
+  // the first message did not already say, and no number that could get worse.
+  // So it speaks once per transition and then holds its peace until it
+  // resolves — which is stricter than the numeric path, deliberately.
+  if (!crossing) return
+  if (isQuiet(k, now)) return
+  const tripped = noteCrossing(k, now)
+  lastNotified.set(k, now)
+  // `lastNotifiedValue` is deliberately NOT written. It is the escalation
+  // memory — "the figure we last said out loud" — and a state kind has no
+  // figure. A 1 here would be a number nothing reads, put there so the two
+  // paths look alike; the paths are not alike, which is why they are two.
+  announced.set(k, { serverId: id, serverName: who, kind })
+
+  const dampHours = Math.round(FLAP_DAMP_MS / 3_600_000)
+  const quiet = tripped
+    ? ` This has happened ${FLAP_CROSSINGS} times in ${dampHours} hours, so nothing further will ` +
+      `be said about it until it has gone ${dampHours} hours without happening again. ` +
+      `The Alerts tab still lists every one.`
+    : ''
+  const summary = STATE_WORDS[kind].raised(who, what)
+  void window.shellpilot?.notify.show(`${who}: ${LABEL[kind]}`, `${summary}.${quiet}`)
+  void window.shellpilot?.webhook?.notify({
+    source: 'shellpilot',
+    version: APP_VERSION,
+    event: 'raised',
+    kind: WEBHOOK_KIND[kind],
+    server: who,
+    summary,
+    at: new Date(now).toISOString(),
+    ...(tripped ? { damped: true } : {})
+  })
+  record(kind, 'raised', { serverId: id, serverName: who, detail: what, at: now })
+}
+
+/**
+ * Something happened, once. Item 18's database verdicts.
+ *
+ * `notableDbEvents` records `alarm` and `watch` and deliberately does not
+ * record `ok`, so nothing in the store can ever say a database recovered. A
+ * kind that cannot observe its own recovery must not hold a status-bar chip:
+ * the chip would be permanent, it would point at a Fleet Monitor that disagreed
+ * with it, and that exact contradiction is what 1a4cfaa was written to end.
+ *
+ * So this raises, is recorded, and is done. The inbox is where it lives
+ * afterwards, which is what an inbox is for.
+ *
+ * `at` is the store's own timestamp for the row, and is what makes this
+ * idempotent: the same row seen by two polls is announced once.
+ */
+export function noteAlertEvent(
+  id: string,
+  name: string,
+  kind: EventAlertKind,
+  detail: string,
+  at: number
+): void {
+  if (!useApp.getState().settings.resourceAlertsEnabled) return
+  const who = cleanName(name) || 'A database'
+  const what = cleanName(detail)
+  // Keyed on the SCRUBBED detail and on the store's own timestamp, because
+  // those are the two fields the durable row carries — and the durable row is
+  // what seeds this set at hydration. Keying on the raw detail here would make
+  // the seed miss every row whose detail the scrubber changed, and the first
+  // launch after a night of alarms would replay all of them.
+  const dedupe = eventDedupeKey(id, kind, what, at)
+  if (seenEvents.has(dedupe)) return
+  // Per question, not per database. See eventKey.
+  const k = eventKey(id, kind, what)
+  if (!hydrated) {
+    // Not marked seen — so the next poll offers it again once the log has been
+    // read. Announcing before hydration is exactly what the damping and repeat
+    // state on disk exist to prevent.
+    return
+  }
+  seenEvents.add(dedupe)
+  // There is deliberately no snooze or acknowledgement check here, and the one
+  // that used to be here was dead code: both are set from the inbox's
+  // Outstanding list, that list is built from the status-bar chips, and this
+  // function writes no chip — a kind that cannot observe its own recovery must
+  // not hold one, which is the whole argument in the docblock above. A check
+  // against state nothing can set reads as a feature that exists. The panel
+  // says plainly that a database verdict cannot be snoozed.
+  // The occurrence's OWN time drives damping, not the wall clock at the moment
+  // we happened to read it. That is what makes the live path and the hydration
+  // replay above the same arithmetic on the same rows, rather than two versions
+  // that agree until a poll runs late.
+  if (isDamped(k, at)) {
+    dampedUntil.set(k, at + FLAP_DAMP_MS)
+    return
+  }
+  const tripped = noteCrossing(k, at)
+  const summary = EVENT_WORDS[kind](who, what)
+  const dampHours = Math.round(FLAP_DAMP_MS / 3_600_000)
+  void window.shellpilot?.notify.show(
+    `${who}: ${LABEL[kind]}`,
+    `${summary}.` +
+      (tripped
+        ? ` This has happened ${FLAP_CROSSINGS} times in ${dampHours} hours, so nothing further ` +
+          `will be said about it until it has gone ${dampHours} hours without happening again. ` +
+          `The Alerts tab still lists every one.`
+        : '')
+  )
+  void window.shellpilot?.webhook?.notify({
+    source: 'shellpilot',
+    version: APP_VERSION,
+    event: 'raised',
+    kind: WEBHOOK_KIND[kind],
+    server: who,
+    summary,
+    at: new Date(at).toISOString(),
+    ...(tripped ? { damped: true } : {})
+  })
+  record(kind, 'raised', { serverId: id, serverName: who, detail: what, at })
+}
+
+// ---------------------------------------------------------------------------
+// What a person can do about an alert, from the inbox.
+// ---------------------------------------------------------------------------
+
+/** The durations the inbox offers. An hour is "I am on it", eight hours is
+ *  "not during this shift", a day is "not until tomorrow". Longer than a day is
+ *  what acknowledging is for. */
+export const SNOOZE_CHOICES: readonly { label: string; ms: number }[] = [
+  { label: '1 hour', ms: 60 * 60 * 1000 },
+  { label: '8 hours', ms: 8 * 60 * 60 * 1000 },
+  { label: '24 hours', ms: 24 * 60 * 60 * 1000 }
+]
+
+/**
+ * Stop talking about this server+kind for a while.
+ *
+ * The chip stays up, and that is the point of the pair rather than an
+ * oversight: the condition has not changed, and a snooze that cleared the chip
+ * would put the status bar back into disagreement with the screen it links to —
+ * the contradiction 1a4cfaa was written to end.
+ *
+ * Escalation still speaks, exactly as it does under flap damping, and for the
+ * same reason: a value five points worse than the figure last announced is
+ * monotone movement, and someone who snoozed a disk at 86% did not snooze it at
+ * 96%.
+ */
+export function snoozeAlert(serverId: string, kind: AlertKind, ms: number): void {
+  const k = key(serverId, kind)
+  const until = Date.now() + Math.max(0, ms)
+  snoozedUntil.set(k, until)
+  // Acknowledging and snoozing are alternatives, not layers. Choosing one
+  // replaces the other rather than stacking a period on top of something that
+  // has none.
+  acknowledged.delete(k)
+  const a = useAlerts.getState().active[k]
+  if (a) useAlerts.setState((s) => ({ active: { ...s.active, [k]: { ...a, snoozedUntil: until } } }))
+  record(kind, 'snoozed', {
+    serverId,
+    serverName: a?.serverName ?? '',
+    detail: a?.detail,
+    until,
+    at: Date.now()
+  })
+}
+
+/** End a snooze early. Written to the log as a zero-length snooze rather than
+ *  as a new event name: "quiet until then" with a `then` in the past is exactly
+ *  what this means, and it replays correctly without teaching the reader a
+ *  fifth verb. */
+export function unsnoozeAlert(serverId: string, kind: AlertKind): void {
+  const k = key(serverId, kind)
+  snoozedUntil.delete(k)
+  const a = useAlerts.getState().active[k]
+  if (a) {
+    const next = { ...a }
+    delete next.snoozedUntil
+    useAlerts.setState((s) => ({ active: { ...s.active, [k]: next } }))
+  }
+  const at = Date.now()
+  record(kind, 'snoozed', { serverId, serverName: a?.serverName ?? '', detail: a?.detail, until: at, at })
+}
+
+/**
+ * "I have seen this and I am dealing with it."
+ *
+ * Not a snooze with a long duration. An acknowledgement lasts exactly as long
+ * as the condition does — cleaning a disk takes as long as it takes, and an
+ * acknowledgement that expired on a clock would start shouting again in the
+ * middle of the work it acknowledged. The chip goes, because the person has
+ * taken the alert; the condition is still tracked, the log still records it,
+ * and the endpoint still gets its all-clear when it really clears.
+ */
+export function acknowledgeAlert(serverId: string, kind: AlertKind): void {
+  const k = key(serverId, kind)
+  acknowledged.add(k)
+  snoozedUntil.delete(k)
+  const a = useAlerts.getState().active[k]
+  useAlerts.setState((s) => {
+    const active = { ...s.active }
+    delete active[k]
+    return { active }
+  })
+  record(kind, 'acknowledged', {
+    serverId,
+    serverName: a?.serverName ?? '',
+    detail: a?.detail,
+    at: Date.now()
   })
 }
 
@@ -744,6 +1385,15 @@ export function clearUnitAlerts(serverId: string): void {
 onServerForgotten((serverId) => {
   clearUnitAlerts(serverId)
   useAlerts.getState().clearServer(serverId)
+  // The per-host threshold too. A row keyed on a deleted server's id is a
+  // setting nothing can show and nothing can remove, and a new server that
+  // happened to be given the same id would inherit it.
+  const perHost = useApp.getState().settings.resourceAlertThresholds
+  if (perHost[serverId] !== undefined) {
+    const next = { ...perHost }
+    delete next[serverId]
+    useApp.getState().setSettings({ resourceAlertThresholds: next })
+  }
   // The repeat window and the escalation memory too: otherwise a re-added
   // server inherits a suppression it never earned.
   for (const k of [...lastNotified.keys()]) {
@@ -760,6 +1410,15 @@ onServerForgotten((serverId) => {
   }
   for (const k of [...dampedUntil.keys()]) {
     if (k.startsWith(`${serverId}:`)) dampedUntil.delete(k)
+  }
+  for (const k of [...snoozedUntil.keys()]) {
+    if (k.startsWith(`${serverId}:`)) snoozedUntil.delete(k)
+  }
+  for (const k of [...acknowledged]) {
+    if (k.startsWith(`${serverId}:`)) acknowledged.delete(k)
+  }
+  for (const k of [...conditionSeen.keys()]) {
+    if (k.startsWith(`${serverId}:`)) conditionSeen.delete(k)
   }
   for (const k of [...conditionHeld]) {
     if (k.startsWith(`${serverId}:`)) conditionHeld.delete(k)
@@ -798,6 +1457,12 @@ useApp.subscribe((s, prev) => {
     raiseTimes.clear()
     dampedUntil.clear()
     conditionHeld.clear()
+    conditionSeen.clear()
+    // The snoozes and acknowledgements too. They are decisions about a
+    // conversation the user has just ended, and a snooze surviving the switch
+    // would silence the first alert after it is turned back on.
+    snoozedUntil.clear()
+    acknowledged.clear()
   }
 })
 
@@ -813,8 +1478,15 @@ useApp.subscribe((s, prev) => {
  * how a caller says a thing could not be measured.
  */
 export interface ResourceSample {
-  cpu: number
-  ram: number
+  /** Null when the CPU could not be measured — no procfs, no `grep`, or a
+   *  compound exec that was cut short. Zero would be an idle machine, and an
+   *  idle reading resolves an alert for a host that is still pegged: two
+   *  `resolved` webhooks, the chip gone, `conditionHeld` cleared, and the
+   *  genuine re-cross counting as a fresh clean crossing towards a flap damp. */
+  cpu: number | null
+  /** Null when memory could not be measured. Same rule, same consequence: 0/0
+   *  is not 0%. */
+  ram: number | null
   /** Null when df reported no filesystem at all. A failed probe yields a
    *  diskPct of 0, and 0 here would read as an empty disk and post an
    *  all-clear for a host that may well still be full. */
@@ -846,6 +1518,37 @@ export function isInodeCritical(pct: number): boolean {
 // full utilisation, two is twice as much work as there is machine.
 export const LOAD_DANGER = 2
 
+// The range a per-host override is allowed to take.
+//
+// A threshold of 0 makes `over` true on every sample forever, because no
+// reading is below zero; a threshold of 100 can never be reached by a
+// percentage. Both are ways of switching alerting off for
+// one host while the switch still says it is on, and neither is what anybody
+// meant to type. The global threshold has a slider that cannot produce them;
+// an override is a number in a box, and the box is the only guard there is.
+export const THRESHOLD_MIN = 50
+export const THRESHOLD_MAX = 99
+
+/**
+ * The CPU/memory line for one host.
+ *
+ * Pure, and exported, because it is the whole of the per-host feature and the
+ * part that has to be right: everything else is a text input.
+ */
+export function hostThreshold(
+  global: number,
+  perHost: Record<string, number> | undefined,
+  serverId: string
+): number {
+  const v = perHost?.[serverId]
+  // Not a number, or not a finite one, is not an override. A row that survived
+  // a hand-edited settings file or an old backup falls back to the global
+  // rather than to NaN, which would make every comparison false and silence
+  // the host completely.
+  if (typeof v !== 'number' || !Number.isFinite(v)) return global
+  return Math.min(THRESHOLD_MAX, Math.max(THRESHOLD_MIN, v))
+}
+
 /**
  * Called from the metrics hook and from the fleet sampler on each sample.
  *
@@ -854,20 +1557,45 @@ export const LOAD_DANGER = 2
  * is no branch that turns one into a zero on the way in.
  */
 export function checkResourceAlerts(serverId: string, serverName: string, s: ResourceSample): void {
-  const { resourceAlertsEnabled, resourceAlertThreshold } = useApp.getState().settings
+  const { resourceAlertsEnabled, resourceAlertThreshold, resourceAlertThresholds } =
+    useApp.getState().settings
   if (!resourceAlertsEnabled) return
   const now = Date.now()
-  // `line` is the CLEAR line, not the threshold, and CPU and memory are over
-  // when they reach it. That is load-bearing and easy to mistake for a bug:
-  // because `over` and `clearAt` are then the same number, "over" and "not yet
-  // recovered" are the same condition, and the chip and the notification state
-  // cannot come apart. Raising this to `>= resourceAlertThreshold` would open
-  // a five-point band for CPU where the chip is down but the alert memory is
-  // still held — the dead band that stranded disk chips at 82%. If you change
-  // it, the `!over` branch in evaluate has to grow the disk case's handling.
-  const line = clearLine('cpu', resourceAlertThreshold)
-  evaluate(serverId, serverName, 'cpu', s.cpu, resourceAlertThreshold, now, s.cpu >= line)
-  evaluate(serverId, serverName, 'ram', s.ram, resourceAlertThreshold, now, s.ram >= line)
+  // Per host, falling back to the global. Read here rather than inside
+  // evaluate() so there is exactly one place that decides what this host's line
+  // is, and both `line` below and the sentence a person reads are built from
+  // the same number.
+  const threshold = hostThreshold(resourceAlertThreshold, resourceAlertThresholds, serverId)
+  // THE LINE IS THE NUMBER THE USER TYPED.
+  //
+  // This used to be `threshold - RECOVER_MARGIN`, so that "over" and "not yet
+  // recovered" were the same condition and the chip could not come apart from
+  // the notification state. That argument was sound while the threshold was a
+  // single workspace slider — one sentence off by five points that nobody had
+  // chosen — and it stopped being sound the moment the number was one a person
+  // typed into a box beside the words "alerts at 50%". A host held to 50 raised
+  // at 45, with `threshold: 50` on the wire and a desktop body reading "CPU has
+  // been at or above 50%" at 45; at THRESHOLD_MIN the real line was 45, below
+  // the minimum the box claims to enforce.
+  //
+  // The dead band the old comment warns about is already closed, and by the
+  // disk case: evaluate's `!over` branch drops the chip on `over` alone and
+  // keeps `lastNotifiedValue` until the value is genuinely below `clearAt`. So
+  // hysteresis still governs the TALKING — a host stepping back over the line
+  // has not made a round trip through recovery and earns no fresh raise, it
+  // waits out MIN_GAP and the repeat window like anything else — while the chip
+  // and the sentence both follow the number in the box. Disk, inodes and load
+  // are unchanged: their lines are fixed, shared with the Fleet Monitor, and
+  // never five points from anything.
+  const line = threshold
+  // Guarded exactly as disk, inode and load are. A null is neither raised nor
+  // resolved nor read as healthy, and there is now a null to pass.
+  if (s.cpu !== null) {
+    evaluate(serverId, serverName, 'cpu', s.cpu, threshold, now, s.cpu >= line)
+  }
+  if (s.ram !== null) {
+    evaluate(serverId, serverName, 'ram', s.ram, threshold, now, s.ram >= line)
+  }
   // Fixed at DISK_DANGER rather than the configurable threshold: this is the
   // number the Fleet Monitor colours a bar red at and lists a host under, and
   // an alert that fired at a different number from the screen it sends you to
@@ -896,7 +1624,11 @@ export function resetAlertsForTests(): void {
   announced.clear()
   raiseTimes.clear()
   dampedUntil.clear()
+  snoozedUntil.clear()
+  acknowledged.clear()
   conditionHeld.clear()
+  conditionSeen.clear()
+  seenEvents.clear()
   failedUnits.clear()
   hydrated = true
   hydrating = null

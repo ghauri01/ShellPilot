@@ -27,7 +27,12 @@ export const ALERT_KINDS = [
   'disk',
   'unit-failed',
   'inode',
-  'load'
+  'load',
+  'host-unreachable',
+  'job-failed',
+  'tunnel-down',
+  'db-alarm',
+  'db-watch'
 ] as const
 export type AlertKind = (typeof ALERT_KINDS)[number]
 
@@ -135,23 +140,72 @@ export function validateWebhookUrl(raw: string): { ok: true; url: string } | { o
 // assembled on a host we do not control has no business being rendered.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The kinds as the ALERT STORE names them, which is not quite the wire's list.
+//
+// `ram` is `memory` on the wire — a name chosen before the webhook existed and
+// not worth a migration — and `unit-failed` has no store entry because failed
+// units are tracked as a SET of unit names rather than a threshold crossing.
+// The mapping between the two lives in store/alerts.ts as a total Record, so a
+// kind added to one list and not the other is a type error rather than an alert
+// that posts under the wrong name.
+//
+// They are three lists rather than one because the kinds do not behave alike,
+// and the store has a different code path for each shape. STORE_ALERT_KINDS is
+// their concatenation and stays the single list every whitelist consumes.
+// ---------------------------------------------------------------------------
+
+/** Kinds that are a number against a line. Hysteresis, escalation and a
+ *  recovery margin all mean something for these and nothing for the rest. */
+export const NUMERIC_ALERT_KINDS = ['cpu', 'ram', 'disk', 'inode', 'load'] as const
+export type NumericAlertKind = (typeof NUMERIC_ALERT_KINDS)[number]
+
 /**
- * The kinds as the ALERT STORE names them, which is not quite the wire's list.
+ * Kinds that are a state rather than a reading.
  *
- * `ram` is `memory` on the wire — a name chosen before the webhook existed and
- * not worth a migration — and `unit-failed` has no store entry because failed
- * units are tracked as a SET of unit names rather than a threshold crossing.
- * The mapping between the two lives in store/alerts.ts as a total Record, so a
- * kind added to one list and not the other is a type error rather than an alert
- * that posts under the wrong name.
+ * Split from the numeric ones rather than folded in with a synthetic value of
+ * 1, because every per-kind table the numeric path owns — recovery margin,
+ * escalation step, the unit a number is printed in — would then have to hold an
+ * answer for a question the kind does not ask, and "1 per core" is not an
+ * answer, it is a placeholder that reads as a measurement.
  */
-export const STORE_ALERT_KINDS = ['cpu', 'ram', 'disk', 'inode', 'load'] as const
+export const STATE_ALERT_KINDS = ['host-unreachable', 'job-failed', 'tunnel-down'] as const
+export type StateAlertKind = (typeof STATE_ALERT_KINDS)[number]
+
+/**
+ * Kinds that are neither: something happened, once.
+ *
+ * Item 18's database verdicts. `notableDbEvents` records `alarm` and `watch`
+ * and deliberately does NOT record `ok` — an ok every sixty seconds is a log
+ * nobody reads and a table that grows forever — so there is no row anywhere
+ * that could tell us a database recovered. A kind that cannot observe its own
+ * recovery must not pretend to hold a condition: it raises, it is recorded, and
+ * it never carries a status-bar chip that only a restart could clear.
+ */
+export const EVENT_ALERT_KINDS = ['db-alarm', 'db-watch'] as const
+export type EventAlertKind = (typeof EVENT_ALERT_KINDS)[number]
+
+export const STORE_ALERT_KINDS = [
+  ...NUMERIC_ALERT_KINDS,
+  ...STATE_ALERT_KINDS,
+  ...EVENT_ALERT_KINDS
+] as const
 export type StoreAlertKind = (typeof STORE_ALERT_KINDS)[number]
 
 /** The history-store event kind every alert row is written under. One kind, so
  *  the whole log is one `readEvents({ kind })` — a named statement, not a new
  *  query surface. The `event` field below discriminates. */
 export const ALERT_HISTORY_KIND = 'alert'
+
+/**
+ * The history kinds item 18 writes its verdicts under.
+ *
+ * `notableDbEvents` builds these as `db-${level}` from the verdict level. They
+ * are named here so the read side is a fixed pair of named statements rather
+ * than a kind assembled from a string, and so the two lists cannot drift into
+ * an alert kind nothing produces.
+ */
+export const DB_ALERT_HISTORY_KINDS = ['db-alarm', 'db-watch'] as const
 
 /**
  * What a stored row records, which is one more thing than the wire carries.
@@ -163,9 +217,25 @@ export const ALERT_HISTORY_KIND = 'alert'
  * re-cross seconds later must not read as news), and a stand-down ends the
  * conversation entirely, so the next crossing speaks at once.
  */
-export type StoredAlertEventName = AlertEvent | 'stood-down'
+/**
+ * `stood-down`, `snoozed` and `acknowledged` are decisions ABOUT an alert
+ * rather than things the alert did, and they are in the same log for the reason
+ * the log exists: all three change whether the next crossing speaks, so a
+ * restart that replayed the crossings and not the decisions would undo them.
+ *
+ * `snoozed` carries an `until`. `acknowledged` does not, because it is not a
+ * period — it lasts exactly as long as the condition does, and ends when the
+ * condition ends.
+ */
+export type StoredAlertEventName = AlertEvent | 'stood-down' | 'snoozed' | 'acknowledged'
 
-export const STORED_ALERT_EVENTS = ['raised', 'resolved', 'stood-down'] as const
+export const STORED_ALERT_EVENTS = [
+  'raised',
+  'resolved',
+  'stood-down',
+  'snoozed',
+  'acknowledged'
+] as const
 
 export interface StoredAlertEvent {
   event: StoredAlertEventName
@@ -176,10 +246,68 @@ export interface StoredAlertEvent {
   serverName: string
   value?: number
   threshold?: number
+  /**
+   * What the alert is ABOUT, when the kind has no number to say it with.
+   *
+   * A tunnel's name, a job step, the database question that went into alarm.
+   * The numeric kinds say what they are about with `value` and `threshold`; a
+   * state or event kind that carried neither would reach the inbox as "Job
+   * failed" against a host and nothing else, which is a row nobody can act on.
+   *
+   * Scrubbed on the way in exactly like `serverName`, and for a stronger
+   * reason: `serverName` is a name the user typed, while a database question id
+   * and a job step name are ours but pass through a report. Neither is remote
+   * output today and neither is allowed to become it.
+   */
+  detail?: string
+  /**
+   * When a `snoozed` row's silence ends. Absent on every other event.
+   *
+   * An absolute timestamp rather than a duration, so a snooze read back from
+   * the log means what it meant when it was set. A duration would restart on
+   * every launch, and "snooze for an hour" would be an hour from whenever the
+   * app next opened.
+   */
+  until?: number
 }
 
 /** A row as it comes back out, with the store's own timestamp. */
 export interface StoredAlertRow extends StoredAlertEvent {
+  at: number
+}
+
+/**
+ * One of item 18's database verdicts, as the alert path needs it.
+ *
+ * `notableDbEvents` already decided that this answer is an alarm or a watch,
+ * and wrote it into the history store under its own kind with the numbers on
+ * the payload. Nothing here re-derives that: the level IS the kind, the
+ * question id is what the alert is about, and the timestamp is the store's.
+ * Alerting that recomputed the verdict would be a second opinion that could
+ * disagree with the screen item 18 renders, which is the mistake the disk alert
+ * was careful not to make about `isDiskCritical`.
+ *
+ * Deliberately three fields. The payload also carries a headline and a
+ * "because" written for a human, and neither belongs on this path: they are
+ * prose assembled from a report, and the summary they would land in is rendered
+ * by Slack.
+ *
+ * It also carries item 18's `dbEventMetrics` numbers, and this path deliberately
+ * does not read them. Every `db-alarm` alerts at the levels item 18 already
+ * decided, for the reason directly above: the alert must not hold a second
+ * opinion. The numbers are carried so a future rule — "alert when replication
+ * lag exceeds N", which is a threshold this app does not yet offer anywhere —
+ * can be written without a schema migration. Until it is, they are unused on
+ * purpose.
+ */
+export interface StoredDbAlertRow {
+  kind: 'db-alarm' | 'db-watch'
+  /** The database CONNECTION's id. Not a fleet host — a database connection is
+   *  not a server, and notableDbEvents writes a null hostId for that reason. */
+  connectionId: string
+  /** The question id: `replication`, `autovacuum`, `connections`. Ours, short,
+   *  and stable across a reworded headline. */
+  question: string
   at: number
 }
 
@@ -211,5 +339,13 @@ export function sanitiseStoredAlert(raw: unknown): StoredAlertEvent | null {
   // same as zero — the rule the whole of 19a is built on.
   if (typeof r.value === 'number' && Number.isFinite(r.value)) out.value = r.value
   if (typeof r.threshold === 'number' && Number.isFinite(r.threshold)) out.threshold = r.threshold
+  // Same character class the store scrubs a name to, applied again here. The
+  // store is the only writer today; the whitelist is what makes that a fact
+  // about the DATA rather than a fact about the current call sites.
+  if (typeof r.until === 'number' && Number.isFinite(r.until)) out.until = r.until
+  if (typeof r.detail === 'string') {
+    const detail = r.detail.slice(0, MAX_NAME).replace(/[^A-Za-z0-9 ._@:-]/g, '').trim()
+    if (detail !== '') out.detail = detail
+  }
   return out
 }

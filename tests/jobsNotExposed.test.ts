@@ -536,7 +536,20 @@ describe('what must NOT be able to reach this', () => {
       // The approval record. A caller that can write one can launder consent
       // for work it was never granted.
       'approvalLog',
-      'recordJobApproval'
+      'recordJobApproval',
+      // The access write half — roadmap item 23. It edits authorized_keys, it
+      // is the one write in this app that can lock the operator out of the
+      // host they would use to undo it, and it is currently GATED OFF pending
+      // the blockers in its plan path. The property that it never reaches the
+      // bridge holds today only by construction: nothing imports it, and
+      // nothing stops the next person wiring "let the agent rotate the deploy
+      // key" through here. An agent getting `execute_command` gated per server
+      // is a different consent story from an agent revoking a key across a
+      // selection, and the answer to the second is no — not "not yet".
+      'planAccessChange',
+      'buildRevokeKeyCommand',
+      'buildAddKeyCommand',
+      'accessDisarmCommand'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }

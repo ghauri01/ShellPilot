@@ -1,0 +1,724 @@
+// @vitest-environment jsdom
+import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { stubBridge } from './setup/renderer'
+import { AccessPanel } from '../src/renderer/src/components/monitor/AccessPanel'
+import {
+  ACCESS_STATUS_MARKER,
+  ACCESS_WRITE_ENABLED,
+  parseAccessCollection,
+  type HostAccess,
+  type Sha256
+} from '../src/shared/access'
+import type { Server } from '../src/renderer/src/types'
+
+// Fleet keys and access — roadmap item 23, renderer half.
+//
+// Every test here is about one thing: a host whose authorized_keys could not be
+// read must never render as a host with no keys, and a count drawn over part of
+// the estate must never render as an answer about the estate.
+//
+// src/shared/access.ts goes to real trouble to keep `denied`, `absent`,
+// `no-tool`, `unsupported` and "never collected" apart on the way in. All of it
+// is thrown away by one `?? 0` in a renderer, and until this file there was
+// nothing that could notice.
+
+const sha256: Sha256 = (data) => new Uint8Array(createHash('sha256').update(data).digest())
+
+const ED25519 = 'AAAAC3NzaC1lZDI1NTE5AAAAIJp0kFqDkGDMEnCH7mFY3sBRb+tSVEyKvJhLhZ+SHDdw'
+const ED25519_FP = 'SHA256:wVlk8sEGn2qqP1yFjdkoYGu+eWPmKJ/koiL8zATTjxI'
+
+function server(id: string, name: string): Server {
+  return {
+    id,
+    workspaceId: 'ws-default',
+    folderId: null,
+    name,
+    host: `${id}.example.internal`,
+    port: 22,
+    username: 'ops',
+    auth: 'key',
+    status: 'online',
+    tags: [],
+    favorite: false,
+    os: 'linux',
+    route: [],
+    vpnProfileId: null
+  }
+}
+
+const OK_STATUS = [
+  'accounts ok -',
+  'sshd-config ok - /etc/ssh/sshd_config',
+  'account-status ok -',
+  'sudoers ok -',
+  'last-login ok - lastlog'
+]
+
+/**
+ * Access as the PARSER produces it, from collector-shaped records.
+ *
+ * Hand-building a HostAccess would let a test assert a shape the collector can
+ * never emit — and worse, would keep passing if the derivation of
+ * `authorized-keys` or `certain` were deleted outright. Everything here goes
+ * through the real parser.
+ */
+function collected(body: string[], status: string[] = OK_STATUS): HostAccess {
+  return parseAccessCollection([...body, ACCESS_STATUS_MARKER, ...status].join('\n'), {
+    sha256,
+    now: 1_800_000_000_000
+  })
+}
+
+const complete = (): HostAccess =>
+  collected([
+    'V tz +0000',
+    'U 1 uid 1000',
+    'U 1 keys ok -',
+    'U 1 name ops',
+    `K 1 1 60 ssh-ed25519 ${ED25519} ops@laptop`
+  ])
+
+/** One account read, one denied. The host answered; the answer is partial. */
+const partial = (): HostAccess =>
+  collected([
+    'V tz +0000',
+    'U 1 keys ok -',
+    'U 1 name ops',
+    `K 1 1 60 ssh-ed25519 ${ED25519} ops@laptop`,
+    'U 2 keys denied -',
+    'U 2 name deploy'
+  ])
+
+type Entry = { access?: HostAccess; at?: number; error?: string; errorAt?: number }
+
+/**
+ * `withWrite` puts `accessPlan`/`accessRun` on the bridge.
+ *
+ * Without it a "there is no revoke button" test proves only that this stub
+ * does not expose one — the panel's `canWrite` keys off the bridge — which is
+ * exactly the vacuity the gate test must not have.
+ */
+function mount(servers: Server[], byId: Record<string, Entry>, withWrite = false): void {
+  stubBridge({
+    fleet: {
+      access: async (id: string) => byId[id] ?? { intervalMs: 3_600_000 },
+      sampleNow: async () => undefined,
+      ...(withWrite
+        ? {
+            accessPlan: async () => {
+              throw new Error('the gate let a plan through')
+            },
+            accessRun: async () => {
+              throw new Error('the gate let a run through')
+            }
+          }
+        : {})
+    }
+  })
+  render(<AccessPanel servers={servers} />)
+}
+
+describe('a host that could not be read', () => {
+  it('is named, excluded, and explicitly not called a host with no keys', async () => {
+    // The sentence this panel exists to print. Without it, a failed probe
+    // renders as a host that contributed nothing to the totals — which reads
+    // as a host that trusts nobody.
+    mount([server('a', 'web-1'), server('b', 'db-1')], {
+      a: { access: complete(), at: 1 },
+      b: { error: 'unreachable: ECONNREFUSED', errorAt: 1 }
+    })
+    const failed = await screen.findByTestId('failed-db-1')
+    expect(failed.textContent).toContain('the access probe failed')
+    expect(failed.textContent).toContain('it is not a host with no keys')
+    expect(failed.textContent).not.toMatch(/\b0 keys\b/)
+  })
+
+  it('is counted in the unchecked total, not silently dropped', async () => {
+    mount([server('a', 'web-1'), server('b', 'db-1')], {
+      a: { access: complete(), at: 1 },
+      b: { error: 'unreachable', errorAt: 1 }
+    })
+    const unchecked = await screen.findByTestId('unchecked-hosts')
+    expect(unchecked.textContent).toContain('1 host could not be checked')
+    expect(unchecked.textContent).toContain('not in that count')
+  })
+
+  it('names a host that has simply never been collected, separately from a failure', async () => {
+    // Three states, not two: read, failed, and never looked at. A server added
+    // ten minutes ago is the third and it is not a failure.
+    mount([server('a', 'web-1'), server('b', 'db-1')], { a: { access: complete(), at: 1 } })
+    const never = await screen.findByTestId('never-collected')
+    expect(never.textContent).toContain('db-1')
+    expect(never.textContent).toContain('not been read yet')
+    expect(screen.queryByTestId('failed-db-1')).toBeNull()
+  })
+})
+
+describe('what the panel refuses to conclude', () => {
+  it('says outright that “this key is not on my fleet” cannot be concluded', async () => {
+    mount([server('a', 'web-1'), server('b', 'db-1')], {
+      a: { access: complete(), at: 1 },
+      b: { error: 'unreachable', errorAt: 1 }
+    })
+    const banner = await screen.findByTestId('not-an-answer')
+    expect(banner.textContent).toContain('cannot be concluded')
+    expect(banner.textContent).toContain('lower bound')
+  })
+
+  it('raises the same warning for a host that answered only partly', async () => {
+    // A host can be perfectly reachable and still hide half its accounts behind
+    // a home directory this account cannot traverse. That is the same size of
+    // gap as an unreachable host and gets the same sentence.
+    mount([server('a', 'web-1')], { a: { access: partial(), at: 1 } })
+    expect((await screen.findByTestId('not-an-answer')).textContent).toContain('cannot be concluded')
+    const why = await screen.findByTestId('incomplete-web-1')
+    expect(why.textContent).toContain('1 of 2 accounts could not be read')
+  })
+
+  it('does NOT raise it when every host answered completely', async () => {
+    // The other half of the assertion, and the one that keeps the warning
+    // meaningful: a banner that is always on is a banner nobody reads.
+    mount([server('a', 'web-1')], { a: { access: complete(), at: 1 } })
+    await screen.findByText(/1 distinct key/)
+    expect(screen.queryByTestId('not-an-answer')).toBeNull()
+    expect(screen.queryByTestId('unchecked-hosts')).toBeNull()
+    expect(screen.queryByTestId('incomplete-hosts')).toBeNull()
+  })
+
+  it('warns about a legacy authorized_keys2 it deliberately did not read', async () => {
+    mount([server('a', 'web-1')], {
+      a: {
+        access: collected(['U 1 keys ok -', 'U 1 keys2 present', 'U 1 name ops']),
+        at: 1
+      }
+    })
+    expect((await screen.findByTestId('incomplete-web-1')).textContent).toMatch(
+      /authorized_keys2.*sshd still reads/
+    )
+  })
+})
+
+describe('the by-key view', () => {
+  it('shows where a key is, across hosts', async () => {
+    // The question the whole item exists for: which of my hosts still trusts
+    // this key.
+    mount([server('a', 'web-1'), server('b', 'db-1')], {
+      a: { access: complete(), at: 1 },
+      b: { access: complete(), at: 1 }
+    })
+    const row = await waitFor(() => {
+      const r = document.querySelector(`tr[data-fingerprint="${ED25519_FP}"]`)
+      if (!r) throw new Error('no row for the key')
+      return r
+    })
+    expect(row.textContent).toContain('web-1')
+    expect(row.textContent).toContain('db-1')
+    expect(row.textContent).toContain('ops@laptop')
+  })
+
+  it('renders a key comment as text, marker and all', async () => {
+    // The most attacker-controlled string in the feature. It arrives with
+    // control characters and bidi overrides already stripped by the parser, and
+    // the panel puts it in a cell — never in a title, a link or markup.
+    mount([server('a', 'web-1')], {
+      a: {
+        access: collected([
+          'U 1 keys ok -',
+          'U 1 name ops',
+          `K 1 1 90 ssh-ed25519 ${ED25519} ${ACCESS_STATUS_MARKER}`
+        ]),
+        at: 1
+      }
+    })
+    const row = await waitFor(() => {
+      const r = document.querySelector(`tr[data-fingerprint="${ED25519_FP}"]`)
+      if (!r) throw new Error('no row for the key')
+      return r
+    })
+    expect(row.textContent).toContain(ACCESS_STATUS_MARKER)
+    expect(row.innerHTML).not.toContain('<script')
+  })
+
+  it('says a key has no label rather than leaving the cell empty', async () => {
+    // An unlabelled key is not an unused key — it is a key nobody wrote down
+    // the owner of, which is worse and has to look different from blank.
+    mount([server('a', 'web-1')], {
+      a: { access: collected(['U 1 keys ok -', 'U 1 name ops', `K 1 1 50 ssh-ed25519 ${ED25519}`]), at: 1 }
+    })
+    expect((await screen.findByText('no label')).textContent).toBe('no label')
+  })
+
+  it('calls a cert-authority line what it is, and refuses to be certain beside it', async () => {
+    // The inversion this test exists to catch: `cert-authority` used to be
+    // filed under RESTRICTING_OPTIONS, so the one line in an authorized_keys
+    // file that BROADENS trust to everything a signer will ever sign rendered
+    // under the chip that means "this key is limited".
+    mount([server('a', 'web-1')], {
+      a: {
+        access: collected([
+          'U 1 keys ok -',
+          'U 1 name ops',
+          `K 1 1 90 cert-authority ssh-ed25519 ${ED25519} the-ca`
+        ]),
+        at: 1
+      }
+    })
+    const chip = await screen.findByTestId(`ca-${ED25519_FP}`)
+    expect(chip.textContent).toBe('certificate authority')
+    expect(document.querySelector(`tr[data-fingerprint="${ED25519_FP}"]`)!.textContent).not.toContain(
+      'restricted'
+    )
+    // And a host with one is never a fully-answered host: the keys it accepts
+    // are not written down on it.
+    expect((await screen.findByTestId('not-an-answer')).textContent).toContain(
+      'not a complete picture'
+    )
+  })
+})
+
+describe('the honesty banner', () => {
+  it('is down on a fully-read estate, so it still means something when it is up', async () => {
+    // A stock Ubuntu cloud host: `root` has a login shell and no
+    // authorized_keys, `ubuntu` has one. Both are read; nothing is missing.
+    //
+    // Counting the checked-absent file as unread put the "this is not a
+    // complete picture" banner up permanently on an estate with nothing wrong
+    // with it — and a banner that is always up is wallpaper. The finding it
+    // exists to carry is the one an operator would then scroll past.
+    mount([server('a', 'web-1')], {
+      a: {
+        access: collected([
+          'V tz +0000',
+          'U 1 uid 0',
+          'U 1 shell /bin/bash',
+          'U 1 keys absent -',
+          'U 1 name root',
+          'U 2 uid 1000',
+          'U 2 keys ok -',
+          'U 2 name ubuntu',
+          `K 2 1 60 ssh-ed25519 ${ED25519} ops@laptop`
+        ]),
+        at: 1
+      }
+    })
+    await screen.findByText(/distinct key/)
+    expect(screen.queryByTestId('not-an-answer')).toBeNull()
+    expect(screen.queryByTestId('incomplete-hosts')).toBeNull()
+  })
+
+  it('is up the moment one account actually could not be read', async () => {
+    mount([server('a', 'web-1')], { a: { access: partial(), at: 1 } })
+    expect((await screen.findByTestId('not-an-answer')).textContent).toContain(
+      'not a complete picture'
+    )
+  })
+})
+
+describe('the write half, which this build does not have', () => {
+  it('offers no way to change a key even when the bridge has the methods', async () => {
+    // With the write methods ON the bridge, so this proves the gate rather
+    // than proving the stub is missing something.
+    mount([server('a', 'web-1')], { a: { access: complete(), at: Date.now() } }, true)
+    await screen.findByText(ED25519_FP)
+    expect(screen.queryByTestId(`revoke-${ED25519_FP}`)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Revoke/ })).toBeNull()
+  })
+
+  it('says so, and says why, rather than just not being there', async () => {
+    // A button that quietly vanished is read as a feature that has not arrived.
+    // This one was withdrawn, and the reason is the thing an operator most
+    // needs: the rollback behind it cannot be relied on yet, and a rollback
+    // that cannot be relied on is worse than none — it tells you that you are
+    // safe.
+    mount([server('a', 'web-1')], { a: { access: complete(), at: Date.now() } })
+    const note = await screen.findByTestId('write-gated')
+    expect(note.textContent).toMatch(/not enabled in this build/i)
+    expect(note.textContent).toMatch(/roll ?back/i)
+  })
+
+  it('says what the write half would edit, before any target is chosen', async () => {
+    // Scope honesty. Even re-enabled it can only edit the connecting account's
+    // own ~/.ssh/authorized_keys, and it needs sshd to report the session key
+    // before it will touch that account at all. Someone who reads "revoke a
+    // key across the fleet" and finds out afterwards that it meant one account
+    // per host has been misled by the feature's own name.
+    mount([server('a', 'web-1')], { a: { access: complete(), at: Date.now() } })
+    const note = await screen.findByTestId('write-gated')
+    expect(note.textContent).toContain('authorized_keys')
+    expect(note.textContent).toMatch(/account ShellPilot connects as|connecting account/i)
+    expect(note.textContent).toMatch(/ExposeAuthInfo|which key this session/i)
+  })
+})
+
+describe('a host whose last collection is old and whose probe is failing now', () => {
+  // fleetSampler deliberately keeps the last good collection ALONGSIDE a live
+  // error, and its own comment says why: "'read an hour ago and the probe is
+  // failing now' is two facts and both matter — most of all here." The panel
+  // kept only the first. A host with a three-week-old inventory and hourly
+  // failures ever since sat in `collected`, contributed 0 to `unchecked`, and
+  // carried `certain: true` out of the old collection.
+  const staleEntry = (): Entry => ({
+    access: complete(),
+    at: Date.now() - 21 * 24 * 3_600_000,
+    error: 'unreachable: ETIMEDOUT',
+    errorAt: Date.now() - 3_600_000
+  })
+
+  it('still shows the inventory it has', async () => {
+    mount([server('a', 'web-1')], { a: staleEntry() })
+    // The keys are still the best information anybody has about this host.
+    expect(await screen.findByText(ED25519_FP)).toBeTruthy()
+  })
+
+  it('counts toward unchecked instead of toward answered', async () => {
+    mount([server('a', 'web-1'), server('b', 'db-1')], {
+      a: { access: complete(), at: Date.now() },
+      b: staleEntry()
+    })
+    const unchecked = await screen.findByTestId('unchecked-hosts')
+    expect(unchecked.textContent).toContain('1 host')
+  })
+
+  it('is named as stale, with how old the reading is and what is failing now', async () => {
+    mount([server('a', 'web-1')], { a: staleEntry() })
+    const stale = await screen.findByTestId('stale-web-1')
+    expect(stale.textContent).toContain('ETIMEDOUT')
+    // The age of the READING, not of the failure. "Three weeks old" is the
+    // number that decides whether to act on what is on the screen.
+    expect(stale.textContent).toMatch(/504h|21d|3 weeks/)
+  })
+
+  it('never lets a stale collection carry a complete-picture claim', async () => {
+    // `complete()` summarises as certain. It was certain three weeks ago.
+    mount([server('a', 'web-1')], { a: staleEntry() })
+    expect((await screen.findByTestId('not-an-answer')).textContent).toContain(
+      'not a complete picture'
+    )
+  })
+})
+
+describe('the by-host view', () => {
+  async function hosts(access: HostAccess): Promise<void> {
+    mount([server('a', 'web-1')], { a: { access, at: 1 } })
+    await screen.findByRole('button', { name: /By host/ })
+    await userEvent.click(screen.getByRole('button', { name: /By host/ }))
+  }
+
+  it('shows a reason, not a zero, for an account whose file was not read', async () => {
+    // The single substitution this whole feature exists to prevent.
+    await hosts(partial())
+    const denied = await waitFor(() => {
+      const r = document.querySelector('tr[data-user="deploy"]')
+      if (!r) throw new Error('no row for deploy')
+      return r
+    })
+    expect(denied.textContent).toContain('not permitted')
+    // The COUNT cell, addressed as the count cell. `.mono` used to be read
+    // here and `.mono` is the username — so this compared "deploy" to "0",
+    // which is unequal for every possible rendering including the literal `0`
+    // this test exists to forbid. The count lives in `td.num`.
+    const deniedCount = denied.querySelector('td.num')!
+    expect(deniedCount.textContent).not.toBe('0')
+    expect(deniedCount.textContent).not.toMatch(/\d/)
+    // And the account that WAS read still shows its real count — read out of
+    // the same cell, not matched against the whole row. `toContain('1')` over
+    // the row text matched the server name `web-1`, so hard-coding every count
+    // to 0 passed.
+    const okCount = document.querySelector('tr[data-user="ops"] td.num')!
+    expect(okCount.textContent).toBe('1')
+  })
+
+  it('says authorized_keys2 was unchecked rather than showing nothing', async () => {
+    // The account row is where an operator decides whether they have seen this
+    // account's keys. An account whose second key file could not be looked for
+    // has NOT been fully seen, and a blank cell there says it has.
+    await hosts(
+      collected(['U 1 keys ok root', 'U 1 keys2 unknown', 'U 1 name deploy'])
+    )
+    const chip = await screen.findByTestId('keys2-unknown-deploy')
+    expect(chip.textContent).toContain('unchecked')
+  })
+
+  it('warns when a locked password sits next to a live key', async () => {
+    // `passwd -l` defeats password authentication and does nothing to key
+    // authentication. Locked-plus-key is fully usable by whoever holds the key,
+    // and is exactly what a naive reading of "locked" files as safe.
+    await hosts(
+      collected([
+        'S L ops',
+        'U 1 keys ok -',
+        'U 1 name ops',
+        `K 1 1 60 ssh-ed25519 ${ED25519} old-laptop`
+      ])
+    )
+    const row = await waitFor(() => {
+      const r = document.querySelector('tr[data-user="ops"]')
+      if (!r) throw new Error('no row for ops')
+      return r
+    })
+    const chip = [...row.querySelectorAll('.chip')].find((c) => c.textContent === 'locked')!
+    expect(chip.className).toContain('warn')
+    expect(chip.getAttribute('title')).toContain('can still log in')
+  })
+
+  it('does not warn about a locked account with no keys at all', async () => {
+    await hosts(collected(['S L svc', 'U 1 keys ok -', 'U 1 name svc']))
+    const row = await waitFor(() => {
+      const r = document.querySelector('tr[data-user="svc"]')
+      if (!r) throw new Error('no row for svc')
+      return r
+    })
+    const chip = [...row.querySelectorAll('.chip')].find((c) => c.textContent === 'locked')!
+    expect(chip.className).not.toContain('warn')
+  })
+
+  it('keeps the host’s own last-login phrase when it could not be dated', async () => {
+    // "We cannot make a date out of this" is not "we do not know when they
+    // logged in", and showing the phrase is the better of the two answers.
+    await hosts(
+      collected(['L ops tty1 sometime in the past', 'U 1 keys ok -', 'U 1 name ops'], [
+        ...OK_STATUS.filter((s) => !s.startsWith('last-login')),
+        'last-login partial - lastlog is not available'
+      ])
+    )
+    const row = await waitFor(() => {
+      const r = document.querySelector('tr[data-user="ops"]')
+      if (!r) throw new Error('no row for ops')
+      return r
+    })
+    expect(row.textContent).toContain('sometime in the past')
+  })
+})
+
+describe('before anything has been collected', () => {
+  it('says so, and says nothing is written to any host', async () => {
+    mount([server('a', 'web-1')], {})
+    expect((await screen.findByText(/No authorized_keys have been collected yet/)).textContent).toBeTruthy()
+    expect(document.body.textContent).toContain('no private key is touched')
+    // And no table at all, rather than an empty one that reads as "no keys".
+    expect(document.querySelector('table')).toBeNull()
+  })
+
+  it('survives a bridge with no access method on it', async () => {
+    // Every call site in the renderer has to survive a missing method; a panel
+    // that throws on an older preload takes the monitor down with it.
+    stubBridge({ fleet: {} })
+    render(<AccessPanel servers={[server('a', 'web-1')]} />)
+    expect(await screen.findByText(/No authorized_keys have been collected yet/)).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The write half — roadmap item 23, rule 2, in the panel
+// ---------------------------------------------------------------------------
+//
+// The three outcomes are the whole reason this section exists. A staged key
+// change can end three ways and only one of them is a fault, and a panel that
+// rendered the other two the same way would teach an operator that the
+// dead-man's switch is a failure — which is the fastest route to somebody
+// wanting it turned off.
+
+type Preview = {
+  token: string
+  command: string
+  hosts: { serverId: string; serverName: string; user: string }[]
+  blocks: { serverId: string; serverName: string; user: string; kind: string; reason: string }[]
+  refusals: { serverId: string; serverName: string; user: string; reason: string }[]
+  rollbackSeconds: number
+}
+
+const PREVIEW: Preview = {
+  token: '1800000000000',
+  command: 'SP_F="$HOME/.ssh/authorized_keys"\ngrep -v -F',
+  hosts: [{ serverId: 'a', serverName: 'web-1', user: 'ops' }],
+  blocks: [],
+  refusals: [],
+  rollbackSeconds: 300
+}
+
+function mountWrite(
+  over: {
+    preview?: Partial<Preview>
+    run?: unknown
+    onRun?: (req: Record<string, unknown>) => void
+    planThrows?: string
+  } = {}
+): void {
+  stubBridge({
+    fleet: {
+      access: async () => ({ access: complete(), at: 1, intervalMs: 3_600_000 }),
+      sampleNow: async () => undefined,
+      accessPlan: async () => {
+        if (over.planThrows) throw new Error(over.planThrows)
+        return { ...PREVIEW, ...over.preview }
+      },
+      accessRun: async (req: Record<string, unknown>) => {
+        over.onRun?.(req)
+        return over.run ?? { blocks: [], refusals: [], notStaged: [], reports: [] }
+      }
+    }
+  })
+  render(<AccessPanel servers={[server('a', 'web-1')]} />)
+}
+
+const report = (outcome: string, detail: string): Record<string, unknown> => ({
+  serverId: 'a',
+  serverName: 'web-1',
+  user: 'ops',
+  token: '1800000000000',
+  outcome,
+  detail,
+  backupPath: '/home/ops/.ssh/authorized_keys.shellpilot-1800000000000.bak',
+  at: 1
+})
+
+// The confirm dialog these drive is gated off in this build — see
+// ACCESS_WRITE_ENABLED in shared/access.ts. They are KEPT, not deleted: they are
+// the record of what the write half's renderer is supposed to do, and the task
+// that fixes the five blockers in the plan path needs them. `skipIf` rather
+// than `skip` so they come back on their own the moment the gate is flipped,
+// which is when somebody has to look at them.
+describe.skipIf(!ACCESS_WRITE_ENABLED)('revoking a key', () => {
+  it('asks before anything is written, and says the change is staged rather than applied', async () => {
+    mountWrite()
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    const confirm = await screen.findByTestId('revoke-confirm')
+    expect(confirm.textContent).toContain('This is staged, not applied')
+    expect(confirm.textContent).toContain('arms its OWN rollback')
+    expect(confirm.textContent).toContain('300 seconds')
+    expect(confirm.textContent).toContain('web-1')
+  })
+
+  it('sends back the command it displayed, so main can refuse a change nobody agreed to', async () => {
+    let sent: Record<string, unknown> | null = null
+    mountWrite({ onRun: (r) => (sent = r) })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    await userEvent.click(await screen.findByTestId('revoke-go'))
+    await waitFor(() => expect(sent).not.toBeNull())
+    expect(sent!.confirmedCommand).toBe(PREVIEW.command)
+    expect(sent!.token).toBe(PREVIEW.token)
+    expect(sent!.fingerprint).toBe(ED25519_FP)
+  })
+
+  it('sends a connection main can actually dial, and no secret in it', async () => {
+    // The first version of this panel handed main the `Server` row from the
+    // store. It typechecks — `cfg` is `unknown` on the wire — and main would
+    // have opened nothing, on the one operation where "nothing happened" is
+    // reported as a host that refused the change.
+    let sent: Record<string, unknown> | null = null
+    mountWrite({ onRun: (r) => (sent = r) })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    await userEvent.click(await screen.findByTestId('revoke-go'))
+    await waitFor(() => expect(sent).not.toBeNull())
+
+    const target = (sent!.targets as { user: string; cfg: Record<string, unknown> }[])[0]
+    expect(target.user).toBe('ops')
+    expect(target.cfg.host).toBe('a.example.internal')
+    expect(target.cfg.port).toBe(22)
+    expect(target.cfg.username).toBe('ops')
+    expect(target.cfg.serverId).toBe('a')
+    // Never a credential. Main resolves them per host at the moment it
+    // connects, so a vault unlocked since this rendered is honoured.
+    expect(Object.keys(target.cfg)).not.toContain('password')
+    expect(Object.keys(target.cfg)).not.toContain('privateKey')
+    expect(Object.keys(target.cfg)).not.toContain('passphrase')
+  })
+
+  it('names every host it will not touch, in the same dialog as the ones it will', async () => {
+    // A host quietly left out of a fleet-wide revocation is the exact failure
+    // the read half exists to prevent.
+    mountWrite({
+      preview: {
+        blocks: [
+          {
+            serverId: 'b',
+            serverName: 'db-1',
+            user: 'ops',
+            kind: 'session-key-unknown',
+            reason: 'db-1 does not report which key this session authenticated with.'
+          }
+        ],
+        refusals: [
+          {
+            serverId: 'c',
+            serverName: 'cache-1',
+            user: 'deploy',
+            reason: 'the change would run as ops on cache-1.'
+          }
+        ]
+      }
+    })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    const blocked = await screen.findByTestId('revoke-blocked')
+    expect(blocked.textContent).toContain('2 left out, and not by choice')
+    expect(blocked.textContent).toContain('does not report which key this session authenticated with')
+    expect(blocked.textContent).toContain('the change would run as ops on cache-1')
+  })
+
+  it('renders the three outcomes as three different things', async () => {
+    mountWrite({
+      run: {
+        blocks: [],
+        refusals: [],
+        notStaged: [],
+        reports: [
+          { ...report('committed', 'Committed on web-1.'), serverId: 'a' },
+          { ...report('reverted-verification-failed', 'Reverted on db-1: the check failed.'), serverId: 'b' },
+          { ...report('reverted-unconfirmed', 'Reverted on cache-1: nothing confirmed it in time.'), serverId: 'c' }
+        ]
+      }
+    })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    await userEvent.click(await screen.findByTestId('revoke-go'))
+
+    const committed = await screen.findByTestId('outcome-a')
+    const failed = await screen.findByTestId('outcome-b')
+    const unconfirmed = await screen.findByTestId('outcome-c')
+
+    expect(committed.textContent).toContain('Committed')
+    expect(failed.textContent).toContain('Reverted — the host would not let a new session in')
+    expect(unconfirmed.textContent).toContain('Reverted — nothing confirmed it in time')
+
+    // Three labels, three chips, three classes. The one that is not a fault is
+    // not dressed as one.
+    const chip = (el: Element): Element => el.querySelector('.chip')!
+    expect(chip(committed).className).toContain('ok')
+    expect(chip(failed).className).toContain('loud')
+    expect(chip(unconfirmed).className).toContain('warn')
+    expect(chip(unconfirmed).className).not.toContain('loud')
+    expect(
+      new Set([chip(committed).textContent, chip(failed).textContent, chip(unconfirmed).textContent]).size
+    ).toBe(3)
+  })
+
+  it('keeps a host whose staged write never landed apart from all three', async () => {
+    // Nothing happened there at all: no backup, no watchdog, no change. It is a
+    // fourth thing, and calling it "reverted" would say a file was put back
+    // that was never replaced.
+    mountWrite({
+      run: {
+        blocks: [],
+        refusals: [],
+        notStaged: [{ serverId: 'b', serverName: 'db-1', detail: 'authorized_keys is not writable by this account' }],
+        reports: []
+      }
+    })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    await userEvent.click(await screen.findByTestId('revoke-go'))
+    const row = await screen.findByTestId('not-staged-b')
+    expect(row.textContent).toContain('Nothing was changed on db-1')
+    expect(row.textContent).toContain('not writable by this account')
+    expect(row.textContent).not.toContain('Reverted')
+  })
+
+  it('says nothing was changed when main refuses the run', async () => {
+    mountWrite({ planThrows: 'the collection has changed since the plan was shown' })
+    await userEvent.click(await screen.findByTestId(`revoke-${ED25519_FP}`))
+    const problem = await screen.findByTestId('access-problem')
+    expect(problem.textContent).toContain('Nothing was changed')
+    expect(problem.textContent).toContain('the collection has changed since the plan was shown')
+  })
+})

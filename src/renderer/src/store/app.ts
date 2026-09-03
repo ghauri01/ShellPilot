@@ -103,6 +103,21 @@ export interface AppSettings {
   // UI calls it "Alerts" and says what it covers.
   resourceAlertsEnabled: boolean
   resourceAlertThreshold: number
+  /**
+   * Per-host overrides of the CPU/memory threshold, by server id.
+   *
+   * An estate is not uniform: a build box at 95% is working and a database at
+   * 95% is in trouble, and one number for both means either the build box
+   * cries wolf every afternoon or the database says nothing until it is too
+   * late. Absent means "use the global", which is what every install has today.
+   *
+   * Deliberately only CPU and memory. Disk, inodes and load are fixed at
+   * DISK_DANGER, INODE_DANGER and LOAD_DANGER because those are the numbers
+   * other screens colour a bar at and list a host under — an alert that fired
+   * at a different number from the screen it sends you to is worse than no
+   * alert, which is the argument the disk alert shipped with.
+   */
+  resourceAlertThresholds: Record<string, number>
   // Sample every server in the workspace on a schedule from the main process,
   // so the estate is watched when the monitor is not on screen. Off by default:
   // it maintains connections to the whole estate whether or not anyone is
@@ -164,6 +179,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showMonitorStrip: true,
   resourceAlertsEnabled: true,
   resourceAlertThreshold: 80,
+  resourceAlertThresholds: {},
   fleetSamplingEnabled: false,
   fleetSamplingIntervalMs: FLEET_INTERVAL_DEFAULT_MS,
   modules: defaultModuleState(),

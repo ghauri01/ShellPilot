@@ -1,14 +1,10 @@
 import { GitBranch, Wifi, Bell, Cpu, AlertTriangle } from 'lucide-react'
 import { useApp } from '../../store/app'
-import { LABEL, UNIT, useAlerts } from '../../store/alerts'
+import { LABEL, chipValue, useAlerts } from '../../store/alerts'
 import { useFleetStatus, samplerWarning } from '../../store/fleetStatus'
-import { openSettings } from '../../store/nav'
+import { openMonitor, openSettings } from '../../store/nav'
 import { colorVar } from './WorkspaceSwitcher'
 import { UpdateIndicator } from './UpdateIndicator'
-
-// Whole numbers stay whole; a load average keeps the decimal that makes it a
-// load average. `toFixed(0)` was right while everything was a percentage.
-const fmtValue = (v: number): string => (Number.isInteger(v) ? String(v) : v.toFixed(1))
 
 export function StatusBar(): React.JSX.Element {
   const ws = useApp((s) => s.activeWorkspace())
@@ -50,9 +46,13 @@ export function StatusBar(): React.JSX.Element {
             // ternary label every disk alert "Memory", and a hard-coded `%`
             // showed a load average of 3.2 per core as "3%" — a wrong number
             // rather than an ugly one.
-            .map((a) => `${a.serverName}: ${LABEL[a.kind]} ${fmtValue(a.value)}${UNIT[a.kind]}`)
-            .join('\n')}\n\nClick to open the Fleet Monitor.`}
-          onClick={() => setActivity('monitor')}
+            .map((a) => `${a.serverName}: ${LABEL[a.kind]}${chipValue(a)}${a.detail ? ` — ${a.detail}` : ''}`)
+            .join('\n')}\n\nClick to open the alert inbox.`}
+          // The inbox, not merely the page it is on. The chip is the pointer to
+          // it — a pointer that opened the Fleet Monitor on whatever tab was
+          // last used would be a chip saying "it is in here somewhere", which
+          // is the shape of the problem, not the fix.
+          onClick={() => openMonitor('alerts')}
         >
           <AlertTriangle size={12} />
           <span>

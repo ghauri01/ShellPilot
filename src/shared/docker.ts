@@ -621,7 +621,7 @@ export const DOCKER_MARKERS = {
  * from an empty string: it means the shell never reached that command, which is
  * a diagnosis, whereas an empty section is an answer.
  */
-function section(output: string, marker: string): string | undefined {
+export function section(output: string, marker: string): string | undefined {
   const at = output.indexOf(marker)
   if (at === -1) return undefined
   const rest = output.slice(at + marker.length)

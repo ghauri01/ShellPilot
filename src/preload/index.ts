@@ -10,6 +10,12 @@ import type {
   MetricsResult,
   SshCloseInfo
 } from '../shared/ssh'
+import type {
+  AccessChangePreview,
+  AccessRunRequest,
+  AccessRunResult,
+  HostAccess
+} from '../shared/access'
 import type { HostFacts } from '../shared/hostFacts'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
@@ -36,6 +42,15 @@ import type {
   DockerStatsProbe
 } from '../shared/docker'
 import type {
+  ComposeBridge,
+  ComposeConfigProbe,
+  ComposeEnvProbe,
+  ComposeImageWriteRequest,
+  ComposeImageWriteResult,
+  ComposeListProbe,
+  ComposeProjectRef
+} from '../shared/compose'
+import type {
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -47,6 +62,7 @@ import type {
   AlertPayload,
   StoredAlertEvent,
   StoredAlertRow,
+  StoredDbAlertRow,
   WebhookConfig,
   WebhookDeliveryStatus,
   WebhookTestResult
@@ -321,7 +337,14 @@ const api = {
   alerts: {
     record: (event: StoredAlertEvent, at?: number): Promise<boolean> =>
       ipcRenderer.invoke('alerts:record', event, at),
-    history: (limit?: number): Promise<StoredAlertRow[]> => ipcRenderer.invoke('alerts:history', limit)
+    history: (limit?: number): Promise<StoredAlertRow[]> => ipcRenderer.invoke('alerts:history', limit),
+    // Item 18's database verdicts, which item 19b alerts on and does not
+    // recompute. A separate named read rather than a filter argument on
+    // `history`: the store's rule is named statements only, and "let the caller
+    // say which kind" is the first step of the query surface that rule exists
+    // to refuse.
+    dbEvents: (limit?: number): Promise<StoredDbAlertRow[]> =>
+      ipcRenderer.invoke('alerts:db-events', limit)
   },
   k8s: {
     read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>
@@ -395,6 +418,42 @@ const api = {
       opts?: { sudo?: boolean; timeoutSec?: number }
     ): Promise<DockerActionResult> => ipcRenderer.invoke('docker:act', cfg, action, refs, opts)
   } satisfies DockerBridge,
+  // The file half. `satisfies ComposeBridge` for the same reason as above: a
+  // channel added to the contract and forgotten here becomes a compile error
+  // rather than a method the panel calls and finds undefined.
+  //
+  // There is no `down`, no `rm` and no `stop` on this bridge, and no channel
+  // that returns the contents of an env file. `pull` and `up -d` are absent on
+  // purpose too: they are jobs, and they reach the host through the jobs bridge
+  // so they inherit its approval record rather than growing a second one.
+  compose: {
+    list: (
+      cfg: unknown,
+      opts?: { sudo?: boolean; autoSudo?: boolean; search?: boolean }
+    ): Promise<ComposeListProbe> => ipcRenderer.invoke('compose:list', cfg, opts),
+    config: (
+      cfg: unknown,
+      project: ComposeProjectRef,
+      opts?: { sudo?: boolean; autoSudo?: boolean }
+    ): Promise<ComposeConfigProbe> => ipcRenderer.invoke('compose:config', cfg, project, opts),
+    envNames: (
+      cfg: unknown,
+      paths: string[],
+      opts?: { sudo?: boolean; autoSudo?: boolean }
+    ): Promise<ComposeEnvProbe> => ipcRenderer.invoke('compose:env-names', cfg, paths, opts),
+    readFile: (
+      cfg: unknown,
+      path: string,
+      opts?: { sudo?: boolean }
+    ): Promise<{ ok: boolean; text?: string; error?: string }> =>
+      ipcRenderer.invoke('compose:read-file', cfg, path, opts),
+    writeImageTag: (
+      cfg: unknown,
+      req: ComposeImageWriteRequest,
+      opts?: { sudo?: boolean }
+    ): Promise<ComposeImageWriteResult> =>
+      ipcRenderer.invoke('compose:write-image-tag', cfg, req, opts)
+  } satisfies ComposeBridge,
   cron: {
     collect: (
       targets: { serverId: string; serverName: string; cfg: unknown }[]
@@ -471,6 +530,36 @@ const api = {
       serverId: string
     ): Promise<{ facts?: HostFacts; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
       ipcRenderer.invoke('fleet:facts', serverId),
+    // Who can get into a server, as the sampler last collected it — roadmap
+    // item 23. Read-only and never a trigger, exactly like `facts`.
+    //
+    // `access` absent with no `error` means the probe has not run for this
+    // server yet. That is a THIRD state, distinct from both "collected, and it
+    // trusts no keys" and "the collection failed", and the panel has to keep it
+    // distinct — a host nobody has looked at is not a host with no keys.
+    access: (
+      serverId: string
+    ): Promise<{ access?: HostAccess; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
+      ipcRenderer.invoke('fleet:access', serverId),
+    // Changing who can get in — roadmap item 23, the write half.
+    //
+    // TWO CALLS AND NOT ONE, on purpose. `accessPlan` asks main what a change
+    // would do and what it refuses to do; `accessRun` carries back the command
+    // text the operator was shown, and main will not touch a host unless that
+    // matches what it derives for itself. A single "revoke this key" call would
+    // have nothing to compare, which is precisely the state broadcast was in
+    // before B3.
+    //
+    // `accessRun` is a WRITE and the only one on this bridge that edits an
+    // authorized_keys file. It stages behind the host's own rollback and
+    // confirms over a session that authenticated afterwards; a host that never
+    // gets that confirmation puts its previous file back by itself. The three
+    // outcomes it can report are not two — see AccessCommitOutcome.
+    accessPlan: (
+      req: Omit<AccessRunRequest, 'token' | 'confirmedCommand'>
+    ): Promise<AccessChangePreview> => ipcRenderer.invoke('access:plan', req),
+    accessRun: (req: AccessRunRequest): Promise<AccessRunResult> =>
+      ipcRenderer.invoke('access:run', req),
     onSample: (cb: (event: FleetSampleEvent) => void): (() => void) => {
       const h = (_e: IpcRendererEvent, event: FleetSampleEvent): void => cb(event)
       ipcRenderer.on('fleet:sample', h)

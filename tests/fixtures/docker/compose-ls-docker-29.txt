@@ -1,0 +1,4 @@
+NAME                   STATUS              CONFIG FILES
+billing-stage-api      running(2)          /srv/Ops Platform/billing/docker-compose.test.yml
+edge                   running(3)          /srv/edge/compose.yaml,/srv/edge/compose.override.yaml
+blog-prod-eu-west-01   running(4)          /opt/blog/docker/docker-compose.yml

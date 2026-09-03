@@ -2236,10 +2236,16 @@ export function notableDbEvents(report: DbOpsReport): { kind: string; payload: R
 /**
  * The numbers behind a verdict, for whoever alerts off it.
  *
- * Item 19b's rule is "alert when lag exceeds N". Without this the payload is
- * prose, and the only way to express that rule is a regular expression over an
- * English sentence — which breaks the first time a headline is reworded. The
- * numbers are cheap to add now and a schema migration to add later.
+ * A rule of the shape "alert when lag exceeds N" needs a number. Without this
+ * the payload is prose, and the only way to express such a rule is a regular
+ * expression over an English sentence — which breaks the first time a headline
+ * is reworded. The numbers are cheap to add now and a schema migration to add
+ * later.
+ *
+ * Item 19b does NOT read them, and that is deliberate rather than an oversight
+ * to be tidied up: it alerts at the levels this file already decided, because
+ * an alert that re-derived a verdict could disagree with the screen item 18
+ * renders. These are carried for a rule that does not exist yet.
  *
  * Only finite numbers go in. A metric that is null is omitted rather than
  * written as 0, for the same reason `num()` refuses to: an absent measurement
