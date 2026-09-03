@@ -105,9 +105,13 @@ one of those). The honest possible outcomes include "no database at all — exte
 append-only JSONL pattern that already works", and that is worth knowing before, not
 after.
 
-- [ ] Research: durable store options (running)
-- [ ] Research: host facts
-- [ ] Research: job engine — blocked on the store decision
+- [x] Research: durable store — `node:sqlite`, zero dependencies, verified by running it
+- [x] Research: host facts
+- [x] Research: job engine — the finding reframed both it and item 17
+- [x] **A. Durable store** — shipped `a628ac4`, hardened `6021fd8`
+- [ ] **29. Renderer test harness** — in progress, sequenced before C's table
+- [ ] **C. Host facts** — main-process half in progress; UI waits on 29
+- [ ] B1–B4. Job engine
 
 ### What the adversarial pass caught, before any code was written
 
@@ -245,3 +249,53 @@ coverage at all. Adding jsdom plus testing-library is a day; the value is that e
 subsequent UI defect becomes catchable rather than reviewable. It should land before the job
 engine's job list and item C's inventory table, which are the two largest new surfaces on the
 plan — writing them first and retrofitting tests afterwards is how the gap gets permanent.
+
+## Wave 2 — the plumbing
+
+### Item A shipped, and what the review found
+
+`a628ac4` built it; `6021fd8` fixed what adversarial review found. Suite 2235 → 2319.
+
+The store itself survived attack. The schema, the retention arithmetic, the two-tier stitch
+between full-resolution and hourly rows, the distinction between "no units" and "cannot see
+units", and the checkpoint fix were all confirmed correct — several of them better than the
+commit message claimed.
+
+**Both serious defects were outside the file.** That is the pattern worth carrying into the
+next wave: a new subsystem is reviewed carefully and its seams are not.
+
+*"Delete all data" did not delete it.* The list of files that command clears describes itself
+as deliberately exhaustive and was written before this database existed. A user who typed
+DELETE and read "All data deleted" kept every hostname, kernel, systemd unit and listening
+port in the estate, and the app resumed appending to it. The file is chmod 0600 a few hundred
+lines away, so its sensitivity was already established by the same diff.
+
+*A wrong clock erased it.* Retention took its cutoffs from the wall clock alone and ran
+seconds after launch, before NTP could correct anything. A VM restored from a snapshot, or a
+machine with a dead CMOS battery, rolled everything into hourly buckets and dropped the lot in
+one committed transaction — no error, no log, nothing on the next launch to say so. Two
+guards now, because either alone is insufficient: refuse a pass whose clock outruns the newest
+row it can see, and refuse any pass that would delete more than half the table.
+
+### The capability test that tested the wrong runtime
+
+It claimed to guard against an Electron bump removing an export or shipping an older SQLite,
+and ran under the test runner's own Node with Electron mocked — so it would have stayed green
+through exactly that regression. There is now `npm run test:capability`, which runs it under
+the shipped Electron binary. It reports SQLite 3.53.1 on Node 24.18.1, against 3.51.3 under
+the runner: the gap it was blind to.
+
+### Two review findings that were wrong, and how that was established
+
+The review said to debounce a flapping unit on its `active` state. That does not work — a unit
+in a restart loop alternates between `activating` and `failed`, so `active` is precisely what
+changes. Repeated changes to one fact now amortise into a single event carrying a count,
+turning a hundred flaps into four rows.
+
+It also said `LIKE` could not use the index. Measured, it uses the primary key for the host
+column; what it cannot use is the key prefix. The range scan that replaced it is right, for a
+different reason than the one given.
+
+Both were caught by an implementer testing the instruction rather than following it, which is
+now three times across two waves that a brief has been wrong and saying so was worth more than
+compliance.
