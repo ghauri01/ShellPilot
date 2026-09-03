@@ -549,7 +549,32 @@ describe('what must NOT be able to reach this', () => {
       'planAccessChange',
       'buildRevokeKeyCommand',
       'buildAddKeyCommand',
-      'accessDisarmCommand'
+      'accessDisarmCommand',
+      // Security posture — roadmap item 24. It reads which firewall is active
+      // and the shape of its rules, whether SELinux is enforcing, and how sshd
+      // is configured. That is a MAP OF HOW TO ATTACK THE HOST, assembled and
+      // kept fresh across the whole estate, and an agent that could ask for it
+      // per server could ask for it for all of them.
+      //
+      // The item is read-only, which is what makes the temptation real: there
+      // is no write to refuse, so "it only reads" sounds like an argument. It
+      // is not one. `execute_command` gated per server against an access group
+      // is a consent story about ONE host and one command a human can read;
+      // "tell me which of these forty machines has PasswordAuthentication on
+      // and no firewall" is a different question with a different answer, and
+      // the answer is no — not "not yet".
+      //
+      // The property holds today only by construction: nothing under
+      // src/main/services/mcpServer.ts names any of these. This is what makes
+      // that checkable in a diff rather than by remembering.
+      'buildPostureCommand',
+      'parsePosture',
+      'POSTURE_COMMAND',
+      'PostureReader',
+      'shared/posture',
+      'fleet:posture',
+      'postureFor',
+      'get_host_posture'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }
