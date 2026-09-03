@@ -45,6 +45,14 @@ const MODULE_FILES: Record<string, string[]> = {
     'src/shared/topology.ts',
     'src/renderer/src/components/monitor/PatchPanel.tsx'
   ],
+  // The collector (src/shared/access.ts, src/main/services/access.ts) is not
+  // listed, for the same reason hostFacts is not listed under `inventory`: it
+  // lives in the sampler, not in the module. What differs, and is worth writing
+  // down here rather than only in modules.ts, is that this module's toggle
+  // gates the COLLECTION and not merely the panel — the probe reads other
+  // accounts' authorized_keys with `sudo -n`, which is not a thing to discover
+  // in a sudo log. See FleetSamplerDeps.accessEnabled.
+  access: ['src/renderer/src/components/monitor/AccessPanel.tsx'],
   broadcast: [
     'src/shared/broadcast.ts',
     'src/main/services/broadcast.ts',

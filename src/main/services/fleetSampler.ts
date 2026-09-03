@@ -5,8 +5,10 @@ import type {
   FleetSamplerStatus,
   FleetTarget
 } from '../../shared/fleet'
+import type { HostAccess } from '../../shared/access'
 import type { HostFacts } from '../../shared/hostFacts'
 import type { HostMetrics } from '../../shared/ssh'
+import { ACCESS_FACT_PREFIX, accessKeyPrefix, accessToFacts } from '../../shared/access'
 import {
   FLEET_INTERVAL_DEFAULT_MS,
   FLEET_INTERVAL_MAX_MS,
@@ -54,6 +56,21 @@ type FactsSampler = (
   key: string,
   cfg: FleetTarget['cfg']
 ) => Promise<{ ok: boolean; facts?: HostFacts; error?: string }>
+
+/**
+ * The key and access probe — roadmap item 23. Injected exactly as `sampleFacts`
+ * is, and for the same reason: the sampler's tests must not drag ssh2 and a
+ * pooled connection into every one of them.
+ *
+ * It rides the FACTS cadence rather than owning a timer. Both probes answer
+ * questions that change when a person edits a file, not continuously, and a
+ * second timer would need its own copy of the vault re-check, the generation
+ * guard and disposal — duplicating that reasoning is how it breaks.
+ */
+type AccessSampler = (
+  key: string,
+  cfg: FleetTarget['cfg']
+) => Promise<{ ok: boolean; access?: HostAccess; error?: string }>
 
 /**
  * The slice of the durable store this file uses.
@@ -154,6 +171,34 @@ export interface FleetSamplerDeps {
    * paying a 45-second timeout to find that out again helps nobody.
    */
   sampleFacts?: FactsSampler
+  /**
+   * The key and access probe — roadmap item 23. Optional for the same reason
+   * `sampleFacts` is: a sampler built without it behaves exactly as it did
+   * before, which keeps every existing test valid.
+   *
+   * Runs in the same place and under the same conditions as the facts probe —
+   * inside the sequential sweep, only after a SUCCESSFUL metrics sample, and
+   * only when this target's hour is up. It keeps its own due clock so a facts
+   * probe that fails does not also postpone this one.
+   */
+  sampleAccess?: AccessSampler
+  /**
+   * Whether the key and access probe may run at all, resolved PER SWEEP.
+   *
+   * The one place in this file where a module toggle gates a channel rather
+   * than a panel, and deliberately so. Every other optional module in this app
+   * hides its UI while its main-process handlers stay registered — defensible
+   * for a handler somebody has to call, and not defensible for a probe that
+   * runs by itself on every host every hour and reads other accounts' home
+   * directories with `sudo -n`. "We now read everyone's authorized_keys on all
+   * of your servers" is a thing a person switches on, not one they discover in
+   * a sudo log.
+   *
+   * A function rather than a flag so a toggle takes effect on the next sweep
+   * rather than at the next restart. Absent means the gate is not installed,
+   * which is how every existing test keeps working.
+   */
+  accessEnabled?: () => boolean
   // metricsDisconnect. Called for every target the sampler stops watching.
   //
   // metricsSample holds a pooled connection per key and only releases it when
@@ -256,6 +301,21 @@ export interface FleetCacheEntry {
    *  alongside the last good sample. */
   factsError?: string
   factsErrorAt?: number
+  /**
+   * The last successful key and access collection — roadmap item 23. Its own
+   * clock again, for the reason `factsAt` has one: an inventory read an hour
+   * ago is not the same claim as a metrics sample taken two minutes ago, and
+   * anything quoting it has to say which age it means.
+   */
+  access?: HostAccess
+  accessAt?: number
+  /** Set when the most recent access probe failed; cleared by a success and
+   *  kept ALONGSIDE the last good collection. "This host's keys were read an
+   *  hour ago and the probe is failing now" is two facts and both matter —
+   *  most of all here, where the alternative is an empty key list that reads
+   *  as "this host trusts nobody". */
+  accessError?: string
+  accessErrorAt?: number
 }
 
 /** One host's contribution to a sweep, held until the whole sweep is written. */
@@ -269,6 +329,8 @@ interface PendingWrite {
   recovered?: boolean
   /** Present only on the sweeps where the facts probe was also due. */
   facts?: HostFacts
+  /** Present only on the sweeps where the access probe was also due. */
+  access?: HostAccess
 }
 
 export interface FleetLookup {
@@ -333,6 +395,12 @@ export class FleetSampler {
   // schedule the process cannot remember. Bounded by the target list, cleared
   // in the same pass as `samples`.
   private factsDueAt = new Map<string, number>()
+  // The same, for the key and access probe — roadmap item 23. A SEPARATE map
+  // rather than a shared due time: the two probes fail independently, and one
+  // clock would let a host whose facts probe keeps timing out postpone its
+  // access collection too, so an estate would quietly stop being inventoried
+  // for a reason that has nothing to do with keys.
+  private accessDueAt = new Map<string, number>()
   // Servers whose last known reachability has already been looked up in the
   // store. Once per server per process: the in-memory map is the answer after
   // that, and a lookup on every sweep would be two reads per host forever.
@@ -399,6 +467,7 @@ export class FleetSampler {
       this.samples.delete(id)
       this.reachable.delete(id)
       this.factsDueAt.delete(id)
+      this.accessDueAt.delete(id)
     }
 
     this.stopTimer()
@@ -494,7 +563,16 @@ export class FleetSampler {
       facts: previous?.facts,
       factsAt: previous?.factsAt,
       factsError: previous?.factsError,
-      factsErrorAt: previous?.factsErrorAt
+      factsErrorAt: previous?.factsErrorAt,
+      // Carried across for exactly the reason the facts are. An access
+      // collection is hourly, so nearly every metrics sample lands between two
+      // of them — rebuilding the entry without it would erase the key inventory
+      // thirty times an hour and leave the panel reporting "no keys" on a host
+      // that trusts a dozen.
+      access: previous?.access,
+      accessAt: previous?.accessAt,
+      accessError: previous?.accessError,
+      accessErrorAt: previous?.accessErrorAt
     }
     this.samples.set(
       serverId,
@@ -519,6 +597,44 @@ export class FleetSampler {
         ? { ...entry, facts, factsAt: at, factsError: undefined, factsErrorAt: undefined }
         : { ...entry, factsError: error ?? 'unavailable', factsErrorAt: at }
     )
+  }
+
+  /**
+   * Record one key and access collection, on the entry the metrics sample owns.
+   *
+   * Mirrors `rememberFacts` exactly, including the part that matters most here:
+   * a FAILURE KEEPS THE LAST GOOD COLLECTION. Replacing it with nothing would
+   * turn "the probe could not run this hour" into an empty key list, and an
+   * empty key list is the one thing this feature must never invent.
+   */
+  private rememberAccess(serverId: string, at: number, access?: HostAccess, error?: string): void {
+    const entry = this.samples.get(serverId) ?? {}
+    this.samples.set(
+      serverId,
+      access
+        ? { ...entry, access, accessAt: at, accessError: undefined, accessErrorAt: undefined }
+        : { ...entry, accessError: error ?? 'unavailable', accessErrorAt: at }
+    )
+  }
+
+  /** What this sampler last collected about who can get into one server, for
+   *  the IPC surface the access view reads. Separate from `factsFor` so a
+   *  caller that wants keys is not handed an inventory to ignore. */
+  accessFor(serverId: string): {
+    access?: HostAccess
+    at?: number
+    error?: string
+    errorAt?: number
+    intervalMs: number
+  } {
+    const entry = this.samples.get(serverId)
+    return {
+      access: entry?.access,
+      at: entry?.accessAt,
+      error: entry?.accessError,
+      errorAt: entry?.accessErrorAt,
+      intervalMs: clampFactsInterval(this.cfg.factsIntervalMs)
+    }
   }
 
   /** What this sampler last collected about one server's identity, for the IPC
@@ -615,6 +731,49 @@ export class FleetSampler {
             // source's status where the value is null, so a failed probe still
             // produces a complete key set rather than an empty one.
             store.retireFacts(w.serverId, w.at, HOST_FACT_PREFIX, Object.keys(hostFacts))
+          }
+
+          // Key and access facts — roadmap item 23, into the SAME store.
+          //
+          // The retirement here is the delicate part, and it is deliberately
+          // NOT the unconditional sweep host facts get. `retireFacts` records a
+          // fact-removed event for everything it drops, and a fact-removed
+          // event on an authorized key reads as "this key was revoked on this
+          // host" — which is precisely the audit trail this item exists to
+          // produce, and precisely the thing that must never be fabricated.
+          //
+          // So keys are retired PER ACCOUNT, and only for accounts whose file
+          // was actually read this hour. An account that went `denied` because
+          // somebody tightened a home directory keeps every key it had, and the
+          // status fact next to it says the reading is stale. The alternative —
+          // one sweep of the whole `access:` prefix — would report a clean
+          // revocation of every key on the host the first time sudo stopped
+          // working.
+          if (w.access) {
+            const accessFacts = accessToFacts(w.access)
+            for (const [key, value] of Object.entries(accessFacts)) {
+              store.upsertFact(w.serverId, key, value, w.at)
+            }
+            for (const a of w.access.accounts) {
+              if (a.keys === null) continue
+              const prefix = accessKeyPrefix(a.user)
+              store.retireFacts(
+                w.serverId,
+                w.at,
+                prefix,
+                Object.keys(accessFacts).filter((k) => k.startsWith(prefix))
+              )
+            }
+            // The host-level scalars — source statuses, counts, completeness —
+            // are written for every collection, so sweeping them is safe in the
+            // way the per-account key rows are not. Scoped to the flat keys so
+            // it cannot reach a `user:` row.
+            store.retireFacts(
+              w.serverId,
+              w.at,
+              `${ACCESS_FACT_PREFIX}source:`,
+              Object.keys(accessFacts).filter((k) => k.startsWith(`${ACCESS_FACT_PREFIX}source:`))
+            )
           }
         }
       })
@@ -726,6 +885,32 @@ export class FleetSampler {
                 factsEvent = { factsError: error }
               }
             }
+
+            // The key and access probe — roadmap item 23. Same place, same
+            // conditions, its own due clock. Sequential after the facts probe
+            // rather than beside it: two 45-to-60-second reads opened at once
+            // on the same connection is two exec channels on a link a terminal
+            // may be typing over, which is the thing this whole loop is shaped
+            // to avoid.
+            const accessOn = this.deps.accessEnabled?.() ?? true
+            if (this.deps.sampleAccess && accessOn && at >= (this.accessDueAt.get(t.serverId) ?? 0)) {
+              // Set BEFORE the probe, for the reason the facts one is: a probe
+              // that throws or times out must still push the next attempt an
+              // hour out, or one broken host eats the whole estate's sweep.
+              this.accessDueAt.set(t.serverId, at + clampFactsInterval(this.cfg.factsIntervalMs))
+              const probe = await this.deps.sampleAccess(fleetKey(t.serverId), t.cfg).catch((err) => ({
+                ok: false as const,
+                error: err instanceof Error ? err.message : String(err)
+              }))
+              if (gen !== this.generation || this.disposed) return
+              const accessAt = this.now
+              if (probe.ok && probe.access) {
+                this.rememberAccess(t.serverId, accessAt, probe.access)
+                write.access = probe.access
+              } else {
+                this.rememberAccess(t.serverId, accessAt, undefined, probe.error ?? 'unavailable')
+              }
+            }
             writes.push(write)
           } else {
             const error = res.error ?? 'unavailable'
@@ -804,6 +989,7 @@ export class FleetSampler {
     this.samples.clear()
     this.reachable.clear()
     this.factsDueAt.clear()
+    this.accessDueAt.clear()
     this.seeded.clear()
     if (active === this) active = null
     return this.inFlight ?? Promise.resolve()

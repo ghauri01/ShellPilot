@@ -21,6 +21,7 @@ import { useAlerts } from '../../store/alerts'
 import { FleetHealth } from './FleetHealth'
 import { FleetSearch } from './FleetSearch'
 import { InventoryPanel } from './InventoryPanel'
+import { AccessPanel } from './AccessPanel'
 import { BroadcastPanel } from './BroadcastPanel'
 import { PatchPanel } from './PatchPanel'
 import { LogTailPanel } from './LogTailPanel'
@@ -395,6 +396,11 @@ export function FleetMonitor(): React.JSX.Element {
       {moduleEnabled(modules, 'inventory') && (
         <div style={show('inventory')}>
           <InventoryPanel servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'access') && (
+        <div style={show('access')}>
+          <AccessPanel servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
         </div>
       )}
       {moduleEnabled(modules, 'patch') && (

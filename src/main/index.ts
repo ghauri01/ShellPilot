@@ -56,6 +56,7 @@ import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
+import { AccessReader } from './services/access'
 import type { JobHostCapabilityReport, JobRunRequest } from '../shared/jobs'
 import { JOB_DETACHED_STALL_GRACE_MS, jobCohorts, restartsTheMachine } from '../shared/jobs'
 import type { GateHost } from '../shared/patch'
@@ -810,6 +811,36 @@ const hostFactsReader = new HostFactsReader({
     sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
 })
 
+// Whether the key and access probe may run — roadmap item 23.
+//
+// Main is not given the renderer's settings, so this does what the local
+// terminal's kill switch already does a few hundred lines below: keeps its own
+// copy, refreshed from the same blob on every `data:save` and read once at
+// boot. Absent reads as OFF, matching `moduleEnabled` in shared/modules.ts, so
+// an upgrade never switches it on for an existing install.
+//
+// Gating the CHANNEL rather than the panel is the point — see the note on
+// FleetSamplerDeps.accessEnabled for why this probe is the exception.
+let accessModuleOn = false
+function syncAccessModule(data: unknown): void {
+  const modules = (data as { settings?: { modules?: Record<string, unknown> } } | null)?.settings?.modules
+  accessModuleOn = modules?.access === true
+}
+try {
+  syncAccessModule(loadData())
+} catch {
+  // A blob that will not parse is not consent. Off.
+  accessModuleOn = false
+}
+
+// Fleet key and access, on the same slow clock — roadmap item 23. One reader
+// for the whole process, for the reason HostFactsReader is one: it holds no
+// state beyond the exec function, and every probe is a single round trip.
+const accessReader = new AccessReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
+})
+
 const fleetSampler = new FleetSampler({
   // Secrets are resolved HERE, per sweep, not when targets are configured.
   // A config resolved at configure time would be stale the moment the vault
@@ -828,6 +859,15 @@ const fleetSampler = new FleetSampler({
   sampleFacts: async (_key, cfg) => {
     const probe = await hostFactsReader.read(resolveChainSecrets(cfg as SshConnectConfig))
     return probe.ok ? { ok: true, facts: probe.facts } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
+  },
+  // The key and access half — roadmap item 23. Injected like `sampleFacts`, and
+  // allowPrompt: false for the same reason: this is the unattended caller, and
+  // reading who can log in to a host must never be what raises a host-key trust
+  // dialog the user cannot connect to anything they just did.
+  accessEnabled: () => accessModuleOn,
+  sampleAccess: async (_key, cfg) => {
+    const probe = await accessReader.read(resolveChainSecrets(cfg as SshConnectConfig))
+    return probe.ok ? { ok: true, access: probe.access } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
   },
   release: (key) => metricsDisconnect(key),
   emit: (event) => {
@@ -862,6 +902,12 @@ ipcMain.handle('fleet:status', () => fleetSampler.status())
 // wants fresher facts asks for a sweep, so there is exactly one thing deciding
 // when a package manager is shelled out to.
 ipcMain.handle('fleet:facts', (_e, serverId: string) => fleetSampler.factsFor(serverId))
+// Who can get into one server, as the sweep last saw it — roadmap item 23.
+//
+// A read of what the sweep already has; it never triggers a probe, for the same
+// reason 'fleet:facts' does not. There is exactly one thing deciding how often
+// every home directory on every host gets stat'ed, and it is the sampler.
+ipcMain.handle('fleet:access', (_e, serverId: string) => fleetSampler.accessFor(serverId))
 
 // ---- Run one command across many servers ----
 //
@@ -2060,6 +2106,9 @@ ipcMain.handle('data:save', (_e, data: unknown) => {
   // local.connect() directly and never read it. So main keeps its own copy,
   // refreshed from the same blob, and every local:* handler consults that.
   syncLocalTerminalEnabled(data)
+  // Same pattern, same reason: a module that gates a background probe has to be
+  // read by the process that runs the probe. See syncAccessModule.
+  syncAccessModule(data)
   // The MCP bridge resolves friendly server/workspace names from this same
   // file (see mcpDataCache.ts) rather than round-tripping through the
   // renderer on every tool call, so its cache is refreshed right after the

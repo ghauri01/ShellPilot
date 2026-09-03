@@ -10,6 +10,7 @@ import type {
   MetricsResult,
   SshCloseInfo
 } from '../shared/ssh'
+import type { HostAccess } from '../shared/access'
 import type { HostFacts } from '../shared/hostFacts'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
@@ -524,6 +525,17 @@ const api = {
       serverId: string
     ): Promise<{ facts?: HostFacts; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
       ipcRenderer.invoke('fleet:facts', serverId),
+    // Who can get into a server, as the sampler last collected it — roadmap
+    // item 23. Read-only and never a trigger, exactly like `facts`.
+    //
+    // `access` absent with no `error` means the probe has not run for this
+    // server yet. That is a THIRD state, distinct from both "collected, and it
+    // trusts no keys" and "the collection failed", and the panel has to keep it
+    // distinct — a host nobody has looked at is not a host with no keys.
+    access: (
+      serverId: string
+    ): Promise<{ access?: HostAccess; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
+      ipcRenderer.invoke('fleet:access', serverId),
     onSample: (cb: (event: FleetSampleEvent) => void): (() => void) => {
       const h = (_e: IpcRendererEvent, event: FleetSampleEvent): void => cb(event)
       ipcRenderer.on('fleet:sample', h)

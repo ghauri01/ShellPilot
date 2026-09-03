@@ -26,6 +26,7 @@ export type ModuleId =
   | 'fleetSearch'
   | 'inventory'
   | 'patch'
+  | 'access'
 
 export interface ModuleDef {
   id: ModuleId
@@ -84,6 +85,26 @@ export const MODULES: ModuleDef[] = [
     // switch on rather than discover; that argument is strictly stronger here,
     // where the verb is `upgrade` rather than `-s upgrade` and one of the steps
     // can restart the machine.
+    defaultEnabled: false
+  },
+  {
+    id: 'access',
+    label: 'Fleet keys and access',
+    detail:
+      'Which key opens which host and whose it is: every authorized_keys file across the estate, fingerprinted, with locked and expired accounts and administrative group membership alongside. A host whose files could not be read is shown as unreadable and excluded from every count — never as a host with no keys. Read-only.',
+    // OFF by default, and this one's toggle gates the COLLECTION rather than
+    // just the panel — see FleetSamplerDeps.accessEnabled.
+    //
+    // Every other module here hides a UI while its main-process handlers stay
+    // registered, which is fine for something a person has to press. This is a
+    // background probe that walks /etc/passwd on every host once an hour,
+    // stats every home directory in it, and where passwordless sudo exists uses
+    // `sudo -n cat` to read other accounts' authorized_keys — one line in that
+    // host's sudo log per account per hour.
+    //
+    // Every one of those reads is a read a person could do by hand, none of
+    // them mutates anything, and no private key is touched anywhere. It is
+    // still not something to discover after the fact.
     defaultEnabled: false
   },
   {
