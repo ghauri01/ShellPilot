@@ -15,6 +15,7 @@ import type {
   S3BackupDestination,
   SftpBackupDestination
 } from '../../shared/backup'
+import { s3PrefixProblem } from '../../shared/backup'
 import type { SshAuth, SshHop } from '../../shared/ssh'
 import type { VaultEntry } from '../../shared/vault'
 
@@ -324,8 +325,21 @@ export function signS3Request(input: SigV4Input): {
   }
 }
 
-/** The object key for a name, honouring the destination's prefix. */
+/**
+ * The object key for a name, honouring the destination's prefix.
+ *
+ * A name is one object in one prefix, and this refuses to build a key out of
+ * anything else. Against a real MinIO, `put('/name')` landed under `name` —
+ * the store dropped the leading slash — and `list()` then reported `name`,
+ * which is not the string the caller asked to write. Nothing in this app
+ * generates such a name today (see backupObjectName and dumpObjectName), and
+ * that is exactly why the day one does, it should stop here rather than
+ * quietly write somewhere else.
+ */
 export function s3Key(dest: S3BackupDestination, name: string): string {
+  if (!name || name.includes('/') || name === '.' || name === '..') {
+    throw new Error(`“${name}” is not an object name: it must name one object inside the prefix.`)
+  }
   const prefix = dest.prefix.replace(/^\/+|\/+$/g, '')
   return prefix ? `${prefix}/${name}` : name
 }
@@ -344,18 +358,91 @@ export function s3Endpoint(dest: S3BackupDestination, key: string): { url: strin
 }
 
 /**
+ * XML character references, resolved.
+ *
+ * A ListObjectsV2 body is XML, so `<Key>` is XML-escaped text and not the key.
+ * A real MinIO returned `<Key>a&amp;b/…</Key>` for the key `a&b/…` and
+ * `<Key>line&#x1;one</Key>` for a key holding a control character. Reading
+ * those verbatim gives back a name that does not exist in the bucket — see the
+ * comment on `list` for what that costs.
+ *
+ * Named entities are limited to the five XML predefines on purpose: anything
+ * else in a ListObjectsV2 body would be a store inventing an entity, and
+ * leaving `&nbsp;` alone is better than guessing at it.
+ */
+export function decodeXmlText(value: string): string {
+  return value.replace(/&(#[Xx][0-9A-Fa-f]+|#[0-9]+|[A-Za-z]+);/g, (whole, body: string) => {
+    if (body[0] === '#') {
+      const hex = body[1] === 'x' || body[1] === 'X'
+      const code = Number.parseInt(hex ? body.slice(2) : body.slice(1), hex ? 16 : 10)
+      if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) return whole
+      try {
+        return String.fromCodePoint(code)
+      } catch {
+        return whole
+      }
+    }
+    switch (body) {
+      case 'amp':
+        return '&'
+      case 'lt':
+        return '<'
+      case 'gt':
+        return '>'
+      case 'quot':
+        return '"'
+      case 'apos':
+        return "'"
+      default:
+        return whole
+    }
+  })
+}
+
+/**
+ * A key out of an `encoding-type=url` listing.
+ *
+ * Form encoding, not percent encoding, and the difference is not academic:
+ * against MinIO the key `space name.spbackup` came back as
+ * `space+name.spbackup` and `plus+name.spbackup` came back as
+ * `plus%2Bname.spbackup`. Decoding with decodeURIComponent alone turns the
+ * first into a name with a `+` where the space was.
+ */
+export function decodeS3Key(value: string): string {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, '%20'))
+  } catch {
+    // A store that answered something that is not valid percent-encoding: the
+    // raw text is a worse name than nothing, but a thrown listing is worse
+    // still, and the startsWith check in `list` drops it.
+    return value
+  }
+}
+
+/**
  * `<Contents>` out of a ListObjectsV2 response.
  *
  * A hand-rolled reader rather than an XML dependency, and deliberately narrow:
  * it takes Key, Size and LastModified and ignores everything else, so a store
  * that adds elements does not break it and one that omits Size reports 0
  * rather than NaN.
+ *
+ * The one thing it is not narrow about is the key, because the key is a name
+ * this module will later hand back to GET and DELETE.
  */
 export function parseListObjects(xml: string): { keys: BackupGeneration[]; nextToken: string | null } {
   const keys: BackupGeneration[] = []
+  // Set only when the store echoed `<EncodingType>url</EncodingType>`, which is
+  // its statement that it applied the encoding we asked for. A store that
+  // ignores `encoding-type` answers without the element and its keys are then
+  // decoded as entities only — percent-decoding those would eat a literal `%`
+  // in somebody's key.
+  const urlEncoded = /<EncodingType>\s*url\s*<\/EncodingType>/i.test(xml)
   const blocks = xml.match(/<Contents>[\s\S]*?<\/Contents>/g) ?? []
   for (const block of blocks) {
-    const key = /<Key>([\s\S]*?)<\/Key>/.exec(block)?.[1]
+    const raw = /<Key>([\s\S]*?)<\/Key>/.exec(block)?.[1]
+    if (!raw) continue
+    const key = urlEncoded ? decodeS3Key(decodeXmlText(raw)) : decodeXmlText(raw)
     if (!key) continue
     const size = Number(/<Size>(\d+)<\/Size>/.exec(block)?.[1] ?? '0')
     const iso = /<LastModified>([\s\S]*?)<\/LastModified>/.exec(block)?.[1]
@@ -363,7 +450,13 @@ export function parseListObjects(xml: string): { keys: BackupGeneration[]; nextT
     keys.push({ name: key, size: Number.isFinite(size) ? size : 0, modified: Number.isNaN(modified) ? 0 : modified })
   }
   const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml)
-  const token = /<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/.exec(xml)?.[1] ?? null
+  // Entity-decoded like any XML text, but NOT url-decoded even when the
+  // listing is: `encoding-type` covers Delimiter, Prefix, Key and the marker
+  // fields, and the continuation token is not one of them. Decoding it would
+  // corrupt the `+` and `/` a base64 token is full of, and the next page would
+  // come back empty or wrong.
+  const rawToken = /<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/.exec(xml)?.[1]
+  const token = rawToken === undefined ? null : decodeXmlText(rawToken)
   return { keys, nextToken: truncated ? token : null }
 }
 
@@ -442,20 +535,36 @@ export function s3TargetFrom(
     },
     async list() {
       const prefix = dest.prefix.replace(/^\/+|\/+$/g, '')
+      const under = prefix ? `${prefix}/` : ''
       const out: BackupGeneration[] = []
       let token: string | null = null
       // Bounded: a bucket someone else also writes to must not turn a list
       // into an unbounded loop.
       for (let page = 0; page < 20; page++) {
-        const params = ['list-type=2', 'max-keys=1000']
-        if (prefix) params.push(`prefix=${awsUriEncode(`${prefix}/`)}`)
+        // `encoding-type=url` is what every AWS SDK asks for and it is not
+        // cosmetic. Without it a key is XML text: MinIO returned the key
+        // `a&b/…` as `a&amp;b/…`, this loop sliced `prefix.length + 1`
+        // characters off a string four characters longer than the prefix, and
+        // what came out had a `/` in it — so the generation was dropped. A
+        // destination with an `&` in its prefix listed as empty: retention
+        // deleted nothing and never would, "restore from here" offered
+        // nothing, and the run still reported success. That is a backup that
+        // is silently not a backup, which is the one failure this whole
+        // feature exists to refuse.
+        const params = ['list-type=2', 'max-keys=1000', 'encoding-type=url']
+        if (prefix) params.push(`prefix=${awsUriEncode(under)}`)
         if (token) params.push(`continuation-token=${awsUriEncode(token)}`)
         const query = params.sort().join('&')
         const res = await call('GET', '', undefined, query)
         if (!res.ok) await fail('Listing the bucket', res)
         const { keys, nextToken } = parseListObjects(await res.text())
         for (const k of keys) {
-          const name = prefix ? k.name.slice(prefix.length + 1) : k.name
+          // startsWith rather than a length subtraction: if the key does not
+          // begin with the prefix we asked the store for, then either the
+          // store answered something else or the decoding above is wrong, and
+          // in both cases the honest thing is to not claim it as a generation.
+          if (!k.name.startsWith(under)) continue
+          const name = k.name.slice(under.length)
           // Keys in a sub-"directory" of the prefix are not ours.
           if (!name || name.includes('/') || isScratchName(name)) continue
           out.push({ ...k, name })
@@ -528,6 +637,11 @@ export async function openTarget(dest: BackupDestination, deps: TargetDeps = {})
     }
     case 's3': {
       if (!dest.bucket) throw new Error('This destination has no bucket set.')
+      // Before the credential, so a prefix this driver cannot address is not
+      // reported as a vault problem — and before the first request, so it is
+      // not reported as SignatureDoesNotMatch either.
+      const prefixProblem = s3PrefixProblem(dest.prefix)
+      if (prefixProblem) throw new Error(prefixProblem)
       const creds = (deps.credentials ?? s3Credentials)(dest)
       const f: FetchLike =
         deps.fetchImpl ??

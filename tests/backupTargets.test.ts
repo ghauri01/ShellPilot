@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, afterAll, beforeAll } from 'vitest'
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync } from 'node:fs'
+import { createServer as createTcpServer, connect as tcpConnect } from 'node:net'
+import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync, readFileSync } from 'node:fs'
 import { readFile, writeFile, readdir, stat, unlink, rename } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -14,17 +15,29 @@ import {
   remoteJoin,
   s3Endpoint,
   s3Key,
+  s3TargetFrom,
   sftpTargetFrom,
   sha256,
   signS3Request,
+  type FetchLike,
   type SftpIo
 } from '../src/main/services/backupTargets'
 import {
   backupObjectName,
   backupObjectTime,
+  destinationProblem,
   isBackupObjectName,
-  planRetention
+  planRetention,
+  s3PrefixProblem
 } from '../src/shared/backup'
+import {
+  loopbackFetch,
+  minioSkipReason,
+  MINIO_CREDENTIALS,
+  startMinio,
+  stopMinio,
+  type Minio
+} from './fixtures/s3/minio'
 import type {
   LocalBackupDestination,
   S3BackupDestination,
@@ -613,5 +626,417 @@ describe('nothing in this module writes outside its directory', () => {
     await t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('x'))
     expect(existsSync(join(a, 'shellpilot-20240101T000000Z.spbackup'))).toBe(true)
     expect(readdirSync(b)).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// What a real ListObjectsV2 body actually contains
+// ---------------------------------------------------------------------------
+
+/**
+ * The seven keys in tests/fixtures/s3/*.xml, as the strings they are in the
+ * bucket rather than as the strings they are in the XML.
+ *
+ * One literal list, asserted identically against both recordings, because that
+ * is the property that was broken: the same bucket listed two different ways
+ * has to produce the same names, and one of the two produced
+ * `bundles/amp&amp;ersand.spbackup`.
+ */
+const FIXTURE_KEYS = [
+  'bundles/amp&ersand.spbackup',
+  'bundles/ctrl\u0001char.spbackup',
+  'bundles/plain.spbackup',
+  'bundles/plus+name.spbackup',
+  'bundles/quote"lt<gt>.spbackup',
+  'bundles/space name.spbackup',
+  'bundles/unicodé-日本.spbackup'
+]
+
+function s3Fixture(name: string): string {
+  return readFileSync(join(__dirname, 'fixtures', 's3', name), 'utf8')
+}
+
+describe('parseListObjects, against bodies recorded off a real MinIO', () => {
+  it('reads a key out of an unencoded listing as the key, not as its XML escaping', () => {
+    // Recorded: `<Key>bundles/amp&amp;ersand.spbackup</Key>` and
+    // `<Key>bundles/ctrl&#x1;char.spbackup</Key>`. A reader that takes the
+    // element text verbatim reports names that are not in the bucket, and this
+    // module hands those names straight back to GET and DELETE.
+    expect(parseListObjects(s3Fixture('list-v2-minio.xml')).keys.map((k) => k.name)).toEqual(
+      FIXTURE_KEYS
+    )
+  })
+
+  it('reads the same seven names out of the encoding-type=url listing', () => {
+    expect(parseListObjects(s3Fixture('list-v2-encoded-minio.xml')).keys.map((k) => k.name)).toEqual(
+      FIXTURE_KEYS
+    )
+  })
+
+  it('treats + as a space in an encoded listing and %2B as a plus', () => {
+    // MinIO recorded `space+name.spbackup` and `plus%2Bname.spbackup` for two
+    // keys that differ by exactly that character. decodeURIComponent alone
+    // gets the first one wrong, and gets it wrong silently.
+    const names = parseListObjects(s3Fixture('list-v2-encoded-minio.xml')).keys.map((k) => k.name)
+    expect(names).toContain('bundles/space name.spbackup')
+    expect(names).toContain('bundles/plus+name.spbackup')
+  })
+
+  it('leaves a percent alone when the store did not say it encoded anything', () => {
+    const { keys } = parseListObjects(
+      '<ListBucketResult><IsTruncated>false</IsTruncated>' +
+        '<Contents><Key>100%25.spbackup</Key><Size>3</Size></Contents></ListBucketResult>'
+    )
+    expect(keys.map((k) => k.name)).toEqual(['100%25.spbackup'])
+  })
+
+  it('does not url-decode the continuation token, whatever the keys are doing', () => {
+    // A continuation token is base64, and base64 contains `+`, `/` and `=`.
+    // `encoding-type` covers the key and the marker fields, not the token, so
+    // decoding it here sends an unopenable token back on the next page.
+    const { nextToken } = parseListObjects(
+      '<ListBucketResult><IsTruncated>true</IsTruncated>' +
+        '<NextContinuationToken>ab+cd/ef=</NextContinuationToken>' +
+        '<EncodingType>url</EncodingType></ListBucketResult>'
+    )
+    expect(nextToken).toBe('ab+cd/ef=')
+  })
+
+  it('reads the token verbatim out of the recorded truncated page', () => {
+    const { keys, nextToken } = parseListObjects(s3Fixture('list-v2-encoded-truncated-minio.xml'))
+    expect(keys.map((k) => k.name)).toEqual([
+      'bundles/amp&ersand.spbackup',
+      'bundles/ctrl\u0001char.spbackup'
+    ])
+    expect(nextToken).toBe('YnVuZGxlcy9jdHJsAWNoYXIuc3BiYWNrdXBbbWluaW9fY2FjaGU6djIscmV0dXJuOl0=')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Prefixes and names this driver refuses to address
+// ---------------------------------------------------------------------------
+
+const DOT_PROBLEM =
+  'The key prefix “a/./b” has a “.” path segment. The request is signed over the path before ' +
+  'the URL is parsed, and the parser removes that segment afterwards — so the store would answer ' +
+  'SignatureDoesNotMatch and it would look like the access key was wrong.'
+
+const DOTDOT_PROBLEM =
+  'The key prefix “a/../b” has a “..” path segment. The request is signed over the path before ' +
+  'the URL is parsed, and the parser removes that segment afterwards — so the store would answer ' +
+  'SignatureDoesNotMatch and it would look like the access key was wrong.'
+
+describe('s3PrefixProblem', () => {
+  it('accepts the prefixes a destination normally has', () => {
+    expect(s3PrefixProblem('')).toBe(null)
+    expect(s3PrefixProblem('/shellpilot/')).toBe(null)
+    expect(s3PrefixProblem('estate/backups/nightly')).toBe(null)
+    expect(s3PrefixProblem('has spaces and & and +')).toBe(null)
+  })
+
+  it('refuses an empty path segment, and says why nothing would be written', () => {
+    expect(s3PrefixProblem('a//b')).toBe(
+      'The key prefix “a//b” has an empty path segment. Object stores reject a key with “//” ' +
+        'in it, so nothing would ever be written here.'
+    )
+  })
+
+  it('refuses a dot segment, and says why it would otherwise look like a bad access key', () => {
+    // The one that cost the most to find. Against MinIO an `a/./b` prefix
+    // comes back as 403 SignatureDoesNotMatch, because the URL parser removes
+    // the segment after the signature was computed over the path that still
+    // had it. Nothing in that response mentions the prefix.
+    expect(s3PrefixProblem('a/./b')).toBe(DOT_PROBLEM)
+    expect(s3PrefixProblem('a/../b')).toBe(DOTDOT_PROBLEM)
+  })
+
+  it('is what the destination panel reports, so the destination cannot be saved', () => {
+    expect(destinationProblem(s3Dest('http://x', { prefix: 'a/./b' }))).toBe(DOT_PROBLEM)
+    expect(destinationProblem(s3Dest('http://x', { prefix: 'shellpilot' }))).toBe(null)
+  })
+
+  it('is what openTarget refuses on, before it ever asks the vault for a key', async () => {
+    let asked = false
+    await expect(
+      openTarget(s3Dest('http://x', { prefix: 'a//b' }), {
+        credentials: () => {
+          asked = true
+          return { accessKeyId: 'k', secretAccessKey: 's' }
+        }
+      })
+    ).rejects.toThrow('has an empty path segment')
+    expect(asked).toBe(false)
+  })
+})
+
+describe('s3Key refusals', () => {
+  it('refuses a name that is not one object inside the prefix', () => {
+    // The leading slash is the one that is not loud: MinIO accepted
+    // `put('/name')`, stored it under `name`, and then listed `name` — so what
+    // was written and what the destination reports holding are different
+    // strings, and retention matches on the string.
+    expect(() => s3Key(s3Dest('http://x'), '/a.spbackup')).toThrow(
+      '“/a.spbackup” is not an object name: it must name one object inside the prefix.'
+    )
+    expect(() => s3Key(s3Dest('http://x'), 'a/b.spbackup')).toThrow('is not an object name')
+    expect(() => s3Key(s3Dest('http://x'), '..')).toThrow('is not an object name')
+    expect(() => s3Key(s3Dest('http://x'), '')).toThrow('is not an object name')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The driver against a real MinIO
+// ---------------------------------------------------------------------------
+
+const MINIO_SKIP = minioSkipReason()
+
+describe.skipIf(MINIO_SKIP !== null)(
+  `s3 target against a real MinIO in Docker${MINIO_SKIP ? ` [SKIPPED: ${MINIO_SKIP}]` : ''}`,
+  () => {
+    const CONTAINER = 'shellpilot-s3-driver-test'
+    const PORT = 19731
+    const TEE_PORT = 19741
+    let minio: Minio
+
+    beforeAll(async () => {
+      minio = await startMinio(CONTAINER, PORT, [
+        'estate-backups',
+        'vhstyle-bucket',
+        'dotted.bucket.name'
+      ])
+    }, 180_000)
+    afterAll(() => stopMinio(CONTAINER))
+
+    const live = (over: Partial<S3BackupDestination> = {}): S3BackupDestination =>
+      s3Dest(minio.endpoint, { region: 'us-east-1', ...over })
+
+    const open = (over: Partial<S3BackupDestination> = {}): ReturnType<typeof openTarget> =>
+      openTarget(live(over), { credentials: () => MINIO_CREDENTIALS })
+
+    it('is really talking to MinIO, and not to anything inside this process', async () => {
+      // The guard against this whole block turning into a green no-op: MinIO
+      // names itself in a header no stand-in in this repository sets.
+      const res = await fetch(`${minio.endpoint}/probe-no-such-bucket/`)
+      expect(res.status).toBe(403)
+      expect(res.headers.get('server')).toBe('MinIO')
+    })
+
+    it('uploads, reads back, lists and deletes', async () => {
+      const t = await open({ prefix: 'roundtrip' })
+      await t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('{"magic":"shellpilot-backup"}'))
+      expect((await t.get('shellpilot-20240101T000000Z.spbackup')).toString()).toBe(
+        '{"magic":"shellpilot-backup"}'
+      )
+      const listed = await t.list()
+      expect(listed.map((g) => g.name)).toEqual(['shellpilot-20240101T000000Z.spbackup'])
+      expect(listed[0].size).toBe(29)
+      await t.remove('shellpilot-20240101T000000Z.spbackup')
+      expect(await t.list()).toEqual([])
+    })
+
+    it('round-trips keys whose characters the URL and XML layers would otherwise eat', async () => {
+      // Each of these is a character that SigV4 canonicalisation, WHATWG URL
+      // parsing or XML escaping treats differently from the others.
+      const names = [
+        'has space.spbackup',
+        'has+plus.spbackup',
+        'has=equals.spbackup',
+        'amp&ersand.spbackup',
+        'quote"lt<gt>.spbackup',
+        'tilde~bang!star*paren().spbackup',
+        'unicodé-ü-日本.spbackup'
+      ]
+      const t = await open({ prefix: 'awkward' })
+      for (const name of names) {
+        await t.put(name, Buffer.from(`body of ${name}`))
+        expect((await t.get(name)).toString()).toBe(`body of ${name}`)
+      }
+      expect((await t.list()).map((g) => g.name).sort()).toEqual([...names].sort())
+    })
+
+    it('lists what it wrote even when the prefix itself holds an ampersand', async () => {
+      // The bug this exercise turned up. Before the fix this listed nothing at
+      // all: the key came back XML-escaped, the prefix was stripped by length,
+      // and what was left had a slash in it and was dropped. A destination
+      // that lists nothing keeps every generation for ever and offers nothing
+      // to restore from, while the run goes on reporting success.
+      const t = await open({ prefix: 'tom&jerry' })
+      await t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('kept'))
+      const listed = await t.list()
+      expect(listed.map((g) => g.name)).toEqual(['shellpilot-20240101T000000Z.spbackup'])
+      expect((await t.get(listed[0].name)).toString()).toBe('kept')
+      await t.remove(listed[0].name)
+      expect(await t.list()).toEqual([])
+    })
+
+    it('writes and reads a zero-byte object as zero bytes', async () => {
+      const t = await open({ prefix: 'sizes-empty' })
+      await t.put('shellpilot-20240101T000000Z.spbackup', Buffer.alloc(0))
+      expect((await t.get('shellpilot-20240101T000000Z.spbackup')).length).toBe(0)
+      expect((await t.list())[0].size).toBe(0)
+    })
+
+    it('writes a body past the size at which an SDK would switch to multipart', async () => {
+      // 5 MiB is the minimum part size for a multipart upload and therefore
+      // the threshold an SDK crosses. This driver deliberately never does, so
+      // the case worth proving is one byte over it, in a single PUT.
+      const t = await open({ prefix: 'sizes-big' })
+      const body = Buffer.alloc(5 * 1024 * 1024 + 1)
+      for (let i = 0; i < body.length; i++) body[i] = i & 0xff
+      await t.put('shellpilot-20240101T000000Z.spbackup', body)
+      const back = await t.get('shellpilot-20240101T000000Z.spbackup')
+      expect(back.length).toBe(5 * 1024 * 1024 + 1)
+      expect(sha256(back)).toBe(sha256(body))
+      expect((await t.list())[0].size).toBe(5 * 1024 * 1024 + 1)
+    }, 60_000)
+
+    it('pages a listing past the 1000-key limit with the continuation token', async () => {
+      const t = await open({ prefix: 'paged' })
+      const names: string[] = []
+      for (let i = 0; i < 1001; i++) {
+        names.push(`shellpilot-20240101T${String(i).padStart(6, '0')}Z.spbackup`)
+      }
+      for (let i = 0; i < names.length; i += 50) {
+        await Promise.all(names.slice(i, i + 50).map((n) => t.put(n, Buffer.from('p'))))
+      }
+      const listed = (await t.list()).map((g) => g.name)
+      expect(listed).toHaveLength(1001)
+      expect(new Set(listed).size).toBe(1001)
+      // Lexicographic order leaves this one alone on the second page.
+      expect(listed).toContain('shellpilot-20240101T000000Z.spbackup')
+      expect(listed).toContain('shellpilot-20240101T001000Z.spbackup')
+    }, 180_000)
+
+    it('addresses a bucket virtual-host style, with the bucket in the Host it signs', async () => {
+      const dest = live({
+        endpoint: `http://localhost:${PORT}`,
+        bucket: 'vhstyle-bucket',
+        pathStyle: false,
+        prefix: 'vh'
+      })
+      expect(s3Endpoint(dest, 'vh/a.spbackup').host).toBe(`vhstyle-bucket.localhost:${PORT}`)
+      const t = s3TargetFrom(dest, MINIO_CREDENTIALS, (await loopbackFetch()) as unknown as FetchLike)
+      await t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('virtual host'))
+      expect((await t.get('shellpilot-20240101T000000Z.spbackup')).toString()).toBe('virtual host')
+      expect((await t.list()).map((g) => g.name)).toEqual(['shellpilot-20240101T000000Z.spbackup'])
+    })
+
+    it('addresses a bucket whose name has dots in it, which is why path-style exists', async () => {
+      const t = await open({ bucket: 'dotted.bucket.name', prefix: 'dots' })
+      await t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('dotted'))
+      expect((await t.get('shellpilot-20240101T000000Z.spbackup')).toString()).toBe('dotted')
+    })
+
+    it('reports a wrong secret key as the store refusing the signature', async () => {
+      const t = await openTarget(live({ prefix: 'wrongsecret' }), {
+        credentials: () => ({
+          accessKeyId: MINIO_CREDENTIALS.accessKeyId,
+          secretAccessKey: 'not-the-key'
+        })
+      })
+      await expect(t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('x'))).rejects.toThrow(
+        /^Uploading shellpilot-20240101T000000Z\.spbackup failed with HTTP 403:[\s\S]*SignatureDoesNotMatch/
+      )
+    })
+
+    it('reports a clock this machine got wrong as the store saying so', async () => {
+      // 45 minutes, outside the window SigV4 allows. The point is not that it
+      // fails but that the reason reaches the operator: "check your key" and
+      // "check your clock" are different fixes.
+      const skewed = new Date(Date.now() + 45 * 60 * 1000)
+      const t = s3TargetFrom(
+        live({ prefix: 'skew' }),
+        MINIO_CREDENTIALS,
+        ((url: string, init: RequestInit) => fetch(url, init)) as unknown as FetchLike,
+        () => skewed
+      )
+      await expect(t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('x'))).rejects.toThrow(
+        /failed with HTTP 403:[\s\S]*RequestTimeTooSkewed/
+      )
+    })
+
+    it('sends a Content-Length and never falls back to a chunked body', async () => {
+      // S3 answers 411 to a PUT with no Content-Length, and `aws-chunked` is a
+      // different signing mode this driver does not implement. Asserted on the
+      // wire rather than on what fetch was handed, through a plain TCP tee in
+      // front of MinIO.
+      const heads: string[] = []
+      const sockets: { destroy: () => void }[] = []
+      const tee = createTcpServer((down) => {
+        const up = tcpConnect(PORT, '127.0.0.1')
+        sockets.push(down, up)
+        let buf = Buffer.alloc(0)
+        let captured = false
+        down.on('data', (chunk: Buffer) => {
+          if (!captured) {
+            buf = Buffer.concat([buf, chunk])
+            const end = buf.indexOf('\r\n\r\n')
+            if (end >= 0) {
+              heads.push(buf.subarray(0, end).toString())
+              captured = true
+            }
+          }
+          up.write(chunk)
+        })
+        up.on('data', (chunk: Buffer) => down.write(chunk))
+        down.on('end', () => up.end())
+        up.on('end', () => down.end())
+        down.on('error', () => up.destroy())
+        up.on('error', () => down.destroy())
+      })
+      await new Promise<void>((resolve) => tee.listen(TEE_PORT, '127.0.0.1', resolve))
+      try {
+        const t = await openTarget(
+          live({ endpoint: `http://127.0.0.1:${TEE_PORT}`, prefix: 'wire' }),
+          { credentials: () => MINIO_CREDENTIALS }
+        )
+        await t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('abc'))
+        await t.put('shellpilot-20240101T000001Z.spbackup', Buffer.alloc(0))
+      } finally {
+        // fetch keeps the connection alive, so the tee has to be told to drop
+        // it rather than waited on.
+        for (const s of sockets) s.destroy()
+        await new Promise<void>((resolve) => tee.close(() => resolve()))
+      }
+      const puts = heads.filter((h) => h.startsWith('PUT '))
+      expect(puts).toHaveLength(2)
+      expect(puts[0]).toContain('\ncontent-length: 3')
+      expect(puts[1]).toContain('\ncontent-length: 0')
+      for (const head of puts) {
+        expect(head.toLowerCase()).not.toContain('transfer-encoding')
+        expect(head).toContain('\nx-amz-content-sha256: ')
+        expect(head).toContain('\nauthorization: AWS4-HMAC-SHA256 Credential=')
+      }
+    })
+
+    it('records that MinIO does not check the region, which is why AWS is still unproven', async () => {
+      // Not an assertion about this driver. It is the boundary of what this
+      // container can prove: the region is part of the credential scope and is
+      // therefore signed, and MinIO verifies a signature against whatever
+      // scope it was handed. A destination configured with the wrong region is
+      // caught by AWS and is not caught here, so nothing in this suite may be
+      // read as "the region is right".
+      const t = await openTarget(live({ prefix: 'region', region: 'ap-southeast-2' }), {
+        credentials: () => MINIO_CREDENTIALS
+      })
+      await t.put('shellpilot-20240101T000000Z.spbackup', Buffer.from('any region'))
+      expect((await t.get('shellpilot-20240101T000000Z.spbackup')).toString()).toBe('any region')
+    })
+  }
+)
+
+describe('the live MinIO suite', () => {
+  it('is skipped only for a reason it can name', () => {
+    // A suite that quietly stops running is worse than no suite at all. On a
+    // machine that is meant to have Docker, say so with SHELLPILOT_S3_LIVE=1
+    // and a skip becomes a failure here rather than a green run that proved
+    // nothing.
+    if (process.env.SHELLPILOT_S3_LIVE === '1') {
+      expect(MINIO_SKIP).toBe(null)
+      return
+    }
+    if (MINIO_SKIP !== null) {
+      expect(MINIO_SKIP).toMatch(/^(Docker is not usable here|Docker works but|SHELLPILOT_S3_LIVE=0)/)
+    }
   })
 })

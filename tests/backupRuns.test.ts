@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
 import { readFile, writeFile, readdir, stat, unlink, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -36,8 +36,10 @@ import {
 import type {
   BackupDestination,
   LocalBackupDestination,
+  S3BackupDestination,
   SftpBackupDestination
 } from '../src/shared/backup'
+import { minioSkipReason, MINIO_CREDENTIALS, startMinio, stopMinio } from './fixtures/s3/minio'
 import type { VaultEntry } from '../src/shared/vault'
 
 const PASSPHRASE = 'correct-horse-battery'
@@ -1054,3 +1056,168 @@ describe('a destinations file that cannot be read', () => {
     expect(readTargets().destinations.map((d) => d.id)).toEqual(['dest-local'])
   })
 })
+
+// ---------------------------------------------------------------------------
+// A whole run, against a real S3 server
+// ---------------------------------------------------------------------------
+
+const S3_RUN_SKIP = minioSkipReason()
+
+describe.skipIf(S3_RUN_SKIP !== null)(
+  `a backup run against a real MinIO in Docker${S3_RUN_SKIP ? ` [SKIPPED: ${S3_RUN_SKIP}]` : ''}`,
+  () => {
+    const CONTAINER = 'shellpilot-s3-run-test'
+    const PORT = 19732
+    const BUCKET = 'estate-backups'
+    let endpoint: string
+
+    beforeAll(async () => {
+      endpoint = (await startMinio(CONTAINER, PORT, [BUCKET])).endpoint
+    }, 180_000)
+    afterAll(() => stopMinio(CONTAINER))
+
+    /** A fresh prefix per test, so one test's generations are never another's
+     *  retention candidates and the container is shared without them colliding. */
+    let counter = 0
+    function s3Dest(over: Partial<S3BackupDestination> = {}): S3BackupDestination {
+      counter += 1
+      return {
+        id: 'dest-s3',
+        name: 'Off-site bucket',
+        kind: 's3',
+        endpoint,
+        region: 'us-east-1',
+        bucket: BUCKET,
+        prefix: `run-${counter}`,
+        vaultEntryId: 'vault-1',
+        pathStyle: true,
+        keep: 0,
+        everyHours: 0,
+        restoreTest: true,
+        ...over
+      }
+    }
+
+    const creds = { credentials: (): typeof MINIO_CREDENTIALS => MINIO_CREDENTIALS }
+
+    it('builds, uploads, reads back and test-restores a real bundle', async () => {
+      const dest = s3Dest()
+      const report = await runBackupToDestination(dest, PASSPHRASE, { ...creds, now: () => FIXED })
+
+      expect(report.error).toBe(undefined)
+      expect(report.ok).toBe(true)
+      expect(report.name).toBe(FIXED_NAME)
+      expect(report.verified).toBe(true)
+      expect(report.restoreTested).toBe(true)
+      expect(report.digest).toBe(report.readBackDigest)
+      expect(report.removed).toEqual([])
+      expect(describeRun(report)).toBe(
+        `Off-site bucket: wrote ${FIXED_NAME}, read back and test-restored`
+      )
+
+      // Independently of the run's own report: fetch the object again through
+      // a second target and open it. A run that says it verified something is
+      // exactly the claim this repository has been burned by before.
+      const listed = await listRemoteBackups(dest, creds)
+      expect(listed.ok).toBe(true)
+      expect(listed.generations?.map((g) => g.name)).toEqual([FIXED_NAME])
+
+      const inspected = await inspectRemoteBackup(dest, FIXED_NAME, PASSPHRASE, creds)
+      expect(inspected.ok).toBe(true)
+      expect(inspected.summary?.app).toBe(app.getVersion())
+      if (inspected.path) discardStagedBackup(inspected.path)
+    }, 60_000)
+
+    it('applies retention in the bucket, and reports the names it really deleted', async () => {
+      const dest = s3Dest({ keep: 1 })
+      const times = [
+        new Date('2024-05-01T01:00:00.000Z'),
+        new Date('2024-05-02T01:00:00.000Z'),
+        new Date('2024-05-03T01:00:00.000Z')
+      ]
+      const reports = []
+      for (const when of times) {
+        reports.push(await runBackupToDestination(dest, PASSPHRASE, { ...creds, now: () => when }))
+      }
+      expect(reports.map((r) => r.ok)).toEqual([true, true, true])
+      // Nothing on the first run, because the last backup is never deleted;
+      // then one per run, oldest first, once there is a second one to keep.
+      expect(reports[0].removed).toEqual([])
+      expect(reports[1].removed).toEqual(['shellpilot-20240501T010000Z.spbackup'])
+      expect(reports[2].removed).toEqual(['shellpilot-20240502T010000Z.spbackup'])
+
+      const left = await listRemoteBackups(dest, creds)
+      expect(left.generations?.map((g) => g.name)).toEqual(['shellpilot-20240503T010000Z.spbackup'])
+    }, 120_000)
+
+    it('still applies retention when the prefix contains an ampersand', async () => {
+      // The regression that matters most. With the listing bug in place this
+      // ran green three times, reported `removed: []` every time, and left all
+      // three bundles in the bucket for ever — every one of them holding the
+      // whole vault. Nothing anywhere said so.
+      const dest = s3Dest({ keep: 1, prefix: `run-amp-${counter}&nightly` })
+      const removed: string[][] = []
+      for (const when of [
+        new Date('2024-05-01T01:00:00.000Z'),
+        new Date('2024-05-02T01:00:00.000Z'),
+        new Date('2024-05-03T01:00:00.000Z')
+      ]) {
+        const r = await runBackupToDestination(dest, PASSPHRASE, { ...creds, now: () => when })
+        expect(r.ok).toBe(true)
+        removed.push(r.removed)
+      }
+      expect(removed).toEqual([
+        [],
+        ['shellpilot-20240501T010000Z.spbackup'],
+        ['shellpilot-20240502T010000Z.spbackup']
+      ])
+      const left = await listRemoteBackups(dest, creds)
+      expect(left.generations?.map((g) => g.name)).toEqual(['shellpilot-20240503T010000Z.spbackup'])
+    }, 120_000)
+
+    it('fails the run, and removes what it wrote, when the bundle will not open', async () => {
+      // The restore test doing its job against a real bucket: a bundle that
+      // uploads and reads back byte-perfect but is not a bundle must not be
+      // left there looking like a generation.
+      const dest = s3Dest()
+      const report = await runBackupToDestination(dest, PASSPHRASE, {
+        ...creds,
+        now: () => FIXED,
+        bundle: async () => ({
+          bytes: Buffer.from('not an encrypted bundle'),
+          summary: {
+            createdAt: FIXED.toISOString(),
+            app: '0.0.0',
+            servers: 0,
+            databases: 0,
+            workspaces: 0,
+            secrets: 0,
+            hasVault: false
+          }
+        })
+      })
+      expect(report.ok).toBe(false)
+      expect(report.failedStage).toBe('restore-test')
+      expect(report.verified).toBe(true)
+      expect(report.restoreTested).toBe(false)
+      expect(report.error).toContain('It has been removed.')
+
+      const left = await listRemoteBackups(dest, creds)
+      expect(left.ok).toBe(true)
+      expect(left.generations).toEqual([])
+    }, 60_000)
+
+    it('reports a bucket that is not there as the bucket, not as a backup that worked', async () => {
+      const report = await runBackupToDestination(
+        s3Dest({ bucket: 'no-such-bucket-here' }),
+        PASSPHRASE,
+        { ...creds, now: () => FIXED }
+      )
+      expect(report.ok).toBe(false)
+      expect(report.failedStage).toBe('write')
+      expect(report.verified).toBe(false)
+      expect(report.error).toContain('failed with HTTP 404')
+      expect(report.error).toContain('NoSuchBucket')
+    }, 60_000)
+  }
+)

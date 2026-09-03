@@ -156,6 +156,39 @@ export const BACKUP_DESTINATION_EXPOSURE: Record<BackupDestinationKind, string> 
   s3: 'Every credential in this app, your vault and your trusted host keys will be uploaded to this bucket as an encrypted file. A bucket that is public, or whose keys leak, hands over the whole file — the passphrase is then the only thing left between someone and your estate.'
 }
 
+/**
+ * Why this S3 key prefix cannot be used, in the words the panel shows. Null
+ * when it is fine.
+ *
+ * Both refusals were found by pointing the driver at a real MinIO, and both
+ * are refused here rather than at the far end because of what the far end says
+ * when it refuses them:
+ *
+ *  - An empty segment (`a//b`) makes a key an object store will not accept.
+ *    MinIO answers `400 XMinioInvalidObjectName`, which at least names the
+ *    key — but nothing in this app was going to tell the operator that the
+ *    two slashes they typed were the reason.
+ *  - A `.` or `..` segment is worse, because the signature is computed over
+ *    the path this module builds and the URL parser then rewrites that path
+ *    before it goes on the wire. `a/./b` is signed and sent as two different
+ *    strings, so the store answers `403 SignatureDoesNotMatch` — which reads
+ *    as "your access key is wrong", sends the operator to rotate a credential
+ *    that was never the problem, and leaves the destination broken.
+ */
+export function s3PrefixProblem(prefix: string): string | null {
+  const trimmed = prefix.replace(/^\/+|\/+$/g, '')
+  if (!trimmed) return null
+  for (const segment of trimmed.split('/')) {
+    if (segment === '') {
+      return `The key prefix “${prefix}” has an empty path segment. Object stores reject a key with “//” in it, so nothing would ever be written here.`
+    }
+    if (segment === '.' || segment === '..') {
+      return `The key prefix “${prefix}” has a “${segment}” path segment. The request is signed over the path before the URL is parsed, and the parser removes that segment afterwards — so the store would answer SignatureDoesNotMatch and it would look like the access key was wrong.`
+    }
+  }
+  return null
+}
+
 /** Roots the object name so a destination directory holding other things is
  *  never a retention candidate. */
 export const BACKUP_OBJECT_PREFIX = 'shellpilot-'
@@ -350,6 +383,8 @@ export function destinationProblem(d: BackupDestination): string | null {
     if (!d.vaultEntryId) {
       return 'Choose the vault entry holding the access key — the secret key cannot be stored in settings, because settings travel inside every backup written here.'
     }
+    const prefixProblem = s3PrefixProblem(d.prefix)
+    if (prefixProblem) return prefixProblem
   }
   if (d.everyHours > 0 && !d.passphraseVaultEntryId) {
     return 'A scheduled run has nobody to type a passphrase, so it needs a vault entry holding one.'
