@@ -200,6 +200,9 @@ export interface JobRetentionResult {
   outputDropped: number
   /** Whole jobs dropped — the job row, its targets and any output left. */
   jobsDropped: number
+  /** Set when the JOB-ROW sweep refused to run against a clock the store's own
+   *  newest row disagrees with. The output sweep still ran — see jobRetain. */
+  skipped?: 'clock-ahead'
 }
 
 /**
@@ -1073,6 +1076,12 @@ function buildStore(
       'DELETE FROM job_target WHERE job_id IN (SELECT id FROM job WHERE created_at < ?)'
     ),
     jobDropJobs: db.prepare('DELETE FROM job WHERE created_at < ?'),
+    // Everything belonging to ONE job id, for the re-run path. See createJob.
+    jobTargetsClear: db.prepare('DELETE FROM job_target WHERE job_id = ?'),
+    jobOutputClear: db.prepare('DELETE FROM job_output WHERE job_id = ?'),
+    // The retention guard's second opinion about what time it is. See
+    // jobRetain().
+    newestJob: db.prepare('SELECT max(created_at) AS n FROM job'),
     countJobs: db.prepare('SELECT count(*) AS n FROM job'),
     countJobOutput: db.prepare('SELECT count(*) AS n FROM job_output')
   }
@@ -1478,6 +1487,20 @@ function buildStore(
       // One transaction. A job row whose targets did not land is a job the
       // runner would re-adopt with nothing to run and no way to say why.
       store.transaction(() => {
+        // The id is REPLACED, not merged into, and that has to include the
+        // rows hanging off it.
+        //
+        // The runner only refuses a LIVE id; a finished one is re-runnable and
+        // the job row above is replaced wholesale. The targets were upserted
+        // per id, so a host in the OLD list and not the new one survived — and
+        // a re-run over one host reported the other as `ok`, a host it never
+        // contacted. The output was never touched at all, while seq restarts
+        // at zero, so the second run's first rows overwrote the first run's by
+        // primary key and the rest of the first run's stayed behind: a single
+        // host's output read back as the two runs interleaved, in seq order,
+        // with nothing marking the seam.
+        st.jobTargetsClear.run(job.id)
+        st.jobOutputClear.run(job.id)
         st.jobInsert.run(
           job.id,
           job.createdAt,
@@ -1588,21 +1611,50 @@ function buildStore(
     jobRetain(now = Date.now()) {
       const nothing: JobRetentionResult = { outputDropped: 0, jobsDropped: 0 }
       if (closed) return nothing
-      // The clock guards on retain() above do not apply here, and the reason is
-      // that the failure they protect against cannot happen to this table. A
-      // wrong clock aging out samples destroys the only copy of a measurement
-      // nobody can retake. A wrong clock aging out job output destroys a
-      // record whose SUMMARY — the job and target rows, on a horizon twelve
-      // times longer — is still there, and which is regenerable by running the
-      // job again. What it costs is a month of chatter, not a year of history.
+      // THE OUTPUT SWEEP takes no clock guard, and the argument is the one
+      // written when these horizons were chosen. A wrong clock aging out
+      // samples destroys the only copy of a measurement nobody can retake. A
+      // wrong clock aging out job output destroys a record whose SUMMARY — the
+      // job and target rows, on a horizon twelve times longer — is still there,
+      // and which is regenerable by running the job again. What it costs is a
+      // month of chatter, not a year of history.
       //
-      // The blast-radius guard is worse than useless here for a second reason:
-      // a store holding two jobs, one of them old, legitimately drops half of
-      // everything on the first pass. That is the normal case, not the alarm.
+      // THE JOB-ROW SWEEP takes retain()'s guard, because that argument does
+      // not survive being applied to it. It says the loss is bounded BECAUSE
+      // the summary outlives the output twelve times over — and this branch is
+      // what deletes the summary. A clock more than a year ahead is exactly the
+      // snapshot-restore case retain()'s own guard cites, and retain() refuses
+      // that very same pass, seconds later, with skipped: 'clock-ahead'. One
+      // pass cannot coherently be too dangerous to age out an hourly bucket and
+      // safe to delete the change log.
+      //
+      // Same second opinion, from the same rows plus this table's own: the
+      // newest thing anybody wrote. Events are excluded for retain()'s reason —
+      // the caller records a skip event, and a row written at the bogus time
+      // would disarm the guard on the next pass.
+      //
+      // The blast-radius guard is still not applied, and that reason is
+      // unchanged: a store holding two jobs, one of them old, legitimately
+      // drops half of everything on the first pass. That is the normal case,
+      // not the alarm.
       const outputCutoff = now - JOB_OUTPUT_RETENTION_DAYS * DAY_MS
       const jobCutoff = now - JOB_RECORD_RETENTION_DAYS * DAY_MS
+      const newest = Math.max(
+        num(st.newestJob.get()),
+        num(st.newestSample.get()),
+        num(st.newestHourly.get())
+      )
+      const clockAhead = newest > 0 && now - newest > RETENTION_CLOCK_GRACE_MS
+      if (clockAhead) {
+        console.error(
+          `[history] job record retention skipped: the clock says ${new Date(now).toISOString()} ` +
+            `but the newest row is ${new Date(newest).toISOString()}. Refusing to delete the job ` +
+            `change log against a clock that far ahead. Output past its own horizon is still aged out.`
+        )
+      }
       return store.transaction(() => {
         const outputDropped = Number(st.jobDropOutput.run(outputCutoff).changes)
+        if (clockAhead) return { outputDropped, jobsDropped: 0, skipped: 'clock-ahead' as const }
         // Targets before jobs: the target sweep selects by job id from `job`,
         // so deleting the parents first would strand every child row.
         st.jobDropTargets.run(jobCutoff)

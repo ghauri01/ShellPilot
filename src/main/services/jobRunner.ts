@@ -11,15 +11,20 @@ import type {
 } from '../../shared/jobs'
 import {
   JOB_ABANDONED_ERROR,
+  JOB_CLASSIFY_BYTES,
   JOB_CONCURRENCY,
   JOB_OUTPUT_HEAD,
   JOB_OUTPUT_RATE_PER_SEC,
   JOB_OUTPUT_TAIL,
+  JOB_REDACT_BLOCK_CARRY,
+  JOB_REDACT_LINE_CARRY,
   JOB_STALL_GRACE_MS,
   JOB_STEP_TIMEOUT_MS,
   classifyJobResult,
   elisionNotice,
-  planJob
+  planJob,
+  stepFailureNote,
+  stepNotice
 } from '../../shared/jobs'
 import { redactOutput } from './secretRedaction'
 
@@ -91,7 +96,20 @@ export interface JobExecResult {
   stdout?: string
   stderr?: string
   error?: string
+  /**
+   * The executor dropped output of its own accord.
+   *
+   * A LIVE hint only. It has no column, and it must not get one: the fact a
+   * reader needs a month later is HOW MUCH went, which is what `out_elided`
+   * already holds. An executor that drops bytes therefore reports `elided`
+   * below, the runner folds it into the host's elision count, and truncation
+   * survives a restart as a number rather than as a flag that was emitted once
+   * and thrown away.
+   */
   truncated?: boolean
+  /** Bytes the EXECUTOR dropped, folded into the host's `out_elided`. See
+   *  `truncated`. */
+  elided?: number
 }
 
 export type JobExecutor = (req: JobExecRequest) => Promise<JobExecResult>
@@ -143,6 +161,18 @@ export interface JobRunnerDeps {
 
 interface RunState {
   cancelled: boolean
+  /**
+   * Set by disposeAll(): the app is going away underneath this run.
+   *
+   * Distinct from `cancelled`, and the distinction is the whole of BLOCKER 1.
+   * A cancelled job ENDED — somebody stopped it and the row says so. A disposed
+   * job did not end; nothing decided anything, the window went. Writing
+   * `cancelled` + endedAt for it makes the row terminal, and a terminal row is
+   * one `unfinishedJobs()` can never select again — so the host that was
+   * mid-command stays `running` forever and `abandoned` becomes unreachable on
+   * the one path that produces it. The rows are left open for adopt() instead.
+   */
+  disposed: boolean
 }
 
 /** Per-host output bookkeeping. Lives for the length of one host's run. */
@@ -166,6 +196,13 @@ interface HostOutput {
   windowStart: number
   inWindow: number
   dropped: number
+  /** Bytes held back per stream so a secret split across two chunks is redacted
+   *  as one string. See JOB_REDACT_LINE_CARRY. */
+  carry: { out: string; err: string }
+  /** The tail of each stream, kept only to classify the result. See
+   *  JOB_CLASSIFY_BYTES. */
+  clsOut: string
+  clsErr: string
 }
 
 export class JobRunner {
@@ -285,9 +322,22 @@ export class JobRunner {
             endedAt: at
           })
         } else if (t.state === 'pending' || t.state === 'waiting') {
+          // `cancelled`, whose label is "not run" — NOT `abandoned`.
+          //
+          // `abandoned` is defined one line above and in shared/jobs.ts as
+          // "ShellPilot stopped while this host was RUNNING": the channel went
+          // and the remote process was sent SIGHUP. Nothing ever touched this
+          // host, so there is no channel and no SIGHUP, and filing it under
+          // `abandoned` inflates every summary with hosts that were never at
+          // risk. It is also what classifyJobResult answers for the same row —
+          // the error text below deliberately does not match its ABANDONED
+          // regex — and a stored outcome that disagrees with a re-derivation
+          // over the same row means the answer depends on which of the two a
+          // reader happened to use. markSkipped writes `cancelled` for exactly
+          // this situation already.
           this.deps.store.updateJobTarget(job.id, t.serverId, {
             state: 'skipped',
-            outcome: 'abandoned',
+            outcome: 'cancelled',
             error: 'ShellPilot stopped before this host was reached.',
             endedAt: at
           })
@@ -318,7 +368,7 @@ export class JobRunner {
     if (this.active.has(req.jobId)) {
       throw new Error(`a job with id ${req.jobId} is already running`)
     }
-    const state: RunState = { cancelled: false }
+    const state: RunState = { cancelled: false, disposed: false }
     this.active.set(req.jobId, state)
     // Identity, not `has(jobId)`. Everything after an await asks this before it
     // writes or emits — see the header.
@@ -388,31 +438,57 @@ export class JobRunner {
       // Only if this run still owns the entry. disposeAll clears the map, and a
       // deletion that does not check identity would drop somebody else's live
       // run out of reach of cancel.
-      if (this.active.get(req.jobId) === state) this.active.delete(req.jobId)
+      const stillOurs = this.active.get(req.jobId) === state
+      if (stillOurs) this.active.delete(req.jobId)
       const endedAt = this.now
-      // The state a job ends in is a fact about the run, not about its hosts:
-      // a cancelled job with twelve successful hosts is still a cancelled job,
-      // and calling it `done` would lose the only reason the last three never
-      // ran.
-      store.updateJob(req.jobId, {
-        state: state.cancelled ? 'cancelled' : 'done',
-        endedAt
-      })
-      store.recordEvent(
-        'job-ended',
-        null,
-        { jobId: req.jobId, cancelled: state.cancelled || undefined },
-        endedAt
-      )
-      // A terminal event always fires — on cancel, and on an empty target list
-      // — so nothing waits forever for a job that has already stopped.
-      const final = store.readJob(req.jobId)
-      this.deps.emit({
-        jobId: req.jobId,
-        job: final ?? undefined,
-        done: true,
-        cancelled: state.cancelled || undefined
-      })
+      if (!stillOurs) {
+        // This run no longer owns the id: either disposeAll() took the map
+        // apart under it, or — the map having been cleared — a later run
+        // claimed the id. NOTHING TERMINAL MAY BE WRITTEN HERE, and both cases
+        // want that for different reasons.
+        //
+        // Disposed: the run did not end, the app went. Writing `cancelled` +
+        // endedAt makes the row terminal, unfinishedJobs() selects on
+        // queued/running, and the row drops out of adoption's reach forever —
+        // while the host that was mid-exec is left saying `running` about a
+        // command the kernel SIGHUP'd. That pairing (a job that looks finished
+        // over a target that looks running) is unreadable, it is what the
+        // comment in main/index.ts's before-quit handler promises adopt() will
+        // clean up, and it made `abandoned` — the headline of B1 — unreachable
+        // on the ordinary path. Closing the window on macOS was enough to hit
+        // it. Left `running`, adopt() closes it at the next launch, which is
+        // the truth about what the attached path just did.
+        //
+        // Superseded: the rows belong to the other run now, and a stale write
+        // would overwrite its state with this one's.
+        if (state.disposed) {
+          store.recordEvent('job-disposed', null, { jobId: req.jobId, title: req.spec.title }, endedAt)
+        }
+      } else {
+        // The state a job ends in is a fact about the run, not about its hosts:
+        // a cancelled job with twelve successful hosts is still a cancelled job,
+        // and calling it `done` would lose the only reason the last three never
+        // ran.
+        store.updateJob(req.jobId, {
+          state: state.cancelled ? 'cancelled' : 'done',
+          endedAt
+        })
+        store.recordEvent(
+          'job-ended',
+          null,
+          { jobId: req.jobId, cancelled: state.cancelled || undefined },
+          endedAt
+        )
+        // A terminal event always fires — on cancel, and on an empty target list
+        // — so nothing waits forever for a job that has already stopped.
+        const final = store.readJob(req.jobId)
+        this.deps.emit({
+          jobId: req.jobId,
+          job: final ?? undefined,
+          done: true,
+          cancelled: state.cancelled || undefined
+        })
+      }
     }
 
     return store.readJob(req.jobId) as JobDetail
@@ -478,12 +554,19 @@ export class JobRunner {
       scheduled: false,
       windowStart: startedAt,
       inWindow: 0,
-      dropped: 0
+      dropped: 0,
+      carry: { out: '', err: '' },
+      clsOut: '',
+      clsErr: ''
     }
     const secrets = this.deps.knownSecrets?.(target.cfg) ?? []
 
     let result: JobExecResult | null = null
     let failure: string | null = null
+    /** Which step produced `result`, 1-based, and what it was. */
+    let stepIndex = 0
+    let stepCommand = ''
+    const totalSteps = req.spec.steps.length
 
     // Steps run in order and stop at the first one that does not exit zero —
     // `a && b` semantics, because that is what a person typing them means. A
@@ -493,6 +576,23 @@ export class JobRunner {
     // a lie told by the type.
     for (const step of req.spec.steps) {
       if (!owns()) break
+      stepIndex++
+      stepCommand = step.command
+      // A boundary row, in the stream, in order. Without it a three-step job is
+      // one wall of text and "which step printed this" has no answer — and the
+      // head budget is per host, so a chatty first step eats it and the marker
+      // is the only surviving evidence the later steps ran at all.
+      if (totalSteps > 1) {
+        this.pushOutput(
+          req.jobId,
+          serverId,
+          out,
+          'err',
+          stepNotice(stepIndex, totalSteps, step.command),
+          secrets,
+          owns
+        )
+      }
       const timeoutMs = step.timeoutMs ?? JOB_STEP_TIMEOUT_MS
       try {
         const r = await this.stallGuard(
@@ -512,6 +612,14 @@ export class JobRunner {
         // so a streaming backend and a batch one produce the same rows.
         if (r.stdout) this.pushOutput(req.jobId, serverId, out, 'out', r.stdout, secrets, owns)
         if (r.stderr) this.pushOutput(req.jobId, serverId, out, 'err', r.stderr, secrets, owns)
+        // An executor that capped its own buffer says how much it lost, and
+        // the count is folded into the host's elision total. That is where
+        // truncation is PERSISTED: `truncated` has no column and does not need
+        // one, because out_elided already answers the question a reader has a
+        // month later — how much went — and a flag that is emitted live and
+        // thrown away turns "dpkg failed" back into "the command produced no
+        // error" at the next restart.
+        out.elided += r.elided ?? 0
         if (!r.ok || (r.code ?? 0) !== 0) break
       } catch (e) {
         // One unreachable host must not end the job — the others are the reason
@@ -521,22 +629,59 @@ export class JobRunner {
       }
     }
 
-    // Whatever the rate limiter and the tail buffer are still holding is the
-    // last thing anyone gets to see. Flushed BEFORE the terminal state is
-    // written, so a reader that stops at "this host is done" has all of it.
+    // Whatever the rate limiter, the redaction carry and the tail buffer are
+    // still holding is the last thing anyone gets to see. Flushed BEFORE the
+    // terminal state is written, so a reader that stops at "this host is done"
+    // has all of it. The carry goes first: it holds a partial last line that
+    // the tail has not been offered yet.
+    this.pushOutput(req.jobId, serverId, out, 'out', '', secrets, owns, true)
+    this.pushOutput(req.jobId, serverId, out, 'err', '', secrets, owns, true)
     this.flushPending(req.jobId, serverId, out, owns)
-    this.flushTail(req.jobId, serverId, out)
+    this.flushTail(req.jobId, serverId, out, owns)
 
-    if (!owns()) return
+    if (!owns()) {
+      // Disposed mid-command. This run's result is being dropped on the floor,
+      // so the row must not be left saying `running` — that is the half of
+      // BLOCKER 1 the job row cannot express on its own. Written as exactly
+      // what adopt() would write for it, so the in-process close and the
+      // next-launch one cannot disagree. Guarded on `disposed` rather than on
+      // `!owns()`: if a LATER run took this id, these rows are its rows now.
+      if (state.disposed) {
+        store.updateJobTarget(req.jobId, serverId, {
+          state: 'failed',
+          outcome: 'abandoned',
+          error: JOB_ABANDONED_ERROR,
+          endedAt: this.now,
+          outOffset: out.bytes,
+          outElided: out.elided
+        })
+      }
+      return
+    }
 
     const endedAt = this.now
+    // A step that did not exit zero puts its own number on the row. `result` is
+    // overwritten per step, so without this the row carries an exit code with
+    // no subject: nothing says which of three commands produced it and nothing
+    // says the ones after it never ran.
+    const stepNote =
+      totalSteps > 1 && failure === null && result !== null && (!result.ok || (result.code ?? 0) !== 0)
+        ? stepFailureNote(stepIndex, totalSteps, stepCommand, result.code)
+        : null
+    // Redacted like every other byte that leaves this host, and for the same
+    // reason: a transport error routinely carries the connection string it
+    // failed on, and it lands in the same row of the same file on disk as the
+    // output that WAS scrubbed. The rules are pattern-only here — the resolved
+    // secrets are applied too, via `secrets`.
+    const scrub = (text: string | undefined | null): string | undefined =>
+      text === undefined || text === null || text === '' ? undefined : redactOutput(text, secrets)
     const host: JobHostResult =
       failure !== null
         ? {
             serverId,
             serverName,
             state: 'failed',
-            error: failure,
+            error: scrub(failure),
             startedAt,
             endedAt,
             ms: endedAt - startedAt
@@ -549,7 +694,7 @@ export class JobRunner {
             // failure would make half the useful commands look broken.
             state: result?.ok ? 'ok' : 'failed',
             exitCode: result?.code ?? undefined,
-            error: result?.error,
+            error: scrub([result?.error, stepNote].filter((x) => x).join(' ')),
             startedAt,
             endedAt,
             ms: endedAt - startedAt
@@ -561,11 +706,18 @@ export class JobRunner {
     // the shell's "command not found" is the last thing on stderr, and a host
     // that printed 20k of warnings first would have had it cut off before
     // anyone could read it.
+    //
+    // `clsOut`/`clsErr` are the fallback, and they are what makes a STREAMING
+    // executor classifiable at all: it hands its output to the runner as it
+    // arrives and returns nothing, so `result.stdout` is empty and every
+    // failing command would classify as `nonzero` — no `missing-command`, no
+    // `permission-denied`. A batch executor still wins, because it has the
+    // whole of both streams and the buffers only hold the tail.
     host.outcome =
       classifyJobResult({
         ...host,
-        stdout: result?.stdout ?? '',
-        stderr: result?.stderr ?? ''
+        stdout: result?.stdout || out.clsOut,
+        stderr: result?.stderr || out.clsErr
       }) ?? undefined
 
     store.updateJobTarget(req.jobId, serverId, {
@@ -598,14 +750,67 @@ export class JobRunner {
     stream: 'out' | 'err',
     raw: string,
     secrets: string[],
-    owns: () => boolean
+    owns: () => boolean,
+    /** The host is finished: emit what is being held back rather than waiting
+     *  for a boundary that is never coming. */
+    final = false
   ): void {
     // A superseded or disposed run must not write rows or paint a pane: an
     // executor's channel can still deliver buffered data after the run that
     // owned it has gone.
-    if (!owns() || raw === '') return
-    const text = redactOutput(raw, secrets)
+    if (!owns()) return
+
+    // REDACTION IS APPLIED ACROSS THE CHUNK SEAM, not within one chunk.
+    //
+    // The order was already right — redact, then split for the head/tail — but
+    // each chunk was redacted alone, and a socket boundary does not respect a
+    // regex. `DB_PASSWORD=` ending one chunk and `hunter2` starting the next
+    // matches no rule, and both halves are persisted verbatim. So the trailing
+    // PARTIAL LINE is held back and prepended to whatever comes next: every
+    // pattern rule but one is single-line, and holding only a partial line
+    // costs nothing for output that ends in a newline, which is nearly all of
+    // it.
+    const buffered = out.carry[stream] + raw
+    let ready = buffered
+    let held = ''
+    if (!final) {
+      // `\r` as well as `\n`: a progress bar redrawing in place ends each
+      // redraw with one, and holding those would leave the pane blank through
+      // the download half of an upgrade.
+      const nl = Math.max(buffered.lastIndexOf('\n'), buffered.lastIndexOf('\r'))
+      const cut = nl >= 0 ? nl + 1 : 0
+      ready = buffered.slice(0, cut)
+      held = buffered.slice(cut)
+      // Output that ends at neither — a prompt waiting on input — must not be
+      // held for the whole run. Bounded, then released.
+      if (Buffer.byteLength(held, 'utf8') > JOB_REDACT_LINE_CARRY) {
+        ready = buffered
+        held = ''
+      } else {
+        // The PEM rule is the one that spans lines, and the one whose failure
+        // costs a private key rather than a password. Hold from an
+        // unterminated BEGIN so the block is matched whole.
+        const begin = ready.lastIndexOf('-----BEGIN ')
+        if (begin >= 0 && ready.indexOf('-----END ', begin) < 0) {
+          const block = ready.slice(begin) + held
+          // Capped: a BEGIN with no END behind it must not buffer the host's
+          // entire output waiting for one.
+          if (Buffer.byteLength(block, 'utf8') <= JOB_REDACT_BLOCK_CARRY) {
+            held = block
+            ready = ready.slice(0, begin)
+          }
+        }
+      }
+    }
+    out.carry[stream] = held
+    if (ready === '') return
+
+    const text = redactOutput(ready, secrets)
     const at = this.now
+
+    // The tail of each stream, for classifyJobResult. See JOB_CLASSIFY_BYTES.
+    if (stream === 'out') out.clsOut = keepTail(out.clsOut + text, JOB_CLASSIFY_BYTES)
+    else out.clsErr = keepTail(out.clsErr + text, JOB_CLASSIFY_BYTES)
 
     // The cap is applied WITHIN a chunk, not between chunks, and that is not a
     // refinement — it is the difference between working and not. The attached
@@ -739,7 +944,17 @@ export class JobRunner {
    * somewhere else that one exists. `out_elided` on the target row is the
    * machine-readable half of the same fact.
    */
-  private flushTail(jobId: string, serverId: string, out: HostOutput): void {
+  private flushTail(jobId: string, serverId: string, out: HostOutput, owns: () => boolean): void {
+    // Guarded like flushPending, which the file header already claims of every
+    // post-await step. Without it a disposed run wrote the whole tail ring —
+    // rows appearing under a target the same pass then declined to update, so
+    // the output said one thing and out_offset said the host had produced
+    // nothing.
+    if (!owns()) {
+      out.tail = []
+      out.tailBytes = 0
+      return
+    }
     if (out.tail.length === 0) return
     const rows: JobOutputLine[] = []
     if (out.elided > 0) {
@@ -756,9 +971,20 @@ export class JobRunner {
     this.deps.store.appendJobOutput(jobId, serverId, rows)
   }
 
-  /** Cancels every in-flight job. Called on shutdown. */
+  /**
+   * Stops every in-flight job. Called when the window goes and at quit.
+   *
+   * Queued hosts do not start. Hosts already executing are left alone, exactly
+   * as cancel() leaves them, and their rows are NOT closed as though the run
+   * had finished — see RunState.disposed. What this leaves behind is a job row
+   * still saying `running` with a target row saying the same, which is
+   * precisely what adopt() reads at the next launch and closes as `abandoned`.
+   */
   disposeAll(): void {
-    for (const run of this.active.values()) run.cancelled = true
+    for (const run of this.active.values()) {
+      run.cancelled = true
+      run.disposed = true
+    }
     this.active.clear()
   }
 }
@@ -777,6 +1003,12 @@ export class JobRunner {
  * of the seam — visible corruption in output someone is reading to find out
  * what went wrong.
  */
+/** The last `budget` bytes of `text`, never splitting a code point. */
+function keepTail(text: string, budget: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= budget) return text
+  return splitAtBytes(text, Buffer.byteLength(text, 'utf8') - budget)[1]
+}
+
 export function splitAtBytes(text: string, budget: number): [string, string] {
   if (budget <= 0) return ['', text]
   const buf = Buffer.from(text, 'utf8')

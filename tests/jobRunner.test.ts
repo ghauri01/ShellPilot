@@ -9,12 +9,14 @@ import {
   type HistoryStore
 } from '../src/main/services/history'
 import { JobRunner, splitAtBytes, type JobExecResult } from '../src/main/services/jobRunner'
+import { attachedJobExecutor, type ExecStreamHandlers } from '../src/main/services/jobExec'
 import type { JobOutput, JobProgress, JobSpec } from '../src/shared/jobs'
 import {
   JOB_ABANDONED_ERROR,
   JOB_OUTPUT_HEAD,
   JOB_OUTPUT_RATE_PER_SEC,
   JOB_OUTPUT_RETENTION_DAYS,
+  JOB_REDACT_LINE_CARRY,
   JOB_OUTPUT_TAIL,
   JOB_RECORD_RETENTION_DAYS,
   classifyJobResult,
@@ -377,8 +379,17 @@ describe('a job that was running when ShellPilot stopped', () => {
     expect(byId.a.error).toContain('dpkg --configure -a')
     // The host behind it never started, and says so rather than inheriting the
     // running host's story.
-    expect(byId.b).toMatchObject({ state: 'skipped', outcome: 'abandoned' })
+    //
+    // `cancelled` — whose label is "not run" — and NOT `abandoned`. Nothing
+    // ever touched this host, and `abandoned`'s own definition is "ShellPilot
+    // stopped while this host was RUNNING". It is also the answer a
+    // re-classification gives, and a stored outcome that disagrees with
+    // classifyJobResult over the same row is a summary that changes depending
+    // on which of the two a reader happened to use.
+    expect(byId.b).toMatchObject({ state: 'skipped', outcome: 'cancelled' })
     expect(byId.b.error).toMatch(/before this host was reached/)
+    expect(classifyJobResult(byId.b)).toBe(byId.b.outcome)
+    expect(classifyJobResult(byId.a)).toBe(byId.a.outcome)
   })
 
   it('does not touch a job this process is still running', async () => {
@@ -463,8 +474,11 @@ describe('output', () => {
     const target = store.readJob('j1')!.targets[0]
 
     expect(target.outElided).toBe(total - JOB_OUTPUT_HEAD - JOB_OUTPUT_TAIL)
-    // Within the budget plus the notice, rather than the whole five megabytes.
-    expect(stored).toBeLessThanOrEqual(
+    // EXACTLY the budget plus the notice, not "at most". A `<=` here is
+    // satisfied by an implementation that stores the head and throws the tail
+    // away — the failure this whole policy exists to prevent — so it asserted
+    // nothing the other expectations did not already cover.
+    expect(stored).toBe(
       JOB_OUTPUT_HEAD + JOB_OUTPUT_TAIL + Buffer.byteLength(rows[1]?.text ?? '', 'utf8')
     )
     expect(target.outOffset).toBe(stored)
@@ -525,6 +539,167 @@ describe('output', () => {
     expect(h.outputs.map((o) => o.text).join('')).not.toContain('hunter2')
   })
 
+  it('redacts a secret split across two chunks', async () => {
+    // Redaction is applied per chunk, and a socket boundary does not respect a
+    // regex: `DB_PASSWORD=` ending one chunk and `hunter2` starting the next
+    // matches no rule, and both halves are persisted verbatim. Latent while the
+    // executor delivered one chunk; real the moment it streams.
+    const store = await openStore()
+    const h = harness(store)
+    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    await settle()
+    h.feed('a', 'DB_PASSWORD=')
+    h.feed('a', 'hunter2\n')
+    h.flushTicks()
+    await h.finish('a', { ok: true, code: 0 })
+    await p
+
+    const text = store
+      .readJobOutput('j1', 'a')
+      .map((r) => r.text)
+      .join('')
+    expect(text, 'a secret straddling a chunk boundary was written to disk').not.toContain('hunter2')
+    expect(text).toContain('[REDACTED]')
+    expect(h.outputs.map((o) => o.text).join('')).not.toContain('hunter2')
+  })
+
+  it('redacts a private key that arrives one line at a time', async () => {
+    // The one rule that spans lines, and the one whose seam costs a private key
+    // rather than a password. The line boundary is not enough for it on its
+    // own: `cat id_rsa` over a streaming channel arrives in whatever pieces the
+    // socket hands over.
+    const store = await openStore()
+    const h = harness(store)
+    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    await settle()
+    h.feed('a', '-----BEGIN OPENSSH PRIVATE KEY-----\n')
+    h.feed('a', 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n')
+    h.feed('a', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n')
+    h.feed('a', '-----END OPENSSH PRIVATE KEY-----\n')
+    h.flushTicks()
+    await h.finish('a', { ok: true, code: 0 })
+    await p
+
+    const text = store
+      .readJobOutput('j1', 'a')
+      .map((r) => r.text)
+      .join('')
+    expect(text, 'a private key split over four chunks was written to disk').not.toContain(
+      'b3BlbnNzaC1rZXktdjEAAAAABG5vbmU'
+    )
+    expect(text).toContain('[REDACTED]')
+    expect(h.outputs.map((o) => o.text).join('')).not.toContain('b3BlbnNzaC1rZXktdjEAAAAABG5vbmU')
+  })
+
+  it('releases unterminated output once it passes the carry budget', async () => {
+    // The cost of joining at the line boundary, pinned rather than left to be
+    // discovered: output that ends at neither a newline nor a carriage return
+    // is held — but only until it is this big, and never past the end of the
+    // host's run. A prompt waiting on input must not leave the pane blank
+    // forever.
+    const store = await openStore()
+    const h = harness(store)
+    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    await settle()
+
+    h.feed('a', 'no newline here')
+    h.flushTicks()
+    expect(h.outputs, 'an unterminated line went out before it could be joined').toEqual([])
+
+    // Past the budget, so waiting any longer would be worse than the seam.
+    h.feed('a', 'y'.repeat(JOB_REDACT_LINE_CARRY))
+    h.flushTicks()
+    expect(h.outputs).toHaveLength(1)
+    expect(h.outputs[0].text.startsWith('no newline here')).toBe(true)
+
+    // And whatever is still held when the host finishes goes out with it.
+    h.feed('a', 'trailing')
+    await h.finish('a', { ok: true, code: 0 })
+    await p
+    expect(h.outputs.map((o) => o.text).join('')).toContain('trailing')
+    expect(
+      store
+        .readJobOutput('j1', 'a')
+        .map((r) => r.text)
+        .join('')
+    ).toContain('trailing')
+  })
+
+  it('redacts the error it records, not only the output', async () => {
+    // Every byte of output is scrubbed and the error beside it was not, into
+    // the same row in the same file. A transport error routinely carries the
+    // connection string it failed on.
+    const store = await openStore()
+    const h = harness(store, { knownSecrets: ['s3cr3t-vault-value'] })
+    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    await settle()
+    await h.finish('a', {
+      ok: false,
+      error: 'handshake failed for postgres://svc:s3cr3t-vault-value@db.internal:5432'
+    })
+    const done = await p
+
+    expect(done.targets[0].error).not.toContain('s3cr3t-vault-value')
+    expect(done.targets[0].error).toContain('[REDACTED]')
+    expect(store.readJob('j1')!.targets[0].error).not.toContain('s3cr3t-vault-value')
+    expect(JSON.stringify(h.progress)).not.toContain('s3cr3t-vault-value')
+  })
+
+  it('remembers after a restart that the executor dropped output', async () => {
+    // `truncated` had nowhere to live: no patch field, no column, and
+    // toJobTarget re-derives it from out_elided. So it was emitted live and
+    // thrown away, and a restart turned "dpkg failed" back into "the command
+    // produced no error" — verbatim the failure out_elided exists to prevent.
+    const store = await openStore()
+    const h = harness(store)
+    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    await settle()
+    await h.finish('a', {
+      ok: true,
+      code: 0,
+      stdout: 'the first 200 KB\n',
+      truncated: true,
+      elided: 3_000_000
+    })
+    const done = await p
+    expect(done.targets[0].truncated).toBe(true)
+
+    // The read a restart does. The live object is not the record.
+    const reread = store.readJob('j1')!.targets[0]
+    expect(reread.outElided).toBe(3_000_000)
+    expect(reread.truncated, 'a restart read the job back as untruncated').toBe(true)
+  })
+
+  it('says which step failed and that the rest did not run', async () => {
+    // `result` is overwritten per step, so the row kept only the last step's
+    // exit code and nothing said which of three steps produced it, that the
+    // third never ran, or where one step's output ended and the next began.
+    const store = await openStore()
+    const h = harness(store)
+    const p = h.runner.run({
+      jobId: 'j1',
+      spec: spec({
+        steps: [{ command: 'apt update' }, { command: 'apt upgrade -y' }, { command: 'reboot' }]
+      }),
+      targets: h.targets(['a'])
+    })
+    await settle()
+    await h.finish('a', { ok: true, code: 0, stdout: 'Reading package lists...\n' })
+    await h.finish('a', { ok: true, code: 100, stderr: 'E: Sub-process dpkg returned an error\n' })
+    const done = await p
+
+    const text = store
+      .readJobOutput('j1', 'a')
+      .map((r) => r.text)
+      .join('')
+    expect(text, 'nothing marks where one step ended and the next began').toContain('step 2 of 3')
+    expect(done.targets[0].exitCode).toBe(100)
+    expect(done.targets[0].error, 'the row does not say which step failed').toMatch(/step 2 of 3/)
+    expect(done.targets[0].error, 'the row does not say the rest were skipped').toMatch(
+      /Step 3 did not run/
+    )
+  })
+
   it('coalesces a tick into one message rather than one per chunk', async () => {
     // `apt` writes a progress line per package. One IPC message each is a
     // flood, and a flood is indistinguishable from a freeze.
@@ -551,12 +726,19 @@ describe('output', () => {
     const h = harness(store)
     const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
     await settle()
-    h.feed('a', 'out1', 'out')
-    h.feed('a', 'err1', 'err')
-    h.feed('a', 'out2', 'out')
+    // Newline-terminated, like real command output: an unterminated trailing
+    // line is held back so a secret split across the chunk seam is redacted as
+    // one string. That behaviour has its own test below.
+    h.feed('a', 'out1\n', 'out')
+    h.feed('a', 'err1\n', 'err')
+    h.feed('a', 'out2\n', 'out')
     h.flushTicks()
 
-    expect(h.outputs.map((o) => `${o.stream}:${o.text}`)).toEqual(['out:out1', 'err:err1', 'out:out2'])
+    expect(h.outputs.map((o) => `${o.stream}:${o.text}`)).toEqual([
+      'out:out1\n',
+      'err:err1\n',
+      'out:out2\n'
+    ])
     await h.finish('a', { ok: true, code: 0 })
     await p
   })
@@ -591,7 +773,7 @@ describe('output', () => {
     const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
     await settle()
     for (let i = 0; i < JOB_OUTPUT_RATE_PER_SEC; i++) {
-      h.feed('a', 'x')
+      h.feed('a', 'x\n')
       h.flushTicks()
     }
     h.tick(1000)
@@ -648,6 +830,58 @@ describe('retention', () => {
     expect(store.counts().jobs).toBe(0)
   })
 
+  it('refuses to drop the job rows against a clock a year ahead', async () => {
+    // jobRetain's own reasoning is that a wrong clock costs "a month of
+    // chatter, not a year of history" because the summary survives twelve
+    // times longer. It also drops the job and target rows at now - 365d, so a
+    // clock more than a year ahead — the snapshot-restore case retain()'s
+    // guard cites, and which retain() itself refuses with 'clock-ahead' on the
+    // very same pass — deletes the change log that argument depends on.
+    const store = await openStore()
+    const h = harness(store)
+    const NOW = 1_700_000_000_000
+    h.tick(NOW)
+    const p = h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    await settle()
+    await h.finish('a', { ok: true, code: 0, stdout: 'a lot of dpkg chatter\n' })
+    await p
+
+    const ahead = store.jobRetain(NOW + 400 * DAY)
+    expect(ahead.skipped, 'the job-row sweep ran against a clock 400 days ahead').toBe('clock-ahead')
+    expect(ahead.jobsDropped).toBe(0)
+    expect(store.readJob('j1'), 'the change log the retention argument depends on was deleted').not.toBeNull()
+    // The month of chatter is still the accepted cost — only the year of
+    // history is defended.
+    expect(ahead.outputDropped).toBeGreaterThan(0)
+  })
+
+  it('still ages out old jobs while the store looks current', async () => {
+    // The guard must not turn into "job rows are never dropped". The newest
+    // row is the second opinion; while it agrees with the clock, the horizon
+    // applies exactly as documented.
+    const store = await openStore()
+    const NOW = 1_700_000_000_000
+    const old = harness(store)
+    old.tick(NOW - 400 * DAY)
+    const p1 = old.runner.run({ jobId: 'old', spec: spec(), targets: old.targets(['a']) })
+    await settle()
+    await old.finish('a')
+    await p1
+
+    const fresh = harness(store)
+    fresh.tick(NOW)
+    const p2 = fresh.runner.run({ jobId: 'new', spec: spec(), targets: fresh.targets(['a']) })
+    await settle()
+    await fresh.finish('a')
+    await p2
+
+    const result = store.jobRetain(NOW)
+    expect(result.skipped).toBeUndefined()
+    expect(result.jobsDropped).toBe(1)
+    expect(store.readJob('old')).toBeNull()
+    expect(store.readJob('new')).not.toBeNull()
+  })
+
   it('ships with the tables rather than after someone complains', async () => {
     // The store's own history is the argument: a retention rule added later
     // means the rows are already written. jobRetain exists in the same commit
@@ -676,5 +910,169 @@ describe('disposal', () => {
     expect(h.runner.isRunning('j1')).toBe(false)
     await settle()
     expect(h.isOpening('b')).toBe(false)
+    // And the in-flight host still comes back afterwards, because the channel
+    // outlives the window by however long the command takes. Released HERE
+    // rather than left parked, which is the whole reason the assertions below
+    // were reachable in production and not in this file.
+    await h.finish('a')
+  })
+
+  it('leaves the rows for adopt() to close instead of calling the job cancelled', async () => {
+    // On macOS closing the window does not quit, so disposeAll() runs while
+    // the process lives on. The worker then returns, run()'s `finally` fires,
+    // and a job that wrote itself `cancelled` + endedAt is a job
+    // unfinishedJobs() can never select again — the host mid-exec stays
+    // `running` forever, and `abandoned`, the headline of B1, is unreachable
+    // on the ordinary path.
+    const store = await openStore()
+    const h = harness(store)
+    void h.runner.run({
+      jobId: 'j1',
+      spec: spec({ concurrency: 1 }),
+      targets: h.targets(['a', 'b'])
+    })
+    await settle()
+    h.runner.disposeAll()
+    h.tick(100)
+    await h.finish('a')
+    await settle()
+
+    const job = store.readJob('j1')!
+    expect(job.state, 'a disposed job wrote a terminal state adopt() can never see').toBe('running')
+    expect(job.endedAt).toBeNull()
+    expect(store.unfinishedJobs().map((j) => j.id)).toEqual(['j1'])
+    // No target left claiming to be running under a job row that says it is
+    // over — the pairing the store has no way to represent honestly.
+    expect(job.targets.find((t) => t.serverId === 'a')?.state).not.toBe('running')
+
+    // The next launch closes it, from rows alone.
+    const second = harness(store)
+    second.tick(9_000)
+    expect(second.runner.adopt()).toHaveLength(1)
+    const closed = store.readJob('j1')!
+    expect(closed.state).toBe('abandoned')
+    expect(closed.endedAt).toBe(9_000)
+    const byId = Object.fromEntries(closed.targets.map((t) => [t.serverId, t]))
+    expect(byId.a).toMatchObject({ state: 'failed', outcome: 'abandoned' })
+    expect(byId.b).toMatchObject({ state: 'skipped', outcome: 'cancelled' })
+  })
+
+  it('writes no output rows for a run that no longer owns the id', async () => {
+    // flushPending takes `owns`; flushTail did not, so the tail ring was
+    // written by a run that had already lost the id — rows appearing under a
+    // target the same pass then declined to update.
+    const store = await openStore()
+    const h = harness(store)
+    void h.runner.run({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) })
+    await settle()
+    h.feed('a', 'H'.repeat(JOB_OUTPUT_HEAD))
+    // Past the head, so this parks in the tail ring rather than being written
+    // straight through.
+    h.feed('a', 'ten bytes\n')
+    const beforeDispose = store.readJobOutput('j1', 'a').length
+    expect(beforeDispose).toBe(1)
+
+    h.runner.disposeAll()
+    await h.finish('a')
+    await settle()
+
+    expect(
+      store.readJobOutput('j1', 'a'),
+      'the tail was flushed by a run that no longer owned the job id'
+    ).toHaveLength(beforeDispose)
   })
 })
+
+describe('the attached executor', () => {
+  it('hands every byte to the runner rather than buffering a capped copy', async () => {
+    // `sshExec` stops appending at 200 KB and drops the rest, so the runner
+    // never saw more than that — the head takes 64 KB, what is left fits under
+    // the 192 KB tail budget, out_elided stays 0, and a 3 MB `apt
+    // full-upgrade` reads back as complete. Streaming is what makes the
+    // head+tail policy able to engage at all.
+    let handlers: ExecStreamHandlers | null = null
+    let stopped = 0
+    const exec = attachedJobExecutor({
+      stream: async (_cfg, _command, hs) => {
+        handlers = hs
+        return () => {
+          stopped++
+        }
+      }
+    })
+    const seen: string[] = []
+    const p = exec({
+      cfg: {},
+      command: 'apt full-upgrade -y',
+      timeoutMs: 60_000,
+      onOutput: (stream, text) => seen.push(`${stream}:${text.length}`)
+    })
+    await settle()
+    handlers!.onStdout('X'.repeat(300_000))
+    handlers!.onStderr('E: dpkg returned an error code\n')
+    handlers!.onClose(100)
+
+    const r = await p
+    expect(r).toMatchObject({ ok: true, code: 100 })
+    // Nothing comes back in `stdout`: it has already gone to the runner, and
+    // returning it as well would write every byte twice.
+    expect(r.stdout ?? '').toBe('')
+    expect(seen).toEqual(['out:300000', 'err:31'])
+    expect(stopped).toBe(0)
+  })
+
+  it('gives up on a command that never closes, and signals the remote', async () => {
+    let stopped = 0
+    const exec = attachedJobExecutor({
+      stream: async () => () => {
+        stopped++
+      }
+    })
+    const r = await exec({ cfg: {}, command: 'sleep 999', timeoutMs: 5, onOutput: () => {} })
+    expect(r.ok).toBe(false)
+    expect(r.error).toMatch(/timed out/i)
+    // Abandoning the channel without signalling is how a remote command is
+    // orphaned holding its files open.
+    expect(stopped).toBe(1)
+  })
+
+  it('reports a connection that never came up as an error, not as a result', async () => {
+    const exec = attachedJobExecutor({
+      stream: async () => {
+        throw new Error('connect ECONNREFUSED 10.0.0.4:22')
+      }
+    })
+    const r = await exec({ cfg: {}, command: 'uptime', timeoutMs: 1000, onOutput: () => {} })
+    expect(r).toMatchObject({ ok: false, error: 'connect ECONNREFUSED 10.0.0.4:22' })
+  })
+})
+
+describe('re-running a job id', () => {
+  it('reports no host it never touched, and no output from the run before', async () => {
+    // run() only refuses a LIVE id. A finished one is re-runnable, the job row
+    // is replaced — and the target and output rows were not, so a second run
+    // over one host inherited the first run's other host and interleaved its
+    // output under a seq that restarts at zero.
+    const store = await openStore()
+    const first = harness(store)
+    const p1 = first.runner.run({ jobId: 'j1', spec: spec(), targets: first.targets(['a', 'b']) })
+    await settle()
+    await first.finish('a', { ok: true, code: 0, stdout: 'RUN1-A\n' })
+    await first.finish('b', { ok: true, code: 0, stdout: 'RUN1-B\n' })
+    await p1
+
+    const second = harness(store)
+    const p2 = second.runner.run({ jobId: 'j1', spec: spec(), targets: second.targets(['a']) })
+    await settle()
+    await second.finish('a', { ok: true, code: 0, stdout: 'RUN2-ONLY\n' })
+    const done = await p2
+
+    expect(
+      done.targets.map((t) => t.serverId),
+      'a host the second run never contacted was reported as part of it'
+    ).toEqual(['a'])
+    expect(store.readJobOutput('j1', 'a').map((r) => r.text)).toEqual(['RUN2-ONLY\n'])
+    expect(store.readJobOutput('j1', 'b')).toEqual([])
+  })
+})
+

@@ -53,6 +53,7 @@ import { FleetSampler, setActiveFleetSampler } from './services/fleetSampler'
 import { loadHistory, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
+import { attachedJobExecutor } from './services/jobExec'
 import type { JobRunRequest } from '../shared/jobs'
 import { LogTailer } from './services/logTail'
 import type { LogLine, LogSource, LogTailState } from '../shared/logtail'
@@ -649,6 +650,7 @@ function startHistory(): void {
     }
 
     let lastSkip: string | null = null
+    let lastJobSkip: string | null = null
     const pass = (): void => {
       try {
         // Job output on its own, much shorter horizon: it cannot be
@@ -663,6 +665,16 @@ function startHistory(): void {
               `[jobs] retention dropped ${jobs.outputDropped} output row(s) and ${jobs.jobsDropped} job(s)`
             )
           }
+          // Recorded, not only logged, for retain()'s reason: a store that
+          // quietly stopped ageing out its change log is visible in the store
+          // rather than in a console nobody kept. Written under a different
+          // kind from retain()'s so the two skips are tellable apart — they
+          // have different causes and different costs.
+          const jobSkip = jobs?.skipped ?? null
+          if (jobSkip !== null && jobSkip !== lastJobSkip) {
+            historyStore?.recordEvent('job-retention-skipped', null, { reason: jobSkip })
+          }
+          lastJobSkip = jobSkip
         } catch (err) {
           console.error('[jobs] retention pass failed:', err)
         }
@@ -855,17 +867,14 @@ ipcMain.handle('broadcast:cancel', (_e, runId: string) => broadcast.cancel(runId
 // PENDING, and can do nothing about a job already running on fifteen hosts,
 // because nothing is pending. See tests/jobsNotExposed.test.ts.
 const jobRunner = new JobRunner({
-  exec: async ({ cfg, command, timeoutMs, onOutput }) => {
-    // allowPrompt false, for broadcast's reason: a fan-out across hosts with
-    // unknown keys would raise a stack of identical trust dialogs, and a stack
-    // of identical modals is not a decision anyone can reason about.
-    const r = await sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs, false)
-    // The attached executor has no stream to hand over, so the output arrives
-    // in one piece at the end. The runner treats that identically to a
-    // streaming backend — which is the seam B2 resumes through.
-    void onOutput
-    return { ok: r.ok, code: r.code, stdout: r.stdout, stderr: r.stderr, error: r.error, truncated: r.truncated }
-  },
+  // The executor is a module, not a lambda: see the header of jobExec.ts. It
+  // streams rather than buffering, because `sshExec` stops appending at 200 KB
+  // and drops the rest — which put the ceiling BELOW the runner's own head+tail
+  // budget and made a 3 MB upgrade read back as complete.
+  exec: attachedJobExecutor({
+    stream: (cfg, command, handlers, allowPrompt) =>
+      sshExecStream(resolveChainSecrets(cfg as SshConnectConfig), command, handlers, allowPrompt)
+  }),
   store: jobStore,
   emit: (progress) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('jobs:progress', progress)

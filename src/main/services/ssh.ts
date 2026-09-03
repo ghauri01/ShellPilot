@@ -682,6 +682,15 @@ export interface ExecResult {
   signal: string | null
   error?: string
   truncated: boolean
+  /**
+   * Bytes dropped by EXEC_OUTPUT_CAP, across both streams.
+   *
+   * `truncated` says that something went; this says how much. A caller that
+   * persists a result needs the number, not the flag: "the output was longer
+   * than this" is not a fact anyone can act on a month later, while "2.8 MB
+   * elided" is. Counting it costs one addition per dropped chunk.
+   */
+  elided: number
 }
 
 const EXEC_OUTPUT_CAP = 200_000 // bytes per stream, enough for inspection output without unbounded memory use
@@ -744,21 +753,35 @@ export async function sshExec(
           code: null,
           signal: null,
           truncated: false,
+          elided: 0,
           error: `Command timed out after ${timeoutMs}ms`
         })
       }, timeoutMs)
 
       client.exec(command, (err, stream) => {
         if (err) {
-          done({ ok: false, stdout: '', stderr: '', code: null, signal: null, truncated: false, error: err.message })
+          done({
+            ok: false,
+            stdout: '',
+            stderr: '',
+            code: null,
+            signal: null,
+            truncated: false,
+            elided: 0,
+            error: err.message
+          })
           return
         }
         let stdout = ''
         let stderr = ''
         let truncated = false
+        let elided = 0
         const append = (current: string, chunk: Buffer): string => {
           if (current.length >= EXEC_OUTPUT_CAP) {
             truncated = true
+            // Counted rather than merely noted. A caller that writes this
+            // result down has to be able to say how much went; see ExecResult.
+            elided += chunk.length
             return current
           }
           return current + chunk.toString('utf8')
@@ -770,7 +793,7 @@ export async function sshExec(
           stderr = append(stderr, d)
         })
         stream.on('close', (code: number | null, signal?: string) => {
-          done({ ok: true, stdout, stderr, code: code ?? null, signal: signal ?? null, truncated })
+          done({ ok: true, stdout, stderr, code: code ?? null, signal: signal ?? null, truncated, elided })
         })
       })
     })
@@ -782,6 +805,7 @@ export async function sshExec(
       code: null,
       signal: null,
       truncated: false,
+      elided: 0,
       error: err instanceof Error ? err.message : String(err)
     }
   } finally {

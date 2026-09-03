@@ -455,6 +455,94 @@ export function elisionNotice(bytes: number): string {
 }
 
 /**
+ * The marker written into the output where one step ends and the next begins.
+ *
+ * A row in the stream rather than a field somewhere else, for elisionNotice's
+ * reason: a reader scrolling a host's output has to see the boundary WHERE it
+ * is. Without it a three-step job is one undifferentiated wall of text and
+ * "which step printed this" has no answer at all — and the head budget is per
+ * host, so a chatty first step can consume the whole of it and leave the
+ * boundary as the only evidence the later steps existed.
+ *
+ * Only written when there is more than one step: a marker above the only step
+ * there is is noise.
+ */
+export function stepNotice(index: number, total: number, command: string): string {
+  return `\n… step ${index} of ${total}: ${command} …\n`
+}
+
+/**
+ * What the target row says about a step that did not exit zero.
+ *
+ * `result` is overwritten per step, so the row carries the LAST step's exit
+ * code and nothing else. On step 2 of 3 failing that is an exit code with no
+ * subject: nothing says which command produced it and nothing says step 3 was
+ * never run. Both belong on the row, because the row is what survives the
+ * 30-day output horizon by a factor of twelve.
+ */
+export function stepFailureNote(
+  index: number,
+  total: number,
+  command: string,
+  exitCode: number | null | undefined
+): string {
+  const what = exitCode === null || exitCode === undefined ? 'did not complete' : `exited ${exitCode}`
+  // The steps that did not run are NAMED, not counted. "1 later step did not
+  // run" makes a reader go back to the spec and count; "Step 3 did not run"
+  // is the answer.
+  const rest =
+    index >= total
+      ? ''
+      : index + 1 === total
+        ? ` Step ${total} did not run.`
+        : ` Steps ${index + 1}–${total} did not run.`
+  return `step ${index} of ${total} (\`${command}\`) ${what}.${rest}`
+}
+
+/**
+ * Bytes of each stream kept purely to classify the host's result.
+ *
+ * The TAIL, not the head, for the reason the runner already gives: the shell's
+ * "command not found" is the last thing on stderr, and a host that printed 20k
+ * of warnings first would have had it cut off. A streaming executor hands its
+ * output over and returns nothing, so without this the classifier would see an
+ * empty stderr and call every failing command `nonzero`.
+ */
+export const JOB_CLASSIFY_BYTES = 8 * 1024
+
+/**
+ * How much of a partial last line is held back between chunks before it is
+ * redacted.
+ *
+ * Redaction runs per chunk, and a socket boundary does not respect a regex:
+ * `DB_PASSWORD=` ending one chunk and `hunter2` starting the next matches no
+ * rule and both halves are written verbatim. Every pattern rule except the PEM
+ * block is single-line, so joining at the line boundary closes the seam — and
+ * holding only a PARTIAL line means output that ends at one is not delayed at
+ * all, which is nearly all real output and keeps the live pane live.
+ *
+ * `\r` counts as a boundary as well as `\n`, so a progress bar redrawing in
+ * place is not held either — it ends every redraw with one.
+ *
+ * The known cost, taken deliberately: a command that emits neither, such as a
+ * prompt waiting on input, is delayed until it has produced this many bytes or
+ * finished. The alternative is emitting a secret in two halves because the
+ * kernel happened to split the read there, and a bounded delay on unterminated
+ * output is the cheaper of the two.
+ */
+export const JOB_REDACT_LINE_CARRY = 4 * 1024
+
+/**
+ * How much of an unterminated PEM block is held back.
+ *
+ * The one rule that spans lines, so the line boundary above is not enough for
+ * it — and it is the rule whose failure costs a private key rather than a
+ * password. Capped for the same reason: a `-----BEGIN` with no `-----END`
+ * behind it must not buffer a host's entire output.
+ */
+export const JOB_REDACT_BLOCK_CARRY = 64 * 1024
+
+/**
  * Output chunks emitted to the renderer per host per second.
  *
  * Coalesced per tick like ssh.ts's interactive terminal, NOT per line like

@@ -179,11 +179,37 @@ const SEED_FILES = [
   ...tsFilesIn(join(ROOT, 'src/cli'))
 ]
 
-/** Matched on the specifier's basename, so './jobRunner', '../services/jobRunner.js'
- *  and './jobRunner/index' all hit. */
+/** Every module the job engine is made of. Matched on the specifier's basename,
+ *  so './jobRunner', '../services/jobRunner.js' and './jobRunner/index' all
+ *  hit. A file added to the engine goes here. */
+const JOB_MODULE = /^(jobRunner|jobExec|jobs)$/i
+
 function isForbiddenSpecifier(spec: string): boolean {
   const base = spec.replace(/\.[cm]?[jt]sx?$/i, '').split(/[/\\]/).pop() ?? ''
-  return /^(jobRunner|jobs)$/i.test(base)
+  return JOB_MODULE.test(base)
+}
+
+/**
+ * The path aliases the bundler resolves, so the walker resolves them too.
+ *
+ * Without this, `resolveSpecifier` returned null for anything not starting with
+ * '.', which meant an aliased import was not an offender AND not walked — so
+ * the belt-and-braces check below, which exists precisely to catch an alias,
+ * never saw the module either. Both layers passed for the same wrong reason,
+ * silently, while the literal check further down would have failed loudly with
+ * ENOENT. A guard whose quiet failure mode is "pass" is not a guard.
+ */
+const ALIASES: [RegExp, string][] = [[/^@\//, 'src/renderer/src/']]
+
+function applyAlias(spec: string): string | null {
+  for (const [rx, to] of ALIASES) if (rx.test(spec)) return join(ROOT, spec.replace(rx, to))
+  return null
+}
+
+/** A specifier this walker is expected to be able to follow: relative, or one
+ *  of the aliases above. Anything else is a package from node_modules. */
+function isLocalSpecifier(spec: string): boolean {
+  return spec.startsWith('.') || ALIASES.some(([rx]) => rx.test(spec))
 }
 
 function tsFilesIn(dir: string): string[] {
@@ -198,8 +224,9 @@ function tsFilesIn(dir: string): string[] {
 }
 
 function resolveSpecifier(fromFile: string, spec: string): string | null {
-  if (!spec.startsWith('.')) return null
-  const literal = join(dirname(fromFile), spec)
+  const aliased = applyAlias(spec)
+  if (aliased === null && !spec.startsWith('.')) return null
+  const literal = aliased ?? join(dirname(fromFile), spec)
   const stripped = literal.replace(/\.[cm]?js$/i, '')
   const candidates = [
     literal,
@@ -272,6 +299,23 @@ describe('nothing an agent can reach imports the job engine', () => {
     ).toEqual([])
   })
 
+  it('followed every local import it found, rather than skipping the ones it could not name', () => {
+    // The failure mode that makes the two assertions below vacuous: a
+    // specifier the walker cannot resolve is not an offender and is not
+    // walked, so a rename or a new path alias would defeat BOTH of them
+    // without anything going red. An unresolvable local import is therefore a
+    // failure of this file, not a shrug.
+    const unresolved = edges
+      .filter((e) => e.to === null && isLocalSpecifier(e.spec))
+      .map((e) => `${relative(ROOT, e.from)} -> '${e.spec}'`)
+    expect(
+      unresolved,
+      `The import walker could not follow these. Teach resolveSpecifier about them — a specifier ` +
+        `it cannot resolve is one the forbidden-import assertions below silently skip.\n  ` +
+        `${unresolved.join('\n  ')}`
+    ).toEqual([])
+  })
+
   it('imports neither the job runner nor the job vocabulary', () => {
     const offenders = edges
       .filter((e) => isForbiddenSpecifier(e.spec))
@@ -295,7 +339,9 @@ describe('nothing an agent can reach imports the job engine', () => {
   it('has no job module anywhere in the closure', () => {
     // Belt and braces: catches a reach that arrived through a path alias or a
     // re-export chain whose specifier text never says "jobRunner".
-    const offenders = [...relFiles].filter((f) => /(^|\/)(jobRunner|jobs)\.tsx?$/i.test(f))
+    const offenders = [...relFiles].filter((f) =>
+      JOB_MODULE.test(f.split('/').pop()?.replace(/\.tsx?$/i, '') ?? '')
+    )
     expect(
       offenders,
       `These job modules are in the agent-reachable import closure: ${offenders.join(', ')}`
@@ -373,7 +419,9 @@ describe('what must NOT be able to reach this', () => {
       'jobs:list',
       'unfinishedJobs',
       'createJob',
-      'shared/jobs'
+      'shared/jobs',
+      'jobExec',
+      'attachedJobExecutor'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }
