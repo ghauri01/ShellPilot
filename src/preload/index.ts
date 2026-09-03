@@ -17,6 +17,7 @@ import type {
   HostAccess
 } from '../shared/access'
 import type { HostFacts } from '../shared/hostFacts'
+import type { HostPosture } from '../shared/posture'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type {
@@ -549,6 +550,21 @@ const api = {
       serverId: string
     ): Promise<{ access?: HostAccess; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
       ipcRenderer.invoke('fleet:access', serverId),
+    // A server's security posture, as the sampler last collected it — roadmap
+    // item 24. Read-only and never a trigger, exactly like `facts` and
+    // `access`, and with the same third state: `posture` absent with no `error`
+    // means the probe has not run for this server yet. A host nobody has looked
+    // at is not a host with no firewall, and the panel keeps the two apart.
+    //
+    // There is no write beside this and there is not going to be one casually.
+    // src/shared/posture.ts states the refusal in full: every button this
+    // panel could grow — `ufw enable`, `setenforce`, an sshd_config edit — can
+    // lock the operator out of the host they would use to undo it, with none
+    // of the dead-man's switch that earns `accessRun` its place above.
+    posture: (
+      serverId: string
+    ): Promise<{ posture?: HostPosture; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
+      ipcRenderer.invoke('fleet:posture', serverId),
     // Changing who can get in — roadmap item 23, the write half.
     //
     // TWO CALLS AND NOT ONE, on purpose. `accessPlan` asks main what a change

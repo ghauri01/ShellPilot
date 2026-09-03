@@ -58,6 +58,7 @@ import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
 import { AccessCommitter, AccessReader } from './services/access'
+import { PostureReader } from './services/posture'
 import type {
   AccessChangePreview,
   AccessChangeTarget,
@@ -862,21 +863,39 @@ const hostFactsReader = new HostFactsReader({
 // Gating the CHANNEL rather than the panel is the point — see the note on
 // FleetSamplerDeps.accessEnabled for why this probe is the exception.
 let accessModuleOn = false
+// Whether the security posture probe may run — roadmap item 24. Kept beside
+// the access flag and refreshed from the same blob, and gated for a DIFFERENT
+// reason: the access probe is gated because of what it does on the host, this
+// one because of what it produces. A fleet-wide table of which host has no
+// firewall and still takes passwords over ssh is a map of how to attack the
+// estate, and assembling one is a thing a person switches on rather than
+// discovers. See FleetSamplerDeps.postureEnabled.
+let postureModuleOn = false
 function syncAccessModule(data: unknown): void {
   const modules = (data as { settings?: { modules?: Record<string, unknown> } } | null)?.settings?.modules
   accessModuleOn = modules?.access === true
+  postureModuleOn = modules?.posture === true
 }
 try {
   syncAccessModule(loadData())
 } catch {
   // A blob that will not parse is not consent. Off.
   accessModuleOn = false
+  postureModuleOn = false
 }
 
 // Fleet key and access, on the same slow clock — roadmap item 23. One reader
 // for the whole process, for the reason HostFactsReader is one: it holds no
 // state beyond the exec function, and every probe is a single round trip.
 const accessReader = new AccessReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
+})
+
+// Security posture, on the same slow clock — roadmap item 24. One reader for
+// the whole process, for the reason the other two are one: it holds no state
+// beyond the exec function, and every probe is a single round trip.
+const postureReader = new PostureReader({
   exec: (cfg, command, timeoutMs) =>
     sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
 })
@@ -908,6 +927,15 @@ const fleetSampler = new FleetSampler({
   sampleAccess: async (_key, cfg) => {
     const probe = await accessReader.read(resolveChainSecrets(cfg as SshConnectConfig))
     return probe.ok ? { ok: true, access: probe.access } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
+  },
+  // The security posture half — roadmap item 24. Injected like `sampleAccess`,
+  // and allowPrompt: false for the same reason: this is the unattended caller,
+  // and reading a host's firewall must never be what raises a host-key trust
+  // dialog the user cannot connect to anything they just did.
+  postureEnabled: () => postureModuleOn,
+  samplePosture: async (_key, cfg) => {
+    const probe = await postureReader.read(resolveChainSecrets(cfg as SshConnectConfig))
+    return probe.ok ? { ok: true, posture: probe.posture } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
   },
   release: (key) => metricsDisconnect(key),
   emit: (event) => {
@@ -948,6 +976,18 @@ ipcMain.handle('fleet:facts', (_e, serverId: string) => fleetSampler.factsFor(se
 // reason 'fleet:facts' does not. There is exactly one thing deciding how often
 // every home directory on every host gets stat'ed, and it is the sampler.
 ipcMain.handle('fleet:access', (_e, serverId: string) => fleetSampler.accessFor(serverId))
+// One server's security posture, as the sweep last saw it — roadmap item 24.
+//
+// A read of what the sweep already has; it never triggers a probe, for the same
+// reason 'fleet:facts' and 'fleet:access' do not. There is exactly one thing
+// deciding how often every host gets asked for its firewall ruleset, and it is
+// the sampler.
+//
+// There is deliberately no MCP tool beside this. `fleet:posture` is a renderer
+// channel and nothing else — see the forbidden-symbol list in
+// tests/jobsNotExposed.test.ts for why an agent does not get to ask which of
+// the estate's hosts has SELinux switched off.
+ipcMain.handle('fleet:posture', (_e, serverId: string) => fleetSampler.postureFor(serverId))
 
 // ---- Changing who can get in — roadmap item 23, the write half ----
 //

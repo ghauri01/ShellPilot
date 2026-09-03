@@ -7,6 +7,7 @@ import type {
 } from '../../shared/fleet'
 import type { HostAccess } from '../../shared/access'
 import type { HostFacts } from '../../shared/hostFacts'
+import type { HostPosture } from '../../shared/posture'
 import type { HostMetrics } from '../../shared/ssh'
 import { ACCESS_FACT_PREFIX, accessKeyPrefix, accessToFacts } from '../../shared/access'
 import {
@@ -20,6 +21,7 @@ import {
   HOST_FACT_PREFIX,
   hostFactsToFacts
 } from '../../shared/hostFacts'
+import { POSTURE_FACT_PREFIX, postureToFacts } from '../../shared/posture'
 
 // Samples the estate on a schedule, in main, whether or not anyone is looking.
 //
@@ -71,6 +73,21 @@ type AccessSampler = (
   key: string,
   cfg: FleetTarget['cfg']
 ) => Promise<{ ok: boolean; access?: HostAccess; error?: string }>
+
+/**
+ * The security posture probe — roadmap item 24. Injected exactly as
+ * `sampleFacts` and `sampleAccess` are, and for the same reason: the sampler's
+ * tests must not drag ssh2 and a pooled connection into every one of them.
+ *
+ * It rides the FACTS cadence rather than owning a timer, like the other two.
+ * A firewall ruleset changes when somebody changes it, not continuously, and a
+ * third timer would need its own copy of the vault re-check, the generation
+ * guard and disposal — duplicating that reasoning is how it breaks.
+ */
+type PostureSampler = (
+  key: string,
+  cfg: FleetTarget['cfg']
+) => Promise<{ ok: boolean; posture?: HostPosture; error?: string }>
 
 /**
  * The slice of the durable store this file uses.
@@ -199,6 +216,36 @@ export interface FleetSamplerDeps {
    * which is how every existing test keeps working.
    */
   accessEnabled?: () => boolean
+  /**
+   * The security posture probe — roadmap item 24. Optional for the reason
+   * `sampleFacts` and `sampleAccess` are: a sampler built without it behaves
+   * exactly as it did before, which keeps every existing test valid rather
+   * than making them all declare a probe they do not use.
+   *
+   * Runs in the same place and under the same conditions as the other two —
+   * inside the sequential sweep, only after a SUCCESSFUL metrics sample, and
+   * only when this target's hour is up. Its own due clock, so a facts or
+   * access probe that keeps failing does not also postpone this one.
+   */
+  samplePosture?: PostureSampler
+  /**
+   * Whether the posture probe may run at all, resolved PER SWEEP.
+   *
+   * The SECOND place in this file where a module toggle gates a channel rather
+   * than a panel, and it earns that for a different reason from the access
+   * probe's. That one is gated because of what it does on the host — walking
+   * /etc/passwd and reading other accounts' files under `sudo -n`. This one is
+   * gated because of what it PRODUCES: which port is open on which host, which
+   * of them still take passwords over ssh, and which have SELinux switched
+   * off. That is a map of how to attack the estate, held in one process's
+   * memory and written into the durable store, and building it is a thing a
+   * person switches on rather than discovers.
+   *
+   * A function rather than a flag so a toggle takes effect on the next sweep
+   * rather than at the next restart. Absent means the gate is not installed,
+   * which is how every existing test keeps working.
+   */
+  postureEnabled?: () => boolean
   // metricsDisconnect. Called for every target the sampler stops watching.
   //
   // metricsSample holds a pooled connection per key and only releases it when
@@ -316,6 +363,21 @@ export interface FleetCacheEntry {
    *  as "this host trusts nobody". */
   accessError?: string
   accessErrorAt?: number
+  /**
+   * The last successful posture collection — roadmap item 24. Its own clock
+   * again, for the reason `factsAt` has one: a firewall read an hour ago is
+   * not the same claim as a metrics sample taken two minutes ago, and anything
+   * quoting it has to say which age it means.
+   */
+  posture?: HostPosture
+  postureAt?: number
+  /** Set when the most recent posture probe failed; cleared by a success and
+   *  kept ALONGSIDE the last good collection. "This host's firewall was read
+   *  an hour ago and the probe is failing now" is two facts and both matter —
+   *  most of all here, where the alternative is an empty reading that renders
+   *  as a host with no rules. */
+  postureError?: string
+  postureErrorAt?: number
 }
 
 /** One host's contribution to a sweep, held until the whole sweep is written. */
@@ -331,6 +393,8 @@ interface PendingWrite {
   facts?: HostFacts
   /** Present only on the sweeps where the access probe was also due. */
   access?: HostAccess
+  /** Present only on the sweeps where the posture probe was also due. */
+  posture?: HostPosture
 }
 
 export interface FleetLookup {
@@ -401,6 +465,11 @@ export class FleetSampler {
   // access collection too, so an estate would quietly stop being inventoried
   // for a reason that has nothing to do with keys.
   private accessDueAt = new Map<string, number>()
+  // The same again, for the posture probe — roadmap item 24. A THIRD map
+  // rather than a shared due time, for the reason the second one exists: the
+  // probes fail independently, and one clock would let a host whose access
+  // probe keeps timing out postpone its posture collection too.
+  private postureDueAt = new Map<string, number>()
   // Servers whose last known reachability has already been looked up in the
   // store. Once per server per process: the in-memory map is the answer after
   // that, and a lookup on every sweep would be two reads per host forever.
@@ -468,6 +537,7 @@ export class FleetSampler {
       this.reachable.delete(id)
       this.factsDueAt.delete(id)
       this.accessDueAt.delete(id)
+      this.postureDueAt.delete(id)
     }
 
     this.stopTimer()
@@ -572,7 +642,15 @@ export class FleetSampler {
       access: previous?.access,
       accessAt: previous?.accessAt,
       accessError: previous?.accessError,
-      accessErrorAt: previous?.accessErrorAt
+      accessErrorAt: previous?.accessErrorAt,
+      // And again for the posture, for exactly the same reason. Rebuilding the
+      // entry without it would erase the firewall reading thirty times an hour
+      // and leave the panel reporting "not collected" on a host it read
+      // perfectly well four minutes ago.
+      posture: previous?.posture,
+      postureAt: previous?.postureAt,
+      postureError: previous?.postureError,
+      postureErrorAt: previous?.postureErrorAt
     }
     this.samples.set(
       serverId,
@@ -615,6 +693,46 @@ export class FleetSampler {
         ? { ...entry, access, accessAt: at, accessError: undefined, accessErrorAt: undefined }
         : { ...entry, accessError: error ?? 'unavailable', accessErrorAt: at }
     )
+  }
+
+  /**
+   * Record one posture collection, on the entry the metrics sample owns.
+   *
+   * Mirrors `rememberAccess` exactly, including the part that matters most: a
+   * FAILURE KEEPS THE LAST GOOD COLLECTION. Replacing it with nothing would
+   * turn "the probe could not run this hour" into a host with no firewall
+   * reading, and the panel would then have to decide what that means — which
+   * is precisely the decision this item exists to take away from it.
+   */
+  private rememberPosture(serverId: string, at: number, posture?: HostPosture, error?: string): void {
+    const entry = this.samples.get(serverId) ?? {}
+    this.samples.set(
+      serverId,
+      posture
+        ? { ...entry, posture, postureAt: at, postureError: undefined, postureErrorAt: undefined }
+        : { ...entry, postureError: error ?? 'unavailable', postureErrorAt: at }
+    )
+  }
+
+  /** What this sampler last collected about one server's security posture, for
+   *  the IPC surface the posture view reads — roadmap item 24. Separate from
+   *  `accessFor` so a caller that wants the firewall is not handed a key
+   *  inventory to ignore. */
+  postureFor(serverId: string): {
+    posture?: HostPosture
+    at?: number
+    error?: string
+    errorAt?: number
+    intervalMs: number
+  } {
+    const entry = this.samples.get(serverId)
+    return {
+      posture: entry?.posture,
+      at: entry?.postureAt,
+      error: entry?.postureError,
+      errorAt: entry?.postureErrorAt,
+      intervalMs: clampFactsInterval(this.cfg.factsIntervalMs)
+    }
   }
 
   /** What this sampler last collected about who can get into one server, for
@@ -775,6 +893,30 @@ export class FleetSampler {
               Object.keys(accessFacts).filter((k) => k.startsWith(`${ACCESS_FACT_PREFIX}source:`))
             )
           }
+
+          // Security posture — roadmap item 24, into the SAME store.
+          //
+          // Swept unconditionally, the way host facts are and the way the key
+          // rows above deliberately are NOT. The distinction is what the sweep
+          // can fabricate: `retireFacts` records a fact-removed event for
+          // everything it drops, and on an authorized key that event reads as
+          // "this key was revoked", which must never be invented. Nothing here
+          // is per-object — every key is a flat scalar, and `postureToFacts`
+          // writes ALL of them on every collection, storing the source's status
+          // where the value is null. So a failed probe still produces a
+          // complete key set, and a sweep against that output can only ever
+          // retire a key the shape of the posture genuinely no longer has.
+          //
+          // Written only on the sweeps where the probe actually ran: `w.posture`
+          // absent means "not due this sweep", and sweeping then would delete a
+          // complete reading thirty times an hour.
+          if (w.posture) {
+            const postureFacts = postureToFacts(w.posture)
+            for (const [key, value] of Object.entries(postureFacts)) {
+              store.upsertFact(w.serverId, key, value, w.at)
+            }
+            store.retireFacts(w.serverId, w.at, POSTURE_FACT_PREFIX, Object.keys(postureFacts))
+          }
         }
       })
     } catch (err) {
@@ -911,6 +1053,32 @@ export class FleetSampler {
                 this.rememberAccess(t.serverId, accessAt, undefined, probe.error ?? 'unavailable')
               }
             }
+
+            // The security posture probe — roadmap item 24. Same place, same
+            // conditions, its own due clock, and sequential after the other two
+            // rather than beside them: three long reads opened at once on the
+            // same connection is three exec channels on a link a terminal may
+            // be typing over, which is the thing this whole loop is shaped to
+            // avoid.
+            const postureOn = this.deps.postureEnabled?.() ?? true
+            if (this.deps.samplePosture && postureOn && at >= (this.postureDueAt.get(t.serverId) ?? 0)) {
+              // Set BEFORE the probe, for the reason the other two are: a probe
+              // that throws or times out must still push the next attempt an
+              // hour out, or one broken host eats the whole estate's sweep.
+              this.postureDueAt.set(t.serverId, at + clampFactsInterval(this.cfg.factsIntervalMs))
+              const probe = await this.deps.samplePosture(fleetKey(t.serverId), t.cfg).catch((err) => ({
+                ok: false as const,
+                error: err instanceof Error ? err.message : String(err)
+              }))
+              if (gen !== this.generation || this.disposed) return
+              const postureAt = this.now
+              if (probe.ok && probe.posture) {
+                this.rememberPosture(t.serverId, postureAt, probe.posture)
+                write.posture = probe.posture
+              } else {
+                this.rememberPosture(t.serverId, postureAt, undefined, probe.error ?? 'unavailable')
+              }
+            }
             writes.push(write)
           } else {
             const error = res.error ?? 'unavailable'
@@ -990,6 +1158,7 @@ export class FleetSampler {
     this.reachable.clear()
     this.factsDueAt.clear()
     this.accessDueAt.clear()
+    this.postureDueAt.clear()
     this.seeded.clear()
     if (active === this) active = null
     return this.inFlight ?? Promise.resolve()

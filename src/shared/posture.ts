@@ -1432,26 +1432,38 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
   const fwTool = oneOf(values.get('fw-tool'), FIREWALL_TOOLS)
   const backendTool = oneOf(values.get('fw-backend'), FIREWALL_BACKENDS)
   const backendStatus = oneOf(values.get('fw-backend-status'), POSTURE_STATUSES) ?? 'unknown'
-  const firewallStatus = source('firewall').status
   const zonesRaw = freeText(values.get('fw-zones'))
+  const fwActive = parseActive(values.get('fw-active'))
+  const fwRules = parseCount(values.get('fw-rules'))
+  const fwBackendRules = parseCount(values.get('fw-backend-rules'))
+  // NULL WHEN NOTHING WAS READ, and this is not a tidiness point.
+  //
+  // A `FirewallState` with a tool of null, a rules count of null and an active
+  // flag of null is the Postgres failure this codebase has already had once,
+  // wearing a different hat: a row per object with every column empty and no
+  // error attached, which renders as a real reading of a very quiet host. The
+  // reason lives on the source report; the state object exists only when
+  // something was actually established, so a renderer cannot accidentally show
+  // an empty firewall row instead of the sentence saying why there is none.
+  //
+  // `fw-backend-status` is deliberately NOT counted as content: the collector
+  // emits it on every run, including the `unsupported` one, so counting it
+  // would make this condition true for every host.
   const firewall: FirewallState | null =
-    fwTool === null && backendTool === null && firewallStatus === 'unsupported'
-      ? // Nothing installed. `null` with an `unsupported` source, NOT an empty
-        // FirewallState — a state object with `rules: null` in it would still
-        // put a firewall row on screen for a host that has no firewall tooling.
-        null
+    fwTool === null && backendTool === null && fwActive === null && fwRules === null && fwBackendRules === null
+      ? null
       : {
           tool: fwTool ?? backendTool,
-          active: parseActive(values.get('fw-active')),
+          active: fwActive,
           policyIn: oneOf(values.get('fw-policy-in'), FIREWALL_POLICIES),
           policyOut: oneOf(values.get('fw-policy-out'), FIREWALL_POLICIES),
-          rules: parseCount(values.get('fw-rules')),
+          rules: fwRules,
           denyRules: parseCount(values.get('fw-deny')),
           zone: freeText(values.get('fw-zone')),
           zones: zonesRaw === null ? [] : zonesRaw.split(',').map((z) => z.trim()).filter((z) => z !== ''),
           backend: {
             tool: backendTool,
-            rules: parseCount(values.get('fw-backend-rules')),
+            rules: fwBackendRules,
             policyIn: oneOf(values.get('fw-backend-policy'), FIREWALL_POLICIES),
             status: backendStatus
           }
@@ -1644,7 +1656,16 @@ export function summarisePosture(
     // about what it lets through, and a `denied` one says nothing at all.
     if (fw.status === 'ok' && posture.firewall?.active === true) out.firewallActive++
     else if (fw.status === 'ok' && posture.firewall?.active === false) out.firewallInactive++
-    else if (fw.status === 'ok' && posture.firewall?.backend.tool !== null && posture.firewall?.backend.status === 'ok') {
+    else if (
+      fw.status === 'ok' &&
+      // `posture.firewall !== null` spelled out rather than reached through
+      // `?.`: optional chaining yields `undefined`, and `undefined !== null` is
+      // TRUE, so the short spelling would take this branch for a host that read
+      // no firewall at all.
+      posture.firewall !== null &&
+      posture.firewall.backend.tool !== null &&
+      posture.firewall.backend.status === 'ok'
+    ) {
       // No front end, and the kernel tables were read. Rules present means
       // something is filtering; zero rules read cleanly means nothing is.
       if ((posture.firewall.backend.rules ?? 0) > 0) out.firewallActive++

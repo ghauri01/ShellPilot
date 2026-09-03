@@ -566,8 +566,10 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     h.script('ufw', rootOnly('ufw', `printf '${UFW_STATUS}\\n'`))
     const p = h.collect({ sudo: false, have: ['ufw'], env: { SP_ROOTONLY: 'ufw' } })
     expect(statusOf(p, 'firewall')).toBe('denied')
-    expect(p.firewall?.rules).toBeNull()
-    expect(p.firewall?.active).toBeNull()
+    // NOT an object with every field null next to a `denied` source. A state
+    // where nothing was read is no state at all, so a renderer cannot show an
+    // empty firewall row where the sentence explaining the refusal belongs.
+    expect(p.firewall).toBeNull()
   })
 
   it('falls back to ufw.conf as PARTIAL, because on/off is not the rules', () => {
@@ -590,7 +592,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
       const p = h.collect({ sudo: false, have: ['ufw'], env: { SP_ROOTONLY: 'ufw' } })
       expect(statusOf(p, 'firewall')).toBe('denied')
       expect(postureSource(p, 'firewall').detail).toContain('cannot be entered')
-      expect(p.firewall?.active).toBeNull()
+      expect(p.firewall).toBeNull()
     } finally {
       chmodSync(join(h.root, 'etc/ufw'), 0o755)
     }
@@ -620,7 +622,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     refused.script('nft', 'echo "Operation not permitted" >&2; exit 1')
     const r = refused.collect({ sudo: false, have: ['nft'] })
     expect(statusOf(r, 'firewall')).toBe('denied')
-    expect(r.firewall?.backend).toMatchObject({ tool: null, rules: null, status: 'denied' })
+    expect(r.firewall).toBeNull()
   })
 
   it('reads the kernel tables even when the front end says it is switched off', () => {
