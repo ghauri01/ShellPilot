@@ -35,14 +35,15 @@ export const DISK_DANGER = 85
  * disagrees with it. Both paths call this now, so the disagreement cannot come
  * back without someone editing this line.
  *
- * `diskTotal` is what separates a genuinely empty disk from a df that returned
- * nothing: a host that reported no disk at all must not read as 0% full, and
- * certainly must not raise an alarm. Callers that have already established the
- * disk was measured — the alert path, whose `null` says exactly that — may omit
- * it.
+ * It answers one question — is this too full — and deliberately not the other
+ * one. "Was this measured at all?" is a separate question with a separate
+ * answer at each call site: `diskTotal > 0` here, and a `null` disk on the
+ * alert path. Folding it in as a defaulted `diskTotal` made the measurement
+ * guard something you got by FORGETTING an argument, which is the wrong way
+ * round: a guard should have to be opted out of on purpose.
  */
-export function isDiskCritical(diskPct: number, diskTotal = 1): boolean {
-  return diskTotal > 0 && diskPct > DISK_DANGER
+export function isDiskCritical(diskPct: number): boolean {
+  return diskPct > DISK_DANGER
 }
 
 export interface HostRow {
@@ -123,7 +124,10 @@ function isFailed(u: ServiceUnit): boolean {
 function toRow(server: ServerRef, host: HostMetrics): HostRow {
   const failed = host.services === null ? null : host.services.filter(isFailed)
   const running = host.services === null ? null : host.services.filter((u) => u.sub === 'running').length
-  const diskCritical = isDiskCritical(host.diskPct, host.diskTotal)
+  // `df` returning nothing yields diskPct 0 with diskTotal 0, and a host that
+  // reported no disk at all must not read as a disk that is empty. The check
+  // stays here, at the only site holding the answer.
+  const diskCritical = host.diskTotal > 0 && isDiskCritical(host.diskPct)
   return {
     id: server.id,
     name: server.name,

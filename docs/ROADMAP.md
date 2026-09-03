@@ -735,8 +735,60 @@ happens when two ShellPilots poll the same job.
 Everything else follows: a job list, a persisted history in A, resumable output, and per-job audit
 rows that item 14 can read.
 
-**Size.** 1.5–3 weeks, lower than it looks because the approval spine is done. Unlocks items 17, 5,
-6-editing, 22, and everything in the maintenance tier.
+**The finding that reframes this item, and item 17 with it.** The status quo is not "a job
+dies with its connection". `sshExec` on timeout resolves and abandons without signalling the
+remote process, and when the socket dies sshd sends SIGHUP — which `apt` and `dpkg` do not
+ignore. Minute nine of an `apt upgrade` across an estate is therefore not lost output, it is
+**`dpkg` interrupted on every host**, and the recovery is `dpkg --configure -a` on each. Item
+17 cannot ship on the attached path at all; the attached path is worse than not offering the
+feature.
+
+**Decided: a detached launch with a marker directory.** `setsid` writing `cmd`, `instance`,
+`pid`, `out` and `rc` under the target user's own state directory, `rc` written
+temp-then-renamed so its presence means it is complete. Resume reads from a byte offset,
+which is an exact monotonic cursor. Three honest states fall out that today's vocabulary
+cannot express — `detached` (launched, channel gone), `orphaned` (marker present, pid gone,
+no exit status) and `foreign` (started by another ShellPilot instance) — and today an
+*expected* reboot classifies as `unreachable`, which is the opposite of the truth.
+
+Nothing is installed: no binary, no package, no service, no cron entry, nothing that runs
+after the job. One directory, reaped on read, with a Settings switch that turns detached
+jobs off entirely and degrades to the honest ephemeral behaviour per host. `systemd-run` is
+strictly better where it works and cannot be the only backend — system scope needs root,
+which would make every job run as root and invert the risk model that assessed the command
+as the user typed it; user scope needs lingering, which is a persistent change to the host.
+It belongs later, capability-detected, behind the same interface.
+
+**Correcting this document.** An earlier revision justified the estimate with "the approval
+model — the hard half of any executor — is built and tested", naming five files as one
+system. They are **two systems with no shared code**: the human confirmation model lives
+entirely in `shared/broadcast.ts` and is enforced in the renderer, and the AI capability gate
+lives in `policyEngine`/`policyStore`/`approvals`. The two tests cited as proof test the two
+different halves, and neither produces what a durable job needs — a **persisted approval
+record**. `BroadcastPlan` never reaches main at all; `broadcast:run` takes a run id, a command
+and targets, and `main/index.ts` states deliberately that main does not re-derive the model.
+A job resuming after a restart therefore has no memory of the dialog that authorised it, and
+fixing that reverses a settled decision rather than extending one.
+
+**Split, so item 17 does not wait for all of it.**
+
+| | Scope | Size |
+|---|---|---|
+| **B1** | Durable one-command jobs on the existing attached path, the store, and a job list | 1.5–3 wk |
+| **B2** | The detached backend, the four new states, reconnect with backoff, reclaim and reap, the remote-shell matrix | +2–3 wk |
+| **B3** | A persisted approval record, and moving enforcement into main | +1 wk |
+| **B4** | Stages, the health gate, reboot-and-wait, jump-host exclusion | +1.5–2 wk |
+
+**Size.** **6–9 weeks** for the whole of it, not 1.5–3. B1 alone is the old estimate and is
+the version that does *not* unblock item 17. B4 overlaps what item 17 already budgets for
+reboot coordination — it belongs here, and item 17 shrinks accordingly rather than paying
+twice.
+
+**One guard this item needs that broadcast did not.** Durability defeats revocation: `deny
+all pending` resolves requests that are *pending*, and can do nothing about a job already
+detached on fifteen hosts, because nothing is pending. An agent-reachable job engine would be
+a standing capability the stop-all-AI-access switch cannot revoke. It stays human-only, with
+the three-layer guard the local terminal already uses.
 
 ---
 

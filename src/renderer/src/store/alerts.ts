@@ -74,6 +74,24 @@ const RECOVER_MARGIN = 5
 // window. See evaluate() for why a six-hour window needs it.
 const ESCALATE_BY = 5
 
+// The floor under every reason to speak, per kind. Nothing may notify faster
+// than this, whatever justification it has.
+//
+// The re-raise and escalation bypasses were written for disk and are correct
+// for disk: a filesystem takes hours or days to make a round trip through the
+// five-point recovery margin, so a value back over the line really is a second
+// incident. A CPU makes that trip in one 2-second sample. Sharing the code
+// without scoping the bypasses turned a flapping CPU into fifteen desktop
+// notifications and thirty webhooks a minute — exactly RATE_LIMIT in
+// webhookAlerts.ts, past which genuine alerts are dropped to keep up with the
+// noise. Disk sits at zero because its own bypasses are the feature, and every
+// case its tests pin depends on them firing immediately.
+const MIN_GAP: Record<AlertKind, number> = {
+  cpu: 60_000,
+  ram: 60_000,
+  disk: 0
+}
+
 /** Below this, a value counts as recovered rather than merely lower. */
 const clearLine = (threshold: number): number => Math.max(0, threshold - RECOVER_MARGIN)
 
@@ -82,9 +100,20 @@ const clearLine = (threshold: number): number => Math.max(0, threshold - RECOVER
 const lastNotified = new Map<string, number>()
 
 // The value we last said out loud, per server+metric. Deleted on a real
-// resolve, which is what lets a genuine re-raise speak immediately instead of
-// waiting out a window it did not earn. See evaluate().
+// recovery — meaningfully below the line, not merely off it — which is what
+// lets a genuine re-raise speak immediately instead of waiting out a window it
+// did not earn. See evaluate().
 const lastNotifiedValue = new Map<string, number>()
+
+// Server+metric pairs we have raised and not yet cleared. Its own set rather
+// than being read off one of the maps above, because the two questions came
+// apart once the chip stopped being tied to hysteresis: the chip tracks the
+// condition, `lastNotifiedValue` tracks recovery, and this tracks whether the
+// endpoint is currently holding an alarm from us. A "resolved" for something
+// nobody was told about is a message about nothing, and a host crossing the
+// line repeatedly without earning a new raise must not post an all-clear on
+// every crossing.
+const announced = new Set<string>()
 
 /** Short, for the status-bar chip and the notification title. */
 export const LABEL: Record<AlertKind, string> = { cpu: 'CPU', ram: 'Memory', disk: 'Disk' }
@@ -98,6 +127,27 @@ const SUBJECT: Record<AlertKind, string> = {
   ram: 'Memory',
   disk: 'Root filesystem'
 }
+
+// How each kind's line reads in a sentence, because the kinds do not compare
+// alike. Disk raises STRICTLY above DISK_DANGER — "at or above 85%" was a
+// claim the code does not implement — and correspondingly clears at 85 itself.
+// CPU and memory raise at or above their line.
+const OVER_WORD: Record<AlertKind, string> = {
+  cpu: 'at or above',
+  ram: 'at or above',
+  disk: 'above'
+}
+const backBelow: Record<AlertKind, (threshold: number) => string> = {
+  cpu: (t) => `back below ${t}%`,
+  ram: (t) => `back below ${t}%`,
+  disk: (t) => `back to ${t}% or below`
+}
+
+// One decimal at most, trailing zero dropped. Rounding to whole points made a
+// disk raise at 85.4 arrive as `value: 85, threshold: 85` — indistinguishable
+// at the endpoint from exactly 85, which does not fire at all. Whole numbers
+// still print as whole numbers, so nothing that was "91%" becomes "91.0%".
+const fmt = (v: number): number => Number(v.toFixed(1))
 
 // The wire name for each kind. A Record rather than a ternary, so adding a kind
 // is a type error here instead of a metric quietly posting as 'memory'.
@@ -135,42 +185,46 @@ function evaluate(
   // it counts as recovered.
   const clearAt = clearLine(threshold)
 
-  if (!over && value < clearAt) {
-    // Recovered: drop the alert and allow an immediate notification if it
-    // crosses again later.
+  if (!over) {
+    // The chip tracks `over` and nothing else, so it can never say something
+    // the screen it navigates to denies. Hysteresis belongs to the decision to
+    // SPEAK, not to what is on display: holding the chip until `clearAt`
+    // stranded every disk in 80–85% — a permanent "Disk 90%" button opening a
+    // Fleet Monitor with an empty attention list and an amber bar, which is
+    // exactly where a half-cleaned disk sits.
     if (useAlerts.getState().active[k]) {
       useAlerts.setState((s) => {
         const active = { ...s.active }
         delete active[k]
         return { active }
       })
-      // Whether we ever said this host had a problem. A "resolved" for an alert
-      // nobody was told about is a message about nothing — and with a six-hour
-      // disk window a host oscillating around the line would send a stream of
-      // all-clears against a single raise.
-      const announced = lastNotifiedValue.has(k)
-      // Only the escalation memory is cleared, and only here — on a real
-      // resolve rather than on every below-threshold sample. That is what makes
-      // a later re-raise a new event rather than a continuation.
-      lastNotifiedValue.delete(k)
-      if (announced) {
-        // Only on an actual transition, so a host sitting comfortably below the
-        // threshold does not post "resolved" on every sample. An alert with no
-        // resolution leaves the reader to work out whether it is still
-        // happening, which is why this is worth sending at all.
-        void window.shellpilot?.webhook?.notify({
-          source: 'shellpilot',
-          version: APP_VERSION,
-          event: 'resolved',
-          kind: WEBHOOK_KIND[kind],
-          server: serverName,
-          summary: `${serverName}: ${SUBJECT[kind]} back below ${threshold}%`,
-          at: new Date(now).toISOString(),
-          value: Math.round(value),
-          threshold
-        })
-      }
     }
+
+    // The all-clear, once, and only if the endpoint is holding an alarm from
+    // us. Without this gate a host crossing the line repeatedly without ever
+    // earning a new raise posts a "resolved" on each crossing — a stream of
+    // all-clears against a single alarm.
+    if (announced.delete(k)) {
+      void window.shellpilot?.webhook?.notify({
+        source: 'shellpilot',
+        version: APP_VERSION,
+        event: 'resolved',
+        kind: WEBHOOK_KIND[kind],
+        server: serverName,
+        summary: `${serverName}: ${SUBJECT[kind]} ${backBelow[kind](threshold)}`,
+        at: new Date(now).toISOString(),
+        value: fmt(value),
+        threshold
+      })
+    }
+
+    // The escalation memory is what makes a later crossing a NEW incident
+    // rather than a continuation, so it survives until the value is
+    // meaningfully below the line — not merely off it. That is the whole flap
+    // defence for a disk oscillating 82/86: the chip follows each crossing,
+    // the talking does not.
+    if (value < clearAt) lastNotifiedValue.delete(k)
+
     // `lastNotified` is NOT cleared. Deleting it here let the next crossing
     // notify immediately, which is the other half of the flapping problem:
     // hysteresis stops the oscillation, and keeping the window stops a genuine
@@ -178,11 +232,6 @@ function evaluate(
     // expires on its own.
     return
   }
-
-  // Between the line and the clear line, on the way down: keep the chip, say
-  // nothing new. Raising here would mean a disk at exactly DISK_DANGER alerting
-  // while the Fleet Monitor lists it as fine.
-  if (!over) return
 
   const existing = useAlerts.getState().active[k]
   useAlerts.setState((s) => ({
@@ -205,20 +254,28 @@ function evaluate(
   //    the previous sample, is what keeps 86 → 88 → 90 from escalating on
   //    every one.
   //  - The window has expired, which is the ordinary "still going" repeat.
+  //
+  // MIN_GAP is under all three. The first two are disk's bypasses — a disk
+  // takes hours to make a round trip through the recovery margin or to climb
+  // five points, so they cannot fire often. A CPU does both in one 2-second
+  // sample, and without a floor the shared code turned a flapping CPU into a
+  // notification per sample.
   const last = lastNotified.get(k) ?? 0
   const said = lastNotifiedValue.get(k)
   const reRaised = said === undefined
   const worsened = said !== undefined && value >= said + ESCALATE_BY
   const due = now - last >= REPEAT[kind]
   if (!reRaised && !worsened && !due) return
+  if (now - last < MIN_GAP[kind]) return
   lastNotified.set(k, now)
   lastNotifiedValue.set(k, value)
+  announced.add(k)
 
   const mins = existing ? Math.round((now - existing.since) / 60000) : 0
   const forHow = mins >= 1 ? ` for ${mins} min` : ''
   void window.shellpilot?.notify.show(
-    `${serverName}: ${LABEL[kind]} at ${value.toFixed(0)}%`,
-    `${SUBJECT[kind]} has been at or above ${threshold}%${forHow}.`
+    `${serverName}: ${LABEL[kind]} at ${fmt(value)}%`,
+    `${SUBJECT[kind]} has been ${OVER_WORD[kind]} ${threshold}%${forHow}.`
   )
   // Same repeat window as the desktop notification, so the endpoint sees the
   // same cadence a person does rather than one message per sample.
@@ -228,9 +285,9 @@ function evaluate(
     event: 'raised',
     kind: WEBHOOK_KIND[kind],
     server: serverName,
-    summary: `${serverName}: ${SUBJECT[kind]} at ${value.toFixed(0)}% (threshold ${threshold}%)`,
+    summary: `${serverName}: ${SUBJECT[kind]} at ${fmt(value)}% (threshold ${threshold}%)`,
     at: new Date(now).toISOString(),
-    value: Math.round(value),
+    value: fmt(value),
     threshold,
     ...(mins >= 1 ? { minutes: mins } : {})
   })
@@ -324,6 +381,9 @@ onServerForgotten((serverId) => {
   for (const k of [...lastNotifiedValue.keys()]) {
     if (k.startsWith(`${serverId}:`)) lastNotifiedValue.delete(k)
   }
+  for (const k of [...announced]) {
+    if (k.startsWith(`${serverId}:`)) announced.delete(k)
+  }
 })
 
 // Switching alerts off has to take the chips with it.
@@ -333,9 +393,18 @@ onServerForgotten((serverId) => {
 // survived that until the next restart; a disk chip, whose repeat window is six
 // hours and which does not recover on its own, would sit in the status bar
 // pointing at a feature the user has just switched off.
+// It also has to take the memory with it. Clearing only the chips left the
+// repeat window, the escalation memory and the outstanding-alarm set running
+// across the gap, so switching alerts off and straight back on re-raised the
+// chip in silence — no notification, no webhook, and for a disk another six
+// hours on a clock that had started before the toggle. Everything this module
+// remembers is about a conversation that has just been ended.
 useApp.subscribe((s, prev) => {
   if (prev.settings.resourceAlertsEnabled && !s.settings.resourceAlertsEnabled) {
     useAlerts.setState({ active: {} })
+    lastNotified.clear()
+    lastNotifiedValue.clear()
+    announced.clear()
   }
 })
 
@@ -358,6 +427,14 @@ export function checkResourceAlerts(
   const { resourceAlertsEnabled, resourceAlertThreshold } = useApp.getState().settings
   if (!resourceAlertsEnabled) return
   const now = Date.now()
+  // `line` is the CLEAR line, not the threshold, and CPU and memory are over
+  // when they reach it. That is load-bearing and easy to mistake for a bug:
+  // because `over` and `clearAt` are then the same number, "over" and "not yet
+  // recovered" are the same condition, and the chip and the notification state
+  // cannot come apart. Raising this to `>= resourceAlertThreshold` would open
+  // a five-point band for CPU where the chip is down but the alert memory is
+  // still held — the dead band that stranded disk chips at 82%. If you change
+  // it, the `!over` branch in evaluate has to grow the disk case's handling.
   const line = clearLine(resourceAlertThreshold)
   evaluate(serverId, serverName, 'cpu', cpu, resourceAlertThreshold, now, cpu >= line)
   evaluate(serverId, serverName, 'ram', ram, resourceAlertThreshold, now, ram >= line)
@@ -380,6 +457,7 @@ export function checkResourceAlerts(
 export function resetAlertsForTests(): void {
   lastNotified.clear()
   lastNotifiedValue.clear()
+  announced.clear()
   failedUnits.clear()
   useAlerts.setState({ active: {} })
 }
