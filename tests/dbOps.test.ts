@@ -215,7 +215,15 @@ describe('a broken replica that reports 0 seconds behind', () => {
     const v = judgeMysqlReplication(parseMysqlReplication([captured]))
     expect(v.level).toBe('alarm')
     expect(v.headline).toMatch(/BROKEN/)
-    expect(v.because).toMatch(/nosuchhost\.invalid/)
+    // The engine's own words, kept — minus the identifiers. Last_IO_Error reads
+    // `error connecting to master 'repl@nosuchhost.invalid:3306' … Unknown MySQL
+    // server host 'nosuchhost.invalid'`, and that sentence is not only rendered,
+    // it is written verbatim into the durable event store by notableDbEvents.
+    // The judgement does not need a replication username or a source hostname to
+    // be right, so neither is kept. See redactDbIdentifiers.
+    expect(v.because).toMatch(/Error connecting to source/i)
+    expect(v.because).not.toMatch(/nosuchhost\.invalid/)
+    expect(v.because).toMatch(/<redacted>/)
   })
 
   it('a null-only guard would have passed this server as healthy', () => {
@@ -300,9 +308,9 @@ describe('SHOW REPLICA STATUS and SHOW SLAVE STATUS', () => {
   })
 
   it('MariaDB spells the binlog expiry differently, and that is not a failure either', () => {
-    expect(MARIA.binlogExpire8.errno).toBe(1193)
-    expect(classifyMysqlFailure(1193, MARIA.binlogExpire8.message!).status).toBe('unsupported')
-    const v = parseMysqlBinlogs([], true, { seconds: null, days: num(row(MARIA.binlogExpireLegacy)!.expire_days) })
+    expect(MARIA.binlogExpireSeconds.errno).toBe(1193)
+    expect(classifyMysqlFailure(1193, MARIA.binlogExpireSeconds.message!).status).toBe('unsupported')
+    const v = parseMysqlBinlogs([], true, { seconds: null, days: num(row(MARIA.binlogExpireDays)!.expire_days) })
     expect(v.expireSource).toBe('expire_logs_days')
     expect(v.expireSeconds).toBe(10 * 86_400)
   })
@@ -543,7 +551,7 @@ describe('autovacuum and transaction-ID wraparound', () => {
     // Someone setting autovacuum_freeze_max_age to 2 billion does not make
     // wraparound go away.
     const t = { ...real.tables[0], xidAge: 1_600_000_000, freezeFraction: 1_600_000_000 / 2_000_000_000 }
-    expect(judgePgVacuum({ freezeMaxAge: 2_000_000_000, tables: [t] }).level).toBe('alarm')
+    expect(judgePgVacuum({ freezeMaxAge: 2_000_000_000, tables: [t], databases: [] }).level).toBe('alarm')
   })
 
   it('heavy dead-tuple bloat is a watch even when the freeze age is fine', () => {
@@ -554,7 +562,7 @@ describe('autovacuum and transaction-ID wraparound', () => {
   })
 
   it('no readable ages is unknown, not ok', () => {
-    expect(judgePgVacuum({ freezeMaxAge: 200_000_000, tables: [] }).level).toBe('unknown')
+    expect(judgePgVacuum({ freezeMaxAge: 200_000_000, tables: [], databases: [] }).level).toBe('unknown')
   })
 })
 
@@ -640,7 +648,7 @@ describe('sizes', () => {
 describe('binary logs', () => {
   it('reads a real listing and a real expiry setting', () => {
     const v = parseMysqlBinlogs(rows(MY_SOURCE.binaryLogs), true, {
-      seconds: num(row(MY_SOURCE.binlogExpire8)!.expire_seconds),
+      seconds: num(row(MY_SOURCE.binlogExpireSeconds)!.expire_seconds),
       days: null
     })
     expect(v.files).toHaveLength(3)
@@ -732,7 +740,7 @@ describe('the InnoDB buffer pool', () => {
    * first read of a cold pool is a miss.
    */
   it('refuses to judge a hit rate over too small a sample', () => {
-    const v = parseMysqlBufferPool(statusMap(rows(MY_SOURCE.status)), row(MY_SOURCE.bufferPoolSize))
+    const v = parseMysqlBufferPool(statusMap(rows(MY_SOURCE.status)), row(MY_SOURCE.bufferPool))
     expect(v.hitRate).toBeLessThan(DB_THRESHOLDS.bufferPoolAlarmRate)
     const verdict = judgeMysqlBufferPool(v)
     expect(verdict.level).toBe('unknown')
@@ -741,7 +749,7 @@ describe('the InnoDB buffer pool', () => {
   })
 
   it('judges the same ratio once the sample is big enough', () => {
-    const v = parseMysqlBufferPool(statusMap(rows(MY_SOURCE.status)), row(MY_SOURCE.bufferPoolSize))
+    const v = parseMysqlBufferPool(statusMap(rows(MY_SOURCE.status)), row(MY_SOURCE.bufferPool))
     const settled = { ...v, uptimeSeconds: 86_400, readRequests: 50_000_000, reads: 3_000_000, hitRate: 1 - 3 / 50 }
     expect(judgeMysqlBufferPool(settled).level).toBe('alarm')
     expect(judgeMysqlBufferPool({ ...settled, reads: 1_000_000, hitRate: 0.98 }).level).toBe('watch')

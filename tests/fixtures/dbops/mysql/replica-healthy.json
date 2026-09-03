@@ -154,7 +154,7 @@
       }
     ]
   },
-  "binlogEnabled": {
+  "logBin": {
     "ok": true,
     "rows": [
       {
@@ -162,7 +162,7 @@
       }
     ]
   },
-  "binlogExpire8": {
+  "binlogExpireSeconds": {
     "ok": true,
     "rows": [
       {
@@ -170,7 +170,7 @@
       }
     ]
   },
-  "binlogExpireLegacy": {
+  "binlogExpireDays": {
     "ok": true,
     "rows": [
       {
@@ -278,7 +278,7 @@
       }
     ]
   },
-  "bufferPoolSize": {
+  "bufferPool": {
     "ok": true,
     "rows": [
       {

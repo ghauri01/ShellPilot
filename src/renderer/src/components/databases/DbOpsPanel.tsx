@@ -7,6 +7,7 @@ import {
   formatBytes,
   formatCount,
   formatSeconds,
+  worstVerdict,
   type DbAnswer,
   type DbAnswerStatus,
   type DbOpsReport,
@@ -15,6 +16,7 @@ import {
   type MysqlProcesslistValue,
   type MysqlReplicationChannel,
   type MysqlSizesValue,
+  type PgConnectionsValue,
   type PgLock,
   type PgReplicationValue,
   type PgSizesValue,
@@ -184,16 +186,50 @@ function Detail({ answer, engine }: { answer: DbAnswer<unknown>; engine: 'postgr
 
   if (answer.id === 'autovacuum') {
     const v = answer.value as PgVacuumValue
-    if (v.tables.length === 0) return null
+    const databases = v.databases ?? []
+    if (v.tables.length === 0 && databases.length === 0) return null
+    return (
+      <>
+        {databases.length > 0 && (
+          <Table
+            columns={['database', 'xid age', '% of freeze_max_age', '% to wraparound']}
+            rows={databases.slice(0, 8).map((d) => [
+              d.name,
+              formatCount(d.xidAge),
+              d.freezeFraction === null ? null : `${(d.freezeFraction * 100).toFixed(1)}%`,
+              d.wraparoundFraction === null ? null : `${(d.wraparoundFraction * 100).toFixed(1)}%`
+            ])}
+          />
+        )}
+        {v.tables.length > 0 && (
+          <Table
+            columns={['table', 'xid age', '% of max', 'dead rows', 'last autovacuum']}
+            rows={v.tables.slice(0, 8).map((t) => [
+              // pg_toast.pg_toast_16384 is not a name anybody can act on.
+              t.relkind === 't' && t.parent ? `${t.parent} (TOAST)` : `${t.schema}.${t.name}`,
+              formatCount(t.xidAge),
+              t.freezeFraction === null ? null : `${(t.freezeFraction * 100).toFixed(1)}%`,
+              formatCount(t.deadTuples),
+              t.lastAutovacuumAgeSeconds === null ? null : `${formatSeconds(t.lastAutovacuumAgeSeconds)} ago`
+            ])}
+          />
+        )}
+      </>
+    )
+  }
+
+  if (answer.id === 'connections' && engine === 'postgres') {
+    const v = answer.value as PgConnectionsValue
+    if (v.states.length === 0) return null
     return (
       <Table
-        columns={['table', 'xid age', '% of max', 'dead rows', 'last autovacuum']}
-        rows={v.tables.slice(0, 8).map((t) => [
-          `${t.schema}.${t.name}`,
-          formatCount(t.xidAge),
-          t.freezeFraction === null ? null : `${(t.freezeFraction * 100).toFixed(1)}%`,
-          formatCount(t.deadTuples),
-          t.lastAutovacuumAgeSeconds === null ? null : `${formatSeconds(t.lastAutovacuumAgeSeconds)} ago`
+        columns={['state', 'sessions', 'oldest']}
+        rows={v.states.map((st) => [
+          // NULL is not a state. It is a backend this account may count and may
+          // not read, and writing "unknown" in the cell would read as one.
+          st.state ?? 'hidden from this account',
+          st.n,
+          st.oldestSeconds === null ? null : `${formatSeconds(st.oldestSeconds)} ago`
         ])}
       />
     )
@@ -208,7 +244,9 @@ function Detail({ answer, engine }: { answer: DbAnswer<unknown>; engine: 'postgr
         rows={locks.map((l) => [
           l.pid,
           l.username,
-          formatSeconds(l.waitingSeconds),
+          // formatSeconds(null) is "unknown", and that is the point: a wait this
+          // account may not read is not a wait of zero seconds.
+          l.redacted ? 'hidden' : formatSeconds(l.waitingSeconds),
           l.blockedBy.join(', '),
           l.query
         ])}
@@ -289,9 +327,19 @@ function Detail({ answer, engine }: { answer: DbAnswer<unknown>; engine: 'postgr
 interface Props {
   cfg: DbConnectConfig
   kind: DbKind
+  /**
+   * The worst verdict on the page, reported upward after every read.
+   *
+   * worstVerdict() was documented as "the one the tab badge shows" and nothing
+   * imported it — the Operations tab was a plain button, so ranking `unknown`
+   * above `ok` had no effect on anything anybody could see. The badge is the
+   * whole point of that ranking: the panel is only mounted while the tab is
+   * open, and the state worth showing is the one on the tab nobody has open.
+   */
+  onVerdict?: (level: DbVerdictLevel) => void
 }
 
-export function DbOpsPanel({ cfg, kind }: Props): React.JSX.Element {
+export function DbOpsPanel({ cfg, kind, onVerdict }: Props): React.JSX.Element {
   const [report, setReport] = useState<DbOpsReport | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -308,14 +356,17 @@ export function DbOpsPanel({ cfg, kind }: Props): React.JSX.Element {
       if (mine !== generation.current) return
       if (!r) setError('The preload bridge does not expose operational reads. Restart the app.')
       else if (!r.ok) setError(r.error ?? 'The read failed.')
-      else setReport(r)
+      else {
+        setReport(r)
+        onVerdict?.(worstVerdict(r.answers))
+      }
     } catch (err) {
       if (mine !== generation.current) return
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       if (mine === generation.current) setLoading(false)
     }
-  }, [cfg])
+  }, [cfg, onVerdict])
 
   // A new connection must never show the previous one's answers, not even for
   // the frame before the fresh read lands.

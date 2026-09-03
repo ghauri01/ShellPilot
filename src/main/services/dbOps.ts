@@ -9,8 +9,15 @@
  *
  * Three rules the shape of this file enforces:
  *
- *  1. **Read-only.** Every statement is a SELECT or a SHOW. The refusal to ship
- *     KILL, VACUUM or PURGE is written down in src/shared/dbOps.ts.
+ *  1. **Read-only.** Every statement is a SELECT or a SHOW, plus the session
+ *     timeout, which is built by a validating builder in src/shared/dbOps.ts
+ *     and enumerated there so the read-only assertion can see it. The refusal
+ *     to ship KILL, VACUUM or PURGE is written down in the same file.
+ *
+ *  1b. **On a connection of its own.** Nothing here runs on the client the
+ *     query editor and the shell share. The timeout is a session setting with
+ *     no reset, and a question that raises 42501 aborts the transaction it is
+ *     inside. See openTransient() in ./db.
  *
  *  2. **One failing question does not fail the page.** Each collector is
  *     wrapped, and a failure becomes an ANSWER with a status — denied, absent,
@@ -47,6 +54,7 @@ import {
   judgePgSizes,
   judgePgStatements,
   judgePgVacuum,
+  mariadbMaxStatementTime,
   mysqlMaxExecutionTime,
   num,
   parseMysqlBinlogs,
@@ -78,7 +86,7 @@ import {
   type PgOverview,
   type PgReplicationValue
 } from '../../shared/dbOps'
-import { ensure } from './db'
+import { openTransient } from './db'
 
 type Row = Record<string, unknown>
 
@@ -118,9 +126,9 @@ async function pgRows(client: any, sql: string, params: unknown[] = []): Promise
 async function collectPostgres(client: any): Promise<DbAnswer<unknown>[]> {
   const answers: DbAnswer<unknown>[] = []
 
-  // A per-session timeout. It is set once and applies to everything after it;
-  // if the server refuses (a role with no SET privilege is unusual but
-  // possible) the reads still run, just unbounded.
+  // A per-session timeout on OUR OWN session, which is closed when this
+  // function returns. If the server refuses it (a role with no SET privilege is
+  // unusual but possible) the reads still run, just unbounded.
   try {
     await client.query(pgStatementTimeout(STATEMENT_TIMEOUT_MS))
   } catch {
@@ -170,8 +178,12 @@ async function collectPostgres(client: any): Promise<DbAnswer<unknown>[]> {
       // A row whose every meaningful column is NULL is a permission answer, not
       // a data answer, and it has to be labelled as one or the page reads as
       // "streaming, no lag".
-      const allRedacted = replicas.length > 0 && replicas.every((r) => r.redacted)
-      return { value, verdict, status: allRedacted ? ('denied' as const) : undefined }
+      // every() for denied, some() for partial. One redacted walsender among
+      // two is not a clean read of two, and the old code only had the first
+      // test — so a mixed set came back `ok`.
+      const redacted = replicas.filter((r) => r.redacted).length
+      const status = redacted === 0 ? undefined : redacted === replicas.length ? ('denied' as const) : ('partial' as const)
+      return { value, verdict, status }
     }, pgFailure)
   )
 
@@ -189,7 +201,20 @@ async function collectPostgres(client: any): Promise<DbAnswer<unknown>[]> {
   // ---- autovacuum and wraparound
   answers.push(
     await answer('autovacuum', async () => {
-      const value = parsePgVacuum(await pgRows(client, PG_QUERIES.vacuum, [ROW_LIMIT]), overview?.autovacuumFreezeMaxAge ?? 200_000_000)
+      // Cluster-wide first, and separately: pg_class is per-database, so the
+      // table list cannot see a neighbouring database at 1.9 billion. A role
+      // that cannot read pg_database still gets the table answer.
+      let databaseAges: Row[] = []
+      try {
+        databaseAges = await pgRows(client, PG_QUERIES.databaseAges)
+      } catch {
+        /* supplementary — the per-table ages below are the main answer */
+      }
+      const value = parsePgVacuum(
+        await pgRows(client, PG_QUERIES.vacuum, [ROW_LIMIT]),
+        overview?.autovacuumFreezeMaxAge ?? 200_000_000,
+        databaseAges
+      )
       return { value, verdict: judgePgVacuum(value) }
     }, pgFailure)
   )
@@ -197,8 +222,13 @@ async function collectPostgres(client: any): Promise<DbAnswer<unknown>[]> {
   // ---- connections
   answers.push(
     await answer('connections', async () => {
-      const value = parsePgConnections(await pgRows(client, PG_QUERIES.connections), overview?.maxConnections ?? 0)
-      return { value, verdict: judgePgConnections(value) }
+      const value = parsePgConnections(await pgRows(client, PG_QUERIES.connections), overview?.maxConnections ?? 0, {
+        superuserReserved: overview?.superuserReservedConnections ?? 0,
+        reserved: overview?.reservedConnections ?? 0
+      })
+      // Backends this role may count and may not read. Same species as the
+      // walsender case below: rows present, every readable column NULL.
+      return { value, verdict: judgePgConnections(value), status: value.redactedCount > 0 ? ('partial' as const) : undefined }
     }, pgFailure)
   )
 
@@ -206,7 +236,8 @@ async function collectPostgres(client: any): Promise<DbAnswer<unknown>[]> {
   answers.push(
     await answer('locks', async () => {
       const value = parsePgLocks(await pgRows(client, PG_QUERIES.locks, [ROW_LIMIT]))
-      return { value, verdict: judgePgLocks(value) }
+      const redacted = value.some((l) => l.redacted)
+      return { value, verdict: judgePgLocks(value), status: redacted ? ('partial' as const) : undefined }
     }, pgFailure)
   )
 
@@ -279,11 +310,19 @@ async function myRows(client: any, sql: string, params: unknown[] = []): Promise
 async function collectMysql(client: any): Promise<DbAnswer<unknown>[]> {
   const answers: DbAnswer<unknown>[] = []
 
+  // MySQL's spelling first, then MariaDB's. Not optional: MariaDB raises
+  // ER_UNKNOWN_SYSTEM_VARIABLE (1193) on MAX_EXECUTION_TIME, so with only the
+  // first probe nothing bounded ANY statement on MariaDB — including `sizes`,
+  // which stats every file on the server. A best-effort net that is always
+  // absent on one of the two supported flavours is not a net.
   try {
     await client.query(mysqlMaxExecutionTime(STATEMENT_TIMEOUT_MS))
   } catch {
-    /* MariaDB spells it max_statement_time and takes seconds; not worth a
-       second dialect probe for a safety net that is already best-effort. */
+    try {
+      await client.query(mariadbMaxStatementTime(STATEMENT_TIMEOUT_MS))
+    } catch {
+      /* neither spelling — the reads still run, just unbounded */
+    }
   }
 
   // One SHOW GLOBAL STATUS feeds four of the eight questions.
@@ -329,12 +368,22 @@ async function collectMysql(client: any): Promise<DbAnswer<unknown>[]> {
         firstFailure = err
         // Fall back regardless of which error it was. A parse error means the
         // dialect is older; a privilege error means the account is weaker, and
-        // in that case the second attempt fails the same way and its error is
-        // the one reported.
+        // in that case the later attempts fail the same way and the FIRST
+        // error is the one reported.
+        //
+        // SHOW ALL SLAVES STATUS before SHOW SLAVE STATUS because on MariaDB
+        // the plain form returns only the unnamed default connection: a server
+        // replicating from two sources answers it with one row and says nothing
+        // about the other. On MySQL it is a parse error and costs one round
+        // trip on a path that already failed.
         try {
-          rows = await myRows(client, MYSQL_QUERIES.slaveStatus)
+          rows = await myRows(client, MYSQL_QUERIES.allSlavesStatus)
         } catch {
-          throw firstFailure
+          try {
+            rows = await myRows(client, MYSQL_QUERIES.slaveStatus)
+          } catch {
+            throw firstFailure
+          }
         }
       }
       const channels = parseMysqlReplication(rows)
@@ -394,8 +443,17 @@ async function collectMysql(client: any): Promise<DbAnswer<unknown>[]> {
   answers.push(
     await answer('slowlog', async () => {
       const settings = (await myRows(client, MYSQL_QUERIES.slowSettings))[0]
+      // `status` is empty when SHOW GLOBAL STATUS failed, which made
+      // Slow_queries and Uptime null — and the sentence built from them read
+      // "unknown slow queries recorded in unknown of uptime" under an `ok`.
+      // judgeMysqlSlowLog now returns `unknown` for that; the answer carries
+      // the reason as well.
       const value = parseMysqlSlowLog(settings, status)
-      return { value, verdict: judgeMysqlSlowLog(value), status: value.enabled ? undefined : ('absent' as const) }
+      const verdict = judgeMysqlSlowLog(value)
+      if (statusFailure) {
+        return { value, verdict, status: statusFailure.status, detail: statusFailure.detail }
+      }
+      return { value, verdict, status: value.enabled ? undefined : ('absent' as const) }
     }, mysqlFailure)
   )
 
@@ -517,8 +575,12 @@ export async function dbOps(cfg: DbConnectConfig): Promise<DbOpsReport> {
   if (!supportsDbOps(cfg.kind)) {
     return { ...base, ok: false, error: `Operational reads are not available for ${cfg.kind}.`, elapsedMs: 0 }
   }
+  let conn: Awaited<ReturnType<typeof openTransient>> | null = null
   try {
-    const conn = await ensure(cfg)
+    // NOT ensure(). See openTransient() in ./db for the two reasons: the
+    // session timeout below never resets, and a denied question aborts whatever
+    // transaction the operator has open in the query tab.
+    conn = await openTransient(cfg)
     const answers = cfg.kind === 'postgres' ? await collectPostgres(conn.client) : await collectMysql(conn.client)
     return { ...base, ok: true, answers, elapsedMs: Date.now() - started }
   } catch (err) {
@@ -527,6 +589,15 @@ export async function dbOps(cfg: DbConnectConfig): Promise<DbOpsReport> {
       ok: false,
       error: err instanceof Error ? err.message : String(err),
       elapsedMs: Date.now() - started
+    }
+  } finally {
+    // Always. A leaked connection here is also a leaked SSH or VPN forward.
+    if (conn) {
+      try {
+        await conn.close()
+      } catch {
+        /* already gone */
+      }
     }
   }
 }

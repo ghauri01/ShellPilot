@@ -15,8 +15,22 @@ is stated below rather than filled with an invention — the rule
 `tests/fixtures/docker/README.md` sets out, for the same reason: a fixture written
 from documentation agrees with whatever the author believed the format was.
 
-Each file is `{ questionName: { ok, rows } | { ok: false, code, errno, message } }`,
-one entry per statement in `PG_QUERIES` / `MYSQL_QUERIES`.
+Each file is `{ statementKey: { ok, rows } | { ok: false, code, errno, message } }`,
+one entry per statement in `PG_QUERIES` / `MYSQL_QUERIES`, **keyed by the query's
+own name**. An entry may also carry a `q` field recording the exact text that was
+run, where it differed from the shipped constant.
+
+That correspondence is now asserted, in `tests/dbOpsCollector.test.ts`, in both
+directions: no fixture key that no statement asks for, and no statement without a
+captured answer. Before that assertion existed the keys had drifted
+(`binlogEnabled` for `logBin`, `binlogExpire8` for `binlogExpireSeconds`,
+`bufferPoolSize` for `bufferPool`) while this file claimed one entry per statement,
+so renaming a query silently lost its fixture. The keys were renamed to match; the
+captured data is untouched.
+
+`tests/dbOpsCollector.test.ts` replays these files through the real collector in
+`src/main/services/dbOps.ts` with a fake driver, which is what finally drives the
+fallbacks `mariadb-10.4.json` was captured for.
 
 ### PostgreSQL — `postgres:16` (server 16.15, Debian, aarch64)
 
@@ -30,7 +44,7 @@ standby built from it with `pg_basebackup -R`.
 | `standby.json` | The standby, as `postgres`. `pg_stat_replication` is **empty** — a standby does not appear in its own copy of that view — and `pg_last_xact_replay_timestamp()` is **NULL** on a standby that has replayed nothing since it started. |
 | `unprivileged.json` | The primary, as a plain `LOGIN` role with no grants. The one that changed the design: `pg_stat_replication` returns a **row per walsender with `state` and every lag column NULL**, and no error. `pg_stat_statements` returns real timings with every `query` replaced by `<insufficient privilege>`. |
 | `blocking-locks.json` | The primary, with two sessions genuinely contending on one row: a real `pg_blocking_pids()` result and a real `idle in transaction` state. |
-| `no-pg-stat-statements.json` | A database in the same cluster where the extension was never created. `pg_extension` is empty; the view raises SQLSTATE `42P01`. |
+| `no-pg-stat-statements.json` | A database in the same cluster where the extension was never created. `pg_extension` is empty; the view raises SQLSTATE `42P01`. Only those two statements were run there, so a replay of this file takes its `overview` from `primary.json` — the same cluster, a different database. |
 
 ### MySQL — `mysql:8.0` (server 8.0.46)
 
@@ -52,6 +66,17 @@ A GTID source with binary logging and the slow log on, and a replica of it.
 
 ## The gaps, stated rather than hidden
 
+* **`superReadOnly` is captured and nothing asks for it.** A `SELECT
+  @@super_read_only` from an earlier draft of the MySQL overview. It is kept
+  rather than deleted — removing a real capture to make a test pass is how
+  fixtures start being fiction — and `tests/dbOpsCollector.test.ts` lists it as a
+  known extra.
+* **Three statements have no captured answer at all**, because no server was
+  available to record them and inventing one is not allowed here:
+  `processlistCount` (MySQL), `allSlavesStatus` (MariaDB multi-source; the
+  containers ran one connection each) and `databaseAges` (PostgreSQL). They are
+  named in `UNCAPTURED` in `tests/dbOpsCollector.test.ts` so the coverage
+  assertion stays honest about which ones it is not making.
 * **No MySQL 5.7 and no MariaDB 10.5–11.x.** 5.7 has neither `SHOW REPLICA STATUS`
   nor `binlog_expire_logs_seconds`, so MariaDB 10.4 exercises the same two fallbacks
   and is a reasonable stand-in — but its error *codes* have not been verified, only

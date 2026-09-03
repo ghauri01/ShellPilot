@@ -258,3 +258,43 @@ describe('DbOpsPanel — the read itself', () => {
     expect(document.body.textContent).toMatch(/Nothing has been read yet/)
   })
 })
+
+// ===========================================================================
+// The badge on the tab nobody has open
+// ===========================================================================
+
+describe('DbOpsPanel — reporting the worst verdict upward', () => {
+  it('hands the caller the level the tab badge shows', async () => {
+    const levels: string[] = []
+    opsImpl = () => Promise.resolve(report('mysql', [brokenReplication()]))
+    const user = userEvent.setup()
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'mysql' }} kind="mysql" onVerdict={(l) => levels.push(l)} />)
+    await user.click(readButton())
+    await screen.findByText(/BROKEN/)
+    expect(levels).toEqual(['alarm'])
+  })
+
+  it('an answer nobody was allowed to read still marks the tab', async () => {
+    // worstVerdict ranks `unknown` above `ok` on purpose, and until this was
+    // wired that ranking had no effect on anything anybody could see: the
+    // Operations tab was a plain button and no renderer imported the function.
+    const levels: string[] = []
+    opsImpl = () =>
+      Promise.resolve(
+        report('postgres', [
+          {
+            id: 'sizes',
+            status: 'ok',
+            value: { databases: [{ name: 'shop', totalBytes: 1024 }], tables: [] },
+            verdict: { level: 'ok', headline: '1 KB across 1 database.' }
+          },
+          NO_STATEMENTS
+        ])
+      )
+    const user = userEvent.setup()
+    render(<DbOpsPanel cfg={CFG} kind="postgres" onVerdict={(l) => levels.push(l)} />)
+    await user.click(readButton())
+    await screen.findByText(/pg_stat_statements is not installed/)
+    expect(levels).toEqual(['unknown'])
+  })
+})

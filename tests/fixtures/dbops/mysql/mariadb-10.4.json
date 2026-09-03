@@ -30,7 +30,7 @@
     "ok": true,
     "rows": []
   },
-  "binlogEnabled": {
+  "logBin": {
     "ok": true,
     "rows": [
       {
@@ -38,14 +38,14 @@
       }
     ]
   },
-  "binlogExpire8": {
+  "binlogExpireSeconds": {
     "ok": false,
     "code": "ER_UNKNOWN_SYSTEM_VARIABLE",
     "errno": 1193,
     "sqlState": "HY000",
     "message": "Unknown system variable 'binlog_expire_logs_seconds'"
   },
-  "binlogExpireLegacy": {
+  "binlogExpireDays": {
     "ok": true,
     "rows": [
       {
@@ -140,7 +140,7 @@
       }
     ]
   },
-  "bufferPoolSize": {
+  "bufferPool": {
     "ok": true,
     "rows": [
       {

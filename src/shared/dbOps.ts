@@ -272,6 +272,17 @@ export const DB_THRESHOLDS = {
   slowLogUselessThresholdSeconds: 10
 } as const
 
+/**
+ * Where PostgreSQL actually stops.
+ *
+ * 2^31 minus the 10 million transaction safety margin it keeps for the vacuum
+ * that has to get you out. This is the denominator for the sentence "N% of the
+ * way to transaction-ID wraparound"; `autovacuum_freeze_max_age` is NOT — that
+ * is where autovacuum STARTS, 200 million by default, and 90% of it is 8.5% of
+ * the way to wraparound. A busy table cycles that band as normal steady state.
+ */
+export const PG_WRAPAROUND_XID_LIMIT = 2_147_483_647 - 10_000_000
+
 // ---------------------------------------------------------------------------
 // Coercion
 // ---------------------------------------------------------------------------
@@ -468,6 +479,53 @@ export function mysqlMaxExecutionTime(ms: number): string {
   return `SET SESSION MAX_EXECUTION_TIME = ${safeMs(ms)}`
 }
 
+/**
+ * `SET SESSION max_statement_time = 8`. MariaDB, which spells it differently
+ * AND counts in SECONDS.
+ *
+ * Not a nicety. MariaDB raises ER_UNKNOWN_SYSTEM_VARIABLE (1193) on
+ * MAX_EXECUTION_TIME, so before this existed the collector caught that, shrugged,
+ * and ran unbounded — including `sizes`, which stats every file on the server.
+ * A best-effort net that is always absent on one of the two supported flavours
+ * is not a net. The value is rounded UP to a whole second, because rounding a
+ * sub-second budget down to zero means "no limit" in MariaDB.
+ */
+export function mariadbMaxStatementTime(ms: number): string {
+  return `SET SESSION max_statement_time = ${Math.max(1, Math.ceil(safeMs(ms) / 1000))}`
+}
+
+/**
+ * Every statement this feature sends that is NOT in PG_QUERIES/MYSQL_QUERIES.
+ *
+ * Enumerated so the read-only assertion in tests/dbOpsRegressions.test.ts can
+ * see them. They were the hole: the test that proves nothing here writes
+ * iterated the query maps, and these were the only statements the app sends
+ * that the assertion never saw.
+ */
+export const DB_TIMEOUT_STATEMENT_BUILDERS: ((ms: number) => string)[] = [
+  pgStatementTimeout,
+  mysqlMaxExecutionTime,
+  mariadbMaxStatementTime
+]
+
+/**
+ * Strip credentials and hostnames out of an engine's own error text.
+ *
+ * `Last_IO_Error` reads, verbatim: `error connecting to master
+ * 'replicator@db-eu.internal:3306' - ... Unknown MySQL server host
+ * 'db-eu.internal' (-2)`. That sentence is shown on screen AND written into the
+ * durable event store, where it becomes a replication username and a source
+ * host sitting in a table nobody thinks of as sensitive. The judgement does not
+ * need either to be right, so neither is kept.
+ */
+export function redactDbIdentifiers(text: string): string {
+  return text
+    .replace(/'[^'@\s]+@[^']*'/g, "'<redacted>'")
+    .replace(/\b(host|master|source)\s+'[^']*'/gi, "$1 '<redacted>'")
+    .replace(/\buser\s+'[^']*'/gi, "user '<redacted>'")
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<redacted>')
+}
+
 function safeMs(ms: unknown): number {
   if (typeof ms !== 'number' || !Number.isInteger(ms) || ms <= 0 || ms > 3_600_000) {
     throw new Error(`Refusing to build a timeout statement from ${JSON.stringify(ms)}: expected a positive integer of milliseconds.`)
@@ -484,6 +542,11 @@ export interface PgOverview {
   versionNum: number
   inRecovery: boolean
   maxConnections: number
+  /** `superuser_reserved_connections`, and on PostgreSQL 16+ the separate
+   *  `reserved_connections`. max_connections is not the ceiling an ordinary
+   *  client can reach: these come off it first. */
+  superuserReservedConnections: number
+  reservedConnections: number
   autovacuumFreezeMaxAge: number
   archiveMode: string
   walLevel: string
@@ -553,6 +616,13 @@ export interface PgArchiver {
 export interface PgVacuumTable {
   schema: string
   name: string
+  /** 'r' ordinary, 'm' materialised view, 't' TOAST. Partitioned parents ('p')
+   *  are not asked for: they hold no rows, their relfrozenxid is 0, and
+   *  `age()` of a non-normal xid is INT_MAX rather than an error. */
+  relkind: string | null
+  /** For a TOAST relation, the table it belongs to. `pg_toast.pg_toast_16384`
+   *  is not a name anybody can act on. */
+  parent: string | null
   xidAge: number | null
   deadTuples: number | null
   liveTuples: number | null
@@ -563,28 +633,65 @@ export interface PgVacuumTable {
   freezeFraction: number | null
 }
 
+export interface PgDatabaseAge {
+  name: string
+  xidAge: number | null
+  freezeFraction: number | null
+  /** Fraction of the point at which PostgreSQL stops accepting transactions. */
+  wraparoundFraction: number | null
+}
+
 export interface PgVacuumValue {
   freezeMaxAge: number
   tables: PgVacuumTable[]
+  /**
+   * `age(datfrozenxid)` per database.
+   *
+   * pg_class is per-database and wraparound is a property of the CLUSTER, so
+   * the table list above can only ever see one database's share of it. A
+   * neighbouring database at 1.9 billion takes this one down with it.
+   */
+  databases: PgDatabaseAge[]
 }
 
 export interface PgConnectionState {
-  state: string
+  /**
+   * NULL is not a state. It is the signature of a backend this role may see and
+   * may not read: without pg_read_all_stats, pg_stat_activity returns the row
+   * with `state`, `query_start`, `query` and `wait_event*` all NULL and raises
+   * nothing. COALESCE-ing it to a word laundered that into a bucket no rule
+   * inspects, which made the idle-in-transaction alarm unreachable.
+   */
+  state: string | null
   n: number
   oldestSeconds: number | null
 }
 
 export interface PgConnectionsValue {
   maxConnections: number
+  /** `superuser_reserved_connections` (+ PG16 `reserved_connections`). */
+  superuserReserved: number
+  reserved: number
+  /** What an ordinary client can actually reach. */
+  usableConnections: number
   states: PgConnectionState[]
   used: number
+  /** Backends counted but not readable. See PgConnectionState.state. */
+  redactedCount: number
 }
 
 export interface PgLock {
   pid: number
   username: string | null
   state: string | null
+  /**
+   * How long this session has been waiting — or NULL because the role may not
+   * read `query_start` for a backend it does not own. `?? 0` turned a two-hour
+   * block into "briefly blocked (0s)".
+   */
   waitingSeconds: number | null
+  /** The row is blocked and this account may not see for how long. */
+  redacted: boolean
   blockedBy: number[]
   waitEventType: string | null
   waitEvent: string | null
@@ -642,6 +749,11 @@ export const PG_QUERIES = Object.freeze({
        current_setting('server_version_num')::int AS version_num,
        pg_is_in_recovery() AS in_recovery,
        current_setting('max_connections')::int AS max_connections,
+       current_setting('superuser_reserved_connections')::int AS superuser_reserved,
+       -- PostgreSQL 16 added a second reserve on top of the superuser one. The
+       -- missing_ok form of current_setting returns NULL on 15 and below rather
+       -- than raising, which is what keeps this query working on both.
+       current_setting('reserved_connections', true)::int AS reserved,
        current_setting('autovacuum_freeze_max_age')::bigint AS freeze_max_age,
        current_setting('archive_mode') AS archive_mode,
        current_setting('wal_level') AS wal_level,
@@ -678,7 +790,29 @@ export const PG_QUERIES = Object.freeze({
   // history. The LEFT JOIN is deliberate: a table that autovacuum has never
   // touched has no stats row, and dropping it would hide the table most likely
   // to be the problem.
-  vacuum: `SELECT n.nspname AS schema, c.relname AS name,
+  //
+  // The relkind filter is not a tidiness choice, it is the whole correctness of
+  // this question:
+  //
+  //  * 'p', a PARTITIONED PARENT, is excluded. It holds no rows, so its
+  //    relfrozenxid is 0, and `age()` of a non-normal xid returns INT_MAX
+  //    rather than raising — 2147483647 against a 200 million
+  //    autovacuum_freeze_max_age is 1074%. Any database using declarative
+  //    partitioning — which is most databases big enough to care about
+  //    wraparound — opened this page to a permanent red alarm, and because the
+  //    sort is `ORDER BY age(relfrozenxid) DESC` the storage-less parents took
+  //    every one of the LIMIT $1 rows and hid the real worst table behind them.
+  //    `NOT (relfrozenxid = '0'::xid)` catches the same thing for any other
+  //    storage-less relation. (Negated equality because `xid` is guaranteed the
+  //    `=` operator and nothing else.)
+  //  * 't', a TOAST relation, is now INCLUDED, and pg_toast is no longer
+  //    excluded by namespace. A toast table ages independently of its parent
+  //    and is a classic wraparound source; excluding it hid exactly the kind of
+  //    table this question exists to find. The join to the owning relation is
+  //    so the answer can say `public.documents (TOAST)` rather than
+  //    `pg_toast.pg_toast_16384`, which nobody can act on.
+  vacuum: `SELECT n.nspname AS schema, c.relname AS name, c.relkind::text AS relkind,
+       pn.nspname AS parent_schema, p.relname AS parent_name,
        age(c.relfrozenxid)::bigint AS xid_age,
        COALESCE(s.n_dead_tup, 0)::bigint AS dead_tuples,
        COALESCE(s.n_live_tup, 0)::bigint AS live_tuples,
@@ -687,10 +821,20 @@ export const PG_QUERIES = Object.freeze({
        EXTRACT(EPOCH FROM (now() - s.last_autoanalyze))::bigint AS last_autoanalyze_age_seconds
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-  WHERE c.relkind IN ('r','m','p') AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+  LEFT JOIN pg_class p ON p.reltoastrelid = c.oid
+  LEFT JOIN pg_namespace pn ON pn.oid = p.relnamespace
+  WHERE c.relkind IN ('r','m','t')
+    AND NOT (c.relfrozenxid = '0'::xid)
+    AND n.nspname NOT IN ('pg_catalog','information_schema')
   ORDER BY age(c.relfrozenxid) DESC LIMIT $1`,
 
-  connections: `SELECT COALESCE(state, 'unknown') AS state, count(*)::int AS n,
+  // Wraparound is a CLUSTER property and pg_class is per-database, so the
+  // question above can only ever see one database's worth of it. datfrozenxid
+  // is the cluster's real position, and it is readable by anybody.
+  databaseAges: `SELECT datname AS name, age(datfrozenxid)::bigint AS xid_age
+  FROM pg_database ORDER BY 2 DESC`,
+
+  connections: `SELECT state, count(*)::int AS n,
        MAX(EXTRACT(EPOCH FROM (now() - state_change)))::bigint AS oldest_seconds
   FROM pg_stat_activity WHERE backend_type = 'client backend' GROUP BY 1 ORDER BY 2 DESC`,
 
@@ -709,7 +853,7 @@ export const PG_QUERIES = Object.freeze({
        pg_relation_size(c.oid)::bigint AS heap_bytes,
        pg_indexes_size(c.oid)::bigint AS index_bytes
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE c.relkind IN ('r','m','p') AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+  WHERE c.relkind IN ('r','m') AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
   ORDER BY 3 DESC LIMIT $1`,
 
   // Detect, do not assume. pg_extension is per-database, which is exactly the
@@ -748,6 +892,9 @@ export function parsePgOverview(row: Row | undefined): PgOverview | null {
     versionNum: num(row.version_num) ?? 0,
     inRecovery: bool(row.in_recovery) ?? false,
     maxConnections: num(row.max_connections) ?? 0,
+    superuserReservedConnections: num(row.superuser_reserved) ?? 0,
+    // NULL on PostgreSQL 15 and below, where the setting does not exist.
+    reservedConnections: num(row.reserved) ?? 0,
     autovacuumFreezeMaxAge: num(row.freeze_max_age) ?? 200_000_000,
     archiveMode: str(row.archive_mode) ?? 'unknown',
     walLevel: str(row.wal_level) ?? 'unknown',
@@ -811,15 +958,28 @@ export function parsePgArchiver(row: Row | undefined, archiveMode: string): PgAr
   }
 }
 
-export function parsePgVacuum(rows: Row[], freezeMaxAge: number): PgVacuumValue {
+export function parsePgVacuum(rows: Row[], freezeMaxAge: number, databaseRows: Row[] = []): PgVacuumValue {
   const max = freezeMaxAge > 0 ? freezeMaxAge : 200_000_000
   return {
     freezeMaxAge: max,
+    databases: databaseRows.map((r) => {
+      const xidAge = num(r.xid_age)
+      return {
+        name: str(r.name) ?? '',
+        xidAge,
+        freezeFraction: xidAge === null ? null : xidAge / max,
+        wraparoundFraction: xidAge === null ? null : xidAge / PG_WRAPAROUND_XID_LIMIT
+      }
+    }),
     tables: rows.map((r) => {
       const xidAge = num(r.xid_age)
+      const parentSchema = str(r.parent_schema)
+      const parentName = str(r.parent_name)
       return {
         schema: str(r.schema) ?? '',
         name: str(r.name) ?? '',
+        relkind: str(r.relkind),
+        parent: parentName ? `${parentSchema ? `${parentSchema}.` : ''}${parentName}` : null,
         xidAge,
         deadTuples: num(r.dead_tuples),
         liveTuples: num(r.live_tuples),
@@ -832,13 +992,27 @@ export function parsePgVacuum(rows: Row[], freezeMaxAge: number): PgVacuumValue 
   }
 }
 
-export function parsePgConnections(rows: Row[], maxConnections: number): PgConnectionsValue {
+export function parsePgConnections(
+  rows: Row[],
+  maxConnections: number,
+  reserved: { superuserReserved?: number; reserved?: number } = {}
+): PgConnectionsValue {
   const states = rows.map((r) => ({
-    state: str(r.state) ?? 'unknown',
+    state: str(r.state),
     n: num(r.n) ?? 0,
     oldestSeconds: num(r.oldest_seconds)
   }))
-  return { maxConnections, states, used: states.reduce((a, s) => a + s.n, 0) }
+  const superuserReserved = reserved.superuserReserved ?? 0
+  const alsoReserved = reserved.reserved ?? 0
+  return {
+    maxConnections,
+    superuserReserved,
+    reserved: alsoReserved,
+    usableConnections: Math.max(0, maxConnections - superuserReserved - alsoReserved),
+    states,
+    used: states.reduce((a, s) => a + s.n, 0),
+    redactedCount: states.filter((s) => s.state === null).reduce((a, s) => a + s.n, 0)
+  }
 }
 
 export function parsePgLocks(rows: Row[]): PgLock[] {
@@ -847,6 +1021,9 @@ export function parsePgLocks(rows: Row[]): PgLock[] {
     username: str(r.username),
     state: str(r.state),
     waitingSeconds: num(r.waiting_seconds),
+    // A blocked backend is by definition `active`, so a NULL state on a row
+    // pg_blocking_pids() put here is the redaction, not a quiet session.
+    redacted: str(r.state) === null && num(r.waiting_seconds) === null,
     blockedBy: Array.isArray(r.blocked_by) ? r.blocked_by.map((p) => num(p) ?? 0) : [],
     waitEventType: str(r.wait_event_type),
     waitEvent: str(r.wait_event),
@@ -983,7 +1160,12 @@ export function judgePgReplication(v: PgReplicationValue): DbVerdict {
     }
   }
 
-  const notStreaming = v.replicas.filter((r) => !r.redacted && r.state !== null && r.state !== 'streaming')
+  // 'backup' is a walsender serving a running pg_basebackup. It is not a
+  // standby that stopped, it is a backup being taken, and alarming on it fires
+  // every time somebody clones the server.
+  const notStreaming = v.replicas.filter(
+    (r) => !r.redacted && r.state !== null && r.state !== 'streaming' && r.state !== 'backup'
+  )
   if (notStreaming.length > 0) {
     const worst = notStreaming[0]
     return {
@@ -1014,6 +1196,17 @@ export function judgePgReplication(v: PgReplicationValue): DbVerdict {
     return { level: 'watch', headline: `Replication is ${formatSeconds(worstSeconds)} behind on ${name}.`, because }
   }
   const n = v.replicas.length
+  // SOME redacted, not all. The all-redacted branch above is the easy case; the
+  // mixed one fell through it, and every lag comparison against a redacted
+  // row's NULLs is false, so two standbys of which one is hidden rendered as
+  // "2 standbys streaming" with a verdict of ok.
+  if (redacted.length > 0) {
+    return {
+      level: 'unknown',
+      headline: `${redacted.length} of ${n} standby connections are hidden from this account.`,
+      because: `The ${n - redacted.length} readable one${n - redacted.length === 1 ? ' is' : 's are'} streaming with a worst replay lag of ${formatSeconds(worstSeconds)}. The rest returned every lag column NULL, which Postgres does instead of raising an error when the role lacks pg_monitor — so this page cannot say whether they are current.`
+    }
+  }
   return {
     level: 'ok',
     headline: `${n} standby${n === 1 ? '' : 's'} streaming, worst replay lag ${formatSeconds(worstSeconds)}.`,
@@ -1083,6 +1276,20 @@ export function judgePgArchiver(a: PgArchiver): DbVerdict {
  * as long as it takes. It is visible for weeks first.
  */
 export function judgePgVacuum(v: PgVacuumValue): DbVerdict {
+  // The CLUSTER first, because pg_class is per-database and wraparound is not.
+  // A neighbouring database at 1.9 billion stops this one too, and nothing in
+  // the table list below can see it.
+  const worstDb = (v.databases ?? [])
+    .filter((d) => d.xidAge !== null)
+    .reduce<PgDatabaseAge | null>((a, b) => ((b.xidAge ?? 0) > (a?.xidAge ?? -1) ? b : a), null)
+  if (worstDb && (worstDb.xidAge ?? 0) >= T.freezeAlarmAbsolute) {
+    return {
+      level: 'alarm',
+      headline: `Database ${worstDb.name} is ${Math.round((worstDb.wraparoundFraction ?? 0) * 100)}% of the way to transaction-ID wraparound.`,
+      because: `age(datfrozenxid) is ${formatCount(worstDb.xidAge)} of the ${formatCount(PG_WRAPAROUND_XID_LIMIT)} at which Postgres refuses writes. This is cluster-wide: it is not visible in this database's pg_class, and every database in the cluster stops together.`
+    }
+  }
+
   const withAge = v.tables.filter((t) => t.xidAge !== null)
   if (withAge.length === 0) {
     return { level: 'unknown', headline: 'No table ages could be read.' }
@@ -1090,12 +1297,25 @@ export function judgePgVacuum(v: PgVacuumValue): DbVerdict {
   const worst = withAge.reduce((a, b) => ((b.xidAge ?? 0) > (a.xidAge ?? 0) ? b : a))
   const age = worst.xidAge ?? 0
   const frac = worst.freezeFraction ?? 0
-  const where = `${worst.schema}.${worst.name}`
-  if (frac >= T.freezeAlarmFraction || age >= T.freezeAlarmAbsolute) {
+  // A TOAST relation is named pg_toast.pg_toast_16384, which nobody can act on.
+  const where = worst.relkind === 't' && worst.parent ? `${worst.parent} (TOAST)` : `${worst.schema}.${worst.name}`
+  // The genuine shutdown alarm, measured against the point Postgres actually
+  // stops rather than against the point autovacuum starts.
+  if (age >= T.freezeAlarmAbsolute) {
     return {
       level: 'alarm',
-      headline: `${where} is ${Math.round(frac * 100)}% of the way to transaction-ID wraparound.`,
-      because: `age(relfrozenxid) is ${formatCount(age)} against an autovacuum_freeze_max_age of ${formatCount(v.freezeMaxAge)}. Postgres refuses writes near 2 billion; get a vacuum onto this table in a window you choose rather than one it chooses.`
+      headline: `${where} is ${Math.round((age / PG_WRAPAROUND_XID_LIMIT) * 100)}% of the way to transaction-ID wraparound.`,
+      because: `age(relfrozenxid) is ${formatCount(age)} of the ${formatCount(PG_WRAPAROUND_XID_LIMIT)} at which Postgres refuses writes. Get a vacuum onto this table in a window you choose rather than one it chooses.`
+    }
+  }
+  if (frac >= T.freezeAlarmFraction) {
+    // NOT wraparound. autovacuum_freeze_max_age is where autovacuum STARTS, and
+    // saying "90% of the way to wraparound" here overstated it by more than ten
+    // times — 180M of 200M is 8.5% of the way to the number that matters.
+    return {
+      level: 'alarm',
+      headline: `${where} is ${Math.round(frac * 100)}% of the way to a forced anti-wraparound vacuum.`,
+      because: `age(relfrozenxid) is ${formatCount(age)} against an autovacuum_freeze_max_age of ${formatCount(v.freezeMaxAge)} — ${Math.round((age / PG_WRAPAROUND_XID_LIMIT) * 100)}% of the age at which Postgres refuses writes. At 100% autovacuum forces a freeze whether or not it suits you, and on a large table that is hours of IO.`
     }
   }
   if (frac >= T.freezeWatchFraction) {
@@ -1129,14 +1349,24 @@ export function judgePgVacuum(v: PgVacuumValue): DbVerdict {
 export function judgePgConnections(v: PgConnectionsValue): DbVerdict {
   const idleTx = v.states.find((s) => s.state === 'idle in transaction')
   const idleAborted = v.states.find((s) => s.state === 'idle in transaction (aborted)')
-  const frac = v.maxConnections > 0 ? v.used / v.maxConnections : 0
+  // The ceiling an ordinary client can reach is max_connections minus what is
+  // held back for superusers (and, on PostgreSQL 16+, the second reserve). The
+  // old text asserted Postgres "reserves a handful for superusers and nothing
+  // else" while dividing by the number that includes them.
+  const ceiling = v.usableConnections > 0 ? v.usableConnections : v.maxConnections
+  const frac = ceiling > 0 ? v.used / ceiling : 0
+  const held = v.superuserReserved + v.reserved
   const shape = `${v.used} of ${v.maxConnections} connections in use`
+  const reservedNote = held > 0
+    ? ` ${held} of those are reserved (superuser_reserved_connections ${v.superuserReserved}, reserved_connections ${v.reserved}), so the ceiling an ordinary client reaches is ${ceiling}.`
+    : ''
 
-  if (v.maxConnections > 0 && frac >= T.connectionsAlarmFraction) {
+  if (ceiling > 0 && frac >= T.connectionsAlarmFraction) {
     return {
       level: 'alarm',
       headline: `${shape} (${Math.round(frac * 100)}%).`,
-      because: 'When max_connections is reached every new client is refused, including the psql session you would use to fix it. Postgres reserves a handful for superusers and nothing else.'
+      because:
+        'When max_connections is reached every new client is refused, including the psql session you would use to fix it.' + reservedNote
     }
   }
   const oldestIdleTx = Math.max(idleTx?.oldestSeconds ?? 0, idleAborted?.oldestSeconds ?? 0)
@@ -1147,7 +1377,7 @@ export function judgePgConnections(v: PgConnectionsValue): DbVerdict {
       because: 'It holds its locks and pins the oldest snapshot, so vacuum cannot remove any row deleted since it began. This is how a table bloats without anyone writing to it.'
     }
   }
-  if (v.maxConnections > 0 && frac >= T.connectionsWatchFraction) {
+  if (ceiling > 0 && frac >= T.connectionsWatchFraction) {
     return { level: 'watch', headline: `${shape} (${Math.round(frac * 100)}%).` }
   }
   if (oldestIdleTx >= T.idleInTransactionWatchSeconds) {
@@ -1157,24 +1387,49 @@ export function judgePgConnections(v: PgConnectionsValue): DbVerdict {
       because: 'Idle-in-transaction sessions hold back vacuum for the whole database.'
     }
   }
+  // Below every threshold — but if part of the picture came back NULL, this is
+  // not a clean bill of health, it is a bill this account could not read. The
+  // idle-in-transaction rules above are silently unreachable in this state.
+  if (v.redactedCount > 0) {
+    return {
+      level: 'unknown',
+      headline: `${shape} (${Math.round(frac * 100)}%), and ${v.redactedCount} of them cannot be read by this account.`,
+      because:
+        'Their state, query and query_start all came back NULL. Postgres does that rather than raising an error when the role lacks pg_read_all_stats, so an idle-in-transaction session holding back vacuum for the whole database would be invisible here. Grant pg_monitor (or pg_read_all_stats) to answer this.'
+    }
+  }
   return { level: 'ok', headline: `${shape} (${Math.round(frac * 100)}%).` }
 }
 
 export function judgePgLocks(locks: PgLock[]): DbVerdict {
   if (locks.length === 0) return { level: 'ok', headline: 'Nothing is waiting on a lock.' }
-  const worst = locks.reduce((a, b) => ((b.waitingSeconds ?? 0) > (a.waitingSeconds ?? 0) ? b : a))
-  const s = worst.waitingSeconds ?? 0
+  // `?? 0` here was the bug: a role without pg_read_all_stats gets NULL for
+  // query_start on a backend it does not own, so a session blocked for two
+  // hours rendered as "briefly blocked (0s)" — a watch instead of an alarm.
+  // A wait nobody could time is not a wait of zero.
+  const timed = locks.filter((l) => l.waitingSeconds !== null)
+  const hidden = locks.length - timed.length
+  const worst = timed.length > 0 ? timed.reduce((a, b) => ((b.waitingSeconds ?? 0) > (a.waitingSeconds ?? 0) ? b : a)) : null
+  const s = worst?.waitingSeconds ?? null
   const blockers = [...new Set(locks.flatMap((l) => l.blockedBy))]
-  const because = `pid ${worst.pid} is waiting on ${worst.blockedBy.join(', ') || 'another session'}${
+  const target = worst ?? locks[0]
+  const because = `pid ${target.pid} is waiting on ${target.blockedBy.join(', ') || 'another session'}${
     blockers.length > 1 ? `; ${blockers.length} sessions are blocking in total` : ''
   }.`
-  if (s >= T.lockWaitAlarmSeconds) {
+  if (s !== null && s >= T.lockWaitAlarmSeconds) {
     return { level: 'alarm', headline: `${locks.length} session${locks.length === 1 ? ' has' : 's have'} been blocked for up to ${formatSeconds(s)}.`, because }
   }
-  if (s >= T.lockWaitWatchSeconds) {
+  if (hidden > 0) {
+    return {
+      level: 'unknown',
+      headline: `${locks.length} session${locks.length === 1 ? ' is' : 's are'} blocked, and this account cannot see for how long.`,
+      because: `query_start came back NULL for ${hidden} of them, which is what Postgres returns instead of an error when the role lacks pg_read_all_stats. The wait could be two seconds or two hours. ${because}`
+    }
+  }
+  if (s !== null && s >= T.lockWaitWatchSeconds) {
     return { level: 'watch', headline: `${locks.length} session${locks.length === 1 ? ' is' : 's are'} blocked, the longest for ${formatSeconds(s)}.`, because }
   }
-  return { level: 'watch', headline: `${locks.length} session${locks.length === 1 ? ' is' : 's are'} briefly blocked (${formatSeconds(s)}).`, because }
+  return { level: 'watch', headline: `${locks.length} session${locks.length === 1 ? ' is' : 's are'} briefly blocked (${formatSeconds(s ?? 0)}).`, because }
 }
 
 export function judgePgSizes(v: PgSizesValue): DbVerdict {
@@ -1357,6 +1612,10 @@ export const MYSQL_QUERIES = Object.freeze({
   // parser therefore reads either vocabulary from whichever row it got, rather
   // than assuming the columns follow the statement it happened to send.
   replicaStatus: 'SHOW REPLICA STATUS',
+  // MariaDB's multi-source spelling. `SHOW SLAVE STATUS` there returns ONLY the
+  // unnamed default connection, so a MariaDB server replicating from two
+  // sources answers it with the one row and says nothing about the other.
+  allSlavesStatus: 'SHOW ALL SLAVES STATUS',
   slaveStatus: 'SHOW SLAVE STATUS',
 
   logBin: 'SELECT @@log_bin AS log_bin',
@@ -1439,7 +1698,10 @@ export function parseMysqlOverview(row: Row | undefined, uptimeSeconds: number |
 
 export function parseMysqlReplication(rows: Row[]): MysqlReplicationChannel[] {
   return rows.map((r) => ({
-    channel: str(replicaField(r, 'Channel_Name', 'Channel_Name')) || 'default',
+    // MySQL calls it Channel_Name; MariaDB calls it Connection_name. Reading
+    // only the first collapsed every MariaDB multi-source connection into
+    // "default", so a server replicating from two places looked like one.
+    channel: str(replicaField(r, 'Channel_Name', 'Connection_name')) || 'default',
     vocabulary: replicaVocabulary(r),
     sourceHost: str(replicaField(r, 'Source_Host', 'Master_Host')),
     ioState: str(replicaField(r, 'Replica_IO_State', 'Slave_IO_State')),
@@ -1618,7 +1880,9 @@ export function judgeMysqlChannel(c: MysqlReplicationChannel): DbVerdict {
 
   if (!ioOk || !sqlOk) {
     const stopped = [!ioOk ? 'IO' : null, !sqlOk ? 'SQL' : null].filter(Boolean).join(' and ')
-    const err = (c.lastIoError || '').trim() || (c.lastSqlError || '').trim()
+    // Last_IO_Error reads `error connecting to master 'replicator@db:3306'`.
+    // That sentence is shown here AND written into the durable event store.
+    const err = redactDbIdentifiers((c.lastIoError || '').trim() || (c.lastSqlError || '').trim())
     return {
       level: 'alarm',
       headline: `${name} is BROKEN — the ${stopped} thread${stopped.includes('and') ? 's are' : ' is'} not running.`,
@@ -1709,7 +1973,13 @@ export function judgeMysqlSlowLog(v: MysqlSlowLogValue): DbVerdict {
     }
   }
   const t = v.longQueryTimeSeconds
-  const counted = `${formatCount(v.slowQueries)} slow quer${v.slowQueries === 1 ? 'y' : 'ies'} recorded in ${formatSeconds(v.uptimeSeconds)} of uptime.`
+  // SHOW GLOBAL STATUS feeds both of these. When it failed — a denied account,
+  // a dropped connection — they are null, and the sentence built from them read
+  // "unknown slow queries recorded in unknown of uptime" under a green tick.
+  const uncounted = v.slowQueries === null || v.uptimeSeconds === null
+  const counted = uncounted
+    ? 'SHOW GLOBAL STATUS could not be read, so how much this log has actually recorded is unknown.'
+    : `${formatCount(v.slowQueries)} slow quer${v.slowQueries === 1 ? 'y' : 'ies'} recorded in ${formatSeconds(v.uptimeSeconds)} of uptime.`
   if (t !== null && t >= T.slowLogUselessThresholdSeconds) {
     return {
       level: 'watch',
@@ -1718,7 +1988,7 @@ export function judgeMysqlSlowLog(v: MysqlSlowLogValue): DbVerdict {
     }
   }
   return {
-    level: 'ok',
+    level: uncounted ? 'unknown' : 'ok',
     headline: `Slow query log on at ${t ?? '?'}s, writing to ${v.output ?? 'FILE'}.`,
     because: `${counted}${v.file ? ` File: ${v.file}` : ''}`
   }
@@ -1836,7 +2106,12 @@ export function judgeMysqlBufferPool(v: MysqlBufferPoolValue): DbVerdict {
   const pct = `${(v.hitRate * 100).toFixed(2)}%`
   const tooYoung = (v.uptimeSeconds ?? 0) < T.bufferPoolMinUptimeSeconds
   const tooFew = (v.readRequests ?? 0) < T.bufferPoolMinReadRequests
-  if (tooYoung || tooFew) {
+  // AND, not OR. A million requests is a lot for a busy server and nothing for
+  // a quiet one, so a server up a hundred days with half a million reads was
+  // `unknown` forever at a 99.98% hit rate — a permanently unanswered question
+  // rather than a warm-up guard. Either signal on its own is enough to judge;
+  // it takes both to mean the pool is still cold.
+  if (tooYoung && tooFew) {
     return {
       level: 'unknown',
       headline: `Buffer pool hit rate is ${pct}, over too small a sample to judge.`,
@@ -1858,7 +2133,20 @@ export function judgeMysqlBufferPool(v: MysqlBufferPoolValue): DbVerdict {
 }
 
 export function judgeMysqlSizes(v: MysqlSizesValue): DbVerdict {
-  if (v.tables.length === 0) return { level: 'unknown', headline: 'No user tables were listed.' }
+  // information_schema.TABLES is filtered by grants, silently — the identical
+  // mechanism as PROCESSLIST, and there is no counter to cross-check it
+  // against, so it is disclosed instead of guessed at. A 500 GB server read by
+  // an account with SELECT on one schema answers "32 KB across 1 table" with no
+  // error and no warning.
+  const scope =
+    ' information_schema.TABLES lists only tables this account has some privilege on, and MySQL does not say when it has filtered the list — treat this as a floor, not a total.'
+  if (v.tables.length === 0) {
+    return {
+      level: 'unknown',
+      headline: 'No user tables were listed.',
+      because: `That is either an empty server or an account with no privileges on anything.${scope}`
+    }
+  }
   const biggest = v.tables[0]
   const fragmented = v.tables.filter((t) => (t.freeBytes ?? 0) > 1_000_000_000)
   return {
@@ -1868,7 +2156,8 @@ export function judgeMysqlSizes(v: MysqlSizesValue): DbVerdict {
       `Largest: ${biggest.schema}.${biggest.name} at ${formatBytes((biggest.dataBytes ?? 0) + (biggest.indexBytes ?? 0))}.` +
       (fragmented.length > 0
         ? ` ${fragmented.length} table${fragmented.length === 1 ? ' has' : 's have'} over 1 GB of DATA_FREE — space allocated on disk and not in use.`
-        : '')
+        : '') +
+      scope
   }
 }
 
@@ -1936,9 +2225,151 @@ export function notableDbEvents(report: DbOpsReport): { kind: string; payload: R
         status: a.status,
         level: a.verdict.level,
         headline: a.verdict.headline,
-        because: a.verdict.because
+        because: a.verdict.because,
+        metrics: dbEventMetrics(a)
       }
     })
+  }
+  return out
+}
+
+/**
+ * The numbers behind a verdict, for whoever alerts off it.
+ *
+ * Item 19b's rule is "alert when lag exceeds N". Without this the payload is
+ * prose, and the only way to express that rule is a regular expression over an
+ * English sentence — which breaks the first time a headline is reworded. The
+ * numbers are cheap to add now and a schema migration to add later.
+ *
+ * Only finite numbers go in. A metric that is null is omitted rather than
+ * written as 0, for the same reason `num()` refuses to: an absent measurement
+ * and a measurement of zero are the whole subject of this file.
+ */
+export function dbEventMetrics(a: DbAnswer<unknown>): Record<string, number> {
+  const out: Record<string, number> = {}
+  const put = (k: string, n: number | null | undefined): void => {
+    if (typeof n === 'number' && Number.isFinite(n)) out[k] = n
+  }
+  const v = a.value as Record<string, unknown> | undefined
+  switch (a.id) {
+    case 'replication': {
+      if (Array.isArray(v)) {
+        // MySQL: worst channel.
+        const channels = v as MysqlReplicationChannel[]
+        put('channels', channels.length)
+        const behind = channels.map((c) => c.secondsBehind).filter((n): n is number => n !== null)
+        if (behind.length > 0) put('secondsBehind', Math.max(...behind))
+        put('channelsStopped', channels.filter((c) => c.ioRunning !== 'Yes' || c.sqlRunning !== 'Yes').length)
+      } else if (v && (v as unknown as PgReplicationValue).role === 'standby') {
+        const st = v as unknown as PgReplicationStandby
+        put('secondsBehind', st.replayAgeSeconds)
+        put('applyLagBytes', st.applyLagBytes)
+      } else if (v && (v as unknown as PgReplicationValue).role === 'primary') {
+        const replicas = (v as unknown as PgReplicationPrimary).replicas
+        put('replicas', replicas.length)
+        put('replicasRedacted', replicas.filter((r) => r.redacted).length)
+        const lags = replicas.map((r) => r.replayLagSeconds).filter((n): n is number => n !== null)
+        if (lags.length > 0) put('secondsBehind', Math.max(...lags))
+      }
+      break
+    }
+    case 'archiver': {
+      const ar = v as unknown as PgArchiver | undefined
+      put('failedCount', ar?.failedCount)
+      put('archivedCount', ar?.archivedCount)
+      put('lastFailedAgeSeconds', ar?.lastFailedAgeSeconds)
+      break
+    }
+    case 'autovacuum': {
+      const va = v as unknown as PgVacuumValue | undefined
+      const worst = (va?.tables ?? []).reduce<number | null>((m, t) => (t.xidAge !== null && t.xidAge > (m ?? -1) ? t.xidAge : m), null)
+      put('xidAge', worst)
+      put('freezeMaxAge', va?.freezeMaxAge)
+      if (worst !== null && va) put('freezeFraction', worst / va.freezeMaxAge)
+      if (worst !== null) put('wraparoundFraction', worst / PG_WRAPAROUND_XID_LIMIT)
+      const db = (va?.databases ?? []).reduce<number | null>((m, d) => (d.xidAge !== null && d.xidAge > (m ?? -1) ? d.xidAge : m), null)
+      put('databaseXidAge', db)
+      break
+    }
+    case 'connections': {
+      if (v && 'usableConnections' in v) {
+        const c = v as unknown as PgConnectionsValue
+        put('used', c.used)
+        put('maxConnections', c.maxConnections)
+        put('usableConnections', c.usableConnections)
+        put('redactedCount', c.redactedCount)
+        if (c.usableConnections > 0) put('usedFraction', c.used / c.usableConnections)
+      } else if (v) {
+        const c = v as unknown as MysqlConnectionsValue
+        put('used', c.threadsConnected)
+        put('maxConnections', c.maxConnections)
+        put('refused', c.connectionErrorsMaxConnections)
+        put('highWaterMark', c.maxUsedConnections)
+        if (c.maxConnections > 0 && c.threadsConnected !== null) put('usedFraction', c.threadsConnected / c.maxConnections)
+      }
+      break
+    }
+    case 'locks': {
+      const locks = (Array.isArray(v) ? v : []) as PgLock[]
+      put('blockedSessions', locks.length)
+      const waits = locks.map((l) => l.waitingSeconds).filter((n): n is number => n !== null)
+      if (waits.length > 0) put('longestWaitSeconds', Math.max(...waits))
+      put('redactedSessions', locks.filter((l) => l.redacted).length)
+      break
+    }
+    case 'sizes': {
+      if (v && 'databases' in v) {
+        const sz = v as unknown as PgSizesValue
+        put('totalBytes', sz.databases.reduce((acc, d) => acc + (d.totalBytes ?? 0), 0))
+        put('largestTableBytes', sz.tables[0]?.totalBytes)
+      } else if (v) {
+        const sz = v as unknown as MysqlSizesValue
+        put('totalBytes', sz.totalBytes)
+        put('tables', sz.tables.length)
+      }
+      break
+    }
+    case 'statements': {
+      const st = v as unknown as PgStatementsValue | undefined
+      put('statements', st?.statements.length)
+      put('redactedCount', st?.redactedCount)
+      put('slowestMeanMs', st?.statements[0]?.meanExecMs)
+      break
+    }
+    case 'binlogs': {
+      const b = v as unknown as MysqlBinlogsValue | undefined
+      put('totalBytes', b?.totalBytes)
+      put('files', b?.files.length)
+      put('expireSeconds', b?.expireSeconds)
+      break
+    }
+    case 'slowlog': {
+      const sl = v as unknown as MysqlSlowLogValue | undefined
+      put('slowQueries', sl?.slowQueries)
+      put('longQueryTimeSeconds', sl?.longQueryTimeSeconds)
+      put('uptimeSeconds', sl?.uptimeSeconds)
+      break
+    }
+    case 'processlist': {
+      const pl = v as unknown as MysqlProcesslistValue | undefined
+      put('visible', pl?.visible)
+      put('threadsConnected', pl?.threadsConnected)
+      const running = (pl?.processes ?? []).filter(isClientQuery)
+      put('running', running.length)
+      const secs = running.map((r) => r.seconds).filter((n): n is number => n !== null)
+      if (secs.length > 0) put('longestSeconds', Math.max(...secs))
+      break
+    }
+    case 'bufferpool': {
+      const bp = v as unknown as MysqlBufferPoolValue | undefined
+      put('hitRate', bp?.hitRate)
+      put('readRequests', bp?.readRequests)
+      put('reads', bp?.reads)
+      put('sizeBytes', bp?.sizeBytes)
+      break
+    }
+    default:
+      break
   }
   return out
 }
