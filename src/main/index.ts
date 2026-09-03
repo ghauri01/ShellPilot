@@ -51,7 +51,7 @@ import {
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { HostFactsReader } from './services/hostFacts'
 import { FleetSampler, fleetCached, setActiveFleetSampler } from './services/fleetSampler'
-import { loadHistory, type HistoryStore } from './services/history'
+import { loadHistory, type EventCursor, type HistoryStore } from './services/history'
 import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
@@ -1622,16 +1622,53 @@ ipcMain.handle('alerts:record', (_e, raw: unknown, at?: number) => {
   return true
 })
 
+/**
+ * How far back the alert log is read.
+ *
+ * A ROW COUNT was the wrong bound and it re-created the exact failure the
+ * durable half of item 19b exists to end. `ORDER BY ts DESC LIMIT 500` drops
+ * the OLDEST rows first, and the oldest rows are the chronic alerts this whole
+ * feature is for: six hundred rows of newer CPU noise — which one busy estate
+ * produces in an afternoon, since CPU's repeat window is sixty seconds — push
+ * a disk that has been at 91% for a month out of the window, and it
+ * re-announces itself immediately after every restart. Forever, because the
+ * replacement row is written with the ORIGINAL `at` and lands outside the
+ * newest-500 window again.
+ *
+ * So the bound is TIME. Thirty days is longer than any outstanding alert can
+ * plausibly go without a corroborating row — the longest repeat window in the
+ * store is six hours, a snooze is at most a day — and it is well inside what
+ * the history store keeps.
+ *
+ * ROW_BUDGET is a ceiling on the read, not the bound: it is what stops a
+ * pathological log from being loaded whole. It is five thousand rather than
+ * five hundred so that reaching it takes an estate that raises an alert every
+ * eight minutes for a month, and if it is ever reached the oldest rows are
+ * still what falls out — stated here rather than left to be rediscovered.
+ */
+const ALERT_HYDRATION_WINDOW_MS = 30 * 86_400_000
+const ALERT_HYDRATION_ROW_BUDGET = 5000
+
 ipcMain.handle('alerts:history', (_e, limit?: number): StoredAlertRow[] => {
   if (!historyStore) return []
+  // The page size, not the answer size. The caller's number is how much to ask
+  // for at a time; the window below is what decides when to stop.
   const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(2000, Math.floor(limit))) : 500
+  const from = Date.now() - ALERT_HYDRATION_WINDOW_MS
   const out: StoredAlertRow[] = []
-  for (const row of historyStore.readEvents({ kind: ALERT_HISTORY_KIND, limit: n })) {
-    // Sanitised on the way OUT as well as the way in. The rows on disk predate
-    // whatever version is reading them, and a kind this build does not know is
-    // not a kind it can render or reason about.
-    const event = sanitiseStoredAlert(row.payload)
-    if (event) out.push({ ...event, at: row.ts })
+  let cursor: EventCursor | undefined
+  while (out.length < ALERT_HYDRATION_ROW_BUDGET) {
+    const page = historyStore.readEvents({ kind: ALERT_HISTORY_KIND, limit: n, from, cursor })
+    if (page.length === 0) break
+    for (const row of page) {
+      // Sanitised on the way OUT as well as the way in. The rows on disk predate
+      // whatever version is reading them, and a kind this build does not know is
+      // not a kind it can render or reason about.
+      const event = sanitiseStoredAlert(row.payload)
+      if (event) out.push({ ...event, at: row.ts })
+    }
+    if (page.length < n) break
+    cursor = page[page.length - 1].cursor
   }
   return out
 })
@@ -1653,9 +1690,16 @@ ipcMain.handle('alerts:history', (_e, limit?: number): StoredAlertRow[] => {
 ipcMain.handle('alerts:db-events', (_e, limit?: number): StoredDbAlertRow[] => {
   if (!historyStore) return []
   const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 200
+  // Bounded by the same window the alert log is hydrated over, and that pairing
+  // is the point rather than tidiness. `seenEvents` — the only thing that stops
+  // an occurrence being announced twice — is seeded from `alerts:history`, so a
+  // db row older than that window arrives with nothing to recognise it and is
+  // announced again on every launch. Offering a row this process cannot
+  // remember having announced is offering it forever.
+  const from = Date.now() - ALERT_HYDRATION_WINDOW_MS
   const out: StoredDbAlertRow[] = []
   for (const kind of DB_ALERT_HISTORY_KINDS) {
-    for (const row of historyStore.readEvents({ kind, limit: n })) {
+    for (const row of historyStore.readEvents({ kind, limit: n, from })) {
       const p = row.payload
       if (typeof p !== 'object' || p === null) continue
       const r = p as Record<string, unknown>
@@ -1699,12 +1743,48 @@ ipcMain.handle('db:close', (_e, id: string) => dbClose(id))
 // down at the top of src/shared/dbOps.ts. Notable states are recorded as
 // history events so item 19b can alert on them later; the alerting itself is
 // deliberately NOT here.
+/**
+ * The verdict each question was last recorded at, per connection.
+ *
+ * `db:ops` runs when somebody presses a button, and it used to write a fresh
+ * history row stamped `Date.now()` on every read. The alert store's dedupe key
+ * includes `at`, so six reads of ONE standing replication alarm were six
+ * distinct occurrences: five notifications, the fifth announcing "this has
+ * happened 5 times in 6 hours" about something that happened once and was read
+ * five times, and a flap damp earned by pressing Refresh.
+ *
+ * So an unchanged verdict is not a new occurrence. The row that already stands
+ * keeps its original `at`, which is the honest timestamp: it is when the
+ * condition was first seen, not when somebody last looked at it.
+ *
+ * In memory, and deliberately not seeded from the store. A restart is allowed
+ * to write one fresh row per standing verdict — that is once per launch rather
+ * than once per press, and the alternative is reading history back on a path
+ * that is already doing a database round trip. `ok` is tracked here even though
+ * it is never written, because it is what tells a later alarm on the same
+ * question that it is a NEW occurrence rather than the same one being re-read.
+ */
+const dbVerdictSeen = new Map<string, string>()
+
 ipcMain.handle('db:ops', async (_e, cfg: DbConnectConfig) => {
   const report = await dbOps(withVpnTransportDb(resolveDbSecrets(cfg)))
   if (report.ok) {
-    // hostId is null: a database connection is not a fleet host, and inventing
-    // one would put rows in a host's timeline that host never produced.
-    for (const event of notableDbEvents(report)) historyStore?.recordEvent(event.kind, null, event.payload)
+    // Every answer, not just the notable ones: a question that has gone back to
+    // `ok` has to be forgotten, or the next time it alarms it looks like the
+    // same alarm being re-read and is never written down.
+    const notable = new Map(
+      notableDbEvents(report).map((e) => [`${report.connectionId}\u0000${String(e.payload.question)}`, e])
+    )
+    for (const a of report.answers) {
+      const seenKey = `${report.connectionId}\u0000${a.id}`
+      const event = notable.get(seenKey)
+      const level = event ? String(event.payload.level) : a.verdict.level
+      if (dbVerdictSeen.get(seenKey) === level) continue
+      dbVerdictSeen.set(seenKey, level)
+      // hostId is null: a database connection is not a fleet host, and inventing
+      // one would put rows in a host's timeline that host never produced.
+      if (event) historyStore?.recordEvent(event.kind, null, event.payload)
+    }
   }
   return report
 })
