@@ -549,3 +549,42 @@ All three are now stated in every implementation brief rather than assumed. The 
 generalises past git: when several workers share a resource, the dangerous operations are not
 the ones that write to their own files, but the ones that touch state they think is private
 and is not.
+
+### Queued: two blockers in the detached engine
+
+Found by adversarial review of B2/B3/17. Both need `src/shared/jobs.ts` and
+`src/main/services/jobDetached.ts`, which another agent holds while it unifies the sudo
+prefix. Written down rather than held in conversation, because a queued blocker that exists
+only in a chat message is a blocker that gets lost.
+
+**Reboot verification never runs.** `classifyJobPoll` checks `rc !== null` first and
+unconditionally, so a declared reboot only reaches the verification path when the wrapper
+was killed before it could record an exit status. But `systemctl reboot` and `shutdown -r
+now` both return 0 *immediately*, and the wrapper's next instruction writes `rc` — microseconds
+later, while systemd is still stopping units. The marker directory deliberately survives the
+reboot, so the first poll after the host returns lands in the finished branch, reaps, and
+reports success.
+
+`verifyReboot` is therefore unreachable in production. A host that was told to reboot, came
+back with failed units, or never rebooted at all because something swallowed the request,
+reports `ok` and the wave rolls on — which is the failure item 17 exists to prevent, in the
+one code path it was written for. A test pins the behaviour as intended without confronting
+what it implies.
+
+The fix is that a *declared* reboot must not accept `rc` as its answer; it falls through to
+the same verification the killed-wrapper case already uses.
+
+**A race deletes the exit status of jobs that succeeded.** The poll reads `rc`, then checks
+`kill -0`. Those are two adjacent instructions in the wrapper, and the polling shell can be
+descheduled between them — so a wrapper that writes `rc` and exits inside that window is
+observed as "no exit status, not alive". That classifies as `orphaned`, which reaps the
+directory, **deleting the `rc` that was in fact written**, and records the OOM-killer
+explanation for a job that exited zero.
+
+The rc-before-output ordering is correct and must stay; the fix is a second read after the
+liveness check, or one confirming poll before any reap.
+
+The pattern in both is the same, and it is worth naming: **the happy path was never
+exercised end to end.** Every state the engine can reach was tested, and the two defects live
+in the ordinary sequence — a reboot that works, and a job that finishes — which the fake host
+could produce but was never asked to.
