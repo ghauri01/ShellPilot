@@ -211,6 +211,85 @@ describe('spellings the classifier used to miss', () => {
     expect(assessCommand('apt-get purge nginx').risk).toBe('elevated')
     expect(assessCommand('apt autoremove').risk).toBe('elevated')
   })
+
+  // -----------------------------------------------------------------------
+  // sudo WITH FLAGS, which is the spelling this codebase itself uses.
+  //
+  // The prefix admitted `sudo ` and `doas ` and nothing else — no options. So
+  // `sudo -n reboot` fell out of every destructive rule and landed on the
+  // `runs as root` rule instead, which is `elevated`: one confirm click on one
+  // host, where a bare `reboot` demands a typed phrase. Strictly weaker
+  // confirmation for strictly more privilege.
+  //
+  // And `-n` is not an exotic spelling. It is the ONLY escalation that cannot
+  // prompt for a password, which is why SUDO_PROBE in src/shared/docker.ts,
+  // the docker sudo failover and src/shared/cron.ts all use it. The spelling
+  // the app prefers was the spelling the guard missed.
+  // -----------------------------------------------------------------------
+  it('flags a machine-stopping verb behind sudo with flags', () => {
+    for (const c of [
+      'sudo -n reboot',
+      'sudo --non-interactive reboot',
+      'sudo -u root reboot',
+      'sudo -H shutdown -h now',
+      'doas -n reboot',
+      // Bundled short flags, an attached value, a long flag with `=`, an
+      // end-of-options `--`, and a quoted value with a space in it.
+      'sudo -nH poweroff',
+      'sudo -uroot reboot',
+      'sudo --user=root halt',
+      'sudo -- reboot',
+      "sudo -p 'password for %p: ' reboot",
+      // The env prefix still has to work in front of the flags.
+      'DEBIAN_FRONTEND=noninteractive sudo -n shutdown -h now',
+      // And it still has to work after a chain, not only at position zero.
+      'apt-get -y upgrade && sudo -n reboot'
+    ]) {
+      expect(assessCommand(c).risk, c).toBe('destructive')
+    }
+  })
+
+  it('flags the rest of the destructive set behind a flagged sudo, not just reboot', () => {
+    // Every hand-rolled rule carried its own copy of the flagless prefix, so
+    // the hole was the whole set. `sudo -n rm -rf /var/log` taking a single
+    // confirm click on one host is a worse hole than the reboot one.
+    for (const c of [
+      'sudo -n rm -rf /var/log',
+      'sudo -u root rm --recursive --force /srv/old',
+      'sudo -n systemctl stop nginx',
+      'sudo -n systemctl reboot',
+      'sudo -n service nginx stop',
+      'sudo -n iptables -F',
+      'sudo -n crontab -r',
+      'sudo -n dd if=/dev/zero of=/dev/sda',
+      'sudo -n mkfs.ext4 /dev/sdb1',
+      'sudo -n chmod -R 777 /srv',
+      'sudo -u root chown --recursive deploy /srv',
+      'sudo -n pkill -9 nginx',
+      'sudo -n userdel deploy',
+      'sudo -n lvremove /dev/vg0/data',
+      'sudo -n zfs destroy tank/backups',
+      'sudo -n truncate -s 0 /var/log/syslog',
+      "sudo -n find /var/log -name '*.gz' -delete",
+      // The two rules that read a sudo which is NOT at a command start.
+      "find /srv -name '*.bak' -exec sudo -n rm -rf {} +",
+      'find /srv -type f | xargs sudo -n rm -f'
+    ]) {
+      expect(assessCommand(c).risk, c).toBe('destructive')
+    }
+  })
+
+  it('gives the elevated rules the same reading, so the reason is still said', () => {
+    // These already read `elevated` before the fix — but only via the blanket
+    // `runs as root` rule, so the dialog said "runs as root" and never said
+    // WHAT it was about to do. The reason is the half of the model the user
+    // actually reads.
+    const why = (c: string): string[] => assessCommand(c).reasons
+    expect(why('sudo -n apt-get install nginx')).toContain('changes installed packages')
+    expect(why('sudo -n systemctl restart nginx')).toContain('restarts a service')
+    expect(why('sudo -n service nginx reload')).toContain('restarts a service')
+    expect(why('sudo -u root docker system prune -af')).toContain('removes or stops containers')
+  })
 })
 
 describe('and still not crying wolf', () => {
@@ -234,7 +313,84 @@ describe('and still not crying wolf', () => {
       'echo charming',
       'grep reboot /var/log/syslog',
       // A filename that happens to end in a capital R is not a recursive flag.
-      'chmod 644 /srv/foo-baR'
+      'chmod 644 /srv/foo-baR',
+      // The word `sudo` in an argument is not a command running as root, and
+      // `sudoers` is not `sudo` — there is no word boundary inside it.
+      'echo sudo reboot',
+      'ls /etc/sudoers.d',
+      'cat /etc/sudoers.d/90-reboot',
+      'grep -r sudo /etc/pam.d'
+    ]) {
+      expect(assessCommand(c).risk, c).toBe('ordinary')
+    }
+  })
+
+  // -----------------------------------------------------------------------
+  // The half of the sudo-flag fix that matters more than the other half.
+  //
+  // Widening the prefix to admit option arguments is one careless character
+  // away from admitting the COMMAND as an option argument — and then
+  // `sudo -u deploy grep reboot /var/log/syslog` reads as "stops the machine".
+  // A guard that fires on a read-only grep is a guard people learn to click
+  // through, and it is then not there for the `reboot` that meant it.
+  //
+  // These are all `elevated`, because they genuinely do run as root. What none
+  // of them may be is `destructive`: the destructive verb in each one is an
+  // ARGUMENT, not a command.
+  // -----------------------------------------------------------------------
+  it('does not read a verb in a flagged sudo’s arguments as a command', () => {
+    for (const c of [
+      'sudo -u deploy grep reboot /var/log/syslog',
+      'sudo -n cat reboot.txt',
+      'sudo cat /var/log/reboot.log',
+      'sudo -u root tail -n 50 /var/log/shutdown.log',
+      'sudo -n grep -r reboot /etc',
+      'sudo -n test -f /run/reboot-required',
+      'sudo -n stat /sbin/reboot',
+      'sudo -n ls /etc/systemd/system/reboot.target.wants',
+      'sudo -n journalctl -u nginx | grep -i shutdown',
+      'sudo -n systemctl status reboot-guard',
+      // `-u deploy` must consume `deploy` as the flag's value and then STOP.
+      // A prefix that swallowed any token after any flag would read the `rm`
+      // here as a command.
+      'sudo -u deploy ls -la /srv/rm-backups',
+      'sudo -n head -n 100 /var/log/mkfs.log',
+      'sudo -n diff /etc/crontab /etc/crontab.bak'
+    ]) {
+      const a = assessCommand(c)
+      expect(a.risk, c).toBe('elevated')
+      expect(a.reasons, c).toEqual(['runs as root'])
+    }
+  })
+
+  it('cannot be made to hang by a long line of flags', () => {
+    // Not a theoretical hardening. The first version of the widened prefix
+    // spelled the value-taking flags inline, which made `sudo -u -u -u …`
+    // parse exponentially many ways over the same characters — twenty flags
+    // did not finish. `assessCommand` runs on every keystroke in the broadcast
+    // panel, so an input that wedges it wedges the window.
+    for (const line of [
+      `sudo ${'-u '.repeat(400)}x`,
+      `sudo ${'-u a '.repeat(400)}x`,
+      `sudo ${'-uuuu a '.repeat(400)}x`,
+      `sudo ${'--user root '.repeat(400)}x`,
+      `sudo ${'-nHE '.repeat(400)}x`
+    ]) {
+      const started = Date.now()
+      expect(assessCommand(line).risk).toBe('elevated')
+      expect(Date.now() - started, line.slice(0, 40)).toBeLessThan(250)
+    }
+  })
+
+  it('still refuses to widen the anchor itself', () => {
+    // The option loop hangs off `sudo`/`doas` and nothing else. A bare flag,
+    // or a flag behind some other command, is not a licence to go looking for
+    // a verb further down the line.
+    for (const c of [
+      'ssh -n web01 uptime',
+      'nice -n 10 tar cf backup.tar /srv',
+      'timeout -k 5 30 curl https://example.test/reboot',
+      'ansible -m shell -a uptime web'
     ]) {
       expect(assessCommand(c).risk, c).toBe('ordinary')
     }

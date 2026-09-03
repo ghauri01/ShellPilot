@@ -10,6 +10,7 @@ import {
   approvalFor,
   assessCommand,
   classifyBroadcastResult,
+  commandStart,
   confirmationFor,
   verifyApproval
 } from './broadcast'
@@ -431,12 +432,18 @@ export function planJob(spec: JobSpec, targets: JobTargetRef[]): JobPlan {
     // it carries a boolean saying what it does, and grading it by re-reading
     // its own shell would be preferring the guess to the declaration.
     //
-    // It is not hypothetical. This codebase uses `sudo -n` everywhere,
-    // precisely because that is the only escalation which cannot prompt — and
-    // `assessCommand` recognises `sudo <verb>` but not `sudo -n <verb>`, so
-    // `sudo -n reboot` reads as `elevated`. A patch run would then have asked
-    // for a weaker confirmation to restart a machine than to run a bare
-    // `reboot`, which is exactly backwards. See tests/jobStages.test.ts.
+    // It was not hypothetical. `assessCommand` used to recognise `sudo <verb>`
+    // and not `sudo -n <verb>` — and this codebase uses `sudo -n` everywhere,
+    // precisely because that is the only escalation which cannot prompt. So
+    // `sudo -n reboot` read as `elevated`, and a patch run asked for a WEAKER
+    // confirmation to restart a machine than to run a bare `reboot`.
+    //
+    // That gap is now closed in broadcast.ts, and this rule stays anyway. It is
+    // the defence in depth beneath the text rule, not a workaround for it: the
+    // text rule is still a text rule, still defeatable, and still blind to
+    // `sudo sh -c 'reboot'` or a reboot inside a script this step invokes by
+    // name. A step that says what it does is graded on what it says.
+    // See tests/jobStages.test.ts.
     if (step.reboot === true && risk !== 'destructive') {
       risk = 'destructive'
       const why = 'a step in this job restarts the machine'
@@ -1767,12 +1774,21 @@ export function nextRetryDelay(
  * that stops answering because the job asked it to reboot is reported
  * `unreachable`, which reads as a fault and is the opposite of the truth.
  *
- * These two patterns are broadcast.ts's, deliberately duplicated rather than
- * imported, because there they are RISK rules — one entry in a list whose
- * output is a confirmation dialog — and here the question is a different one
- * with a different consequence. `tests/jobDetached.test.ts` asserts the two
- * agree, so a command this calls a restart that broadcast does not call
- * destructive is a test failure rather than a slow divergence.
+ * The VERB lists are broadcast.ts's, kept here rather than imported because
+ * there they are RISK rules — entries in a list whose output is a confirmation
+ * dialog — and here the question is a different one with a different
+ * consequence. `tests/jobDetached.test.ts` asserts the two agree, so a command
+ * this calls a restart that broadcast does not call destructive is a test
+ * failure rather than a slow divergence.
+ *
+ * The ANCHOR, though, is imported, and that is a correction rather than a
+ * tidy-up. Duplicating it meant this copy kept the flagless `(?:sudo\s+)?`
+ * after broadcast's was fixed, so `restartsTheMachine('sudo -n reboot')` said
+ * false while `assessCommand` said destructive — and this function is what the
+ * runner guard uses to catch an ad-hoc job whose text restarts a machine. The
+ * guard for an UNDECLARED reboot would have gone on missing the one spelling
+ * this codebase actually uses. Two copies of a safety rule that no longer agree
+ * is worse than one copy that is wrong: the wrong one is at least predictable.
  *
  * Anchored at a command start for broadcast's reason, which is worth repeating
  * because it is the whole reason the rule is not a substring search: without
@@ -1780,8 +1796,8 @@ export function nextRetryDelay(
  * guard that cries wolf on a read-only grep is a guard nobody reads.
  */
 const RESTARTS = [
-  /(^|[;&|(]|\n)\s*(?:\w+=\S+\s+)*(?:sudo\s+|doas\s+)?(?:shutdown|poweroff|halt|reboot)\b/,
-  /(^|[;&|(]|\n)\s*(?:sudo\s+|doas\s+)?systemctl\s+(?:poweroff|reboot|halt|kexec)\b/
+  commandStart(String.raw`(?:shutdown|poweroff|halt|reboot)\b`),
+  commandStart(String.raw`systemctl\s+(?:poweroff|reboot|halt|kexec)\b`)
 ]
 
 export function restartsTheMachine(command: string): boolean {

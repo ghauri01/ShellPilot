@@ -278,19 +278,24 @@ describe('classifying a poll on a step that was declared to restart the machine'
   })
 
   it('does not lean on the text matcher to know a reboot step is a reboot step', () => {
-    // A REAL GAP, found by writing this test. `assessCommand` — and
-    // `restartsTheMachine`, which duplicates its patterns — recognise
-    // `sudo <verb>` and not `sudo -n <verb>`, and `sudo -n` is what this
-    // codebase uses everywhere because it is the only escalation that cannot
-    // prompt. So the reboot command built here does NOT match the guess.
+    // A REAL GAP, found by writing this test, and STILL real now that the
+    // classifier reads sudo's flags. The reboot this codebase actually issues
+    // is `if command -v systemctl …; then sudo -n systemctl reboot; else …`,
+    // and the verb there sits after a `then` rather than at a command start.
+    // No anchored text rule reaches it, and an unanchored one would flag every
+    // `grep reboot /var/log/syslog` — which is the guard nobody reads.
     //
     // That is why `JobStep.reboot` is a declaration rather than a sniff, and
-    // why planJob grades a declared reboot as destructive on its own. The
-    // assertion is kept in this shape deliberately: if the patterns are ever
-    // widened, this line fails and somebody reads the paragraph above.
+    // why planJob grades a declared reboot as destructive on its own.
     expect(restartsTheMachine(buildRebootStep())).toBe(false)
-    expect(restartsTheMachine('sudo -n reboot')).toBe(false)
+    // What the text matcher DOES see, it now sees whole. `sudo -n` was the
+    // hole: the only escalation that cannot prompt, used everywhere in this
+    // codebase, and invisible to a prefix that admitted no flags. jobs.ts
+    // shares broadcast.ts's command-start fragment so the two cannot drift
+    // apart on it again.
+    expect(restartsTheMachine('sudo -n reboot')).toBe(true)
     expect(restartsTheMachine('reboot')).toBe(true)
+    expect(restartsTheMachine('grep reboot /var/log/syslog')).toBe(false)
   })
 })
 

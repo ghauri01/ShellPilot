@@ -424,19 +424,29 @@ describe('the reboot-ordering guard', () => {
 
 describe('the confirmation a reboot step demands', () => {
   it('is destructive on the declaration, not on how the command reads', async () => {
-    // THE BUG THIS PINS. `assessCommand` recognises `sudo <verb>` and not
-    // `sudo -n <verb>`, and `sudo -n` is what this codebase uses everywhere
-    // because it is the only escalation that cannot prompt. Without
-    // planJob honouring `step.reboot`, restarting a machine would have asked
-    // for a WEAKER confirmation than running a bare `reboot`.
+    // WHAT THIS PINS. `assessCommand` is a text rule anchored to a command
+    // start, so it grades what a command LOOKS like. A step that restarts the
+    // machine from inside a wrapper script looks like nothing at all — and
+    // that is not a hole to be patched, because the alternative to anchoring
+    // is flagging every `grep reboot /var/log/syslog`.
+    //
+    // (It used to be pinned with `sudo -n systemctl reboot`, which read as
+    // `elevated` because the sudo prefix admitted no flags — so restarting a
+    // machine asked for a WEAKER confirmation than a bare `reboot`. That gap
+    // is closed in broadcast.ts now; this rule is the defence in depth
+    // beneath it, not a workaround for it.)
     const bare = planJob(
-      { kind: 'patch', title: 't', steps: [{ command: 'sudo -n systemctl reboot' }] },
+      { kind: 'patch', title: 't', steps: [{ command: 'sudo -n /usr/local/sbin/apply-kernel.sh' }] },
       [{ serverId: 'a', serverName: 'a' }]
     )
     expect(bare.risk).toBe('elevated')
 
     const declared = planJob(
-      { kind: 'patch', title: 't', steps: [{ command: 'sudo -n systemctl reboot', reboot: true }] },
+      {
+        kind: 'patch',
+        title: 't',
+        steps: [{ command: 'sudo -n /usr/local/sbin/apply-kernel.sh', reboot: true }]
+      },
       [{ serverId: 'a', serverName: 'a' }]
     )
     expect(declared.risk).toBe('destructive')
