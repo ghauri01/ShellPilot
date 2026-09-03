@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { useApp, useWorkspaceServers } from '../../store/app'
 import { useFleet } from '../../store/fleet'
 import { useFleetStatus } from '../../store/fleetStatus'
-import { checkResourceAlerts, checkUnitAlerts } from '../../store/alerts'
+import { checkResourceAlerts, checkUnitAlerts, hydrateAlerts } from '../../store/alerts'
 import { bridgeHas, bridgeOn } from '../../lib/bridge'
 import { sshHopsFor } from '../../lib/ssh'
 import type { FleetTarget } from '../../../../shared/fleet'
@@ -68,6 +68,21 @@ export function FleetWatcher(): null {
     () => servers.filter((s) => s.demo === false).map(toTarget),
     [servers]
   )
+
+  // Read the durable alert log back before anything is allowed to speak.
+  //
+  // Everything the alert store remembers — the repeat window, the value last
+  // announced, whether the endpoint is holding an alarm from us — used to live
+  // only in renderer memory, so a disk that has been at 91% for a month
+  // announced itself once per app launch forever. Until this resolves the store
+  // updates its chips and says nothing out loud; see hydrateAlerts.
+  //
+  // Here rather than at module scope because this component is the one thing
+  // mounted once at the app root that already owns the alerting path, and a
+  // module-scope IPC call would fire in every test that imports the store.
+  useEffect(() => {
+    void hydrateAlerts()
+  }, [])
 
   // Results arrive whether or not anything is on screen, so the subscription
   // is separate from the configuration below and is never torn down by a

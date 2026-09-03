@@ -100,3 +100,100 @@ export function validateWebhookUrl(raw: string): { ok: true; url: string } | { o
   }
   return { ok: false, error: `Unsupported scheme "${u.protocol.replace(':', '')}". Use https.` }
 }
+
+// ---------------------------------------------------------------------------
+// The durable side of an alert.
+//
+// Everything the alert store remembered used to be a module-level Map in the
+// renderer, so it died with the window. The visible cost was a chronically full
+// disk: its repeat window is six hours, but the window was empty at every
+// launch, so the same 91% announced itself once per app start forever — and the
+// first thing a person does about an alert they cannot action is mute the
+// feature.
+//
+// So the raise/resolve decisions are written to the history store (item A) and
+// read back at startup. These types are here rather than beside the store
+// because BOTH processes need them: the renderer decides and the main process
+// writes, and the row is rebuilt from a whitelist on the way in exactly like
+// the webhook payload is. A row that reaches the inbox is rendered, and prose
+// assembled on a host we do not control has no business being rendered.
+// ---------------------------------------------------------------------------
+
+/**
+ * The kinds as the ALERT STORE names them, which is not quite the wire's list.
+ *
+ * `ram` is `memory` on the wire — a name chosen before the webhook existed and
+ * not worth a migration — and `unit-failed` has no store entry because failed
+ * units are tracked as a SET of unit names rather than a threshold crossing.
+ * The mapping between the two lives in store/alerts.ts as a total Record, so a
+ * kind added to one list and not the other is a type error rather than an alert
+ * that posts under the wrong name.
+ */
+export const STORE_ALERT_KINDS = ['cpu', 'ram', 'disk'] as const
+export type StoreAlertKind = (typeof STORE_ALERT_KINDS)[number]
+
+/** The history-store event kind every alert row is written under. One kind, so
+ *  the whole log is one `readEvents({ kind })` — a named statement, not a new
+ *  query surface. The `event` field below discriminates. */
+export const ALERT_HISTORY_KIND = 'alert'
+
+/**
+ * What a stored row records, which is one more thing than the wire carries.
+ *
+ * `stood-down` is not an all-clear and is never posted anywhere: it is the row
+ * written when alerting is switched OFF while something was outstanding. It has
+ * to be distinguishable from a resolve, because the two mean opposite things to
+ * whoever reads the log back — a resolve leaves the repeat window standing (a
+ * re-cross seconds later must not read as news), and a stand-down ends the
+ * conversation entirely, so the next crossing speaks at once.
+ */
+export type StoredAlertEventName = AlertEvent | 'stood-down'
+
+export const STORED_ALERT_EVENTS = ['raised', 'resolved', 'stood-down'] as const
+
+export interface StoredAlertEvent {
+  event: StoredAlertEventName
+  kind: StoreAlertKind
+  /** The server's id, so the row can be filtered per host. */
+  serverId: string
+  /** The FRIENDLY name, for the same reason AlertPayload carries it. */
+  serverName: string
+  value?: number
+  threshold?: number
+}
+
+/** A row as it comes back out, with the store's own timestamp. */
+export interface StoredAlertRow extends StoredAlertEvent {
+  at: number
+}
+
+const MAX_NAME = 200
+
+/**
+ * Rebuild a row from a whitelist, or refuse it.
+ *
+ * Same shape and same reasoning as `sanitisePayload` in webhookAlerts.ts: an
+ * unknown `kind` or `event` is dropped rather than stored, because the inbox
+ * renders these and a row is only as trustworthy as the narrowest thing that
+ * produced it.
+ */
+export function sanitiseStoredAlert(raw: unknown): StoredAlertEvent | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const r = raw as Record<string, unknown>
+  const event = STORED_ALERT_EVENTS.find((e) => e === r.event)
+  const kind = STORE_ALERT_KINDS.find((k) => k === r.kind)
+  if (!event || !kind) return null
+  if (typeof r.serverId !== 'string' || r.serverId === '') return null
+  const out: StoredAlertEvent = {
+    event,
+    kind,
+    serverId: r.serverId.slice(0, MAX_NAME),
+    serverName: typeof r.serverName === 'string' ? r.serverName.slice(0, MAX_NAME) : ''
+  }
+  // A value of 0 is a real reading and must survive; only a non-finite one is
+  // dropped. `undefined` here means "this kind has no number", which is not the
+  // same as zero — the rule the whole of 19a is built on.
+  if (typeof r.value === 'number' && Number.isFinite(r.value)) out.value = r.value
+  if (typeof r.threshold === 'number' && Number.isFinite(r.threshold)) out.threshold = r.threshold
+  return out
+}

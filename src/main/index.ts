@@ -90,7 +90,8 @@ import {
   webhookTest,
   webhookNotify
 } from './services/webhookAlerts'
-import type { AlertPayload } from '../shared/webhook'
+import type { AlertPayload, StoredAlertRow } from '../shared/webhook'
+import { ALERT_HISTORY_KIND, sanitiseStoredAlert } from '../shared/webhook'
 import { dbTest, dbQuery, dbInfo, dbClose, dbDisposeAll } from './services/db'
 import { dbShell } from './services/dbshell'
 import { dbOps } from './services/dbOps'
@@ -1535,6 +1536,48 @@ ipcMain.handle('webhook:set-url', (_e, url: string) => {
 ipcMain.handle('webhook:test', () => webhookTest())
 ipcMain.handle('webhook:notify', (_e, payload: AlertPayload) => {
   webhookNotify(payload)
+})
+
+// ---- The alert log ----
+//
+// Roadmap item 19b. Every raise and resolve the alert store decides is written
+// here and read back at startup, so suppression survives a restart. Before it,
+// the repeat window lived in a renderer Map: a disk that has been at 91% for a
+// month re-announced itself on every launch, and the only defence against that
+// is the mute button.
+//
+// Two named methods over the history store's own named statements. There is
+// deliberately no filter argument, no ordering argument and nothing resembling
+// a query: the store's design rule is that no SQL crosses its boundary in
+// either direction, and an "just let the caller pass a WHERE" surface here is
+// exactly how that rule would be lost.
+ipcMain.handle('alerts:record', (_e, raw: unknown, at?: number) => {
+  const event = sanitiseStoredAlert(raw)
+  // A row that did not survive the whitelist is dropped and NOT written as a
+  // partial. A half-row in the inbox reads as an alert nobody can explain.
+  if (!event) return false
+  if (!historyStore) return false
+  historyStore.recordEvent(
+    ALERT_HISTORY_KIND,
+    event.serverId,
+    event,
+    typeof at === 'number' && Number.isFinite(at) ? at : undefined
+  )
+  return true
+})
+
+ipcMain.handle('alerts:history', (_e, limit?: number): StoredAlertRow[] => {
+  if (!historyStore) return []
+  const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.min(2000, Math.floor(limit))) : 500
+  const out: StoredAlertRow[] = []
+  for (const row of historyStore.readEvents({ kind: ALERT_HISTORY_KIND, limit: n })) {
+    // Sanitised on the way OUT as well as the way in. The rows on disk predate
+    // whatever version is reading them, and a kind this build does not know is
+    // not a kind it can render or reason about.
+    const event = sanitiseStoredAlert(row.payload)
+    if (event) out.push({ ...event, at: row.ts })
+  }
+  return out
 })
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()

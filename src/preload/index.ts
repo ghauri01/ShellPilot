@@ -45,6 +45,8 @@ import type {
 } from '../shared/kubernetes'
 import type {
   AlertPayload,
+  StoredAlertEvent,
+  StoredAlertRow,
   WebhookConfig,
   WebhookDeliveryStatus,
   WebhookTestResult
@@ -309,6 +311,17 @@ const api = {
       ipcRenderer.invoke('webhook:set-url', url),
     test: (): Promise<WebhookTestResult> => ipcRenderer.invoke('webhook:test'),
     notify: (payload: AlertPayload): Promise<void> => ipcRenderer.invoke('webhook:notify', payload)
+  },
+  // The durable side of alerting — roadmap item 19b.
+  //
+  // Two methods, both named. `record` writes one raise or resolve; `history`
+  // reads the log newest-first. There is no filter or query argument on
+  // purpose: the history store's rule is that no SQL crosses its boundary, and
+  // a general read surface here would be the first step to losing it.
+  alerts: {
+    record: (event: StoredAlertEvent, at?: number): Promise<boolean> =>
+      ipcRenderer.invoke('alerts:record', event, at),
+    history: (limit?: number): Promise<StoredAlertRow[]> => ipcRenderer.invoke('alerts:history', limit)
   },
   k8s: {
     read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>

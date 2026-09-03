@@ -2,7 +2,12 @@ import { create } from 'zustand'
 import { useApp } from './app'
 import { onServerForgotten } from './serverCleanup'
 import { DISK_DANGER, isDiskCritical } from '../components/monitor/hostHealth'
-import type { AlertKind as WebhookAlertKind } from '../../../shared/webhook'
+import type {
+  AlertKind as WebhookAlertKind,
+  StoreAlertKind,
+  StoredAlertEvent,
+  StoredAlertRow
+} from '../../../shared/webhook'
 
 // Stamped into every outbound payload so a shared endpoint can tell which
 // version posted. Read once: app.getVersion() is an IPC round trip and this is
@@ -22,7 +27,9 @@ void window.shellpilot?.getVersion?.().then((v) => {
 // Sampling is not driven from here — alerts are evaluated from metrics that are
 // already being collected, so enabling them never adds SSH load.
 
-export type AlertKind = 'cpu' | 'ram' | 'disk'
+/** The store's kinds. Defined in shared/webhook.ts because the main process
+ *  rebuilds a durable row from the same list. */
+export type AlertKind = StoreAlertKind
 
 export interface ActiveAlert {
   serverId: string
@@ -113,7 +120,182 @@ const lastNotifiedValue = new Map<string, number>()
 // nobody was told about is a message about nothing, and a host crossing the
 // line repeatedly without earning a new raise must not post an all-clear on
 // every crossing.
-const announced = new Set<string>()
+const announced = new Map<string, { serverId: string; serverName: string; kind: AlertKind }>()
+
+// ---------------------------------------------------------------------------
+// The durable half.
+//
+// The three maps above are the whole memory of this feature and they died with
+// the renderer. Cheap to overlook for CPU, whose window is sixty seconds; not
+// cheap for disk, whose window is six hours and whose condition does not fix
+// itself. A host that has been at 91% for a month re-announced the same 91% on
+// every app launch, forever, and the only thing a person can do about an alert
+// they cannot action is mute the feature — which the roadmap names as the
+// failure that would make shipping this worse than not shipping it.
+//
+// So every raise and resolve is written to the history store and the maps are
+// rebuilt from it at startup. What is durable and what is not was decided one
+// question at a time:
+//
+//   lastNotified       DURABLE. It is the repeat window, and the whole point.
+//   lastNotifiedValue  DURABLE. Without it a restart makes every outstanding
+//                      alert look like a first crossing (`said === undefined`
+//                      is the re-raise bypass) and announce immediately.
+//   announced          DURABLE. Otherwise a restart followed by a recovery
+//                      posts no all-clear for an alarm the endpoint is holding.
+//   raiseTimes         DURABLE (stage 2's flap counter — see damping below).
+//   active (the chip)  IN MEMORY, deliberately. It states what is true NOW, and
+//                      what was true before a restart is not that. It is
+//                      rebuilt by the first sample, one interval later.
+//   failedUnits        IN MEMORY, deliberately. It is a diff against the last
+//                      sweep's unit set, and a set from before a restart would
+//                      make every unit that failed while the app was closed
+//                      look like it failed at launch. Announcing it once at
+//                      startup is the correct behaviour and is what happens.
+// ---------------------------------------------------------------------------
+
+/** How many rows the startup read asks for. Two hundred crossings is far more
+ *  than a healthy estate produces in the ninety days the store keeps events,
+ *  and small enough that the read is not something to think about. */
+const HISTORY_LIMIT = 500
+
+/**
+ * Whether the durable state has been read back yet.
+ *
+ * Starts TRUE, and only `hydrateAlerts()` sets it false. A module that gated on
+ * hydration by default would be silent in every context that never calls it —
+ * every existing test, and any window that loads before the bridge — which is
+ * the failure this whole item is about, inverted.
+ */
+let hydrated = true
+let hydrating: Promise<void> | null = null
+
+/**
+ * How far back the flap counter looks. Stage 2's damping rule is stated at
+ * `damped()`; this is only how much history it is allowed to see, and it is
+ * also what bounds the list, so a host that genuinely oscillates for a week
+ * does not accumulate a week of timestamps.
+ */
+const FLAP_WINDOW_MS = 60 * 60 * 1000
+
+/** Raise timestamps per server+kind, oldest first. Bounded by FLAP_WINDOW_MS. */
+const raiseTimes = new Map<string, number[]>()
+
+function record(
+  kind: AlertKind,
+  event: StoredAlertEvent['event'],
+  a: { serverId: string; serverName: string; value?: number; threshold?: number; at: number }
+): void {
+  void window.shellpilot?.alerts?.record?.(
+    {
+      event,
+      kind,
+      serverId: a.serverId,
+      serverName: a.serverName,
+      ...(a.value === undefined ? {} : { value: fmt(a.value) }),
+      ...(a.threshold === undefined ? {} : { threshold: a.threshold })
+    },
+    a.at
+  )
+}
+
+/**
+ * Rebuild the maps from the log. Rows are newest-first.
+ *
+ * Only the NEWEST row per server+kind decides the outstanding state, because
+ * that is what the maps hold: one entry each. Older rows are read only for the
+ * flap counter, which is a count over a window rather than a latest-wins fact.
+ *
+ * Exported for the restart tests, which are the only way to prove this without
+ * relaunching an app.
+ */
+export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
+  const seen = new Set<string>()
+  for (const row of rows) {
+    const k = key(row.serverId, row.kind)
+    if (row.event === 'raised') {
+      const times = raiseTimes.get(k)
+      if (times) times.unshift(row.at)
+      else raiseTimes.set(k, [row.at])
+    }
+    if (seen.has(k)) continue
+    seen.add(k)
+    if (row.event === 'raised') {
+      lastNotified.set(k, row.at)
+      // `undefined` here is the re-raise bypass, so a raise whose value did not
+      // survive the whitelist must NOT land as "nothing outstanding" — it would
+      // announce immediately on the next sample, which is the restart noise
+      // this function exists to stop. A raise we cannot put a number to still
+      // counts as outstanding, at the value the threshold implies.
+      lastNotifiedValue.set(k, row.value ?? row.threshold ?? 0)
+      announced.set(k, { serverId: row.serverId, serverName: row.serverName, kind: row.kind })
+    } else if (row.event === 'stood-down') {
+      // Alerting was switched off with this outstanding. Nothing is owed and
+      // nothing is suppressed: the next crossing is a new conversation, which
+      // is what the in-session toggle already does.
+      lastNotified.delete(k)
+      lastNotifiedValue.delete(k)
+      announced.delete(k)
+    } else {
+      // A resolve leaves the repeat window in place and clears the escalation
+      // memory — exactly what evaluate()'s `!over` branch does, for the reason
+      // written there: a genuine re-cross seconds later must not arrive as if
+      // nothing had been said.
+      lastNotified.set(k, row.at)
+      lastNotifiedValue.delete(k)
+      announced.delete(k)
+    }
+  }
+  // Oldest first, and only as far back as the counter is allowed to look. The
+  // newest row in the log is the clock here rather than Date.now(): a log read
+  // at launch is history, and an hour "ago" measured from now would throw away
+  // the very crossings that prove a host was flapping when the app closed.
+  const newest = rows.length > 0 ? Math.max(...rows.map((r) => r.at)) : 0
+  for (const [k, times] of raiseTimes) {
+    const kept = times.filter((t) => newest - t < FLAP_WINDOW_MS).sort((a, b) => a - b)
+    if (kept.length === 0) raiseTimes.delete(k)
+    else raiseTimes.set(k, kept)
+  }
+}
+
+/**
+ * Read the durable state back. Called once, from FleetWatcher.
+ *
+ * Until it settles, evaluate() updates chips but says nothing out loud: a
+ * notification sent before the log is read is a notification that ignores it,
+ * and the whole point is that a six-hour window survives a restart. Nothing is
+ * lost by waiting — an alert still over the line is still over the line on the
+ * next sample, and `due` will be true then.
+ *
+ * It settles on failure too. A build with no bridge, or a machine where the
+ * history store is disabled, must alert exactly as it did before this existed.
+ */
+/** Remember that we raised, for the flap counter. Trimmed to the window so the
+ *  list cannot grow with the uptime of a host that genuinely oscillates. */
+function noteRaise(k: string, now: number): void {
+  const times = (raiseTimes.get(k) ?? []).filter((t) => now - t < FLAP_WINDOW_MS)
+  times.push(now)
+  raiseTimes.set(k, times)
+}
+
+export function hydrateAlerts(): Promise<void> {
+  if (hydrating) return hydrating
+  const read = window.shellpilot?.alerts?.history
+  if (!read) return Promise.resolve()
+  hydrated = false
+  hydrating = Promise.resolve(read(HISTORY_LIMIT))
+    .then((rows) => {
+      if (Array.isArray(rows)) applyStoredAlerts(rows)
+    })
+    .catch(() => {
+      // Nothing to say. An unreadable log is a reason to behave as if there
+      // were none, not a reason to stop alerting.
+    })
+    .then(() => {
+      hydrated = true
+    })
+  return hydrating
+}
 
 /** Short, for the status-bar chip and the notification title. */
 export const LABEL: Record<AlertKind, string> = { cpu: 'CPU', ram: 'Memory', disk: 'Disk' }
@@ -201,11 +383,17 @@ function evaluate(
       })
     }
 
+    // Nothing is said until the durable log has been read back. A resolve
+    // decided against an empty `announced` is a resolve for an alarm we cannot
+    // yet know whether we hold. One sample later the answer is on hand.
+    if (!hydrated) return
+
     // The all-clear, once, and only if the endpoint is holding an alarm from
     // us. Without this gate a host crossing the line repeatedly without ever
     // earning a new raise posts a "resolved" on each crossing — a stream of
     // all-clears against a single alarm.
     if (announced.delete(k)) {
+      record(kind, 'resolved', { serverId, serverName, value, threshold, at: now })
       void window.shellpilot?.webhook?.notify({
         source: 'shellpilot',
         version: APP_VERSION,
@@ -261,6 +449,11 @@ function evaluate(
   // five points, so they cannot fire often. A CPU does both in one 2-second
   // sample, and without a floor the shared code turned a flapping CPU into a
   // notification per sample.
+  // Same gate as the resolve above, and the same reasoning: the repeat window
+  // that decides this is on disk and has not been read yet. The chip is already
+  // up, which is the part that must not wait.
+  if (!hydrated) return
+
   const last = lastNotified.get(k) ?? 0
   const said = lastNotifiedValue.get(k)
   const reRaised = said === undefined
@@ -270,7 +463,9 @@ function evaluate(
   if (now - last < MIN_GAP[kind]) return
   lastNotified.set(k, now)
   lastNotifiedValue.set(k, value)
-  announced.add(k)
+  announced.set(k, { serverId, serverName, kind })
+  noteRaise(k, now)
+  record(kind, 'raised', { serverId, serverName, value, threshold, at: now })
 
   const mins = existing ? Math.round((now - existing.since) / 60000) : 0
   const forHow = mins >= 1 ? ` for ${mins} min` : ''
@@ -382,8 +577,11 @@ onServerForgotten((serverId) => {
   for (const k of [...lastNotifiedValue.keys()]) {
     if (k.startsWith(`${serverId}:`)) lastNotifiedValue.delete(k)
   }
-  for (const k of [...announced]) {
+  for (const k of [...announced.keys()]) {
     if (k.startsWith(`${serverId}:`)) announced.delete(k)
+  }
+  for (const k of [...raiseTimes.keys()]) {
+    if (k.startsWith(`${serverId}:`)) raiseTimes.delete(k)
   }
 })
 
@@ -403,9 +601,20 @@ onServerForgotten((serverId) => {
 useApp.subscribe((s, prev) => {
   if (prev.settings.resourceAlertsEnabled && !s.settings.resourceAlertsEnabled) {
     useAlerts.setState({ active: {} })
+    // The durable log has to hear about it too, or the clear below is undone by
+    // the next launch: a restart would rehydrate a repeat window from a
+    // conversation the user ended, and the disk case would be six hours of
+    // silence earned by switching the feature off. `stood-down` is written
+    // rather than `resolved` precisely because it is not an all-clear — nothing
+    // is posted anywhere, and the reader can tell the two apart.
+    const at = Date.now()
+    for (const a of announced.values()) {
+      record(a.kind, 'stood-down', { serverId: a.serverId, serverName: a.serverName, at })
+    }
     lastNotified.clear()
     lastNotifiedValue.clear()
     announced.clear()
+    raiseTimes.clear()
   }
 })
 
@@ -459,6 +668,9 @@ export function resetAlertsForTests(): void {
   lastNotified.clear()
   lastNotifiedValue.clear()
   announced.clear()
+  raiseTimes.clear()
   failedUnits.clear()
+  hydrated = true
+  hydrating = null
   useAlerts.setState({ active: {} })
 }
