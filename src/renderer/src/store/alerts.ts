@@ -332,6 +332,65 @@ const acknowledged = new Set<string>()
  */
 const conditionHeld = new Set<string>()
 
+// ---------------------------------------------------------------------------
+// When a held condition stops being a held condition.
+//
+// A state kind speaks only on a crossing — there is nothing to add about a
+// tunnel that is still in error that the first message did not say — and
+// `conditionHeld` is durable. Put together, a raise whose resolve never arrives
+// does not merely repeat itself: it poisons that key permanently and swallows
+// the NEXT occurrence, which is a different and much quieter failure.
+//
+// Both producers are reachable, and neither is exotic:
+//
+//   tunnel-down  The poll only ever passes `false` for tunnels that are IN
+//                `tunnel.list()`, and tunnelStop deletes the tunnel from the
+//                map — so stopping one while it is in error, or quitting the
+//                app at all (tunnelDisposeAll), makes it vanish with no
+//                resolve. Start it again under the same id and it fails again:
+//                nothing is said, ever.
+//   job-failed   Resolved only by a later `ok` on the same host. A job that
+//                fails on web-1 and is never re-run there leaves web-1's
+//                `job-failed` held forever, and a DIFFERENT job failing on
+//                that host a month later is silent.
+//
+// The fix is an expiry, and it is an expiry rather than a tunnel-side cleanup
+// hook on purpose. A hook on tunnel deletion fixes exactly one of the two
+// producers — `job-failed` has nothing to hook, and `onServerForgotten` cannot
+// help either, because it sweeps by `${serverId}:` and a tunnel key is
+// `tunnelId:tunnel-down`. Resolving tunnels that disappeared from the list is
+// worse than useless: quitting the app disposes every tunnel, so it would post
+// an all-clear for every outage on the way out. An expiry covers both
+// producers, needs no cross-process cleanup, and any state kind added later
+// inherits it.
+//
+// THE RULE. A hold is only a hold while something goes on corroborating it. A
+// raise older than this with no affirming sample since is no longer held, so
+// the next occurrence is a crossing and is heard.
+//
+// Six hours, matching the longest repeat window in the file. Every kind that
+// IS being observed refreshes far faster — the tunnel poll is ten seconds, the
+// sampler a couple of minutes — so this can only expire a hold nothing is
+// watching any more, which is exactly the case it is for. What it does not do
+// is post an all-clear: we know we stopped observing, which is not the same as
+// knowing it recovered, and 19a's rule holds at the last surface too. The
+// endpoint's view is a raise, then a second raise when the thing fails again.
+const STATE_HOLD_MAX_MS = 6 * 60 * 60 * 1000
+
+/** When each held condition was last affirmed by an observation. Written by
+ *  every raise, live or replayed, and cleared with the condition. Only the
+ *  state path reads it: the numeric kinds are told `over: false` on every
+ *  sample and so cannot get stuck this way. */
+const conditionSeen = new Map<string, number>()
+
+/** Whether a held state kind has gone unobserved for long enough to stop
+ *  counting as held. Unheld keys are not stale — they are simply not held. */
+function holdIsStale(k: string, now: number): boolean {
+  if (!conditionHeld.has(k)) return false
+  const seen = conditionSeen.get(k)
+  return seen === undefined || now - seen >= STATE_HOLD_MAX_MS
+}
+
 /**
  * Occurrences already announced, as `serverId:kind:detail:at`.
  *
@@ -425,6 +484,9 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       // alert rather than a flapping one.
       if (!conditionHeld.has(k)) noteCrossing(k, row.at)
       conditionHeld.add(k)
+      // The row's own time, so a hold read back from the log ages from when it
+      // was affirmed rather than from the moment the app happened to start.
+      conditionSeen.set(k, row.at)
       lastNotified.set(k, row.at)
       // `undefined` here is the re-raise bypass, so a raise whose value did not
       // survive the whitelist must NOT land as "nothing outstanding" — it would
@@ -459,6 +521,7 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       lastNotifiedValue.delete(k)
       announced.delete(k)
       conditionHeld.delete(k)
+      conditionSeen.delete(k)
       raiseTimes.delete(k)
       dampedUntil.delete(k)
       snoozedUntil.delete(k)
@@ -472,6 +535,7 @@ export function applyStoredAlerts(rows: readonly StoredAlertRow[]): void {
       lastNotifiedValue.delete(k)
       announced.delete(k)
       conditionHeld.delete(k)
+      conditionSeen.delete(k)
       // An acknowledgement lasts as long as its condition, and this row is the
       // condition ending. A snooze is a period the user chose and outlives the
       // thing it was about — otherwise a disk that cleared five minutes into an
@@ -686,6 +750,7 @@ function evaluate(
     if (!hydrated) return
 
     conditionHeld.delete(k)
+    conditionSeen.delete(k)
 
     // An acknowledgement ends with the condition it was about, and it is
     // cleared HERE — before the quiet gate — so the all-clear still goes out.
@@ -797,6 +862,10 @@ function evaluate(
     conditionHeld.add(k)
     if (isDamped(k, now)) dampedUntil.set(k, now + FLAP_DAMP_MS)
   }
+  // Not read on this path — a numeric kind is told `over: false` on every
+  // sample and so cannot get stuck held — but kept current so the two paths
+  // never disagree about what a hold means.
+  conditionSeen.set(k, now)
 
   const last = lastNotified.get(k) ?? 0
   const said = lastNotifiedValue.get(k)
@@ -934,6 +1003,7 @@ export function checkStateAlert(
     }
     if (!hydrated) return
     conditionHeld.delete(k)
+    conditionSeen.delete(k)
     // An acknowledgement ends with the condition it was about, and it is
     // cleared HERE — before the quiet gate — so the all-clear still goes out.
     // The person acknowledged the alert on their own screen; an endpoint left
@@ -976,11 +1046,17 @@ export function checkStateAlert(
   }
   if (!hydrated) return
 
-  const crossing = !conditionHeld.has(k)
+  // A hold nothing has corroborated for STATE_HOLD_MAX_MS is no longer a hold.
+  // See the rule above: without this, one raise whose resolve never arrives
+  // swallows every later occurrence on that key forever.
+  const crossing = !conditionHeld.has(k) || holdIsStale(k, now)
   if (crossing) {
     conditionHeld.add(k)
     if (isDamped(k, now)) dampedUntil.set(k, now + FLAP_DAMP_MS)
   }
+  // This sample is the corroboration, whether or not anything is said about it
+  // — a snoozed or damped tunnel is still being watched.
+  conditionSeen.set(k, now)
 
   // A state kind has no "still going" repeat and no escalation: there is
   // nothing to say a second time about a host that is still not answering that
@@ -1296,6 +1372,9 @@ onServerForgotten((serverId) => {
   for (const k of [...acknowledged]) {
     if (k.startsWith(`${serverId}:`)) acknowledged.delete(k)
   }
+  for (const k of [...conditionSeen.keys()]) {
+    if (k.startsWith(`${serverId}:`)) conditionSeen.delete(k)
+  }
   for (const k of [...conditionHeld]) {
     if (k.startsWith(`${serverId}:`)) conditionHeld.delete(k)
   }
@@ -1333,6 +1412,7 @@ useApp.subscribe((s, prev) => {
     raiseTimes.clear()
     dampedUntil.clear()
     conditionHeld.clear()
+    conditionSeen.clear()
     // The snoozes and acknowledgements too. They are decisions about a
     // conversation the user has just ended, and a snooze surviving the switch
     // would silence the first alert after it is turned back on.
@@ -1489,6 +1569,7 @@ export function resetAlertsForTests(): void {
   snoozedUntil.clear()
   acknowledged.clear()
   conditionHeld.clear()
+  conditionSeen.clear()
   seenEvents.clear()
   failedUnits.clear()
   hydrated = true

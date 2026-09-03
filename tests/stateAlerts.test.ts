@@ -208,6 +208,76 @@ describe('a state that survives a restart', () => {
   })
 })
 
+describe('a state whose resolve never arrives', () => {
+  // The one shape a state kind cannot recover from on its own. It speaks only
+  // on a crossing, `conditionHeld` is durable and is seeded from every raised
+  // row, and there is no repeat and no escalation — so a raise whose resolve
+  // never comes poisons that key permanently and swallows the NEXT occurrence
+  // rather than merely repeating the last one.
+  //
+  // Both producers are reachable. `tunnelStop` deletes the tunnel from the map
+  // and `tunnel.list()` is what the poll diffs against, so stopping a tunnel
+  // while it is in error — or quitting the app, which calls tunnelDisposeAll —
+  // makes it vanish with no `false` ever passed. And a job failure is resolved
+  // only by a later `ok` on the same host, which never comes for a job that is
+  // never re-run there.
+
+  it('hears the next tunnel failure after the tunnel vanished from the list', () => {
+    alerts.checkStateAlert('t1', 'office-vpn', 'tunnel-down', true)
+    expect(raises()).toHaveLength(1)
+
+    // The tunnel is stopped while in error. It is gone from tunnel.list(), so
+    // the ten-second poll stops mentioning it entirely — no `false`, no null,
+    // nothing. Two days pass.
+    posted.length = 0
+    vi.setSystemTime(T0 + 48 * HOUR)
+    // Started again under the same id, and it fails again. That is news.
+    alerts.checkStateAlert('t1', 'office-vpn', 'tunnel-down', true)
+    expect(raises()).toHaveLength(1)
+    expect(chips()['t1:tunnel-down']).toBeDefined()
+  })
+
+  it('hears the next job failure on a host whose failed job was never re-run', () => {
+    alerts.checkStateAlert('s1', 'web-1', 'job-failed', true, 'nightly upgrade')
+    expect(raises()).toHaveLength(1)
+
+    const rows = loggedRows()
+    restart(rows)
+    posted.length = 0
+    // A month later, a different job fails on the same host.
+    vi.setSystemTime(T0 + 30 * 24 * HOUR)
+    alerts.checkStateAlert('s1', 'web-1', 'job-failed', true, 'database backup')
+    expect(raises()).toHaveLength(1)
+    expect(raises()[0].summary).toBe('web-1 failed a job step (database backup)')
+  })
+
+  it('still says nothing extra about a condition it is being told about', () => {
+    // Paired with the two above so they cannot pass by the hold being dropped
+    // altogether. A tunnel that is polled every ten seconds is corroborated
+    // every ten seconds, and stays one alert however long it is down.
+    alerts.checkStateAlert('t1', 'office-vpn', 'tunnel-down', true)
+    for (let i = 1; i <= 24 * 60 * 6; i++) {
+      vi.setSystemTime(T0 + i * 10_000)
+      alerts.checkStateAlert('t1', 'office-vpn', 'tunnel-down', true)
+    }
+    expect(raises()).toHaveLength(1)
+  })
+
+  it('does not re-announce an unreachable host across an ordinary restart', () => {
+    // The hold has to survive what it was built to survive. A host that was
+    // unreachable when the app closed and is unreachable when it opens has not
+    // crossed anything, and the sampler corroborates it every couple of
+    // minutes.
+    alerts.checkStateAlert('s1', 'web-1', 'host-unreachable', true)
+    const rows = loggedRows()
+    restart(rows)
+    posted.length = 0
+    vi.setSystemTime(T0 + 2 * MINUTE)
+    alerts.checkStateAlert('s1', 'web-1', 'host-unreachable', true)
+    expect(raises()).toHaveLength(0)
+  })
+})
+
 describe('a state that flaps', () => {
   /** One clean crossing: down, then back up. */
   function flap(at: number): void {
