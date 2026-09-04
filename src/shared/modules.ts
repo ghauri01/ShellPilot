@@ -32,6 +32,7 @@ export type ModuleId =
   | 'rules'
   | 'changeLog'
   | 'drift'
+  | 'processes'
 
 export interface ModuleDef {
   id: ModuleId
@@ -221,6 +222,28 @@ export const MODULES: ModuleDef[] = [
     label: 'Scheduled jobs',
     detail: 'Read crontabs, /etc/cron.d and systemd timers across the estate. Read-only.',
     defaultEnabled: true
+  },
+  {
+    id: 'processes',
+    label: 'Local processes',
+    detail:
+      'Run, watch, restart and read the logs of a long-lived process on THIS machine \u2014 a dev server, a worker, a script that should outlive its terminal. Restart policies, exponential backoff, crash-loop detection and a bounded log ring, from the supervisor that already keeps VPN engines alive. Nothing runs on a remote host, nothing starts by itself, and a value that looks like a secret has to come from the vault rather than the process list.',
+    // OFF by default, and this is the module whose default matters most in the
+    // whole registry.
+    //
+    // Every other module here acts on a REMOTE system through a credential
+    // that a person could rotate afterwards, or reads something. This one runs
+    // a program ON THE MACHINE THE VAULT IS ON, from a command line held in a
+    // file, and keeps it running.
+    //
+    // What the toggle gates is the panel, not the definitions: a stored
+    // process stays on disk with the module off, and nothing about it executes
+    // by existing \u2014 there is no auto-start and there is not going to be one
+    // (see the refusal at the top of src/shared/processes.ts). So turning this
+    // off does not silently disarm something the user thinks is running, and
+    // turning it back on does not silently arm anything either. The only thing
+    // that starts a process is a person pressing Start.
+    defaultEnabled: false
   },
   {
     id: 'docker',
