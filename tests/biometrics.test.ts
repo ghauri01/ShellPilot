@@ -131,6 +131,34 @@ describe('persistent scope — the weaker, explicit opt-in', () => {
     bio.enableBiometricUnlock()
     expect(bio.biometricScope()).toBe('session')
   })
+
+  it('replaces a session key rather than sitting behind it', () => {
+    // The upgrade a user actually performs: they turned this on, found it asked
+    // for the password again after a restart, and chose to keep it.
+    //
+    // `biometricScope()` reads the session key FIRST, so a persistent enable
+    // that left the session key in memory would write the file, return ok, and
+    // still report `session` -- the switch would look like it had not worked,
+    // which is precisely the complaint that led here. The two scopes are
+    // exclusive by construction, and each enable has to say so.
+    if (!bio.biometricSupport().available) return
+    expect(bio.enableBiometricUnlock('session').ok).toBe(true)
+    expect(bio.biometricScope()).toBe('session')
+    expect(bio.enableBiometricUnlock('persistent').ok).toBe(true)
+    expect(bio.biometricScope()).toBe('persistent')
+  })
+
+  it('is dropped again by going back to session-only', () => {
+    // The other direction has to be real too: downgrading must delete the file,
+    // or "only while the app is running" would leave a key on disk that says
+    // otherwise.
+    if (!bio.biometricSupport().available) return
+    expect(bio.enableBiometricUnlock('persistent').ok).toBe(true)
+    expect(bio.enableBiometricUnlock('session').ok).toBe(true)
+    expect(bio.biometricScope()).toBe('session')
+    bio.forgetSessionKey()
+    expect(bio.biometricEnabled()).toBe(false)
+  })
 })
 
 describe('enabling', () => {

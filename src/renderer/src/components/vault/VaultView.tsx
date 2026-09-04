@@ -251,20 +251,33 @@ function BiometricOffer(): React.JSX.Element | null {
       <div style={{ flex: 1 }}>
         <div className="s-title">Unlock with {label} next time?</div>
         <div className="s-desc">
-          {label} reopens the vault while ShellPilot is running. <b>Nothing extra is written to
-          disk</b> — you enter your master password once each time you start the app, and after
-          that {label} unlocks it.
+          Your master password is never stored either way, and you can change this at any time.
           <br />
-          Your master password is never stored, and you can turn this off at any time.
+          <b>While the app is running</b> — nothing extra is written to disk. You type the master
+          password once per launch, and {label} reopens the vault after that.
+          <br />
+          <b>Across restarts</b> — the vault&rsquo;s key is saved to this Mac&rsquo;s keychain, so
+          you stop typing the password altogether. It is the more convenient choice and the weaker
+          one: anything that can read that keychain entry as your account can then open the vault.
         </div>
       </div>
       <button
         className="btn sm primary"
         onClick={() =>
+          void setBiometrics(true, 'persistent').then(
+            (ok) => ok && toast(`${label} unlock enabled, and remembered across restarts`, 'ok')
+          )
+        }
+      >
+        Across restarts
+      </button>
+      <button
+        className="btn sm"
+        onClick={() =>
           void setBiometrics(true, 'session').then((ok) => ok && toast(`${label} unlock enabled`, 'ok'))
         }
       >
-        Enable
+        While it&rsquo;s running
       </button>
       <button className="btn sm" onClick={decline}>
         Not now
@@ -313,6 +326,25 @@ function VaultBrowser(): React.JSX.Element {
           >
             <Fingerprint size={13} /> {BIO_LABEL[bioKind] ?? 'Biometrics'}:{' '}
             {bioEnabled ? (bioScope === 'persistent' ? 'on, saved' : 'on, this session') : 'off'}
+          </button>
+        )}
+        {/* The upgrade had no control at all: `persistent` was implemented,
+            tested and reachable only by calling the store by hand, so a user who
+            turned this on and then found the password prompt waiting after a
+            restart had no way to say "no, keep it". */}
+        {bioAvailable && bioEnabled && bioScope === 'session' && (
+          <button
+            className="btn sm"
+            title={`Save this vault's key to the keychain so ${
+              BIO_LABEL[bioKind] ?? 'biometrics'
+            } opens it after a restart too. Anything that can read that entry as your account can then open the vault.`}
+            onClick={() =>
+              void setBiometrics(true, 'persistent').then(
+                (ok) => ok && toast('Key saved — this vault opens after a restart now', 'ok')
+              )
+            }
+          >
+            Keep after restart
           </button>
         )}
         <button className="btn sm" onClick={() => setChanging((v) => !v)}>

@@ -154,6 +154,12 @@ export function enableBiometricUnlock(scope: BiometricScope = 'session'): VaultR
       if (existsSync(FILE)) unlinkSync(FILE)
     } else {
       writeFileSync(FILE, JSON.stringify(payload), { mode: 0o600 })
+      // And the mirror of the line above. `biometricScope()` reads the session
+      // key first, so leaving one in memory here would write the file, return
+      // ok, and still report `session` -- the user turns on "remember across
+      // restarts", sees the switch stay where it was, and concludes the feature
+      // is broken. The two scopes are exclusive, and each enable says so.
+      sessionKey = null
     }
     return { ok: true }
   } catch (err) {
