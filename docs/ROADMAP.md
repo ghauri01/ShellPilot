@@ -916,7 +916,29 @@ promise about unattended correctness this app cannot keep.
 
 ---
 
-### 18. Database operations
+### 18. Database operations — SHIPPED
+
+**Postgres and MySQL/MariaDB shipped in `c008c8d` and were hardened in `971c47d`. MongoDB and
+Redis are now built too**, in four commits: the captured fixtures, the pure command/parse/judge
+layer, the collectors, and the panel. Eight questions for MongoDB and nine for Redis — the ninth
+is `cluster`, which cannot fold into `replication` because a cluster in state `fail` refuses a
+third of the keyspace while every node's `INFO replication` reports a healthy master.
+
+**SQL Server is deliberately not covered**, and `DB_OPS_UNSUPPORTED_NOTE` says so on the page
+rather than leaving an empty tab to be discovered: nothing here has been run against one, and a
+set of questions written from documentation agrees with whatever its author assumed rather than
+with the server.
+
+What the MongoDB and Redis pass cost was not the commands. It was that both engines report a dead
+thing with a number that reads as healthy, in the same shape MySQL does and with different field
+names. A MongoDB member that is unreachable reports `health: 0` alongside `pingMs: 0`, `uptime: 0`
+and an `optimeDate` of the Unix epoch; a Redis replica whose master has gone reports
+`master_last_io_seconds_ago: -1`. Neither is a measurement, and every clamp a reviewer would ask
+for turns both into zero. Both were captured from real containers rather than reasoned about, and
+`tests/fixtures/dbops/README.md` records what could NOT be captured — no sharded cluster, no Redis
+Cluster, no Sentinel, no AOF, no `mongodb+srv` — rather than filling the gaps with invention.
+
+The write-up below is kept as the reasoning that produced it.
 
 The five engines are connected and can be queried. That is a client. An operator needs the other
 half: backups, replication health, connection counts, slow queries, locks, growth.
@@ -943,6 +965,11 @@ Backups belong to item 5, not here — a database dump is a job with a destinati
 second backup path beside `backup.ts` is exactly the two-schedulers mistake in another costume.
 
 **Size.** 1–1.5 weeks per engine. Postgres and MySQL first covers most estates.
+
+**What the estimate got right and wrong.** The eight-questions-per-engine framing held for both
+new engines, and the editorial half was indeed the hard part. What it missed is that "roughly
+eight questions" is the cheap half of a week and the fixtures are the expensive half: every
+finding that changed a judgement came out of a container, and none of them out of documentation.
 
 ---
 
@@ -1263,7 +1290,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 | C | ~~**Host facts**~~ | 100% | continuous | 4 | strong | **3 / 21** | **SHIPPED** | — | Done |
 | A | ~~**Durable store**~~ | — | — | — | — | **0 / 30** | **SHIPPED** | — | Done |
 | B | ~~**Job engine B1+B2+B3**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | B4 remains | Part done |
-| 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** (pg+mysql) | mongo/redis remain | Part done |
+| 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** | mssql not covered, stated | Done |
 | 17 | ~~**Patch management**~~ | 100% | weekly | 5 | strong | **10** | **SHIPPED** | — | Done |
 | 5 | ~~**Backups to real targets**~~ | 90% | weekly | 5 | strong | **8** | **SHIPPED** | — | Done |
 | 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | OOM kills, cert expiry remain | Part done |
