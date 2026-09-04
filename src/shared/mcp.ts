@@ -135,7 +135,16 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string; detail: string 
   {
     id: 'vpnControl',
     label: 'VPN & reverse proxies',
-    detail: 'Lists VPN profiles and reverse proxies, and starts or stops them.'
+    // Says what it grants and what it does not. It used to say "and starts
+    // or stops them", which promised something no value of this setting
+    // delivers: an frp reverse proxy makes a port on the user's own machine
+    // reachable from the internet, so set_vpn refuses one outright and no
+    // access group can permit it. A permission UI that offers a power the
+    // code refuses is how an operator ends up believing they granted less
+    // than they did, or more.
+    detail:
+      'Lists VPN profiles and reverse proxies, and starts or stops the VPNs. Reverse proxies ' +
+      'are never started or stopped by an agent, at any setting.'
   }
 ]
 
