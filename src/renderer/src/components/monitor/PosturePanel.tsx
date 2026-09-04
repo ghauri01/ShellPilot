@@ -3,13 +3,18 @@ import { RefreshCw, ShieldAlert, ShieldQuestion } from 'lucide-react'
 import { bridgeHas } from '../../lib/bridge'
 import { clsx, duration } from '../../lib/format'
 import {
+  CERT_EXPIRY_DAYS,
+  OOM_WINDOW_HOURS,
+  POSTURE_SOURCE_IDS,
   POSTURE_STATUS_HELP,
   SSHD_DIRECTIVES,
+  isCertificateExpiringSoon,
+  oomWindowIsStated,
   postureSource,
   securityUpdateReading,
+  soonestCertificateExpiry,
   summarisePosture,
   type HostPosture,
-  type PostureSourceId,
   type PostureStatus,
   type SshdReading
 } from '../../../../shared/posture'
@@ -230,6 +235,95 @@ function failedCell(posture: HostPosture): Cell {
   }
 }
 
+
+function oomCell(posture: HostPosture): Cell {
+  const s = postureSource(posture, 'oom-kills')
+  const k = posture.oomKills
+  if (k === null || k.count === null) return gapCell(s.status, s.detail)
+  if (k.count > 0) {
+    const procs =
+      k.processes === null ? '' : ` · ${k.processes} name${k.processes === 1 ? '' : 's'}`
+    return {
+      text: `${k.count} killed${procs}`,
+      gap: null,
+      bad: true,
+      help: `The kernel reaped ${k.count} process${k.count === 1 ? '' : 'es'} for memory${
+        k.processes === null ? '' : `, under ${k.processes} distinct name${k.processes === 1 ? '' : 's'}`
+      }, read from ${k.window ?? 'the kernel log'}. Counts only: a process name is a string the process chose for itself.`
+    }
+  }
+  // ZERO, AND THE WINDOW DECIDES WHETHER THAT IS A FINDING. Only the journal
+  // is asked for a period of time; a ring buffer holds as much as it holds, so
+  // a zero out of it is not a statement about a day and must not be drawn like
+  // one. This is the single branch item 19b deferred this kind over.
+  if (oomWindowIsStated(k.source)) {
+    return {
+      text: `none in ${OOM_WINDOW_HOURS}h`,
+      gap: null,
+      help: `The kernel journal was asked for the last ${OOM_WINDOW_HOURS} hours and holds no OOM kill. This is a reading over a stated window, not a gap.`
+    }
+  }
+  return {
+    text: 'none seen · window unbounded',
+    gap: 'partial',
+    help: `${POSTURE_STATUS_HELP.partial} This was read from ${k.window ?? 'a source with no stated window'}, which is not a period of time — it holds as much as it holds. Nothing was found in it, and that is NOT a report of no OOM kills in the last day. Passwordless sudo lets journalctl -k answer over a real window.`
+  }
+}
+
+function certCell(posture: HostPosture): Cell {
+  const s = postureSource(posture, 'certificates')
+  const inv = posture.certificates
+  if (inv === null) return gapCell(s.status, s.detail)
+  const days = soonestCertificateExpiry(inv)
+  const unread = inv.certificates.filter((c) => c.problem !== null).length
+  const bound = `Searched ${inv.bound.roots.join(', ')} to ${inv.bound.maxDepth} levels, at most ${inv.bound.maxFiles} files, without crossing filesystems.`
+
+  if (days === null) {
+    // NOTHING WAS DATED, and the three reasons are not the same finding.
+    if (inv.unreadableRoots > 0) {
+      return {
+        text: `${inv.unreadableRoots} director${inv.unreadableRoots === 1 ? 'y' : 'ies'} refused`,
+        gap: s.status === 'ok' ? 'denied' : s.status,
+        help: `A certificate directory that could not be entered is NOT a directory with no certificates. /etc/letsencrypt is 0700 root on most hosts, so this usually closes with passwordless sudo. ${bound}`
+      }
+    }
+    if (unread > 0) {
+      return {
+        text: `${unread} could not be read`,
+        gap: 'partial',
+        help: `${unread} file${unread === 1 ? ' was' : 's were'} found and could not be dated — unreadable, not a certificate, or DER this build will not parse. A certificate that could not be parsed is not a certificate that is valid. ${bound}`
+      }
+    }
+    return {
+      text: s.status === 'absent' ? 'no certificate directories' : 'none found',
+      gap: null,
+      help:
+        s.status === 'absent'
+          ? `None of the directories ShellPilot looks in exists on this host, and that was checked rather than assumed. ${bound}`
+          : `Every directory was read and holds no certificate. This is a reading, not a gap — and it is not the same as "this host is fine", because nothing here has an expiry to be near. ${bound}`
+    }
+  }
+
+  // Something WAS dated, and something else may still be missing. The suffix is
+  // not decoration: "45 days" beside a silently skipped /etc/letsencrypt is
+  // worse than no number at all.
+  const missing = inv.unreadableRoots + unread + (inv.truncated ? 1 : 0)
+  const suffix = missing > 0 ? ` · ${missing} not read` : ''
+  return {
+    text: days < 0 ? `EXPIRED ${-days}d ago${suffix}` : `${days}d left${suffix}`,
+    gap: null,
+    bad: isCertificateExpiringSoon(days),
+    help:
+      (days < 0
+        ? `The soonest certificate on this host expired ${-days} days ago. This is an outage in progress, not a warning.`
+        : `The soonest certificate on this host has ${days} days left${isCertificateExpiringSoon(days) ? `, which is inside the ${CERT_EXPIRY_DAYS}-day line certbot itself renews at — the renewal that should have run has not` : ''}.`) +
+      (missing > 0
+        ? ` ${missing} other thing${missing === 1 ? '' : 's'} could not be read, so this number may not be the worst one on the host.`
+        : '') +
+      ` ${bound}`
+  }
+}
+
 /** The security update count, TAKEN FROM ITEM C. Not recomputed here and not
  *  recomputed anywhere: the distribution's own answer is better than anything
  *  this app would derive, and `unsupported` has to survive all the way to the
@@ -298,7 +392,9 @@ const COLUMNS: { id: string; label: string; help: string }[] = [
   { id: 'mac', label: 'SELinux / AppArmor', help: 'Whether mandatory access control is enforcing. A host with neither is a finding, not a gap — and it is shown differently from a host that could not be asked.' },
   { id: 'sshd', label: 'sshd', help: 'Seven directives against a hardening baseline. A directive that could not be read is never counted as passing.' },
   { id: 'failed', label: 'Failed logins', help: 'How many failed attempts the host recorded and how many distinct account names they tried. Counts only: every field on a failed-login record is text an attacker chose.' },
-  { id: 'updates', label: 'Security updates', help: 'Pending security updates as the host’s own package manager counts them. Collected by the Inventory probe and shown here unchanged — ShellPilot computes nothing from a CVE feed.' }
+  { id: 'updates', label: 'Security updates', help: 'Pending security updates as the host’s own package manager counts them. Collected by the Inventory probe and shown here unchanged — ShellPilot computes nothing from a CVE feed.' },
+  { id: 'oom', label: 'OOM kills', help: 'Processes the kernel reaped for memory in the last 24 hours. Only the journal can be asked for a window — a count read from dmesg or kern.log is real, and a ZERO read from either is not a statement about a day and is not drawn as one.' },
+  { id: 'certs', label: 'Certificates', help: 'Days left on the soonest certificate in a bounded set of named directories on this host. Not a TLS scanner: nothing is fetched over the network, the distribution trust store is deliberately not searched, and a directory that could not be entered is never rendered as a host with no certificates.' }
 ]
 
 export function PosturePanel({
@@ -373,9 +469,19 @@ export function PosturePanel({
                 mac: macCell(posture),
                 sshd: sshdCell(posture),
                 failed: failedCell(posture),
-                updates: updatesCell(facts[s.id] ?? null)
+                updates: updatesCell(facts[s.id] ?? null),
+                oom: oomCell(posture),
+                certs: certCell(posture)
               }
-            : { firewall: NEVER, mac: NEVER, sshd: NEVER, failed: NEVER, updates: updatesCell(facts[s.id] ?? null) }
+            : {
+                firewall: NEVER,
+                mac: NEVER,
+                sshd: NEVER,
+                failed: NEVER,
+                updates: updatesCell(facts[s.id] ?? null),
+                oom: NEVER,
+                certs: NEVER
+              }
         }
       }),
     [servers, entries, facts]
@@ -434,6 +540,38 @@ export function PosturePanel({
               {summary.sshdWeak === 0 && <span>no weak sshd settings found</span>}
               {summary.sshdUnknown > 0 && (
                 <span className="warn"> · {summary.sshdUnknown} sshd config could not be read</span>
+              )}
+            </span>
+            {/* Both of these carry their gap, for the reason every count above
+                does: a roll-up drawn over the hosts that answered is the
+                reassuring fiction this panel exists to avoid. `oomUnknown`
+                counts every host answered by a ring buffer as well as every
+                host that refused, because neither can support a "none". */}
+            <span>
+              {summary.oomKilling > 0 ? (
+                <span className="warn">{summary.oomKilling} killing processes for memory</span>
+              ) : (
+                <span>no OOM kills seen</span>
+              )}
+              {summary.oomUnknown > 0 && (
+                <span className="warn"> · {summary.oomUnknown} kernel log could not be read over a stated window</span>
+              )}
+            </span>
+            <span>
+              {summary.certExpired > 0 && (
+                <span className="warn">{summary.certExpired} with an EXPIRED certificate</span>
+              )}
+              {summary.certExpired === 0 && summary.certExpiringSoon === 0 && (
+                <span>no certificate inside {CERT_EXPIRY_DAYS} days</span>
+              )}
+              {summary.certExpiringSoon > 0 && (
+                <span className="warn">
+                  {summary.certExpired > 0 ? ' · ' : ''}
+                  {summary.certExpiringSoon} expiring within {CERT_EXPIRY_DAYS} days
+                </span>
+              )}
+              {summary.certUnknown > 0 && (
+                <span className="warn"> · {summary.certUnknown} could not be fully read</span>
               )}
             </span>
           </div>
@@ -548,7 +686,7 @@ export function PosturePanel({
           {rows
             .filter((r) => r.posture !== null)
             .flatMap((r) =>
-              (['firewall', 'mandatory-access', 'sshd-hardening', 'failed-logins'] as PostureSourceId[])
+              POSTURE_SOURCE_IDS
                 .map((id) => ({ row: r, s: postureSource(r.posture as HostPosture, id) }))
                 .filter(({ s }) => s.status === 'denied' && s.detail)
                 .map(({ row, s }) => (

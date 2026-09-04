@@ -4,7 +4,8 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { stubBridge } from './setup/renderer'
 import { PosturePanel } from '../src/renderer/src/components/monitor/PosturePanel'
-import { POSTURE_STATUS_MARKER, parsePosture } from '../src/shared/posture'
+import { OOM_WINDOW_HOURS, POSTURE_STATUS_MARKER, parsePosture } from '../src/shared/posture'
+import { CERT_EXPIRED, CERT_FAR, CERT_SOON } from './postureCertificateFixtures'
 import { parseHostFacts } from '../src/shared/hostFacts'
 import type { HostPosture } from '../src/shared/posture'
 import type { HostFacts } from '../src/shared/hostFacts'
@@ -336,5 +337,223 @@ describe('the sshd detail', () => {
     // plus the Match block that makes the global values conditional.
     expect(detail.textContent).toContain('Read from configuration files')
     expect(detail.textContent).toContain('conditional')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The two cells item 19b deferred
+//
+// Same rule as every cell above, and for these two it is the ENTIRE reason
+// they were held back: a zero read from a kernel ring buffer and an empty list
+// from a certificate directory nobody could enter are the two most convincing
+// clean bills of health this panel could print, and neither is one.
+// ---------------------------------------------------------------------------
+
+describe('the OOM cell never turns an unread kernel log into a quiet host', () => {
+  it('shows a restricted dmesg as not permitted, never as no kills', async () => {
+    mount(
+      {
+        a: {
+          posture: collected([
+            POSTURE_STATUS_MARKER,
+            'oom-kills denied - dmesg is installed and the kernel refused it'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'oom')).toBe('not permitted'))
+    // The spellings a naive table produces, none of which may appear.
+    expect(cell('web-1', 'oom')).not.toMatch(/\bnone\b/i)
+    expect(cell('web-1', 'oom')).not.toMatch(/\b0\b/)
+    expect(cell('web-1', 'oom')).not.toBe('—')
+  })
+
+  it('shows a ring-buffer zero as an unbounded window, not as a clean day', async () => {
+    // The line the whole kind was deferred over. dmesg read fine and held no
+    // kill; that is not a statement about the last twenty-four hours, and the
+    // cell must not let it be read as one.
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V oom-tool dmesg',
+            'V oom-count 0',
+            'V oom-procs 0',
+            'V oom-window the kernel ring buffer which reaches back only as far as it has not been overwritten',
+            POSTURE_STATUS_MARKER,
+            'oom-kills partial - dmesg. The ring buffer is not a time window'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'oom')).toBe('none seen · window unbounded'))
+    expect(cell('web-1', 'oom')).not.toBe(`none in ${OOM_WINDOW_HOURS}h`)
+  })
+
+  it('shows a journal zero as the real reading it is', async () => {
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V oom-tool journal',
+            'V oom-count 0',
+            'V oom-procs 0',
+            `V oom-window the last ${OOM_WINDOW_HOURS} hours of the kernel journal`,
+            POSTURE_STATUS_MARKER,
+            'oom-kills ok - journalctl -k'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'oom')).toBe(`none in ${OOM_WINDOW_HOURS}h`))
+  })
+
+  it('counts kills and the names they wore', async () => {
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V oom-tool journal',
+            'V oom-count 3',
+            'V oom-procs 2',
+            `V oom-window the last ${OOM_WINDOW_HOURS} hours of the kernel journal`,
+            POSTURE_STATUS_MARKER,
+            'oom-kills ok - journalctl -k'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'oom')).toBe('3 killed · 2 names'))
+  })
+})
+
+describe('the certificate cell never turns an unread directory into a host with none', () => {
+  it('shows a refused certificate directory as refused, never as none found', async () => {
+    // /etc/letsencrypt is 0700 root on Debian, so this is the common case and
+    // "none found" is the answer a naive table gives for it.
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V cert-searched 1',
+            'V cert-refused 1',
+            POSTURE_STATUS_MARKER,
+            'certificates denied - every certificate directory present refused to be entered'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'certs')).toBe('1 directory refused'))
+    expect(cell('web-1', 'certs')).not.toMatch(/none/i)
+    expect(cell('web-1', 'certs')).not.toMatch(/\bok\b/i)
+  })
+
+  it('shows a certificate that would not parse as unread, never as valid', async () => {
+    mount(
+      {
+        a: {
+          posture: collected([
+            'C AAAA /etc/nginx/broken.pem',
+            'V cert-searched 1',
+            'V cert-refused 0',
+            POSTURE_STATUS_MARKER,
+            'certificates ok - read every directory'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'certs')).toBe('1 could not be read'))
+    expect(cell('web-1', 'certs')).not.toMatch(/left/)
+  })
+
+  it('shows an expired certificate differently from one expiring soon', async () => {
+    mount(
+      {
+        a: {
+          posture: collected([
+            `C ${CERT_EXPIRED} /etc/nginx/old.pem`,
+            'V cert-searched 1',
+            'V cert-refused 0',
+            POSTURE_STATUS_MARKER,
+            'certificates ok - read every directory'
+          ])
+        },
+        b: {
+          posture: collected([
+            `C ${CERT_SOON} /etc/nginx/soon.pem`,
+            'V cert-searched 1',
+            'V cert-refused 0',
+            POSTURE_STATUS_MARKER,
+            'certificates ok - read every directory'
+          ])
+        }
+      },
+      [server('a', 'web-1'), server('b', 'web-2')]
+    )
+    // 27 and not 26: `daysRemaining` is floored, so a certificate that expired
+    // 26 days and 8 hours before this file's NOW is -27. The literal is written
+    // out rather than computed, which is what makes that visible.
+    await waitFor(() => expect(cell('web-1', 'certs')).toBe('EXPIRED 27d ago'))
+    expect(cell('web-2', 'certs')).toBe('17d left')
+  })
+
+  it('says how much it could not read beside the number it did read', async () => {
+    // "45 days" beside a silently skipped /etc/letsencrypt is worse than no
+    // number at all: it is a number that may not be the worst one on the host.
+    mount(
+      {
+        a: {
+          posture: collected([
+            `C ${CERT_FAR} /etc/nginx/good.pem`,
+            'V cert-searched 1',
+            'V cert-refused 2',
+            POSTURE_STATUS_MARKER,
+            'certificates partial - some directories refused to be entered'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'certs')).toBe('502d left · 2 not read'))
+  })
+
+  it('shows a clean search that found nothing as a reading, not as a gap', async () => {
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V cert-searched 1',
+            'V cert-refused 0',
+            POSTURE_STATUS_MARKER,
+            'certificates ok - read every directory'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'certs')).toBe('none found'))
+  })
+
+  it('shows a host with none of the directories as absent, having checked', async () => {
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V cert-searched 0',
+            'V cert-refused 0',
+            POSTURE_STATUS_MARKER,
+            'certificates absent - none of the directories is present'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    await waitFor(() => expect(cell('web-1', 'certs')).toBe('no certificate directories'))
   })
 })
