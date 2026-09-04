@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import type { LookupFunction } from 'node:net'
 
 /**
  * A real MinIO in Docker, for the tests that will not accept a test double.
@@ -160,18 +161,16 @@ export function stopMinio(container: string): void {
  */
 export async function loopbackFetch(): Promise<typeof fetch> {
   const { Agent } = await import('undici')
-  const dispatcher = new Agent({
-    connect: {
-      lookup: (
-        _hostname: string,
-        options: { all?: boolean },
-        callback: (err: Error | null, address: unknown, family?: number) => void
-      ): void =>
-        options && options.all
-          ? callback(null, [{ address: '127.0.0.1', family: 4 }])
-          : callback(null, '127.0.0.1', 4)
-    }
-  })
+  // Node's own `LookupFunction`, not a hand-written approximation of it. The
+  // approximation typed the callback's `address` as `unknown`, which a
+  // parameter position makes narrower than the real
+  // `string | dns.LookupAddress[]` rather than wider — so it was not a lookup
+  // undici could have called.
+  const lookup: LookupFunction = (_hostname, options, callback) =>
+    options && options.all
+      ? callback(null, [{ address: '127.0.0.1', family: 4 }])
+      : callback(null, '127.0.0.1', 4)
+  const dispatcher = new Agent({ connect: { lookup } })
   return ((url: string, init?: RequestInit) =>
     fetch(url, { ...init, dispatcher } as RequestInit)) as unknown as typeof fetch
 }
