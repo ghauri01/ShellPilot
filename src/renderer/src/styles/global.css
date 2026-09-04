@@ -2944,3 +2944,258 @@ details[open] > .disclosure-head .chev {
   margin-left: 6px;
   cursor: help;
 }
+
+/* ============================= Alert inbox ============================= */
+/* The Alerts tab of the Fleet Monitor.
+   
+   Everything here is scoped under `.alerts` on purpose. The panel used
+   `.s-title` and `.s-desc` for its headings and its explanatory prose, and
+   those two classes are defined in this file ONLY under `.setting-row` (and
+   `.backup-banner`). Outside a settings row they style nothing at all — so
+   the page title, six section headings, five paragraphs of explanation and
+   every table cell all rendered at the same 13px body colour and weight. That
+   is the mechanical cause of "I can't figure out anything in this mountain of
+   text": there was no hierarchy to read, only reading order.
+
+   The fix is a type scale for this one panel rather than a global `.s-desc`,
+   because a global one would silently restyle every other screen that spells
+   its help text the same way. Same reason `.warn`/`.ok` are scoped here: this
+   file has never defined bare `.warn`, so `className="warn"` was inert on this
+   panel — the severity colour the markup asked for was simply not being
+   painted, which is why the one outstanding alert read as "a single dim line".
+   Fixing that globally is a change to nine other components and is not this
+   change. */
+
+.alerts {
+  /* The panel scrolls as one column; the sections space themselves. */
+  padding: var(--sp-4);
+}
+
+/* --- Type scale. Title > heading > body > secondary, and nothing else. --- */
+.alerts .alerts-title {
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.alerts .alerts-heading {
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.alerts .alerts-subhead {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+}
+.alerts .alerts-sub,
+.alerts .s-desc {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.alerts .alerts-meta,
+.alerts .alerts-quiet-line {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+/* The status colours the markup has always asked for and never received. */
+.alerts .warn {
+  color: var(--warn);
+}
+.alerts .ok {
+  color: var(--ok);
+}
+.alerts .s-desc.warn {
+  color: var(--warn);
+}
+
+/* --- Header --- */
+.alerts .alerts-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+/* A live state with a control on it, not help text — so it keeps its colour
+   and its own edge rather than joining the folded prose. */
+.alerts .alerts-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-sm);
+}
+
+/* --- Sections --- */
+.alerts .alerts-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-5) 0 var(--sp-2);
+}
+
+/* --- Outstanding: the page --- */
+.alerts .alert-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+/* The same left-edge marker the fleet-health attention rows and the toasts
+   use, so "this one is shouting" is an idiom the app already has rather than a
+   new one invented here. */
+.alerts .alert-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-md);
+}
+/* Snoozed is quieter but still present. It is not resolved, and a card that
+   looked resolved would be this screen disagreeing with the status-bar chip
+   that is still up — the contradiction the snooze semantics exist to avoid. */
+.alerts .alert-card.snoozed {
+  border-left-color: var(--border-strong);
+  background: var(--bg-panel);
+}
+.alerts .alert-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+/* The two things a person is scanning for — what, and where. Everything else
+   on the card is deliberately a step down from these. */
+.alerts .alert-kind {
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  color: var(--warn);
+}
+.alerts .alert-card.snoozed .alert-kind {
+  color: var(--text-muted);
+}
+.alerts .alert-host {
+  font-size: var(--fs-lg);
+  font-weight: 550;
+  color: var(--text);
+}
+.alerts .alert-reading {
+  font-size: var(--fs-md);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.alerts .alert-since {
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.alerts .alert-snoozed-note {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.alerts .alert-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+/* Three durations were three of the five identical ghost buttons that made the
+   old row unreadable. Grouped and shrunk, they read as one secondary control
+   with three settings — which is what they are — beside one primary action. */
+.alerts .alert-snooze {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+.alerts .alert-snooze-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.alerts .alert-snooze-group {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.alerts .alert-snooze-group .btn {
+  height: 24px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: 0;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+.alerts .alert-snooze-group .btn + .btn {
+  border-left: 1px solid var(--border);
+}
+
+/* --- The settled state. Confident, not absent. --- */
+.alerts .alerts-quiet {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+}
+.alerts .alerts-quiet-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+}
+.alerts .alerts-quiet-sub {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+/* --- The folded halves: explanation, runbook, thresholds. --- */
+.alerts .alerts-fold {
+  margin-top: var(--sp-3);
+}
+.alerts .alerts-fold .disclosure-body {
+  gap: var(--sp-2);
+}
+
+/* --- History --- */
+.alerts .alerts-history {
+  width: 100%;
+}
+.alerts .alerts-history td.strong,
+.alerts .mini-table td.strong {
+  color: var(--text);
+}
+/* The verb is the column the eye lands on, so it is the only one with weight. */
+.alerts .alerts-event {
+  font-weight: 600;
+}
+
+/* ---- Sub-group heading -----------------------------------------------------
+   The name of a group WITHIN a panel — one host's block of cron jobs, one
+   account's keys. Not `.ui-section-title`: the panel already used that once and
+   a second 15px heading inside it would compete with the panel's own name. Body
+   size, heavier, which is the whole step. It replaces `.s-title` at these call
+   sites, which — like `.s-desc` — is only ever defined as `.setting-row
+   .s-title` and therefore did nothing here. */
+.panel-subtitle {
+  font-size: var(--type-body-size);
+  font-weight: 600;
+  color: var(--text);
+}

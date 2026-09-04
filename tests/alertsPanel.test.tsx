@@ -24,13 +24,19 @@ const T0 = new Date('2026-01-01T12:00:00Z').getTime()
 
 let historyRows: StoredAlertRow[]
 let historyFails: boolean
+/** The durable write behind Acknowledge and Snooze. A spy rather than a stub
+ *  so the redesign can be held to reaching the LOG and not merely the in-memory
+ *  chip: a card whose primary button only mutated the store would look right,
+ *  survive every assertion about the store, and lose the acknowledgement on the
+ *  next launch. */
+let recorded: ReturnType<typeof vi.fn>
 
 function install(): void {
   stubBridge({
     getVersion: () => Promise.resolve('9.9.9'),
     notify: { show: () => {} },
     alerts: {
-      record: () => Promise.resolve(true),
+      record: recorded,
       history: () =>
         historyFails ? Promise.reject(new Error('database is locked')) : Promise.resolve(historyRows)
     }
@@ -40,6 +46,7 @@ function install(): void {
 beforeEach(() => {
   historyRows = []
   historyFails = false
+  recorded = vi.fn(() => Promise.resolve(true))
   install()
   resetAlertsForTests()
   useFleetStatus.getState().setStatus(null)
@@ -93,15 +100,15 @@ describe('the history the chip cannot show', () => {
     // percentages of its own, and a body-wide assertion would be passing on
     // whatever text happened to be absent rather than on this row's contents.
     //
-    // Found by BEING a row rather than by being the only 'Unreachable' on the
-    // page: item 28's runbook picker names every alert kind in an <option>, so
-    // the label is no longer unique and a getByText would throw on the
-    // ambiguity rather than assert anything about this row.
-    const row =
-      screen
-        .getAllByText('Unreachable')
-        .map((el) => el.closest('tr'))
-        .find((tr): tr is HTMLTableRowElement => tr !== null)?.textContent ?? ''
+    // Found by BEING an outstanding card rather than by being the only
+    // 'Unreachable' on the page: item 28's runbook picker names every alert
+    // kind in an <option>, so the label is no longer unique and a getByText
+    // would throw on the ambiguity rather than assert anything about this row.
+    //
+    // Addressed by its testid rather than by `closest('tr')`, which is what
+    // this line used when Outstanding was a table. The assertions below are
+    // unchanged; only the way the card is located is.
+    const row = screen.getByTestId('outstanding-alert').textContent ?? ''
     expect(row).toContain('web-1')
     expect(row).toContain('since 30 min ago')
     // A state kind has no reading. A "0" here would be a measurement nobody
@@ -401,5 +408,203 @@ describe('the chip is a pointer at the inbox', () => {
     expect(title).toContain('office-db: Tunnel down')
     expect(title).not.toContain('office-db: Tunnel down 0')
     expect(title).toContain('Click to open the alert inbox.')
+  })
+})
+
+// ===========================================================================
+// The layout, as behaviour.
+//
+// The complaint this covers, verbatim: "alerts page is weird UX, i can't
+// figure out anything in this mountain of text." Everything the page said was
+// true and stayed true; the problem was that the one outstanding alert was the
+// seventh thing on the screen, one dim line tall, with its five controls
+// rendered as five identical grey buttons.
+//
+// These are written as assertions about ORDER, WEIGHT and DISCLOSURE rather
+// than about wording, because those three are what went wrong and they are the
+// three a later edit can undo without any single line looking incorrect. A
+// paragraph moved back above the alerts, an `Acknowledge` that goes back to
+// `btn ghost`, a `<details>` that gains a default `open` — each is a one-word
+// diff, and each one puts the mountain back.
+// ===========================================================================
+
+describe('the alert is the page', () => {
+  function outstanding(): void {
+    useAlerts.setState({
+      active: {
+        's1:disk': { serverId: 's1', serverName: 'web-1', kind: 'disk', value: 91, since: T0 }
+      }
+    })
+  }
+
+  it('puts the outstanding alerts above the explanation rather than under it', async () => {
+    outstanding()
+    render(<AlertsPanel />)
+    const card = await screen.findByTestId('outstanding-alert')
+    // Every explanatory block, in the order a person meets them. All four used
+    // to be above the alert.
+    for (const id of ['alerts-how-it-works', 'alerts-runbook', 'alerts-thresholds']) {
+      const fold = screen.getByTestId(id)
+      expect(
+        card.compareDocumentPosition(fold) & Node.DOCUMENT_POSITION_FOLLOWING,
+        `${id} renders before the outstanding alert`
+      ).toBeTruthy()
+    }
+  })
+
+  it('gives each outstanding alert a card of its own, longest-standing first', async () => {
+    // Oldest first, which is the order the store has always sorted in. Asserted
+    // here because the cards make it visible: whichever is worst-established
+    // leads the page.
+    useAlerts.setState({
+      active: {
+        's1:disk': { serverId: 's1', serverName: 'web-1', kind: 'disk', value: 91, since: T0 - 60_000 },
+        's2:cpu': { serverId: 's2', serverName: 'db-1', kind: 'cpu', value: 97, since: T0 - 9 * 60 * 60_000 }
+      }
+    })
+    render(<AlertsPanel />)
+    const cards = await screen.findAllByTestId('outstanding-alert')
+    expect(cards).toHaveLength(2)
+    expect(cards[0].textContent).toContain('db-1')
+    expect(cards[1].textContent).toContain('web-1')
+    // The card carries the whole alert, so nothing about it has to be looked
+    // up in a second place: what, where, the reading, and how long.
+    expect(cards[0].textContent).toContain('CPU')
+    expect(cards[0].textContent).toContain('97')
+    expect(cards[0].textContent).toContain('since 9 h ago')
+  })
+
+  it('makes Acknowledge the one primary control and the snoozes secondary', async () => {
+    // The specific thing that was wrong: 1 hour / 8 hours / 24 hours /
+    // Acknowledge / Runbook were five `btn ghost sm` in one table cell, so the
+    // action with a consequence looked exactly like the four that mostly do
+    // not have one.
+    outstanding()
+    render(<AlertsPanel />)
+    const ack = await screen.findByRole('button', { name: 'Acknowledge' })
+    expect(ack.classList.contains('primary')).toBe(true)
+    for (const label of ['1 hour', '8 hours', '24 hours', 'Runbook']) {
+      expect(
+        screen.getByRole('button', { name: label }).classList.contains('primary'),
+        `${label} is competing with Acknowledge`
+      ).toBe(false)
+    }
+    // And the three durations are one grouped control rather than three peers
+    // scattered along the row.
+    const group = screen.getByRole('button', { name: '8 hours' }).parentElement
+    expect(group?.className).toContain('alert-snooze-group')
+    expect(group?.querySelectorAll('button')).toHaveLength(3)
+  })
+
+  it('records an acknowledgement in the durable log, not only on the chip', async () => {
+    outstanding()
+    render(<AlertsPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Acknowledge' }))
+    const call = recorded.mock.calls.find((c) => (c[0] as { event: string }).event === 'acknowledged')
+    expect(call, 'Acknowledge wrote nothing to the alert log').toBeTruthy()
+    expect(call?.[0]).toMatchObject({ event: 'acknowledged', kind: 'disk', serverId: 's1', serverName: 'web-1' })
+  })
+
+  it('records a snooze with the moment it runs until', async () => {
+    outstanding()
+    render(<AlertsPanel />)
+    await userEvent.click(await screen.findByRole('button', { name: '8 hours' }))
+    const call = recorded.mock.calls.find((c) => (c[0] as { event: string }).event === 'snoozed')
+    expect(call, 'Snooze wrote nothing to the alert log').toBeTruthy()
+    const payload = call?.[0] as { until: number; serverId: string; kind: string }
+    expect(payload.serverId).toBe('s1')
+    expect(payload.kind).toBe('disk')
+    expect(payload.until).toBeGreaterThanOrEqual(T0 + 8 * 60 * 60_000)
+    expect(payload.until).toBeLessThan(T0 + 8 * 60 * 60_000 + 60_000)
+  })
+})
+
+describe('the explanation, kept but folded', () => {
+  it('is collapsed on arrival, so somebody who knows never scrolls past it', async () => {
+    render(<AlertsPanel />)
+    const fold = (await screen.findByTestId('alerts-how-it-works')) as HTMLDetailsElement
+    expect(fold.open).toBe(false)
+    // Folded, NOT deleted. Every sentence is still there, and each one states
+    // a semantic a sysadmin needs — which is why this is a disclosure and not
+    // a cut.
+    expect(fold.textContent).toContain('opened the Databases page and read it')
+    expect(fold.textContent).toContain('Security posture module is on for this workspace')
+    expect(fold.textContent).toContain('occurrences rather than conditions')
+  })
+
+  it('opens when it is asked for', async () => {
+    render(<AlertsPanel />)
+    const fold = (await screen.findByTestId('alerts-how-it-works')) as HTMLDetailsElement
+    // The affordance has to be a real <summary>. It is the only child of a
+    // <details> that can open it, by mouse or by keyboard, and prose sealed
+    // behind a styled <div> that merely looks like a disclosure head is prose
+    // nobody can reach at all — strictly worse than the wall it replaced.
+    const summary = fold.querySelector('summary')
+    expect(summary, 'the fold has no <summary>, so nothing can open it').toBeTruthy()
+    expect(summary?.textContent).toContain('How alerting works')
+    await userEvent.click(screen.getByText(/How alerting works/))
+    expect(fold.open).toBe(true)
+  })
+
+  it('leaves the coverage verdict outside the fold, because it is a warning', async () => {
+    // The one thing that must not be folded away. "An alert can only fire
+    // while you are already looking at the host" is not an explanation of how
+    // the feature works, it is a statement that the feature is not watching —
+    // and a warning behind a chevron is a warning nobody reads.
+    useApp.getState().setSettings({ fleetSamplingEnabled: false })
+    useFleetStatus.getState().setStatus({ running: false } as never)
+    render(<AlertsPanel />)
+    const verdict = await screen.findByText('Foreground only')
+    expect(screen.getByTestId('alerts-how-it-works').contains(verdict)).toBe(false)
+    // And it is read from whether the sampler is LOOPING, never from the
+    // switch — the rule alertCoverage.ts exists to keep.
+    useFleetStatus.getState().setStatus({ running: true } as never)
+    useApp.getState().setSettings({ fleetSamplingEnabled: true })
+    await waitFor(() => expect(screen.getByText('Background checks on')).toBeTruthy())
+  })
+
+  it('files per-host thresholds behind their own fold, out of the alert flow', async () => {
+    // Configuration, not an alert. It used to sit between the outstanding list
+    // and the history, with a paragraph of justification attached.
+    useApp.setState({
+      servers: [
+        {
+          id: 's1',
+          workspaceId: 'ws-default',
+          folderId: null,
+          name: 'web-1',
+          host: 'example.test',
+          port: 22,
+          username: 'root',
+          auth: 'key' as const,
+          status: 'offline' as const,
+          tags: [],
+          favorite: false,
+          os: 'Linux',
+          route: [],
+          vpnProfileId: null
+        }
+      ]
+    })
+    render(<AlertsPanel />)
+    const fold = (await screen.findByTestId('alerts-thresholds')) as HTMLDetailsElement
+    expect(fold.open).toBe(false)
+    // Folded, and still whole: the box and the paragraph explaining why disk,
+    // inodes and load are not settable per host are both in there.
+    expect(fold.contains(screen.getByLabelText('CPU and memory threshold for web-1'))).toBe(true)
+    expect(fold.textContent).toContain('deliberately not settable per host')
+  })
+})
+
+describe('the quiet state', () => {
+  it('answers an empty inbox with a settled state rather than an absence', async () => {
+    render(<AlertsPanel />)
+    await waitFor(() => expect(screen.getByText('Nothing is outstanding right now.')).toBeTruthy())
+    // Not a bare grey half-line. "Everything is fine" and "nothing loaded"
+    // look identical when the answer is one faint sentence, and on an alerts
+    // page that is the more expensive of the two to get wrong — so the settled
+    // state says where the things that DID happen went.
+    expect(screen.getByText(/Anything that has been raised and cleared is in the history/)).toBeTruthy()
+    expect(screen.queryAllByTestId('outstanding-alert')).toHaveLength(0)
   })
 })

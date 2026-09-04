@@ -428,13 +428,12 @@ describe('the refusal', () => {
     })
     views = [view(), view({ hostId: 's1', recall: { status: 'never-fired' } })]
     render(<AlertsPanel />)
-    // 'Disk' also names an <option> in the kind picker below, so the row is
-    // found by being a row rather than by being the only match.
+    // 'Disk' also names an <option> in the kind picker below, so the card is
+    // found by being an outstanding card rather than by being the only match.
+    // (It was located with `closest('tr')` while Outstanding was a table; the
+    // assertions below are unchanged.)
     await waitFor(() => expect(screen.getAllByText('Disk').length).toBeGreaterThan(1))
-    const row = screen
-      .getAllByText('Disk')
-      .map((el) => el.closest('tr'))
-      .find((tr): tr is HTMLTableRowElement => tr !== null) as HTMLElement
+    const row = screen.getByTestId('outstanding-alert')
     await user.click(within(row).getByText('Runbook'))
     await waitFor(() =>
       expect(screen.getByLabelText('Runbook note for Disk on web-1')).toBeTruthy()
