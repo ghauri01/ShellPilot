@@ -553,7 +553,7 @@ describe('the drain refuses before it runs, not after', () => {
     expect(sent).toEqual([])
   })
 
-  it('a host that cannot be reached leaves every read unknown, not empty', async () => {
+  it('a server that cannot be reached leaves every read unknown, not empty', async () => {
     const { reader: r } = reader(() => ({ ok: false }))
     const a = await r.drainPreflight(cfg, 'spk8s-worker', 'kind-spk8s')
     expect(a.unchecked.map((u) => u.read).sort()).toEqual([
@@ -565,7 +565,7 @@ describe('the drain refuses before it runs, not after', () => {
     expect(a.safe).toBe(false)
   })
 
-  it('reports an unreachable host mid-drain as an UNKNOWN outcome', async () => {
+  it('reports an unreachable server mid-drain as an UNKNOWN outcome', async () => {
     const { reader: r } = reader((command) =>
       command.includes('DPDB')
         ? { ok: true, code: 0, stdout: fixture('preflight-clear.txt') }

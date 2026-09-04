@@ -986,7 +986,7 @@ function ListenerFields({ listeners, issue, onChange, shown }: ListenerProps): R
             <div className="input-group">
               <input
                 className="input"
-                placeholder="Target host inside the tunnel"
+                placeholder="Target server inside the tunnel"
                 value={l.targetHost}
                 onChange={(e) => replace(i, { ...l, targetHost: e.target.value })}
               />

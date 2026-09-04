@@ -87,7 +87,7 @@ describe('a check that could not run is never shown as a check that passed', () 
             'V fw-tool ufw',
             'V fw-backend-status denied',
             POSTURE_STATUS_MARKER,
-            'firewall denied - ufw status needs root on this host',
+            'firewall denied - ufw status needs root on this server',
             'mandatory-access absent - neither is installed',
             'sshd-hardening ok - files',
             'failed-logins denied - needs root'
@@ -103,13 +103,13 @@ describe('a check that could not run is never shown as a check that passed', () 
     expect(cell('web-1', 'firewall')).not.toBe('')
   })
 
-  it('shows a host with no firewall tooling as cannot-be-answered, not as open', async () => {
+  it('shows a server with no firewall tooling as cannot-be-answered, not as open', async () => {
     mount(
       {
         a: {
           posture: collected([
             POSTURE_STATUS_MARKER,
-            'firewall unsupported - this host has none of ufw, firewalld, nft or iptables installed',
+            'firewall unsupported - this server has none of ufw, firewalld, nft or iptables installed',
             'mandatory-access absent - neither is installed',
             'sshd-hardening absent - no sshd_config',
             'failed-logins no-tool - no lastb'
@@ -197,14 +197,14 @@ describe('a check that could not run is never shown as a check that passed', () 
     expect(cell('web-1', 'sshd')).toContain('2 weak')
   })
 
-  it('shows a host that was never collected as not collected, not as clear', async () => {
+  it('shows a server that was never collected as not collected, not as clear', async () => {
     mount({}, [server('a', 'web-1'), server('b', 'web-2')])
     // With nothing collected anywhere the panel shows its empty state rather
     // than a table of blanks.
     await waitFor(() => expect(screen.getByText(/No security posture has been collected yet/)).toBeTruthy())
   })
 
-  it('keeps an uncollected host visible beside a collected one, and says which is which', async () => {
+  it('keeps an uncollected server visible beside a collected one, and says which is which', async () => {
     mount(
       {
         a: {
@@ -287,7 +287,7 @@ describe('the security update count comes from the inventory probe', () => {
     await waitFor(() => expect(cell('web-1', 'updates')).toBe('0'))
   })
 
-  it('shows a host with no inventory at all as unknown rather than zero', async () => {
+  it('shows a server with no inventory at all as unknown rather than zero', async () => {
     mount({ a: { posture: posture() } }, [server('a', 'web-1')])
     await waitFor(() => expect(cell('web-1', 'updates')).toBe('unknown'))
   })
@@ -355,8 +355,8 @@ describe('the firewall rules — roadmap item 31', () => {
   ]
 
   const openRules = async (): Promise<HTMLElement> => {
-    await waitFor(() => expect(screen.getByTitle(/rule lines this host/i)).toBeTruthy())
-    await userEvent.click(screen.getByTitle(/rule lines this host/i))
+    await waitFor(() => expect(screen.getByTitle(/rule lines this server/i)).toBeTruthy())
+    await userEvent.click(screen.getByTitle(/rule lines this server/i))
     return screen.findByText((_, el) => el?.getAttribute('data-rules-detail') === 'web-1')
   }
 
@@ -366,12 +366,12 @@ describe('the firewall rules — roadmap item 31', () => {
     expect(detail.textContent).toContain('3306/tcp ALLOW IN Anywhere')
     // Marked as the host's words, not ShellPilot's. The line above is text
     // written by whoever configured that machine.
-    expect(detail.textContent).toContain('Reported by the host')
+    expect(detail.textContent).toContain('Reported by the server')
     // And where it came from, named, so a reader can go and check it.
     expect(detail.textContent).toContain('ufw status verbose')
   })
 
-  it('says nobody asked for them rather than showing a host with no rules', async () => {
+  it('says nobody asked for them rather than showing a server with no rules', async () => {
     // The capability ungranted. The cell still reads "ufw · 3 rules"; the
     // detail must NOT read as a host whose rule list is empty.
     mount(
@@ -425,7 +425,7 @@ describe('the firewall rules — roadmap item 31', () => {
             'V fw-active yes',
             'V fw-rule-collection on',
             POSTURE_STATUS_MARKER,
-            'firewall partial - ufw status needs root on this host'
+            'firewall partial - ufw status needs root on this server'
           ])
         }
       },
@@ -433,7 +433,7 @@ describe('the firewall rules — roadmap item 31', () => {
     )
     const detail = await openRules()
     expect(detail.textContent).toContain('could not be read')
-    expect(detail.textContent).toContain('needs root on this host')
+    expect(detail.textContent).toContain('needs root on this server')
     expect(detail.textContent).not.toMatch(/no rules|nothing is allowed/i)
   })
 })
@@ -447,7 +447,7 @@ describe('the firewall rules — roadmap item 31', () => {
 // clean bills of health this panel could print, and neither is one.
 // ---------------------------------------------------------------------------
 
-describe('the OOM cell never turns an unread kernel log into a quiet host', () => {
+describe('the OOM cell never turns an unread kernel log into a quiet server', () => {
   it('shows a restricted dmesg as not permitted, never as no kills', async () => {
     mount(
       {
@@ -529,7 +529,7 @@ describe('the OOM cell never turns an unread kernel log into a quiet host', () =
   })
 })
 
-describe('the certificate cell never turns an unread directory into a host with none', () => {
+describe('the certificate cell never turns an unread directory into a server with none', () => {
   it('shows a refused certificate directory as refused, never as none found', async () => {
     // /etc/letsencrypt is 0700 root on Debian, so this is the common case and
     // "none found" is the answer a naive table gives for it.
@@ -638,7 +638,7 @@ describe('the certificate cell never turns an unread directory into a host with 
     await waitFor(() => expect(cell('web-1', 'certs')).toBe('none found'))
   })
 
-  it('shows a host with none of the directories as absent, having checked', async () => {
+  it('shows a server with none of the directories as absent, having checked', async () => {
     mount(
       {
         a: {

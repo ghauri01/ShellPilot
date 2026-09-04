@@ -55,7 +55,7 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('which line a host is held to', () => {
+describe('which line a server is held to', () => {
   it('uses the workspace default when there is no override', () => {
     expect(alerts.hostThreshold(80, {}, 's1')).toBe(80)
     expect(alerts.hostThreshold(80, undefined, 's1')).toBe(80)
@@ -67,7 +67,7 @@ describe('which line a host is held to', () => {
     expect(alerts.hostThreshold(80, { s1: 95 }, 's2')).toBe(80)
   })
 
-  it('clamps a value that would switch the host off while the switch says on', () => {
+  it('clamps a value that would switch the server off while the switch says on', () => {
     // 0 makes the clear line max(0, -5), which no reading is below, so the
     // alert raises on every sample forever. 100 can never be reached.
     expect(alerts.hostThreshold(80, { s1: 0 }, 's1')).toBe(alerts.THRESHOLD_MIN)
@@ -89,7 +89,7 @@ describe('the line a sample is actually judged against', () => {
   const sample = (id: string, name: string, cpu: number): void =>
     alerts.checkResourceAlerts(id, name, { cpu, ram: 0, disk: null, inode: null, load: null })
 
-  it('holds two hosts to two different lines in the same sweep', () => {
+  it('holds two servers to two different lines in the same sweep', () => {
     app.useApp.getState().setSettings({ resourceAlertThresholds: { build: 95 } })
     // 88% on both.
     //
@@ -106,7 +106,7 @@ describe('the line a sample is actually judged against', () => {
     expect(raises()[0].threshold).toBe(80)
   })
 
-  it('puts the host’s own number in the sentence a person reads', () => {
+  it('puts the server’s own number in the sentence a person reads', () => {
     app.useApp.getState().setSettings({ resourceAlertThresholds: { build: 95 } })
     sample('build', 'ci-runner', 97)
     expect(raises()).toHaveLength(1)
@@ -117,7 +117,7 @@ describe('the line a sample is actually judged against', () => {
     expect(raises()[0].summary).not.toContain('threshold 80%')
   })
 
-  it('recovers against the host’s own line, not the default', () => {
+  it('recovers against the server’s own line, not the default', () => {
     app.useApp.getState().setSettings({ resourceAlertThresholds: { build: 95 } })
     sample('build', 'ci-runner', 97)
     expect(raises()).toHaveLength(1)

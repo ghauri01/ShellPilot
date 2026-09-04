@@ -172,7 +172,7 @@ export function detectIpv6Leak(routes: RouteSpec[], defaults: RouteEntry[]): Rou
     ? `via ${v6.gateway}${v6.interfaceName ? ` on ${v6.interfaceName}` : ''}`
     : v6.interfaceName
       ? `on ${v6.interfaceName}`
-      : 'on this host'
+      : 'on this server'
   return {
     kind: 'ipv6-leak',
     destination: '::/0',

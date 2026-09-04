@@ -138,7 +138,7 @@ describe('RBAC, which is what makes this different from docker', () => {
       classifyK8sFailure('Error from server (Forbidden): pods is forbidden: User cannot list resource', 1)
     ).toBe('forbidden')
     expect(
-      classifyK8sFailure('The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?', 1)
+      classifyK8sFailure('The connection to the server 10.0.0.1:6443 was refused - did you specify the right server or port?', 1)
     ).toBe('no-cluster')
   })
 

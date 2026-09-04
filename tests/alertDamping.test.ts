@@ -86,7 +86,7 @@ afterEach(() => {
 
 const T0 = Date.parse('2026-01-01T00:00:00Z')
 
-describe('a host that crosses cleanly and repeatedly', () => {
+describe('a server that crosses cleanly and repeatedly', () => {
   it('is not the reason for forty messages overnight', () => {
     // Forty crossings spread over twelve hours, which is what "overnight" is.
     for (let i = 0; i < 40; i++) crossOnce(T0 + i * 18 * MINUTE)
@@ -192,7 +192,7 @@ describe('what damping must not touch', () => {
     expect(cpu.every((p) => p.damped === undefined)).toBe(true)
   })
 
-  it('damps one server+kind without silencing another host', () => {
+  it('damps one server+kind without silencing another server', () => {
     for (let i = 0; i < 8; i++) crossOnce(T0 + i * 5 * MINUTE)
     vi.setSystemTime(T0 + 45 * MINUTE)
     alerts.checkResourceAlerts('s2', 'db-1', { cpu: 0, ram: 0, disk: 93, inode: null, load: null })
@@ -203,7 +203,7 @@ describe('what damping must not touch', () => {
 })
 
 describe('the damp survives a restart', () => {
-  it('does not hand a flapping host a clean slate at every launch', () => {
+  it('does not hand a flapping server a clean slate at every launch', () => {
     for (let i = 0; i < 4; i++) crossOnce(T0 + i * 5 * MINUTE)
     expect(raises().length).toBe(4)
     // The restart happens with the host recovered, which is the case that would

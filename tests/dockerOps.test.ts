@@ -105,7 +105,7 @@ describe('where the disk went', () => {
     expect(r.rows[1]).toMatchObject({ type: 'Containers', size: '0B', reclaimablePercent: 0 })
   })
 
-  it('says "you cannot look" rather than reporting a host that uses no disk', () => {
+  it('says "you cannot look" rather than reporting a server that uses no disk', () => {
     // The whole point. Four zeroes during a disk-full incident is the most
     // expensive lie this module could tell.
     const r = parseDockerDiskOutput(dfOutput(DENIED), 1)
@@ -344,7 +344,7 @@ describe('which image, which volume — not which category', () => {
     })
   })
 
-  it('reads a host whose store is genuinely empty as empty', () => {
+  it('reads a server whose store is genuinely empty as empty', () => {
     // Headers with nothing under them. The one case where an empty list is the
     // true answer, and it must not be confused with the refusals below.
     const r = parseDockerDiskDetailOutput(dfvOutput(EMPTY_STORE), 0)
@@ -373,7 +373,7 @@ describe('which image, which volume — not which category', () => {
     }
   })
 
-  it('does not count that same shell noise as a row of a populated host either', () => {
+  it('does not count that same shell noise as a row of a populated server either', () => {
     const noisy = `${dfvOutput(REAL_DFV)}\nbash: warning: setlocale: LC_ALL: cannot change locale`
     const r = parseDockerDiskDetailOutput(noisy, 0)
     expect(r.ok && r.disk.unreadable).toBe(0)
@@ -409,7 +409,7 @@ describe('which image, which volume — not which category', () => {
     expect(!r.ok && r.reason).toBe('not-installed')
   })
 
-  it('refuses to report tables it could not read as an empty host', () => {
+  it('refuses to report tables it could not read as an empty server', () => {
     // A runtime whose columns are not the ones assumed here. Empty lists would
     // be the same lie as the refusal cases above, wearing a different hat.
     const body = ['Images space usage:', '', 'REPO SIZE THINGS', 'some row we cannot read at all'].join('\n')
@@ -494,7 +494,7 @@ describe('which image, which volume — not which category', () => {
   })
 })
 
-describe('how old the engine on this host is', () => {
+describe('how old the engine on this server is', () => {
   const buildTime = '2021-06-02T11:54:33.000000000+00:00'
   const at = (iso: string): number => Date.parse(iso)
 
@@ -623,7 +623,7 @@ describe('the number this must never produce', () => {
     for (const key of Object.keys(d)) expect(key).not.toMatch(/total/i)
   })
 
-  it('proves the sum would be wrong on the recorded host', () => {
+  it('proves the sum would be wrong on the recorded server', () => {
     const d = okDetail(dfvOutput(REAL_DFV))
     const summed = d.images.reduce((n, i) => n + (i.sizeBytes ?? 0), 0)
     const honest = d.images.reduce((n, i) => n + (i.uniqueSizeBytes ?? 0), 0)
@@ -676,7 +676,7 @@ const listOutput = (opts: { version?: string; compose?: string; ps: string[] }):
     ...opts.ps
   ].join('\n')
 
-describe('grouping by compose project, which is how people think about a host', () => {
+describe('grouping by compose project, which is how people think about a server', () => {
   const ps = [
     row('aaa1', 'shop-web-1', 'shop/web:1.4', 'running', 'Up 3 hours', '0.0.0.0:80->80/tcp', 'now'),
     row('bbb2', 'shop-db-1', 'postgres:16', 'running', 'Up 3 hours', '', 'now'),
@@ -729,7 +729,7 @@ describe('grouping by compose project, which is how people think about a host', 
     expect(r.ok && r.containers).toHaveLength(3)
   })
 
-  it('still reports a host with no docker as not installed', () => {
+  it('still reports a server with no docker as not installed', () => {
     // The regression the block ordering exists to prevent: the compose command
     // ends in `|| true`, so putting it AFTER `docker ps` would replace the 127
     // that says the binary is missing with a 0 that says the host is quiet.
@@ -994,7 +994,7 @@ describe('CPU and memory, one shot', () => {
     expect(r.ok && r.stats[0].memPercent).toBeNull()
   })
 
-  it('does not render a refused socket as a host with no load', () => {
+  it('does not render a refused socket as a server with no load', () => {
     const r = parseDockerStatsOutput(statsOutput(DENIED), 1)
     expect(!r.ok && r.reason).toBe('permission-denied')
   })
@@ -1010,7 +1010,7 @@ describe('CPU and memory, one shot', () => {
     expect(buildDockerStatsCommand(['web'])).toMatch(/stats --no-stream/)
   })
 
-  it('never samples the whole host by accident', () => {
+  it('never samples the whole server by accident', () => {
     // Bare `docker stats` samples every running container. "Everything" is not
     // a target the caller chose.
     expect(() => buildDockerStatsCommand([])).toThrow(/refusing/)

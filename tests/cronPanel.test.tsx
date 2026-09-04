@@ -119,7 +119,7 @@ describe('the cron panel’s edit half', () => {
     expect(label.getAttribute('title')).toContain('/etc/cron.d')
   })
 
-  it('will not edit a host whose own crontab was only partly read, and says so', async () => {
+  it('will not edit a server whose own crontab was only partly read, and says so', async () => {
     stubBridge(
       bridge({
         collect: vi.fn(async () =>
@@ -142,7 +142,7 @@ describe('the cron panel’s edit half', () => {
     expect(screen.queryByTitle('Change this job')).toBeNull()
   })
 
-  it('refuses a schedule cron would not take, before anything reaches a host', async () => {
+  it('refuses a schedule cron would not take, before anything reaches a server', async () => {
     const stub = bridge()
     stubBridge(stub)
     render(<CronPanel servers={[SERVER]} />)
@@ -223,7 +223,7 @@ describe('the cron panel’s edit half', () => {
     expect(req.approval.targets).toEqual([{ serverId: SERVER.id, serverName: SERVER.name }])
   })
 
-  it('tells the operator where the previous crontab is, and re-reads the host', async () => {
+  it('tells the operator where the previous crontab is, and re-reads the server', async () => {
     const stub = bridge()
     stubBridge(stub)
     render(<CronPanel servers={[SERVER]} />)
@@ -277,7 +277,7 @@ describe('the cron panel’s edit half', () => {
     await screen.findByText(/glued onto the end of the previous one/i)
   })
 
-  it('reports a write that did not land, in the host’s words', async () => {
+  it('reports a write that did not land, in the server’s words', async () => {
     stubBridge(
       bridge({
         write: vi.fn(async () => ({
@@ -285,7 +285,7 @@ describe('the cron panel’s edit half', () => {
           serverId: SERVER.id,
           serverName: SERVER.name,
           outcome: 'changed',
-          detail: 'the crontab on this host is not the one this change was planned against',
+          detail: 'the crontab on this server is not the one this change was planned against',
           backupPath: undefined
         }))
       })

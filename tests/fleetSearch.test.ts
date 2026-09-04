@@ -113,7 +113,7 @@ describe('finding things across the estate', () => {
     expect(r.matches[0].detail).toMatch(/not visible at this privilege/)
   })
 
-  it('finds the host itself by hostname or kernel', () => {
+  it('finds the server itself by hostname or kernel', () => {
     const r = searchFleet(input({
       hosts: { a: { host: host({ hostname: 'inter-scanner-01' }), at: 1 } }
     }), 'scanner')
@@ -136,7 +136,7 @@ describe('finding things across the estate', () => {
 })
 
 describe('what the search admits it could not see', () => {
-  it('names hosts that have never been sampled', () => {
+  it('names servers that have never been sampled', () => {
     const r = searchFleet(input({
       servers: [{ id: 'a', name: 'web-01' }, { id: 'b', name: 'db-01' }],
       hosts: { a: { host: host(), at: 1 } }
@@ -163,7 +163,7 @@ describe('what the search admits it could not see', () => {
     expect(r.coverage.noPortView).toEqual(['web-01'])
   })
 
-  it('keeps rows from a host that has since gone unreachable, and marks them', () => {
+  it('keeps rows from a server that has since gone unreachable, and marks them', () => {
     // Dropping them would answer "postgres is nowhere" when the truth is
     // "postgres was on that box and the box stopped answering".
     const r = searchFleet(input({
@@ -188,7 +188,7 @@ describe('what the search admits it could not see', () => {
     expect(r.coverage.unreachable).toEqual(['web-01'])
   })
 
-  it('does not count a host with neither probe as searched', () => {
+  it('does not count a server with neither probe as searched', () => {
     // Nothing on it was searchable but its own name. Counting it put a
     // reassuring number on screen — "Searched 1 host" — that the results behind
     // it did not support, and named the host twice under two separate gaps
@@ -202,11 +202,11 @@ describe('what the search admits it could not see', () => {
     expect(r.coverage.noPortView).toEqual([])
     const sentence = coverageSentence(r.coverage)
     expect(sentence).toBe(
-      'Units and ports searched on 0 hosts, host facts on 1 — neither systemd nor a port probe on web-01.'
+      'Units and ports searched on 0 servers, server facts on 1 — neither systemd nor a port probe on web-01.'
     )
   })
 
-  it('still counts a host with one probe missing as searched', () => {
+  it('still counts a server with one probe missing as searched', () => {
     const r = searchFleet(input({
       hosts: { a: { host: host({ services: null }), at: 1 } }
     }), 'nginx')
@@ -224,7 +224,7 @@ describe('what the search admits it could not see', () => {
     expect(r.coverage.unreachable).toEqual([])
   })
 
-  it('is silent only when every host was searched with both probes working', () => {
+  it('is silent only when every server was searched with both probes working', () => {
     const clean = searchFleet(input(), 'web')
     expect(coverageSentence(clean.coverage)).toBeNull()
   })
@@ -240,7 +240,7 @@ describe('what the search admits it could not see', () => {
   })
 })
 
-describe('finding a host by what it IS', () => {
+describe('finding a server by what it IS', () => {
   // Host facts, roadmap item C. "Which boxes are Rocky", "which are on KVM" and
   // "which use apt" were all unanswerable without visiting every host, and the
   // answers have been in memory since the sampler's first sweep.
@@ -250,31 +250,31 @@ describe('finding a host by what it IS', () => {
       (m) => m.label
     )
 
-  it('finds a host by its distribution id', () => {
+  it('finds a server by its distribution id', () => {
     expect(matched('ubuntu')).toEqual(['web-01'])
   })
 
-  it('finds a host by its package manager', () => {
+  it('finds a server by its package manager', () => {
     expect(matched('apt')).toEqual(['web-01'])
   })
 
-  it('finds a host by its virtualisation type', () => {
+  it('finds a server by its virtualisation type', () => {
     expect(matched('kvm')).toEqual(['web-01'])
   })
 
-  it('finds a rocky host by its distribution id', () => {
+  it('finds a rocky server by its distribution id', () => {
     expect(
       matched('rocky', { distroId: 'rocky', prettyName: 'Rocky Linux 9.4 (Blue Onyx)' })
     ).toEqual(['web-01'])
   })
 
-  it('finds a host by version, architecture and CPU model too', () => {
+  it('finds a server by version, architecture and CPU model too', () => {
     expect(matched('24.04')).toEqual(['web-01'])
     expect(matched('x86_64')).toEqual(['web-01'])
     expect(matched('epyc')).toEqual(['web-01'])
   })
 
-  it('does not invent a match for a host whose facts were never collected', () => {
+  it('does not invent a match for a server whose facts were never collected', () => {
     // The gap is reported, not papered over. A host with no facts is not an
     // Ubuntu host that failed to say so.
     const r = searchFleet(input({ facts: {} }), 'ubuntu')
@@ -282,7 +282,7 @@ describe('finding a host by what it IS', () => {
     expect(r.coverage.noFacts).toEqual(['web-01'])
   })
 
-  it('ranks an exact distro id above a host that merely contains it', () => {
+  it('ranks an exact distro id above a server that merely contains it', () => {
     // The same defect the hostname ranking fixed: a host found by a field the
     // label does not contain used to score worst-possible and sort last.
     const r = searchFleet(
@@ -296,7 +296,7 @@ describe('finding a host by what it IS', () => {
     expect(r.matches.map((m) => m.serverName)).toEqual(['web-01', 'arch-mirror-01'])
   })
 
-  it('puts the distribution on the row, so a host found by "kvm" says why', () => {
+  it('puts the distribution on the row, so a server found by "kvm" says why', () => {
     const r = searchFleet(input(), 'kvm')
     expect(r.matches[0].detail).toContain('Ubuntu 24.04.1 LTS')
     expect(r.matches[0].detail).toContain('kvm')
@@ -311,7 +311,7 @@ describe('what the search admits it cannot ever know', () => {
   // together would report an estate as unchecked while it is being checked
   // constantly.
 
-  it('names hosts whose facts have never been collected', () => {
+  it('names servers whose facts have never been collected', () => {
     const r = searchFleet(
       input({
         servers: [{ id: 'a', name: 'web-01' }, { id: 'b', name: 'db-01' }],
@@ -324,7 +324,7 @@ describe('what the search admits it cannot ever know', () => {
     expect(r.coverage.factsSearched).toEqual(['web-01'])
   })
 
-  it('does not name a never-sampled host twice', () => {
+  it('does not name a never-sampled server twice', () => {
     // The sampler only probes facts after a successful metrics sample, so a
     // host nothing has ever sampled has never had facts collected either.
     // Reporting it under both gaps says less than reporting it under the one
@@ -337,7 +337,7 @@ describe('what the search admits it cannot ever know', () => {
     expect(r.coverage.noFacts).toEqual([])
   })
 
-  it('keeps the facts gap for a host with facts but no metrics sample yet', () => {
+  it('keeps the facts gap for a server with facts but no metrics sample yet', () => {
     // The comment on the never-sampled branch used to justify itself with "the
     // sampler only probes facts after a successful metrics sample". True of
     // main. NOT true of the store this function reads: FleetWatcher seeds facts
@@ -405,7 +405,7 @@ describe('what the search admits it cannot ever know', () => {
     expect(new Set(gaps).size).toBe(gaps.length)
   })
 
-  it('names hosts with no package manager, and does not also call them unsupported', () => {
+  it('names servers with no package manager, and does not also call them unsupported', () => {
     // The two buckets are disjoint. A host with no package manager cannot
     // report a security count either, but the reason is "there is nothing to
     // ask", not "the distribution does not publish it" — and an operator does
@@ -434,7 +434,7 @@ describe('what the search admits it cannot ever know', () => {
     expect(r.coverage.securityUnsupported).toEqual([])
   })
 
-  it('names hosts that can NEVER report a security count', () => {
+  it('names servers that can NEVER report a security count', () => {
     const r = searchFleet(input({ facts: { a: { facts: archFacts(), at: 1 } } }), 'x')
     expect(r.coverage.securityUnsupported).toEqual(['web-01'])
     expect(r.coverage.noPackageManager).toEqual([])
@@ -442,7 +442,7 @@ describe('what the search admits it cannot ever know', () => {
     expect(r.coverage.factsSearched).toEqual(['web-01'])
   })
 
-  it('tells someone searching "security" that five hosts can never answer', () => {
+  it('tells someone searching "security" that five servers can never answer', () => {
     // The headline case for the whole bucket. Three hits and no sentence reads
     // as "the estate has three security-related things"; five Arch and Alpine
     // boxes are permanently outside that number and nothing else on screen
@@ -487,8 +487,8 @@ describe('what the search admits it cannot ever know', () => {
     const sentence = coverageSentence(r.coverage)
     // Two hosts searched for units and ports, one for facts. One number
     // covering both would be true of neither.
-    expect(sentence).toContain('Units and ports searched on 2 hosts, host facts on 1')
-    expect(sentence).toContain('no host facts collected yet for db-01')
+    expect(sentence).toContain('Units and ports searched on 2 servers, server facts on 1')
+    expect(sentence).toContain('no server facts collected yet for db-01')
   })
 })
 
@@ -517,7 +517,7 @@ describe('ranking what actually matched', () => {
   // its owning process. The label is what is DISPLAYED; it is not necessarily
   // what was searched.
 
-  it('ranks a host found by an exact hostname above a unit that merely contains the query', () => {
+  it('ranks a server found by an exact hostname above a unit that merely contains the query', () => {
     const r = searchFleet(input({
       hosts: {
         a: {

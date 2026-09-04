@@ -198,7 +198,7 @@ describe('samples round-trip', () => {
     ])
   })
 
-  it('stores hosts as small integers, so the id length does not reach the rows', async () => {
+  it('stores servers as small integers, so the id length does not reach the rows', async () => {
     // The 21.9 bytes/row measurement assumes there is nothing in a row but four
     // small values. A server id repeated 86,400 times a day as a string would
     // be most of the file, so this is a size assertion wearing a schema costume:
@@ -309,7 +309,7 @@ describe('facts', () => {
     expect(s.readFacts('h1').map((f) => f.key)).toEqual(['unit:fooXbar', 'unit:other'])
   })
 
-  it('returns nothing for a host it has never seen', async () => {
+  it('returns nothing for a server it has never seen', async () => {
     const s = await open()
     expect(s.readFacts('never-sampled')).toEqual([])
     expect(s.readEvents({ hostId: 'never-sampled' })).toEqual([])
@@ -317,7 +317,7 @@ describe('facts', () => {
 })
 
 describe('events', () => {
-  it('filters by host, kind and time, newest first', async () => {
+  it('filters by server, kind and time, newest first', async () => {
     const s = await open()
     s.recordEvent('host-unreachable', 'a', { error: 'timeout' }, 1000)
     s.recordEvent('host-recovered', 'a', undefined, 2000)
@@ -340,7 +340,7 @@ describe('events', () => {
     expect(s.readEvents({ kind: 'retention' })[0].cursor.ts).toBe(4000)
   })
 
-  it('an unknown host filter returns nothing, not everything', async () => {
+  it('an unknown server filter returns nothing, not everything', async () => {
     const s = await open()
     s.recordEvent('x', 'a', undefined, 1000)
     // Falling back to "no filter" here would be a quiet lie: a caller asking
@@ -562,9 +562,9 @@ describe('retention', () => {
     const rows = after.samples + after.hourly
     const perRow = primary / rows
     console.log(
-      `[history] 1 host, 7d full + 1d hourly: ${rows} rows, ` +
+      `[history] 1 server, 7d full + 1d hourly: ${rows} rows, ` +
         `${(primary / 1024 / 1024).toFixed(2)} MB in the primary, ${perRow.toFixed(1)} bytes/row. ` +
-        `15-host steady state extrapolates to ${((perRow * steadyStateRows(15, cadence).total) / 1024 / 1024).toFixed(1)} MB, ` +
+        `15-server steady state extrapolates to ${((perRow * steadyStateRows(15, cadence).total) / 1024 / 1024).toFixed(1)} MB, ` +
         `about twice that on disk once the .bak is counted.`
     )
     // The whole retention argument is that 15 hosts fit in tens of megabytes,
@@ -1041,7 +1041,7 @@ describe('file permissions', () => {
 })
 
 describe('the event read path', () => {
-  it('uses the (host, ts) index instead of scanning the ts index', async () => {
+  it('uses the (server, ts) index instead of scanning the ts index', async () => {
     // `(?1 IS NULL OR e.host = ?1)` is not sargable: SQLite cannot use an index
     // for a comparison that might be "match everything". Measured on HEAD, the
     // shipped statement plans as `SCAN e USING INDEX events_ts` — so
@@ -1160,7 +1160,7 @@ describe('the three capacity series, in one pass', () => {
           .map((r) => r.detail)
           .join(' | ')
       const full = plan(
-        'SELECT ts, metric, v FROM samples WHERE host = ? AND ts >= ? AND ts <= ? ' +
+        'SELECT ts, metric, v FROM samples WHERE server = ? AND ts >= ? AND ts <= ? ' +
           'AND metric IN (1, 2, 4) ORDER BY ts'
       )
       // One range seek on the primary key, and no sort afterwards: the key
@@ -1233,14 +1233,14 @@ describe('the three capacity series, in one pass', () => {
     expect(s.readTrends('h1', 3 * 60_000, 5 * 60_000).diskPct.map((p) => p.v)).toEqual([3, 4, 5])
   })
 
-  it('answers a host it has never seen with three empty series, not with everything', async () => {
+  it('answers a server it has never seen with three empty series, not with everything', async () => {
     const s = await open()
     s.recordSamples('h1', 1000, { diskPct: 50 })
     const trends = s.readTrends('h2', 0, 9999)
     expect(trends).toEqual({ cpu: [], memPct: [], diskPct: [] })
   })
 
-  it('does not leak one host samples into another host trends', async () => {
+  it('does not leak one server samples into another server trends', async () => {
     const s = await open()
     s.transaction(() => {
       for (let i = 0; i < 20; i++) {
@@ -1442,7 +1442,7 @@ describe('jobsForHost', () => {
     })
   }
 
-  it('returns the job together with this host own target row, not another host row', async () => {
+  it('returns the job together with this server own target row, not another server row', async () => {
     const s = await open()
     seed(s, 'j1', AT, ['journalctl --vacuum-time=2d'], ['a', 'b'])
     s.updateJobTarget('j1', 'a', { outcome: 'ok', exitCode: 0 })
@@ -1474,7 +1474,7 @@ describe('jobsForHost', () => {
     expect(s.jobsForHost('h', AT, AT + 100).map((r) => r.job.id)).toEqual(['upper', 'lower'])
   })
 
-  it('returns nothing for a host that ran nothing, and for no host at all', async () => {
+  it('returns nothing for a server that ran nothing, and for no server at all', async () => {
     const s = await open()
     seed(s, 'j1', AT, ['a'], ['h'])
     expect(s.jobsForHost('other', AT - 1000, AT + 1000)).toEqual([])
@@ -1494,7 +1494,7 @@ describe('jobsForHost', () => {
     expect(s.jobsForHost('h', AT - 1000, AT + 100_000, 2).map((r) => r.job.id)).toEqual(['j4', 'j3'])
   })
 
-  it('reads the host index rather than scanning a year of targets', async () => {
+  it('reads the server index rather than scanning a year of targets', async () => {
     // The read a runbook does on every open. job_target's primary key leads
     // with job_id, so without job_target_server this is a full scan of every
     // target row on every host.

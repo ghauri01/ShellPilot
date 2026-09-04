@@ -417,7 +417,7 @@ describe('DockerPanel — reclaim by id', () => {
     await user.type(screen.getByPlaceholderText(/Type REMOVE to continue/), 'REMOVE')
     await user.click(btn(/^Remove$/))
 
-    await screen.findByText(/This host is not what the list said it was/)
+    await screen.findByText(/This server is not what the list said it was/)
     expect(document.body.textContent).toContain('1 container linked to it')
     expect(reclaimCalls).toBe(0)
   })

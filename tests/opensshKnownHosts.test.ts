@@ -50,21 +50,21 @@ describe('OpenSSH known_hosts parsing', () => {
   })
 })
 
-describe('host name canonicalisation', () => {
+describe('server name canonicalisation', () => {
   // Getting this wrong is the whole bug: a host trusted on a non-default port
   // is stored as "[host]:port", so looking it up by bare host finds nothing.
-  it('brackets the host only when the port is not 22', () => {
+  it('brackets the server only when the port is not 22', () => {
     expect(canonicalHostname('13.251.230.58', 22000)).toBe('[13.251.230.58]:22000')
     expect(canonicalHostname('example.com', 22)).toBe('example.com')
     expect(canonicalHostname('example.com', 0)).toBe('example.com')
   })
 })
 
-describe('host pattern matching', () => {
+describe('server pattern matching', () => {
   const entryFor = (hosts: string): ReturnType<typeof parseKnownHosts>[number] =>
     parseKnownHosts(`${hosts} ssh-rsa ${b64(KEY_A)}`)[0]
 
-  it('matches a plain host and a comma-separated list', () => {
+  it('matches a plain server and a comma-separated list', () => {
     expect(entryMatchesHost(entryFor('example.com'), 'example.com')).toBe(true)
     expect(entryMatchesHost(entryFor('a.com,b.com,c.com'), 'b.com')).toBe(true)
     expect(entryMatchesHost(entryFor('a.com,b.com'), 'z.com')).toBe(false)
@@ -110,13 +110,13 @@ describe('looking a presented key up in known_hosts', () => {
     expect(result).toEqual({ trusted: true, knownUnderAnotherKey: false, revoked: false })
   })
 
-  it('reports a host known under a different key rather than calling it trusted', () => {
+  it('reports a server known under a different key rather than calling it trusted', () => {
     const result = look(`example.com ssh-rsa ${b64(KEY_A)}`, 'example.com', 22, KEY_B)
     expect(result.trusted).toBe(false)
     expect(result.knownUnderAnotherKey).toBe(true)
   })
 
-  it('still recognises the right key when the host has several', () => {
+  it('still recognises the right key when the server has several', () => {
     // A host normally has one line per key type; matching must not be
     // defeated by the other types sitting alongside it.
     const text = [`example.com ssh-rsa ${b64(KEY_A)}`, `example.com ssh-ed25519 ${b64(KEY_B)}`].join('\n')
@@ -138,7 +138,7 @@ describe('looking a presented key up in known_hosts', () => {
     expect(result.knownUnderAnotherKey).toBe(false)
   })
 
-  it('finds nothing for a host that is genuinely absent', () => {
+  it('finds nothing for a server that is genuinely absent', () => {
     const result = look(`other.com ssh-rsa ${b64(KEY_A)}`, 'example.com', 22, KEY_A)
     expect(result).toEqual({ trusted: false, knownUnderAnotherKey: false, revoked: false })
   })

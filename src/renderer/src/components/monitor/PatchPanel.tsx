@@ -331,7 +331,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
         </span>
         <h2 className="ui-section-title">Patch and updates</h2>
         <p className="ui-note panel-head-purpose">
-          Choose the hosts to update, review the plan, then run it in waves. Nothing installs
+          Choose the servers to update, review the plan, then run it in waves. Nothing installs
           until you confirm, and there is no unattended mode.
         </p>
         <div className="panel-head-actions">
@@ -340,7 +340,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
           disabled={running || needy.length === 0}
           data-testid="patch-select-needy"
           onClick={() => setSelected(new Set(needy.map((r) => r.serverId)))}
-          title="Selects the hosts that report something to install or a reboot they are owed. A host whose counts could not be read is NOT selected here: it is unknown, not known to need something, and picking it would be this screen deciding something for you. The button beside this one offers those hosts separately."
+          title="Selects the servers that report something to install or a reboot they are owed. A server whose counts could not be read is NOT selected here: it is unknown, not known to need something, and picking it would be this screen deciding something for you. The button beside this one offers those servers separately."
         >
           Select what needs something
         </button>
@@ -358,7 +358,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
             onClick={() =>
               setSelected((prev) => new Set([...prev, ...unanswerable.map((r) => r.serverId)]))
             }
-            title="Adds the hosts where at least one question had no answer — a count that could not be read, a security channel that does not exist, a reboot flag nothing could check. They are unknown, not known to be clean, and nothing here can tell you which. Adding them to the selection is a decision for you to make deliberately."
+            title="Adds the servers where at least one question had no answer — a count that could not be read, a security channel that does not exist, a reboot flag nothing could check. They are unknown, not known to be clean, and nothing here can tell you which. Adding them to the selection is a decision for you to make deliberately."
           >
             <ShieldQuestion size={13} /> Add {unanswerable.length} that could not answer
           </button>
@@ -383,7 +383,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
 
       {summary.withFacts === 0 ? (
         <div className="panel-empty">
-          <p className="panel-empty-title">No host facts have been collected yet.</p>
+          <p className="panel-empty-title">No server facts have been collected yet.</p>
           <p className="panel-empty-body">
             Update counts come from the same hourly sweep the inventory reads. Press{' '}
             <b>Check now</b>, and make sure background checking is on in Settings.
@@ -414,11 +414,11 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
 
           {summary.securityUnanswerable > 0 && (
             <div className="panel-note is-unknown" data-testid="patch-unanswerable">
-              <ShieldQuestion size={12} /> {summary.securityUnanswerable} host
+              <ShieldQuestion size={12} /> {summary.securityUnanswerable} server
               {summary.securityUnanswerable === 1 ? '' : 's'} can never report a security update
               count, so {summary.securityUnanswerable === 1 ? 'it is' : 'they are'} not in the{' '}
               {summary.securityTotal} above. Arch and Alpine have no security channel at all, and
-              dnf cannot answer where the repositories publish no updateinfo. Treat those hosts as
+              dnf cannot answer where the repositories publish no updateinfo. Treat those servers as
               unknown, never as zero.
             </div>
           )}
@@ -497,7 +497,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
               in waves of{' '}
               <input
                 type="number"
-                aria-label="Hosts per wave"
+                aria-label="Servers per wave"
                 min={1}
                 max={Math.max(1, chosen.length)}
                 value={waveSize}
@@ -522,7 +522,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
                 onChange={(e) => setReboot(e.target.checked)}
                 disabled={running}
               />{' '}
-              restart the hosts that say they need it
+              restart the servers that say they need it
             </label>
           </div>
 
@@ -591,7 +591,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
               onClick={() => (strongest === 'none' ? void start() : setConfirming(true))}
             >
               {scope === 'security' ? 'Install security updates' : 'Install updates'} on{' '}
-              {plan.hosts.filter((h) => h.excluded === null).length} host
+              {plan.hosts.filter((h) => h.excluded === null).length} server
               {plan.hosts.filter((h) => h.excluded === null).length === 1 ? '' : 's'}
             </button>
           </div>
@@ -602,7 +602,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
                 This will run on{' '}
                 {plan.hosts.filter((h) => h.excluded === null).map((h) => h.serverName).join(', ')} in{' '}
                 {waves.length} wave{waves.length === 1 ? '' : 's'}
-                {reboot ? ', restarting the hosts that say they need it' : ''}.
+                {reboot ? ', restarting the servers that say they need it' : ''}.
               </div>
               {strongest === 'type-to-confirm' && (
                 <input

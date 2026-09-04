@@ -86,7 +86,7 @@ function statusChip(status: AccessStatus): React.JSX.Element | null {
       {status === 'denied'
         ? 'not permitted'
         : status === 'absent'
-          ? 'not on this host'
+          ? 'not on this server'
           : status === 'no-tool'
             ? 'no tool for it'
             : status === 'unsupported'
@@ -122,7 +122,7 @@ function KeyCount({ account }: { account: AccessAccount }): React.JSX.Element {
       {unreadable > 0 && (
         <span
           className="chip warn"
-          title={`${unreadable} line${unreadable === 1 ? '' : 's'} in this file could not be fingerprinted, so ${unreadable === 1 ? 'it is' : 'they are'} not in the count beside it and cannot be matched against other hosts.`}
+          title={`${unreadable} line${unreadable === 1 ? '' : 's'} in this file could not be fingerprinted, so ${unreadable === 1 ? 'it is' : 'they are'} not in the count beside it and cannot be matched against other servers.`}
         >
           +{unreadable} unreadable
         </span>
@@ -149,7 +149,7 @@ function KeyCount({ account }: { account: AccessAccount }): React.JSX.Element {
  */
 const OUTCOME_LABEL: Record<AccessCommitOutcome, string> = {
   committed: 'Committed',
-  'reverted-verification-failed': 'Reverted — the host would not let a new session in',
+  'reverted-verification-failed': 'Reverted — the server would not let a new session in',
   'reverted-unconfirmed': 'Reverted — nothing confirmed it in time'
 }
 
@@ -391,20 +391,20 @@ export function AccessPanel({
         </span>
         <h2 className="ui-section-title">Keys and access</h2>
         <p className="ui-note panel-head-purpose">
-          Which SSH keys can reach which hosts, and which accounts they land on. Files are read,
+          Which SSH keys can reach which servers, and which accounts they land on. Files are read,
           never edited, and no private key is touched.
         </p>
         <div className="panel-head-actions">
           {collected.length > 0 && (
             <button className="btn ghost sm" onClick={() => setView(view === 'keys' ? 'hosts' : 'keys')}>
-              {view === 'keys' ? 'By host' : 'By key'}
+              {view === 'keys' ? 'By server' : 'By key'}
             </button>
           )}
           <button
             className="btn primary"
             disabled={busy || servers.length === 0}
             onClick={() => void refresh()}
-            title="Sweeps the estate now and re-reads what has already been collected. Keys are re-read at most once an hour per host."
+            title="Sweeps the estate now and re-reads what has already been collected. Keys are re-read at most once an hour per server."
           >
             <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
           </button>
@@ -427,15 +427,15 @@ export function AccessPanel({
           <p className="panel-empty-title">No authorized_keys have been collected yet.</p>
           <p className="panel-empty-body">
             ShellPilot reads them about once an
-          hour, on the same background sweep as host facts — so a server added in the last hour, or
+          hour, on the same background sweep as server facts — so a server added in the last hour, or
           an estate where this module has just been switched on, will not have any yet. Press{' '}
           <b>Check now</b> to sweep immediately, and make sure background checking is on in
-          Settings. Nothing is written to any host by this: the files are read, never edited, and no
+          Settings. Nothing is written to any server by this: the files are read, never edited, and no
           private key is touched.
           {failed.length > 0 && (
             <>
               {' '}
-              <b>{failed.length}</b> host{failed.length === 1 ? '' : 's'} refused the probe — see
+              <b>{failed.length}</b> server{failed.length === 1 ? '' : 's'} refused the probe — see
               below.
             </>
           )}
@@ -455,17 +455,17 @@ export function AccessPanel({
           <div className="panel-stats">
             <span>
               {keyRows.length} distinct key{keyRows.length === 1 ? '' : 's'} across{' '}
-              {collected.length} host{collected.length === 1 ? '' : 's'}
+              {collected.length} server{collected.length === 1 ? '' : 's'}
             </span>
             {unchecked > 0 && (
               <span className="state-unknown" data-testid="unchecked-hosts">
-                {unchecked} host{unchecked === 1 ? '' : 's'} could not be checked and{' '}
+                {unchecked} server{unchecked === 1 ? '' : 's'} could not be checked and{' '}
                 {unchecked === 1 ? 'is' : 'are'} not in that count
               </span>
             )}
             {incomplete.length > 0 && (
               <span className="state-unknown" data-testid="incomplete-hosts">
-                {incomplete.length} host{incomplete.length === 1 ? '' : 's'} answered only partly
+                {incomplete.length} server{incomplete.length === 1 ? '' : 's'} answered only partly
               </span>
             )}
           </div>
@@ -480,7 +480,7 @@ export function AccessPanel({
               is not on my fleet” cannot be concluded from it.{' '}
               {unchecked > 0 && (
                 <>
-                  {unchecked} host{unchecked === 1 ? '' : 's'} could not be read this time
+                  {unchecked} server{unchecked === 1 ? '' : 's'} could not be read this time
                   {stale.length > 0 && (
                     <>
                       {' '}
@@ -493,7 +493,7 @@ export function AccessPanel({
               )}
               {incomplete.length > 0 && (
                 <>
-                  {incomplete.length} host{incomplete.length === 1 ? '' : 's'} answered for some
+                  {incomplete.length} server{incomplete.length === 1 ? '' : 's'} answered for some
                   accounts and not others.{' '}
                 </>
               )}
@@ -513,9 +513,9 @@ export function AccessPanel({
                 Revoke {pending.fingerprint} from {pending.preview.hosts.length} account
                 {pending.preview.hosts.length === 1 ? '' : 's'}?
               </b>{' '}
-              This is staged, not applied. Each host takes a timestamped backup, replaces the file,
+              This is staged, not applied. Each server takes a timestamped backup, replaces the file,
               and arms its OWN rollback before ShellPilot lets go — so if this app dies in the next
-              instant, the host puts the previous file back by itself after{' '}
+              instant, the server puts the previous file back by itself after{' '}
               {pending.preview.rollbackSeconds} seconds. Nothing becomes permanent until a second
               connection has authenticated against the changed file.
               {pending.preview.hosts.length > 0 && (
@@ -556,12 +556,12 @@ export function AccessPanel({
               <div style={{ marginTop: 6 }}>
                 <details>
                   <summary className="muted" style={{ fontSize: 11 }}>
-                    What will run on each host
+                    What will run on each server
                   </summary>
                   {/* Shown, and sent back with the run: main derives it again
                       and refuses to touch a host if the two differ. */}
                   <pre className="mono" style={{ fontSize: 10, whiteSpace: 'pre-wrap' }}>
-                    {pending.preview.command || 'nothing — every host was left out'}
+                    {pending.preview.command || 'nothing — every server was left out'}
                   </pre>
                 </details>
               </div>
@@ -603,7 +603,7 @@ export function AccessPanel({
                 </div>
               ))}
               {result.reports.length === 0 && result.notStaged.length === 0 && (
-                <span>Nothing ran: every host was left out.</span>
+                <span>Nothing ran: every server was left out.</span>
               )}
             </div>
           )}
@@ -651,7 +651,7 @@ export function AccessPanel({
                         {k.restrictedEverywhere && (
                           <span
                             className="chip"
-                            title="Every line carrying this key restricts it — a command=, from= or restrict option. It is not a general-purpose login on any host where it was found."
+                            title="Every line carrying this key restricts it — a command=, from= or restrict option. It is not a general-purpose login on any server where it was found."
                           >
                             restricted
                           </span>
@@ -659,7 +659,7 @@ export function AccessPanel({
                         {k.viaCertificate && (
                           <span
                             className="chip"
-                            title="At least one host trusts this key through a certificate rather than as a bare key. The fingerprint is the key inside the certificate, which is what ssh-keygen -l prints — so it is the same key either way."
+                            title="At least one server trusts this key through a certificate rather than as a bare key. The fingerprint is the key inside the certificate, which is what ssh-keygen -l prints — so it is the same key either way."
                           >
                             certificate
                           </span>
@@ -672,7 +672,7 @@ export function AccessPanel({
                           <span
                             className="chip warn"
                             data-testid={`ca-${k.fingerprint}`}
-                            title="This is a cert-authority line: the host trusts this key as a signer, so it also accepts every key this authority signs — including keys that do not exist yet and are in no file anywhere. Revoking one signed key does not change that."
+                            title="This is a cert-authority line: the server trusts this key as a signer, so it also accepts every key this authority signs — including keys that do not exist yet and are in no file anywhere. Revoking one signed key does not change that."
                           >
                             certificate authority
                           </span>
@@ -709,7 +709,7 @@ export function AccessPanel({
                             data-testid={`revoke-${k.fingerprint}`}
                             disabled={running || pending !== null}
                             onClick={() => void planRevoke(k.fingerprint)}
-                            title="Shows exactly what would run on which hosts. Nothing is written until you confirm it, and nothing becomes permanent until a second, independent session has proved the host still lets ShellPilot in."
+                            title="Shows exactly what would run on which servers. Nothing is written until you confirm it, and nothing becomes permanent until a second, independent session has proved the server still lets ShellPilot in."
                           >
                             Revoke…
                           </button>
@@ -818,7 +818,7 @@ export function AccessPanel({
                             // of this" is not "we do not know when they logged
                             // in", and showing the phrase is the better of the
                             // two answers.
-                            <span title="The host reported this and ShellPilot could not read a date out of it.">
+                            <span title="The server reported this and ShellPilot could not read a date out of it.">
                               {a.lastLoginText}
                             </span>
                           ) : (
@@ -852,20 +852,20 @@ export function AccessPanel({
         <div key={h.server.id} className="panel-note is-unknown" data-testid={`stale-${h.server.name}`}>
           <ShieldAlert size={12} /> <b>{h.server.name}</b>: the keys shown above were read{' '}
           <b>{duration(h.entry!.at ?? null)} ago</b> and the probe has been failing since —{' '}
-          {h.entry!.error}. They are what ShellPilot last saw, not what the host trusts now, and
-          this host is counted as unchecked.
+          {h.entry!.error}. They are what ShellPilot last saw, not what the server trusts now, and
+          this server is counted as unchecked.
         </div>
       ))}
 
       {failed.map((h) => (
         <div key={h.server.id} className="panel-note is-alarm" data-testid={`failed-${h.server.name}`}>
-          {h.server.name}: the access probe failed — {h.entry!.error}. This host is excluded from
-          every count above; it is not a host with no keys.
+          {h.server.name}: the access probe failed — {h.entry!.error}. This server is excluded from
+          every count above; it is not a server with no keys.
         </div>
       ))}
       {collected.length > 0 && never.length > 0 && (
         <div className="panel-note is-unknown" data-testid="never-collected">
-          {never.length} host{never.length === 1 ? '' : 's'} ({never.map((h) => h.server.name).join(', ')}
+          {never.length} server{never.length === 1 ? '' : 's'} ({never.map((h) => h.server.name).join(', ')}
           ) {never.length === 1 ? 'has' : 'have'} not been read yet. They are excluded from every
           count above.
         </div>

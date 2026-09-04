@@ -176,11 +176,11 @@ export const K8S_FAILURE_HELP: Record<K8sFailure, string> = {
   // PATH an SSH session gets" — described a limitation that resolveBinary
   // removed, so it sent people to check a PATH that had already been searched.
   'not-installed':
-    'No kubectl on this host. Looked on PATH and in /usr/bin, /usr/local/bin, /snap/bin, /opt/homebrew/bin, /usr/sbin, plus the k3s, rke2 and microk8s wrappers. If it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
+    'No kubectl on this server. Looked on PATH and in /usr/bin, /usr/local/bin, /snap/bin, /opt/homebrew/bin, /usr/sbin, plus the k3s, rke2 and microk8s wrappers. If it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
   'no-kubeconfig':
     'kubectl is installed but found no kubeconfig. It looks in $KUBECONFIG then ~/.kube/config, and an SSH session may not have the same environment as a login shell.',
   'no-cluster':
-    'kubectl has a config but the cluster is not answering — the API server may be down, or the context may point somewhere unreachable from this host.',
+    'kubectl has a config but the cluster is not answering — the API server may be down, or the context may point somewhere unreachable from this server.',
   forbidden:
     'This account is authenticated but its RBAC does not allow listing these resources. That is a different problem from there being none, and the roles it needs are named in the raw error below.',
   unauthorized:
@@ -1251,7 +1251,7 @@ export function planK8sRollout(target: K8sRolloutTarget): K8sRolloutPlan {
     // ReadWriteOnce volume, a host port or a full node all make it not.
     type = true
     reasons.push(
-      'one replica — the replacement is started first, but if it cannot be scheduled (a ReadWriteOnce volume, a host port, a full node) this workload stays down until it can'
+      'one replica — the replacement is started first, but if it cannot be scheduled (a ReadWriteOnce volume, a server port, a full node) this workload stays down until it can'
     )
   }
   if ((target.desired ?? 0) >= K8S_TYPE_ABOVE_REPLICAS) {
@@ -2683,7 +2683,7 @@ const INGRESS_JSONPATH =
   `'jsonpath={range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}` +
   `{.spec.ingressClassName}{"|"}{range .status.loadBalancer.ingress[*]}{.ip}{.hostname}{";"}{end}{"|"}` +
   `{range .spec.tls[*]}{.secretName}{";"}{end}{"|"}` +
-  `{range .spec.rules[*]}{.host}{range .http.paths[*]}{" "}{.path}{"->"}` +
+  `{range .spec.rules[*]}{.server}{range .http.paths[*]}{" "}{.path}{"->"}` +
   `{.backend.service.name}{":"}{.backend.service.port.number}{end}{";"}{end}{"\\n"}{end}'`
 
 const RBAC_JSONPATH =
@@ -3050,7 +3050,7 @@ export function parseK8sHelmList(output: string, exitCode: number | null): K8sHe
       ok: false,
       reason: 'not-installed',
       detail:
-        'No helm on this host. That is not a statement about the cluster — releases installed from somewhere else are still there, this host just cannot list them.'
+        'No helm on this server. That is not a statement about the cluster — releases installed from somewhere else are still there, this server just cannot list them.'
     }
   }
   try {

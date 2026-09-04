@@ -82,7 +82,7 @@ export function FrpTunnelSetup({
   const upsertVpnProfile = useApp((s) => s.upsertVpnProfile)
   const base = existing?.spec.kind === 'frp' ? existing.spec : null
 
-  const [name, setName] = useState(existing?.name ?? 'Tunnel host')
+  const [name, setName] = useState(existing?.name ?? 'Tunnel server')
   const [serverAddr, setServerAddr] = useState(base?.serverAddr ?? '')
   const [serverPort, setServerPort] = useState(base?.serverPort ?? 7000)
   const [token, setToken] = useState('')
@@ -122,7 +122,7 @@ export function FrpTunnelSetup({
       if (token.trim() && storeToken) {
         const stored = await withVaultUnlock(`Saving the frp token for ${name.trim()}`, () =>
           storeToken({
-            profileName: name.trim() || 'Tunnel host',
+            profileName: name.trim() || 'Tunnel server',
             workspaceId,
             token: token.trim(),
             ...(tokenRef?.vaultEntryId ? { replaces: tokenRef.vaultEntryId } : {})
@@ -166,7 +166,7 @@ export function FrpTunnelSetup({
       const profile: VpnProfile = {
         id: existing?.id ?? `vpn-${crypto.randomUUID()}`,
         workspaceId,
-        name: name.trim() || 'Tunnel host',
+        name: name.trim() || 'Tunnel server',
         autoStart: existing?.autoStart ?? false,
         spec
       }
@@ -180,7 +180,7 @@ export function FrpTunnelSetup({
 
   return (
     <Modal
-      title="Set up a tunnel host"
+      title="Set up a tunnel server"
       subtitle="Once. After this, publishing a port is one step."
       size="lg"
       onClose={onClose}
@@ -199,7 +199,7 @@ export function FrpTunnelSetup({
       <div className="col" style={{ gap: 14 }}>
         {/* Said once, here, and nowhere else in this pane. */}
         <p className="muted" style={{ fontSize: 12, margin: 0, lineHeight: 1.5 }}>
-          ShellPilot does not host public addresses. frp publishes through an frp server you run,
+          ShellPilot does not server public addresses. frp publishes through an frp server you run,
           under a domain you own — so those are the two things this asks for. It is the only time
           it will.
         </p>

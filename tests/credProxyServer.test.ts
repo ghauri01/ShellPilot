@@ -386,7 +386,7 @@ describe('a caller on loopback is not automatically trusted', () => {
 })
 
 describe('a redirect to another origin does not carry the credential', () => {
-  it('does not follow the hop, and the second host is never contacted', async () => {
+  it('does not follow the hop, and the second server is never contacted', async () => {
     const thief = await upstream()
     cleanups.push(thief.close)
     const api = await upstream((_req, res) => {

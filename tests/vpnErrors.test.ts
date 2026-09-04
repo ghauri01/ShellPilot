@@ -135,7 +135,7 @@ describe('classifyEngineLine', () => {
     ["Verification Failed: 'Auth'", 'auth-failed'],
     ['VERIFY ERROR: depth=0, error=certificate has expired', 'cert-expired'],
     ['TLS key negotiation failed to occur within 60 seconds', 'tls-handshake-failed'],
-    ['RESOLVE: Cannot resolve host address: vpn.example.com', 'dns-failure'],
+    ['RESOLVE: Cannot resolve server address: vpn.example.com', 'dns-failure'],
     ['Network is unreachable', 'network-unreachable'],
     ['ERROR: Cannot ioctl TUNSETIFF tun0: Operation not permitted', 'permission-denied'],
     ['bind(): Address already in use', 'port-in-use'],

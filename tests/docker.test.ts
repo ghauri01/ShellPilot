@@ -266,7 +266,7 @@ describe('output with things printed before the answer', () => {
   })
 })
 
-describe('a podman host, whose docker is a shim', () => {
+describe('a podman server, whose docker is a shim', () => {
   it('lists containers even though the daemon version probe cannot be answered', () => {
     // `podman version --format {{.Server.Version}}` fails with a nil-pointer
     // template error, because podman has no server for a local connection. The
@@ -358,7 +358,7 @@ describe('the ports column', () => {
   })
 })
 
-describe('names real hosts produce', () => {
+describe('names real servers produce', () => {
   it('keeps a compose name and a Kubernetes pod name intact', () => {
     const k8s = 'k8s_POD_coredns-5d78c9869d-abcde_kube-system_1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d_0'
     const r = parseDockerOutput(
@@ -399,7 +399,7 @@ describe('the field separator', () => {
 })
 
 describe('the version probe', () => {
-  it('falls back to --version so a podman host reports something', () => {
+  it('falls back to --version so a podman server reports something', () => {
     expect(DOCKER_LIST_COMMAND).toMatch(/docker --version/)
   })
 
@@ -435,7 +435,7 @@ describe('the --tail count, which arrives over IPC', () => {
   })
 })
 
-describe('the whole round trip on a host with no docker', () => {
+describe('the whole round trip on a server with no docker', () => {
   it('still says "not installed" rather than "no containers"', () => {
     // The version probe now falls back to `docker --version`, so its block no
     // longer carries the diagnosis. The exit status does: an empty list comes

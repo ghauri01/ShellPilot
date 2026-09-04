@@ -342,7 +342,7 @@ describe('what it refuses to write', () => {
     })
     expect(plan.ok).toBe(false)
     if (plan.ok) return
-    expect(plan.reason).toContain('edited on the host since')
+    expect(plan.reason).toContain('edited on the server since')
   })
 
   it('refuses when the index points past the end of the file', () => {
@@ -483,7 +483,7 @@ function fakeHost(initial: string | null): FakeHost {
       '  [ -n "$SP_CRON_REJECT" ] && { echo "new crontab file is missing newline before EOF, can\'t install." >&2; rm -f "$SP_F.in"; exit 1; }',
       // Mangles the FIRST install only, so the restore that follows behaves the
       // way a real host would.
-      '  [ -n "$SP_CRON_MANGLE" ] && [ ! -f "$SP_F.mangled" ] && { printf \'# mangled by the host\\n\' >> "$SP_F.in"; : > "$SP_F.mangled"; }',
+      '  [ -n "$SP_CRON_MANGLE" ] && [ ! -f "$SP_F.mangled" ] && { printf \'# mangled by the server\\n\' >> "$SP_F.in"; : > "$SP_F.mangled"; }',
       '  mv "$SP_F.in" "$SP_F" ;;',
       '*) echo "usage" >&2; exit 1 ;;',
       'esac',
@@ -591,7 +591,7 @@ describe.skipIf(process.platform === 'win32')('the writer, run against a host-sh
     expect(h.live()).toBeNull()
   })
 
-  it('says so when the host has no crontab command, rather than reporting success', () => {
+  it('says so when the server has no crontab command, rather than reporting success', () => {
     const h = host('0 3 * * * /a\n')
     // Point the resolver at a name that cannot exist. Left as its own case
     // because "no crontab binary" and "an empty crontab" are the pair the read
@@ -604,7 +604,7 @@ describe.skipIf(process.platform === 'win32')('the writer, run against a host-sh
     expect(res.detail).toContain('no crontab command')
   })
 
-  it('refuses while another crontab change on the same host holds the lock', () => {
+  it('refuses while another crontab change on the same server holds the lock', () => {
     const h = host('0 3 * * * /a\n')
     mkdirSync(join(h.home, '.shellpilot-cron.lock'))
     const res = parseCronWriteResult(h.run(writeCmd('0 3 * * * /a\n', '0 4 * * * /a\n')).stdout)
@@ -624,7 +624,7 @@ describe.skipIf(process.platform === 'win32')('the writer, run against a host-sh
     expect(existsSync(join(h.home, '.shellpilot-cron.lock'))).toBe(false)
   })
 
-  it('reports the host’s own words when crontab refuses the file, and keeps the backup', () => {
+  it('reports the server’s own words when crontab refuses the file, and keeps the backup', () => {
     const h = host('0 3 * * * /a\n')
     const res = parseCronWriteResult(
       h.run(writeCmd('0 3 * * * /a\n', '0 4 * * * /a\n'), { SP_CRON_REJECT: '1' }).stdout
@@ -716,7 +716,7 @@ describe('pointing at a job by its line rather than its position', () => {
     expect(timers.entries).toEqual([])
   })
 
-  it('resolves a line to its position in the file the host just handed over', () => {
+  it('resolves a line to its position in the file the server just handed over', () => {
     const d = doc(FILES.commentBetween)
     const r = resolveCronEdit(d, { op: 'remove', line: '30 4 * * 1 /usr/bin/weekly' })
     expect(r.ok).toBe(true)

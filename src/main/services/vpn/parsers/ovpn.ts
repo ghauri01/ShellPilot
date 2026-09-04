@@ -601,7 +601,7 @@ function directive(ctx: Ctx, tokens: string[], lineNo: number, raw: string): voi
 
     case 'remote': {
       const host = args[0] ?? ''
-      if (!HOSTISH.test(host)) return drop(ctx, name, `"${host}" is not a host name or address.`)
+      if (!HOSTISH.test(host)) return drop(ctx, name, `"${host}" is not a server name or address.`)
       const port = args.length > 1 ? intIn(args[1], 1, 65535) : 1194
       if (port === null) return drop(ctx, name, `"${args[1]}" is not a port.`)
       let proto = ctx.globalProto ?? 'udp'
@@ -759,7 +759,7 @@ function directive(ctx: Ctx, tokens: string[], lineNo: number, raw: string): voi
     case 'socks-proxy': {
       const host = args[0] ?? ''
       const port = intIn(args[1] ?? '', 1, 65535)
-      if (!HOSTISH.test(host) || port === null) return drop(ctx, name, 'Expected a proxy host and port.')
+      if (!HOSTISH.test(host) || port === null) return drop(ctx, name, 'Expected a proxy server and port.')
       const extra: string[] = []
       if (args.length > 2) {
         const third = args[2].toLowerCase()

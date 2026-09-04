@@ -43,15 +43,15 @@ const PHRASING: Record<AiCapability, Phrasing> = {
   sudo: { verb: 'use sudo', gerund: 'using sudo' },
   serverMetrics: { verb: 'read server metrics', gerund: 'reading server metrics' },
   hostFacts: {
-    verb: 'read the host inventory and its pending security updates',
-    gerund: 'reading the host inventory and its pending security updates'
+    verb: 'read the server inventory and its pending security updates',
+    gerund: 'reading the server inventory and its pending security updates'
   },
   // "collect", not "read": no agent can read these at all, and the verb has to
   // survive being read quickly. What the grant does is let ShellPilot's own
   // hourly posture probe ASK the host for its rule lines.
   firewallRules: {
-    verb: 'collect this host’s firewall rule list',
-    gerund: 'collecting this host’s firewall rule list'
+    verb: 'collect this server’s firewall rule list',
+    gerund: 'collecting this server’s firewall rule list'
   },
   manageServers: { verb: 'add servers to the workspace', gerund: 'adding servers to the workspace' },
   // Says what it grants and what it does not, matching the capability's own

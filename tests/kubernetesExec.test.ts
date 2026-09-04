@@ -278,7 +278,7 @@ describe('the approval is a record, not a boolean', () => {
     expect(sent).toEqual([])
   })
 
-  it('refuses when the host was swapped', async () => {
+  it('refuses when the server was swapped', async () => {
     const approved = approvalOf(target({ serverId: 's1', serverName: 'kube-jump' }))
     const { reader, sent } = build(ok)
     const r = await reader.exec(
@@ -353,7 +353,7 @@ describe('the approval is a record, not a boolean', () => {
     expect(panel).not.toContain('buildK8sExecCommand')
   })
 
-  it('reports an unreachable host as an UNKNOWN outcome, not a failed command', async () => {
+  it('reports an unreachable server as an UNKNOWN outcome, not a failed command', async () => {
     const t = target()
     const { reader } = build(() => ({ ok: false }))
     const r = await reader.exec(cfg, t, approvalOf(t))

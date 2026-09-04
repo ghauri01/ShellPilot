@@ -136,7 +136,7 @@ describe('a forecast the data cannot support', () => {
   })
 })
 
-describe('a host that was unreachable', () => {
+describe('a server that was unreachable', () => {
   const before = points(T0 - 2 * DAY - 12 * HOUR, 73, HOUR, 'hourly', (i) => 40 + i * 0.4)
   const after = points(T0, 13, HOUR, 'hourly', () => 80)
 
@@ -200,7 +200,7 @@ describe('the boundary between the two stored resolutions', () => {
   })
 })
 
-describe('reading for the wrong host', () => {
+describe('reading for the wrong server', () => {
   it('does not land one server trends under another server heading', async () => {
     // The DockerPanel defect, in a place where it would be worse: a disk
     // forecast is a number an operator acts on, and there is nothing on screen

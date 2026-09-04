@@ -44,7 +44,7 @@ beforeEach(() => {
 describe('storing an frp server token', () => {
   it('writes it to the vault and returns a ref, not the token', async () => {
     const result = await storeFrpToken({
-      profileName: 'Tunnel host',
+      profileName: 'Tunnel server',
       workspaceId: 'ws-1',
       token: TOKEN
     })
@@ -57,7 +57,7 @@ describe('storing an frp server token', () => {
     expect(JSON.stringify(result)).not.toContain(TOKEN)
 
     expect(vaultEntries).toHaveLength(1)
-    expect(vaultEntries[0].name).toBe('Tunnel host')
+    expect(vaultEntries[0].name).toBe('Tunnel server')
     expect(vaultEntries[0].kind).toBe('vpn')
     expect(vaultEntries[0].tags).toEqual(['vpn', 'frp'])
     // `token` maps onto the password slot, which is what the vault UI renders,
@@ -68,12 +68,12 @@ describe('storing an frp server token', () => {
 
   it('releases the entry it replaces, and only after the new one is written', async () => {
     const first = await storeFrpToken({
-      profileName: 'Tunnel host',
+      profileName: 'Tunnel server',
       workspaceId: 'ws-1',
       token: TOKEN
     })
     const second = await storeFrpToken({
-      profileName: 'Tunnel host',
+      profileName: 'Tunnel server',
       workspaceId: 'ws-1',
       token: 'sp-frp-token-rotated',
       replaces: first.vaultEntryId
@@ -86,7 +86,7 @@ describe('storing an frp server token', () => {
 
   it('does not release the old token when the rotation is refused', async () => {
     const first = await storeFrpToken({
-      profileName: 'Tunnel host',
+      profileName: 'Tunnel server',
       workspaceId: 'ws-1',
       token: TOKEN
     })
@@ -96,7 +96,7 @@ describe('storing an frp server token', () => {
     // would leave the profile pointing at nothing, holding a token that is
     // written down nowhere else.
     const refused = await storeFrpToken({
-      profileName: 'Tunnel host',
+      profileName: 'Tunnel server',
       workspaceId: 'ws-1',
       token: '',
       replaces: first.vaultEntryId
@@ -110,7 +110,7 @@ describe('storing an frp server token', () => {
   it('asks for an unlock rather than reporting an error the user cannot act on', async () => {
     vaultUnlocked = false
     const result = await storeFrpToken({
-      profileName: 'Tunnel host',
+      profileName: 'Tunnel server',
       workspaceId: 'ws-1',
       token: TOKEN
     })
@@ -123,7 +123,7 @@ describe('storing an frp server token', () => {
 
   it('refuses an empty token and writes nothing', async () => {
     const result = await storeFrpToken({
-      profileName: 'Tunnel host',
+      profileName: 'Tunnel server',
       workspaceId: 'ws-1',
       token: '   '
     })

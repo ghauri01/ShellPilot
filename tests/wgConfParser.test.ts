@@ -134,7 +134,7 @@ describe('what is reported rather than swallowed', () => {
 })
 
 describe('warnings the user needs before connecting', () => {
-  it('says so when a v4-only profile runs on a v6 host (E16)', () => {
+  it('says so when a v4-only profile runs on a v6 server (E16)', () => {
     expect(parse('ok-minimal.conf', true).warnings).toContain(
       'This profile does not carry IPv6. IPv6 traffic will bypass it.'
     )

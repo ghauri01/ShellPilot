@@ -288,7 +288,7 @@ describe('a full real-world profile', () => {
 })
 
 describe('import warnings', () => {
-  it('warns about a v4-only profile on a v6 host (E16)', () => {
+  it('warns about a v4-only profile on a v6 server (E16)', () => {
     expect(parse('ok-minimal.ovpn', true).warnings).toContain(
       'This profile does not carry IPv6. IPv6 traffic will bypass it.'
     )

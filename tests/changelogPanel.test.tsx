@@ -228,7 +228,7 @@ describe('the timeline', () => {
     expect(text).toContain('systemctl restart nginx')
   })
 
-  it('names a host the store only knew by id, and falls back to the id when it is gone', async () => {
+  it('names a server the store only knew by id, and falls back to the id when it is gone', async () => {
     // main does not hold the workspace's server list, so a history event
     // reaches the panel with a uuid on it. Rendering the uuid is bad; rendering
     // nothing is worse, because an empty cell reads as "no host".
@@ -246,11 +246,11 @@ describe('the timeline', () => {
     expect(text).toContain('host-recovered · srv-removed')
   })
 
-  it('says when a host filter hid rows that name no host', async () => {
+  it('says when a server filter hid rows that name no server', async () => {
     stub(() => page({ entries: [entry()], hostFilterHidUnattributed: 3 }))
     render(<ChangeLogPanel servers={SERVERS} />)
     expect((await screen.findByTestId('changelog-host-filter-note')).textContent).toContain(
-      '3 entries in this window name no host at all'
+      '3 entries in this window name no server at all'
     )
   })
 

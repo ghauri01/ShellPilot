@@ -204,7 +204,7 @@ export type JobHostOutcome = BroadcastHostOutcome | 'abandoned' | 'orphaned' | '
 export const JOB_OUTCOME_LABEL: Record<JobHostOutcome, string> = {
   ok: 'ok',
   nonzero: 'non-zero exit',
-  'missing-command': 'command not on this host',
+  'missing-command': 'command not on this server',
   'permission-denied': 'permission denied',
   timeout: 'timed out',
   unreachable: 'unreachable',
@@ -222,8 +222,8 @@ export const JOB_OUTCOME_LABEL: Record<JobHostOutcome, string> = {
  * bug waiting for someone to reword a sentence.
  */
 export const JOB_ABANDONED_ERROR =
-  'ShellPilot stopped while this host was running — the SSH channel closed and the remote ' +
-  'command was sent SIGHUP. If it was a package operation, the host may need `dpkg --configure -a`.'
+  'ShellPilot stopped while this server was running — the SSH channel closed and the remote ' +
+  'command was sent SIGHUP. If it was a package operation, the server may need `dpkg --configure -a`.'
 
 const ABANDONED = /ShellPilot stopped while/i
 
@@ -618,11 +618,11 @@ export type JobApprovalEvent = 'granted' | 'refused' | 'resumed' | 'sealed'
  * of its inputs is not a rule.
  */
 export const JOB_RESUME_NOT_REAUTHORISED = (confirmedAt: number | null): string =>
-  'ShellPilot stopped before this host was reached, and it was not started at the next launch. ' +
+  'ShellPilot stopped before this server was reached, and it was not started at the next launch. ' +
   (confirmedAt === null
     ? 'The job carries no confirmation this process could check.'
     : `The confirmation it was authorised with was given at ${new Date(confirmedAt).toISOString()}, ` +
-      'by a window that is gone — a host that never started needs a fresh one.')
+      'by a window that is gone — a server that never started needs a fresh one.')
 
 // ------------------------------------------------------------------ records
 
@@ -866,7 +866,7 @@ export const JOB_OUTPUT_CAP = JOB_OUTPUT_HEAD + JOB_OUTPUT_TAIL
 /** The marker written where the elided middle was, so a reader of the stored
  *  output sees a gap rather than a seam. */
 export function elisionNotice(bytes: number): string {
-  return `\n… ${bytes} bytes elided from the middle of this host's output …\n`
+  return `\n… ${bytes} bytes elided from the middle of this server's output …\n`
 }
 
 /**
@@ -1133,7 +1133,7 @@ export const JOB_INSTANCE_NOTE =
  * worse than the fact it was hiding.
  */
 export const JOB_DETACHED_SETTING_NOTE =
-  'Detached jobs write one directory per step under your own state directory on each host — five ' +
+  'Detached jobs write one directory per step under your own state directory on each server — five ' +
   'small marker files, plus the job’s own output, which is as large as the command makes it — so ' +
   'a job survives the connection dropping. Nothing is installed and nothing runs after the job, ' +
   'and the directory is removed as soon as ShellPilot has read the exit status, or swept seven ' +
@@ -1166,7 +1166,7 @@ export const JOB_DETACHED_SETTING_NOTE =
  */
 export const JOB_OUT_SIZE_NOTE =
   'A detached job’s output file grows with the command: ShellPilot caps what it stores and what ' +
-  'each poll carries, but it does not truncate the file on the host, because the only portable ' +
+  'each poll carries, but it does not truncate the file on the server, because the only portable ' +
   'way to do that would kill the command with SIGPIPE mid-run. The directory is removed once the ' +
   'exit status has been read, and an abandoned one is swept after seven days.'
 
@@ -1910,7 +1910,7 @@ export function parseJobSignal(stdout: string): JobSignalOutcome {
 
 /** What a host is told when its pid could not be verified, so nothing was sent. */
 export const JOB_SIGNAL_UNVERIFIED_ERROR = (ms: number, dir: string): string =>
-  `Command timed out after ${ms}ms. NOTHING WAS SIGNALLED: this host has no usable \`ps\`, so ` +
+  `Command timed out after ${ms}ms. NOTHING WAS SIGNALLED: this server has no usable \`ps\`, so ` +
   'ShellPilot could not confirm that the recorded pid is still this job rather than a process ' +
   'that has since been given the same number — and sending SIGTERM on that basis could stop ' +
   `something unrelated. The command may still be running; its marker directory is left at ${dir} ` +
@@ -2089,7 +2089,7 @@ export function isJobDetachedHandle(v: unknown): v is JobDetachedHandle {
 /** The error a reclaimed host carries when its wrapper died without an answer. */
 export const JOB_ORPHANED_ERROR =
   'The command was launched and its marker directory is still here, but the process is gone and ' +
-  'no exit status was ever written \u2014 the OOM killer, a kill -9, or the host going down under ' +
+  'no exit status was ever written \u2014 the OOM killer, a kill -9, or the server going down under ' +
   'it. Whether the work completed is not knowable from here; check the output above.'
 
 /** The error a host carries when a detached launch could not even start. */
@@ -2152,13 +2152,13 @@ export function waveLabel(name: string): string {
  * first.
  */
 export const JOB_GATE_SKIPPED_ERROR = (wave: string, reason: string): string =>
-  `Nothing was installed on this host. The run stopped after ${waveLabel(wave)} because the ` +
+  `Nothing was installed on this server. The run stopped after ${waveLabel(wave)} because the ` +
   `health check between waves would not pass: ${reason}`
 
 /** The error a reboot step carries when the host came back wrong. */
 export const JOB_REBOOT_UNHEALTHY_ERROR = (detail: string): string =>
-  `The reboot was issued and the host came back, but not cleanly: ${detail} The wave gate will ` +
-  'not pass on this host, so nothing after it was started.'
+  `The reboot was issued and the server came back, but not cleanly: ${detail} The wave gate will ` +
+  'not pass on this server, so nothing after it was started.'
 
 /**
  * What the row says while a reboot has been accepted but has not happened yet.
@@ -2173,12 +2173,12 @@ export const JOB_REBOOT_UNHEALTHY_ERROR = (detail: string): string =>
  * waits for the host to actually go, and says what it is waiting for.
  */
 export const JOB_REBOOT_ACCEPTED_NOTE =
-  'The reboot has been accepted by the host and it is still answering, which is normal: the exit ' +
+  'The reboot has been accepted by the server and it is still answering, which is normal: the exit ' +
   'status of a reboot command is the status of asking. ShellPilot is waiting for it to go down, ' +
   'and will then check that it really restarted and that nothing failed on the way up.'
 
 /** The error a reboot step carries when the host never came back. */
 export const JOB_REBOOT_TIMEOUT_ERROR = (ms: number): string =>
-  `The reboot was issued and the host has not answered in ${Math.round(ms / 1000)}s. It is NOT ` +
+  `The reboot was issued and the server has not answered in ${Math.round(ms / 1000)}s. It is NOT ` +
   'recorded as unreachable in the ordinary sense — the disconnect was expected and asked for — ' +
   'but it has now been gone long enough that somebody should look at it.'

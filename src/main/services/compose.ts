@@ -98,7 +98,7 @@ export class ComposeReader {
     // A transport failure is not a compose failure. Saying "compose is not
     // installed" for a host that was simply unreachable sends someone to fix
     // the wrong machine.
-    if (!r.ok) return onTransportFailure(r.error ?? 'could not reach the host')
+    if (!r.ok) return onTransportFailure(r.error ?? 'could not reach the server')
     const stdout = r.stdout ?? ''
     const stderr = r.stderr ?? ''
     // Joined on a newline rather than glued: the collectors redirect the
@@ -236,7 +236,7 @@ export class ComposeReader {
     const command = buildComposeReadCommand(path, opts)
     try {
       const r = await this.deps.exec(cfg, command, READ_TIMEOUT_MS)
-      if (!r.ok) return { ok: false, error: r.error ?? 'could not reach the host' }
+      if (!r.ok) return { ok: false, error: r.error ?? 'could not reach the server' }
       const text = r.stdout ?? ''
       const stderr = (r.stderr ?? '').trim()
       // `head` writes its refusal to stderr and nothing to stdout. A file that
@@ -281,7 +281,7 @@ export class ComposeReader {
       return {
         ok: false,
         reason:
-          'the compose file on the host is not the one this edit was planned against — it has changed since it was read. Nothing was written.'
+          'the compose file on the server is not the one this edit was planned against — it has changed since it was read. Nothing was written.'
       }
     }
 
@@ -295,7 +295,7 @@ export class ComposeReader {
     const command = buildComposeWriteCommand(req.path, updated, opts)
     try {
       const r = await this.deps.exec(cfg, command, WRITE_TIMEOUT_MS)
-      if (!r.ok) return { ok: false, reason: r.error ?? 'could not reach the host' }
+      if (!r.ok) return { ok: false, reason: r.error ?? 'could not reach the server' }
       const merged = `${r.stdout ?? ''}${r.stderr ?? ''}`
       // The write chain is `cp && tee && mv && echo <end marker>`. The marker
       // is the only proof the `mv` ran: a non-zero exit is conclusive, but a

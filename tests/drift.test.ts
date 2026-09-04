@@ -127,7 +127,7 @@ describe('normalising a file says which rules did the work', () => {
     expect(r.text).toBe('# not a comment here\n')
   })
 
-  it('substitutes the host name it was told about and nothing else', () => {
+  it('substitutes the server name it was told about and nothing else', () => {
     const r = normaliseConfig('server_name web-03.example.internal;\n', ['hostnames'], {
       hostname: 'web-03.example.internal',
       serverName: 'web-03'
@@ -147,7 +147,7 @@ describe('normalising a file says which rules did the work', () => {
     expect(r.text).toBe('x <host> y\n')
   })
 
-  it('does not claim a hostname rule fired when the file never mentions the host', () => {
+  it('does not claim a hostname rule fired when the file never mentions the server', () => {
     const r = normaliseConfig('Port 22\n', ['hostnames'], { hostname: 'web-03', serverName: 'web-03' })
     expect(r.applied).toEqual([])
   })
@@ -216,7 +216,7 @@ describe('the read command', () => {
 
 const WATCH = driftWatch('timezone') as DriftWatch
 
-describe('parsing what a host sent back', () => {
+describe('parsing what a server sent back', () => {
   const b64 = (s: string): string => Buffer.from(s, 'utf8').toString('base64')
 
   it('reads a complete record', () => {
@@ -235,7 +235,7 @@ describe('parsing what a host sent back', () => {
     expect(Buffer.from(r.files[0].contentB64 as string, 'base64').toString('utf8')).toBe('Europe/London\n')
   })
 
-  it('reports a watch the host never mentioned as unknown, not as missing', () => {
+  it('reports a watch the server never mentioned as unknown, not as missing', () => {
     // A watch silently absent from a result is a watch nobody notices is not
     // being checked.
     const r = parseDriftCollection([DRIFT_MARKER, DRIFT_STATUS_MARKER].join('\n'), [WATCH])
@@ -438,7 +438,7 @@ const reading = (over: Partial<DriftReading> = {}): DriftReading => ({
 const drift = (r: DriftReading, at = 1_000): HostDrift => ({ at, readings: [r] })
 
 describe('comparing a watched file across the fleet', () => {
-  it('never calls a host that could not be read a host that matches', () => {
+  it('never calls a server that could not be read a server that matches', () => {
     // The failure this codebase has been bitten by repeatedly, in its most
     // direct form. A denied read is not a match, is not counted in `matching`,
     // and is named in coverage.
@@ -458,7 +458,7 @@ describe('comparing a watched file across the fleet', () => {
     expect(c.coverage.compared).toEqual(['web-01', 'web-02'])
   })
 
-  it('never calls a host nobody has collected a host that matches', () => {
+  it('never calls a server nobody has collected a server that matches', () => {
     const c = compareDrift({
       watch: WATCH,
       baselineServerId: 'a',
@@ -533,7 +533,7 @@ describe('comparing a watched file across the fleet', () => {
     expect(c.results[1].ignoredBy).toEqual(['line-endings', 'comments', 'blank-lines'])
   })
 
-  it('reports a host that does not have the file at all as absent, not as differing', () => {
+  it('reports a server that does not have the file at all as absent, not as differing', () => {
     // "All twelve web servers have this nginx.conf. Three do not." Absent is
     // the answer, and it is neither a match nor a read failure.
     const c = compareDrift({
@@ -597,7 +597,7 @@ describe('comparing a watched file across the fleet', () => {
     })
     expect(c.coverage.redacted).toEqual(['web-01', 'web-02'])
     expect(driftCoverageSentence(c.coverage)).toBe(
-      'Compared on 2 hosts — secret-shaped text was replaced before comparing on web-01, web-02, so a ' +
+      'Compared on 2 servers — secret-shaped text was replaced before comparing on web-01, web-02, so a ' +
         'difference inside it is invisible here.'
     )
   })
@@ -616,7 +616,7 @@ describe('the coverage sentence', () => {
     expect(driftCoverageSentence(c.coverage)).toBeNull()
   })
 
-  it('names hosts rather than counting them', () => {
+  it('names servers rather than counting them', () => {
     const c = compareDrift({
       watch: WATCH,
       baselineServerId: 'a',
@@ -626,7 +626,7 @@ describe('the coverage sentence', () => {
       ]
     })
     expect(driftCoverageSentence(c.coverage)).toBe(
-      'Compared on 1 host — web-02 would not let this account read it — that is not the same as matching.'
+      'Compared on 1 server — web-02 would not let this account read it — that is not the same as matching.'
     )
   })
 })
@@ -652,7 +652,7 @@ describe('what this will not do', () => {
     // The shape src/shared/docker.ts uses for `docker system prune`: the
     // refusal is a string in the module, not a comment, so the UI can say it
     // and this test can check it is still said.
-    expect(DRIFT_NO_PUSH).toContain('never writes a file to a host')
+    expect(DRIFT_NO_PUSH).toContain('never writes a file to a server')
     expect(DRIFT_NO_PUSH).toContain('that is a job')
   })
 

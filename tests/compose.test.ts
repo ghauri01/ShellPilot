@@ -115,7 +115,7 @@ describe('environment values', () => {
     expect(gateway?.environment).toEqual([{ name: 'UPSTREAM', origin: 'literal', set: true }])
   })
 
-  it('marks a name with no value as passed through from the host', () => {
+  it('marks a name with no value as passed through from the server', () => {
     const cfg = parseComposeConfigJson(
       JSON.stringify({ services: { api: { environment: { HOME: null, EMPTY: '' } } } })
     )
@@ -139,7 +139,7 @@ describe('environment values', () => {
 })
 
 describe('.env files', () => {
-  it('strips the value on the host, before it can cross the connection', () => {
+  it('strips the value on the server, before it can cross the connection', () => {
     const cmd = buildComposeEnvNamesCommand(['/srv/edge/.env'])
     // The awk program prints a marker letter and a name. There is no field in
     // it that could hold a value.
@@ -199,7 +199,7 @@ describe('.env files', () => {
 
   it('says on screen that values are withheld deliberately', () => {
     expect(COMPOSE_ENV_DISCLOSURE).toContain('never their values')
-    expect(COMPOSE_ENV_DISCLOSURE).toContain('open the file on the host')
+    expect(COMPOSE_ENV_DISCLOSURE).toContain('open the file on the server')
   })
 })
 
@@ -368,7 +368,7 @@ describe('parseComposeListOutput', () => {
     expect(probe.search?.files.map((f) => f.path)).toEqual(['/srv/edge/docker-compose.yml'])
   })
 
-  it('reports a refused socket as a refused socket, not as an empty host', () => {
+  it('reports a refused socket as a refused socket, not as an empty server', () => {
     const probe = parseComposeListOutput(
       wrap({ ls: 'permission denied while trying to connect to the Docker daemon socket' }),
       1
@@ -378,7 +378,7 @@ describe('parseComposeListOutput', () => {
     expect(probe.reason).toBe('permission-denied')
   })
 
-  it('reports a host with no docker at all rather than a host with no projects', () => {
+  it('reports a server with no docker at all rather than a server with no projects', () => {
     const probe = parseComposeListOutput(
       [COMPOSE_MARKERS.version, 'sh: 1: docker: not found'].join('\n'),
       127

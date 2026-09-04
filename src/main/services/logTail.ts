@@ -183,7 +183,7 @@ export class LogTailer {
       // silent gap this counter exists to avoid.
       const flushDrops = (): void => {
         if (dropped === 0) return
-        notice(`— ${dropped} lines dropped, this host is logging faster than the pane can show —`, this.now)
+        notice(`— ${dropped} lines dropped, this server is logging faster than the pane can show —`, this.now)
         dropped = 0
       }
 
@@ -349,7 +349,7 @@ export class LogTailer {
     if (running.length === 0) {
       this.active.delete(tailId)
       this.paused.delete(tailId)
-      return { ok: false, error: 'No host accepted the tail.' }
+      return { ok: false, error: 'No server accepted the tail.' }
     }
     return { ok: true }
   }
@@ -395,13 +395,13 @@ export class LogTailer {
   ): Promise<{ ok: boolean; units: UnitChoice[]; error?: string }> {
     try {
       const r = await exec(cfg, buildUnitListCommand(), 15_000)
-      if (!r.ok) return { ok: false, units: [], error: r.error ?? 'could not reach the host' }
+      if (!r.ok) return { ok: false, units: [], error: r.error ?? 'could not reach the server' }
       const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
       const units = parseUnitList(out)
       // No units parsed AND something that reads like a shell complaint means
       // no systemd here — distinct from a host with genuinely no services.
       if (units.length === 0 && /not found|no such file/i.test(out)) {
-        return { ok: false, units: [], error: 'systemd is not available on this host.' }
+        return { ok: false, units: [], error: 'systemd is not available on this server.' }
       }
       return { ok: true, units }
     } catch (e) {
@@ -416,7 +416,7 @@ export class LogTailer {
   ): Promise<{ ok: boolean; files: string[]; error?: string }> {
     try {
       const r = await exec(cfg, buildLogFileListCommand(), 15_000)
-      if (!r.ok) return { ok: false, files: [], error: r.error ?? 'could not reach the host' }
+      if (!r.ok) return { ok: false, files: [], error: r.error ?? 'could not reach the server' }
       // stdout only. find writes its permission complaints to stderr, and those
       // are not paths — including them would put sentences in a path picker.
       return { ok: true, files: parseLogFileList(r.stdout ?? '') }

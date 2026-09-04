@@ -117,7 +117,7 @@ export function RouteHops({ hops, onChange, excludeServerId }: Props): React.JSX
             onChange={(e) => selectSavedServer(h.id, e.target.value)}
             title="Reuse a saved server, including its stored credentials"
           >
-            <option value="">Custom host — set details below</option>
+            <option value="">Custom server — set details below</option>
             {servers
               .filter((s) => s.id !== excludeServerId)
               .map((s) => (

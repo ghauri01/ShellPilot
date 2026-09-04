@@ -352,7 +352,7 @@ export function ComposePanel({
                                 {s.environment
                                   .map(
                                     (v) =>
-                                      `${v.name}=${v.set ? '(set)' : v.origin === 'passthrough' ? '(from host)' : '(empty)'}`
+                                      `${v.name}=${v.set ? '(set)' : v.origin === 'passthrough' ? '(from server)' : '(empty)'}`
                                   )
                                   .join('  ')}
                               </span>

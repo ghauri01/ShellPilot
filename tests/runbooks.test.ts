@@ -60,7 +60,7 @@ describe('what the job-history half says when it has nothing to show', () => {
   it('says the alert never fired here, rather than showing an empty list', () => {
     const r = buildRunbookRecall(input({ jobs: [job()] }))
     expect(r.status).toBe('never-fired')
-    expect(RUNBOOK_NEVER_FIRED).toContain('has not been raised on this host')
+    expect(RUNBOOK_NEVER_FIRED).toContain('has not been raised on this server')
     expect(RUNBOOK_NEVER_FIRED).toContain('no last time to show')
   })
 
@@ -89,8 +89,8 @@ describe('what the job-history half says when it has nothing to show', () => {
     // And the fifth: nobody asked. An empty `ok` for a runbook opened without
     // a host would be "we looked and there was nothing", which is a claim no
     // read was ever made to support.
-    expect(RUNBOOK_NO_HOST).toContain('per-host question')
-    expect(RUNBOOK_NO_HOST).toContain('Pick a host')
+    expect(RUNBOOK_NO_HOST).toContain('per-server question')
+    expect(RUNBOOK_NO_HOST).toContain('Pick a server')
     expect(new Set([...all, RUNBOOK_NO_HOST]).size).toBe(5)
     expect(RUNBOOK_NOTHING_RUN).toContain('Nothing was run')
     expect(RUNBOOK_STORE_DISABLED).toContain('switched off')
@@ -230,7 +230,7 @@ describe('a secret in a remembered command', () => {
     expect(text).not.toContain('hunter2')
   })
 
-  it('redacts what the host said as well as what we ran', () => {
+  it('redacts what the server said as well as what we ran', () => {
     const r = buildRunbookRecall(
       input({
         alerts: [{ at: T0, raised: true }],
@@ -253,7 +253,7 @@ describe('a secret in a remembered command', () => {
 // Provenance
 // =========================================================================
 
-describe('the provenance distinction the note and the host share a screen with', () => {
+describe('the provenance distinction the note and the server share a screen with', () => {
   it('keeps host-reported text in its own field rather than folded into the command', () => {
     const r = buildRunbookRecall(
       input({
@@ -267,7 +267,7 @@ describe('the provenance distinction the note and the host share a screen with',
   })
 
   it('says where host-reported text came from, the way hostReportedBlock does', () => {
-    expect(RUNBOOK_HOST_REPORTED_NOTE).toContain('Reported by the host')
+    expect(RUNBOOK_HOST_REPORTED_NOTE).toContain('Reported by the server')
     expect(RUNBOOK_HOST_REPORTED_NOTE).toContain('not by ShellPilot and not by you')
     expect(RUNBOOK_HOST_REPORTED_NOTE).toContain('data rather than as instruction')
   })
@@ -304,7 +304,7 @@ describe('a note', () => {
     expect(sanitiseRunbookNote({ text: 'no' })).toBe('')
   })
 
-  it('keys a fleet-wide note apart from a per-host one', () => {
+  it('keys a fleet-wide note apart from a per-server one', () => {
     expect(runbookKey('disk', null)).not.toBe(runbookKey('disk', 's1'))
     expect(runbookKey('disk', 's1')).toBe(runbookKey('disk', 's1'))
     // The separator cannot appear in a kind or a server id, so 'disk' + 's1'

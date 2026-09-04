@@ -187,7 +187,7 @@ describe('two files differing only in a declared-ignorable way', () => {
     expect(a.normalisedHash).not.toBe(b.normalisedHash)
   })
 
-  it('uses the host context it was given for the hostname rule', () => {
+  it('uses the server context it was given for the hostname rule', () => {
     const nginx = driftWatch('nginx-conf') as DriftWatch
     const a = readingFromContent(nginx, 'server_name web-01.example.internal;\n', {
       hostname: 'web-01.example.internal',
@@ -274,7 +274,7 @@ describe('the reader', () => {
     expect(r.drift.readings[0].preview).toBe('Europe/London\n')
   })
 
-  it('gives every watch a reading even when the host mentioned none of them', async () => {
+  it('gives every watch a reading even when the server mentioned none of them', async () => {
     const reader = new DriftReader({ exec: exec(collector([])), watches: [TZ, WATCH] })
     const r = await reader.read({})
     expect(r.ok).toBe(true)

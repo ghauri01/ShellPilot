@@ -466,7 +466,7 @@ export class RuleEngine {
     if (missing.length > 0) {
       const reason =
         `${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} no longer in this workspace. A ` +
-        `rule runs on the host list it was confirmed against or it does not run.`
+        `rule runs on the server list it was confirmed against or it does not run.`
       status.refusal = reason
       status.refusedAt = now
       this.deps.store?.recordEvent(

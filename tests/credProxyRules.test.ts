@@ -40,7 +40,7 @@ describe('normaliseOrigin', () => {
     expect(normaliseOrigin('https://api.example.com/v1/things?a=1#x')).toBe('https://api.example.com')
   })
 
-  it('lowercases the host and the scheme', () => {
+  it('lowercases the server and the scheme', () => {
     expect(normaliseOrigin('HTTPS://API.Example.COM/x')).toBe('https://api.example.com')
   })
 
@@ -50,7 +50,7 @@ describe('normaliseOrigin', () => {
     expect(normaliseOrigin('https://api.example.com:8443')).toBe('https://api.example.com:8443')
   })
 
-  it('drops a single trailing dot, because that is the same host', () => {
+  it('drops a single trailing dot, because that is the same server', () => {
     expect(normaliseOrigin('https://api.example.com./v1')).toBe('https://api.example.com')
   })
 
@@ -81,16 +81,16 @@ describe('matchRule matches an origin exactly, and near misses do not match', ()
 
   // THE ONE THAT MATTERS. Every suffix, prefix or `includes` formulation of
   // this match hands the key to whoever registered the second domain.
-  it('does not match a hostname that merely starts with the rule host', () => {
+  it('does not match a hostname that merely starts with the rule server', () => {
     expect(matchRule(rules, 'https://api.example.com.evil.tld')).toBeNull()
   })
 
-  it('does not match a hostname that merely ends with the rule host', () => {
+  it('does not match a hostname that merely ends with the rule server', () => {
     expect(matchRule(rules, 'https://evil-api.example.com')).toBeNull()
     expect(matchRule(rules, 'https://notapi.example.com')).toBeNull()
   })
 
-  it('does not match a subdomain of the rule host', () => {
+  it('does not match a subdomain of the rule server', () => {
     expect(matchRule(rules, 'https://staging.api.example.com')).toBeNull()
   })
 
@@ -98,20 +98,20 @@ describe('matchRule matches an origin exactly, and near misses do not match', ()
     expect(matchRule(rules, 'https://example.com')).toBeNull()
   })
 
-  it('does not match the same host over a different scheme', () => {
+  it('does not match the same server over a different scheme', () => {
     expect(matchRule(rules, 'http://api.example.com')).toBeNull()
   })
 
-  it('does not match the same host on a different port', () => {
+  it('does not match the same server on a different port', () => {
     expect(matchRule(rules, 'https://api.example.com:8443')).toBeNull()
   })
 
-  it('does not match when the host is only in the path or the fragment', () => {
+  it('does not match when the server is only in the path or the fragment', () => {
     expect(matchRule(rules, 'https://evil.tld/api.example.com')).toBeNull()
     expect(matchRule(rules, 'https://evil.tld#api.example.com')).toBeNull()
   })
 
-  it('does not match when the rule host is smuggled into userinfo', () => {
+  it('does not match when the rule server is smuggled into userinfo', () => {
     expect(matchRule(rules, 'https://api.example.com@evil.tld/v1')).toBeNull()
   })
 

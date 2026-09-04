@@ -79,11 +79,11 @@ describe.skipIf(!HAS_SQLITE)('node:sqlite capability', () => {
       // row true. An UPSERT with an excluded reference is how the hourly
       // roll-up merges. Neither is optional.
       db.exec(
-        'CREATE TABLE t (ts INTEGER, host INTEGER, metric INTEGER, v REAL, PRIMARY KEY (ts, host, metric)) WITHOUT ROWID'
+        'CREATE TABLE t (ts INTEGER, server INTEGER, metric INTEGER, v REAL, PRIMARY KEY (ts, server, metric)) WITHOUT ROWID'
       )
       db.prepare('INSERT INTO t VALUES (?, ?, ?, ?)').run(1, 1, 1, 5)
       db.prepare(
-        'INSERT INTO t VALUES (?, ?, ?, ?) ON CONFLICT(ts, host, metric) DO UPDATE SET v = excluded.v'
+        'INSERT INTO t VALUES (?, ?, ?, ?) ON CONFLICT(ts, server, metric) DO UPDATE SET v = excluded.v'
       ).run(1, 1, 1, 9)
       expect((db.prepare('SELECT v FROM t').get() as { v: number }).v).toBe(9)
     } finally {

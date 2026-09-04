@@ -77,7 +77,7 @@ class FakeHost {
     const m = JOB_CMD_PREFIX.exec(command)
     if (!m) {
       throw new Error(
-        'the fake host does not recognise this command, which means shared/jobs.ts changed its ' +
+        'the fake server does not recognise this command, which means shared/jobs.ts changed its ' +
           `wrapper and this fake is now simulating a protocol nothing speaks:\n${command.slice(0, 200)}`
       )
     }
@@ -352,8 +352,8 @@ describe('classifying a poll on a step that was declared to restart the machine'
 // The whole cycle
 // =========================================================================
 
-describe('issuing a reboot and waiting for the host', () => {
-  it('reports `rebooting` while the host is down, never `unreachable`', async () => {
+describe('issuing a reboot and waiting for the server', () => {
+  it('reports `rebooting` while the server is down, never `unreachable`', async () => {
     const host = new FakeHost()
     const h = harness(host)
     const { req, states } = request()
@@ -380,7 +380,7 @@ describe('issuing a reboot and waiting for the host', () => {
     expect(r.code).toBe(0)
   })
 
-  it('checks the host came back healthy rather than merely came back', async () => {
+  it('checks the server came back healthy rather than merely came back', async () => {
     const host = new FakeHost()
     const h = harness(host)
     const { req, output } = request()
@@ -445,7 +445,7 @@ describe('issuing a reboot and waiting for the host', () => {
     expect(r.error).toContain('cannot prove')
   })
 
-  it('gives up on a host that never comes back, and says the wait was expected', async () => {
+  it('gives up on a server that never comes back, and says the wait was expected', async () => {
     const host = new FakeHost()
     const h = harness(host)
     const { req, states } = request({ timeoutMs: 60_000 })
@@ -493,7 +493,7 @@ describe('issuing a reboot and waiting for the host', () => {
     await h.tick()
     expect(
       host.commands.some((c) => c.includes('shellpilot-postboot/1')),
-      'a host that is still answering has not restarted yet, and must not be judged as if it had'
+      'a server that is still answering has not restarted yet, and must not be judged as if it had'
     ).toBe(false)
     let settled = false
     void p.then(() => {
@@ -544,7 +544,7 @@ describe('issuing a reboot and waiting for the host', () => {
     expect(host.dirs.size, 'the marker is reaped once the answer is in hand').toBe(0)
   })
 
-  it('says the reboot was swallowed when the host answers throughout', async () => {
+  it('says the reboot was swallowed when the server answers throughout', async () => {
     // rc=0 and the machine never goes: something accepted the request and did
     // nothing with it — a container, a masked target, a systemd that refused.
     // The host is answering the whole time, so `rebooting` never becomes a

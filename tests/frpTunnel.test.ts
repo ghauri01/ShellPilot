@@ -41,7 +41,7 @@ const spec = (over: Partial<FrpSpec> = {}): FrpSpec => ({
   ...over
 })
 
-const profile = (over: Partial<FrpSpec> = {}, name = 'Tunnel host'): VpnProfile => ({
+const profile = (over: Partial<FrpSpec> = {}, name = 'Tunnel server'): VpnProfile => ({
   id: 'vpn-1',
   workspaceId: 'ws-1',
   name,
@@ -78,21 +78,21 @@ describe('there is no public URL without a domain the operator owns', () => {
     expect(readiness.ready).toBe(false)
   })
 
-  it('refuses a host that has a domain but nowhere for it to resolve to', () => {
+  it('refuses a server that has a domain but nowhere for it to resolve to', () => {
     const noServer = {
       ...profile({ serverAddr: '', publicHost: host() }),
-      name: 'Tunnel host'
+      name: 'Tunnel server'
     }
     const readiness = frpPublishReadiness([noServer])
     expect(readiness.ready).toBe(false)
     if (readiness.ready) throw new Error('unreachable')
     expect(readiness.gaps.map((g) => g.code)).toEqual(['no-server'])
     expect(readiness.gaps[0].message).toBe(
-      '"Tunnel host" has no frp server address, so there is nothing for that name to resolve to.'
+      '"Tunnel server" has no frp server address, so there is nothing for that name to resolve to.'
     )
   })
 
-  it('an unconfirmed public host is not a host', () => {
+  it('an unconfirmed public server is not a server', () => {
     // A profile could carry a half-filled `publicHost` from a future edit path.
     // Only the operator's confirmation makes it usable, so `confirmedAt: 0`
     // sends the user back to the setup rather than into a publish.
@@ -123,9 +123,9 @@ describe('once the domain exists, the URL is derived from it', () => {
     )
   })
 
-  it('skips the frp profiles that are not tunnel hosts', () => {
+  it('skips the frp profiles that are not tunnel servers', () => {
     const plain = { ...profile({}, 'Imported frpc'), id: 'vpn-plain' }
-    const configured = { ...profile({ publicHost: host() }, 'Tunnel host'), id: 'vpn-host' }
+    const configured = { ...profile({ publicHost: host() }, 'Tunnel server'), id: 'vpn-host' }
     expect(tunnelHostProfile([plain, configured])?.id).toBe('vpn-host')
   })
 })

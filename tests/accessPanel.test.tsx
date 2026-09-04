@@ -121,8 +121,8 @@ function mount(servers: Server[], byId: Record<string, Entry>, withWrite = false
   render(<AccessPanel servers={servers} />)
 }
 
-describe('a host that could not be read', () => {
-  it('is named, excluded, and explicitly not called a host with no keys', async () => {
+describe('a server that could not be read', () => {
+  it('is named, excluded, and explicitly not called a server with no keys', async () => {
     // The sentence this panel exists to print. Without it, a failed probe
     // renders as a host that contributed nothing to the totals — which reads
     // as a host that trusts nobody.
@@ -132,7 +132,7 @@ describe('a host that could not be read', () => {
     })
     const failed = await screen.findByTestId('failed-db-1')
     expect(failed.textContent).toContain('the access probe failed')
-    expect(failed.textContent).toContain('it is not a host with no keys')
+    expect(failed.textContent).toContain('it is not a server with no keys')
     expect(failed.textContent).not.toMatch(/\b0 keys\b/)
   })
 
@@ -142,11 +142,11 @@ describe('a host that could not be read', () => {
       b: { error: 'unreachable', errorAt: 1 }
     })
     const unchecked = await screen.findByTestId('unchecked-hosts')
-    expect(unchecked.textContent).toContain('1 host could not be checked')
+    expect(unchecked.textContent).toContain('1 server could not be checked')
     expect(unchecked.textContent).toContain('not in that count')
   })
 
-  it('names a host that has simply never been collected, separately from a failure', async () => {
+  it('names a server that has simply never been collected, separately from a failure', async () => {
     // Three states, not two: read, failed, and never looked at. A server added
     // ten minutes ago is the third and it is not a failure.
     mount([server('a', 'web-1'), server('b', 'db-1')], { a: { access: complete(), at: 1 } })
@@ -168,7 +168,7 @@ describe('what the panel refuses to conclude', () => {
     expect(banner.textContent).toContain('lower bound')
   })
 
-  it('raises the same warning for a host that answered only partly', async () => {
+  it('raises the same warning for a server that answered only partly', async () => {
     // A host can be perfectly reachable and still hide half its accounts behind
     // a home directory this account cannot traverse. That is the same size of
     // gap as an unreachable host and gets the same sentence.
@@ -178,7 +178,7 @@ describe('what the panel refuses to conclude', () => {
     expect(why.textContent).toContain('1 of 2 accounts could not be read')
   })
 
-  it('does NOT raise it when every host answered completely', async () => {
+  it('does NOT raise it when every server answered completely', async () => {
     // The other half of the assertion, and the one that keeps the warning
     // meaningful: a banner that is always on is a banner nobody reads.
     mount([server('a', 'web-1')], { a: { access: complete(), at: 1 } })
@@ -202,7 +202,7 @@ describe('what the panel refuses to conclude', () => {
 })
 
 describe('the by-key view', () => {
-  it('shows where a key is, across hosts', async () => {
+  it('shows where a key is, across servers', async () => {
     // The question the whole item exists for: which of my hosts still trusts
     // this key.
     mount([server('a', 'web-1'), server('b', 'db-1')], {
@@ -353,7 +353,7 @@ describe('the write half, which this build does not have', () => {
   })
 })
 
-describe('a host whose last collection is old and whose probe is failing now', () => {
+describe('a server whose last collection is old and whose probe is failing now', () => {
   // fleetSampler deliberately keeps the last good collection ALONGSIDE a live
   // error, and its own comment says why: "'read an hour ago and the probe is
   // failing now' is two facts and both matter — most of all here." The panel
@@ -379,7 +379,7 @@ describe('a host whose last collection is old and whose probe is failing now', (
       b: staleEntry()
     })
     const unchecked = await screen.findByTestId('unchecked-hosts')
-    expect(unchecked.textContent).toContain('1 host')
+    expect(unchecked.textContent).toContain('1 server')
   })
 
   it('is named as stale, with how old the reading is and what is failing now', async () => {
@@ -400,11 +400,11 @@ describe('a host whose last collection is old and whose probe is failing now', (
   })
 })
 
-describe('the by-host view', () => {
+describe('the by-server view', () => {
   async function hosts(access: HostAccess): Promise<void> {
     mount([server('a', 'web-1')], { a: { access, at: 1 } })
-    await screen.findByRole('button', { name: /By host/ })
-    await userEvent.click(screen.getByRole('button', { name: /By host/ }))
+    await screen.findByRole('button', { name: /By server/ })
+    await userEvent.click(screen.getByRole('button', { name: /By server/ }))
   }
 
   it('shows a reason, not a zero, for an account whose file was not read', async () => {
@@ -475,7 +475,7 @@ describe('the by-host view', () => {
     expect(chip.className).not.toContain('warn')
   })
 
-  it('keeps the host’s own last-login phrase when it could not be dated', async () => {
+  it('keeps the server’s own last-login phrase when it could not be dated', async () => {
     // "We cannot make a date out of this" is not "we do not know when they
     // logged in", and showing the phrase is the better of the two answers.
     await hosts(
@@ -494,7 +494,7 @@ describe('the by-host view', () => {
 })
 
 describe('before anything has been collected', () => {
-  it('says so, and says nothing is written to any host', async () => {
+  it('says so, and says nothing is written to any server', async () => {
     mount([server('a', 'web-1')], {})
     expect((await screen.findByText(/No authorized_keys have been collected yet/)).textContent).toBeTruthy()
     expect(document.body.textContent).toContain('no private key is touched')
@@ -627,7 +627,7 @@ describe.skipIf(!ACCESS_WRITE_ENABLED)('revoking a key', () => {
     expect(Object.keys(target.cfg)).not.toContain('passphrase')
   })
 
-  it('names every host it will not touch, in the same dialog as the ones it will', async () => {
+  it('names every server it will not touch, in the same dialog as the ones it will', async () => {
     // A host quietly left out of a fleet-wide revocation is the exact failure
     // the read half exists to prevent.
     mountWrite({
@@ -679,7 +679,7 @@ describe.skipIf(!ACCESS_WRITE_ENABLED)('revoking a key', () => {
     const unconfirmed = await screen.findByTestId('outcome-c')
 
     expect(committed.textContent).toContain('Committed')
-    expect(failed.textContent).toContain('Reverted — the host would not let a new session in')
+    expect(failed.textContent).toContain('Reverted — the server would not let a new session in')
     expect(unconfirmed.textContent).toContain('Reverted — nothing confirmed it in time')
 
     // Three labels, three chips, three classes. The one that is not a fault is
@@ -694,7 +694,7 @@ describe.skipIf(!ACCESS_WRITE_ENABLED)('revoking a key', () => {
     ).toBe(3)
   })
 
-  it('keeps a host whose staged write never landed apart from all three', async () => {
+  it('keeps a server whose staged write never landed apart from all three', async () => {
     // Nothing happened there at all: no backup, no watchdog, no change. It is a
     // fourth thing, and calling it "reverted" would say a file was put back
     // that was never replaced.

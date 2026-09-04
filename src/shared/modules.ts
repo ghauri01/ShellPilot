@@ -59,14 +59,14 @@ export const MODULES: ModuleDef[] = [
     id: 'fleetSearch',
     label: 'Fleet-wide search',
     detail:
-      'Search systemd units, listening ports and hosts across the workspace, from data the monitor already collects.',
+      'Search systemd units, listening ports and servers across the workspace, from data the monitor already collects.',
     defaultEnabled: true
   },
   {
     id: 'inventory',
     label: 'Inventory',
     detail:
-      'What every host is — distribution, architecture, CPU, virtualisation — and what it needs: pending updates, security updates where the distribution publishes them, and whether a reboot is owed. Read-only, and nothing is refreshed: package caches are read, never updated, and their age is reported alongside the counts.',
+      'What every server is — distribution, architecture, CPU, virtualisation — and what it needs: pending updates, security updates where the distribution publishes them, and whether a reboot is owed. Read-only, and nothing is refreshed: package caches are read, never updated, and their age is reported alongside the counts.',
     // OFF for a fresh install too, not merely for upgrades.
     //
     // Enabling it means running the host's package manager on every host once
@@ -82,7 +82,7 @@ export const MODULES: ModuleDef[] = [
     id: 'patch',
     label: 'Patch and update management',
     detail:
-      'What every host needs — pending updates, security updates where the distribution publishes them, and whether a reboot is owed — and applying them in waves, with a health check between waves and a hard refusal to restart a host other servers connect through. It never patches on a schedule and never decides for you.',
+      'What every server needs — pending updates, security updates where the distribution publishes them, and whether a reboot is owed — and applying them in waves, with a health check between waves and a hard refusal to restart a server other servers connect through. It never patches on a schedule and never decides for you.',
     // OFF by default, and not merely for upgrades.
     //
     // This is the only module that can INSTALL SOFTWARE ON YOUR SERVERS. The
@@ -97,7 +97,7 @@ export const MODULES: ModuleDef[] = [
     id: 'access',
     label: 'Fleet keys and access',
     detail:
-      'Which key opens which host and whose it is: every authorized_keys file across the estate, fingerprinted, with locked and expired accounts and administrative group membership alongside. A host whose files could not be read is shown as unreadable and excluded from every count — never as a host with no keys. Read-only.',
+      'Which key opens which server and whose it is: every authorized_keys file across the estate, fingerprinted, with locked and expired accounts and administrative group membership alongside. A server whose files could not be read is shown as unreadable and excluded from every count — never as a server with no keys. Read-only.',
     // OFF by default, and this one's toggle gates the COLLECTION rather than
     // just the panel — see FleetSamplerDeps.accessEnabled.
     //
@@ -117,7 +117,7 @@ export const MODULES: ModuleDef[] = [
     id: 'capacity',
     label: 'Capacity trends',
     detail:
-      'How full a host is getting and when it runs out — "this disk fills in eleven days" — drawn from the samples the monitor already writes. It stores nothing of its own, schedules nothing and evaluates nothing in the background: every line is derived on demand from history that exists whether or not this is on. A forecast is never stated without the window it was drawn from, and a gap where a host was unreachable is left as a hole in the line rather than drawn across.',
+      'How full a server is getting and when it runs out — "this disk fills in eleven days" — drawn from the samples the monitor already writes. It stores nothing of its own, schedules nothing and evaluates nothing in the background: every line is derived on demand from history that exists whether or not this is on. A forecast is never stated without the window it was drawn from, and a gap where a server was unreachable is left as a hole in the line rather than drawn across.',
     // OFF for a fresh install too, and this one is the cheapest module in the
     // list — it reads the local history store and opens no connection at all.
     //
@@ -149,7 +149,7 @@ export const MODULES: ModuleDef[] = [
     id: 'rules',
     label: 'Rules',
     detail:
-      'When an alert fires, run a job or post to the webhook \u2014 with a ceiling on how often it may act. A rule runs the job it was confirmed with, on the hosts it was confirmed for, and refuses if either has changed. It is not a workflow language: one trigger, one filter, one action, one rate limit.',
+      'When an alert fires, run a job or post to the webhook \u2014 with a ceiling on how often it may act. A rule runs the job it was confirmed with, on the servers it was confirmed for, and refuses if either has changed. It is not a workflow language: one trigger, one filter, one action, one rate limit.',
     // OFF by default, and this is the module the default matters most for.
     //
     // Every other module here is something a person presses. This one acts on
@@ -168,7 +168,7 @@ export const MODULES: ModuleDef[] = [
     id: 'drift',
     label: 'Configuration drift',
     detail:
-      'Compare a watched configuration file across the estate and say where it diverges \u2014 "all twelve web servers have this nginx.conf, three do not". Every file is compared under normalisation rules that are named on screen, so two files that differ and are called the same say which rule ate the difference. A host that could not be read is never reported as a host that matches. Read-only: it never writes a file back to bring a host into line.',
+      'Compare a watched configuration file across the estate and say where it diverges \u2014 "all twelve web servers have this nginx.conf, three do not". Every file is compared under normalisation rules that are named on screen, so two files that differ and are called the same say which rule ate the difference. A server that could not be read is never reported as a server that matches. Read-only: it never writes a file back to bring a server into line.',
     // OFF by default, and this one's toggle gates the COLLECTION rather than
     // just the panel \u2014 see FleetSamplerDeps.driftEnabled.
     //
@@ -188,7 +188,7 @@ export const MODULES: ModuleDef[] = [
     id: 'posture',
     label: 'Security posture',
     detail:
-      'What every host already knows about its own exposure: which firewall is active and the shape of its rules, whether SELinux or AppArmor is enforcing, how sshd compares with a hardening baseline, and how many logins have failed. Read-only, and emphatically not a vulnerability scanner — the pending security update count comes from the Inventory probe, which asks the host\'s own package manager, rather than from a CVE feed. A check that could not run is shown as unread, never as passed.',
+      'What every server already knows about its own exposure: which firewall is active and the shape of its rules, whether SELinux or AppArmor is enforcing, how sshd compares with a hardening baseline, and how many logins have failed. Read-only, and emphatically not a vulnerability scanner — the pending security update count comes from the Inventory probe, which asks the server\'s own package manager, rather than from a CVE feed. A check that could not run is shown as unread, never as passed.',
     // OFF by default, and this one's toggle gates the COLLECTION rather than
     // just the panel — see FleetSamplerDeps.postureEnabled.
     //
@@ -208,13 +208,13 @@ export const MODULES: ModuleDef[] = [
     id: 'broadcast',
     label: 'Run a command on many servers',
     detail:
-      'Run one command across selected servers, with confirmation that scales to how many hosts and how dangerous the command is.',
+      'Run one command across selected servers, with confirmation that scales to how many servers and how dangerous the command is.',
     defaultEnabled: false
   },
   {
     id: 'logTail',
     label: 'Live log tailing',
-    detail: 'Follow a systemd unit or a log file on several hosts at once, interleaved by host.',
+    detail: 'Follow a systemd unit or a log file on several servers at once, interleaved by server.',
     defaultEnabled: true
   },
   {
@@ -227,7 +227,7 @@ export const MODULES: ModuleDef[] = [
     id: 'processes',
     label: 'Local processes',
     detail:
-      'Run, watch, restart and read the logs of a long-lived process on THIS machine \u2014 a dev server, a worker, a script that should outlive its terminal. Restart policies, exponential backoff, crash-loop detection and a bounded log ring, from the supervisor that already keeps VPN engines alive. Nothing runs on a remote host, nothing starts by itself, and a value that looks like a secret has to come from the vault rather than the process list.',
+      'Run, watch, restart and read the logs of a long-lived process on THIS machine \u2014 a dev server, a worker, a script that should outlive its terminal. Restart policies, exponential backoff, crash-loop detection and a bounded log ring, from the supervisor that already keeps VPN engines alive. Nothing runs on a remote server, nothing starts by itself, and a value that looks like a secret has to come from the vault rather than the process list.',
     // OFF by default, and this is the module whose default matters most in the
     // whole registry.
     //
@@ -249,14 +249,14 @@ export const MODULES: ModuleDef[] = [
     id: 'docker',
     label: 'Docker',
     detail:
-      'List containers on a server, read their logs, and open a shell inside a running one. Uses the docker binary already on the host — a container shell is arbitrary code execution there.',
+      'List containers on a server, read their logs, and open a shell inside a running one. Uses the docker binary already on the server — a container shell is arbitrary code execution there.',
     defaultEnabled: false
   },
   {
     id: 'kubernetes',
     label: 'Kubernetes',
     detail:
-      'List contexts, namespaces and pods and read pod logs, using the kubectl already on the host. Reading only: it never switches your context, never execs into a pod, and never applies or deletes anything.',
+      'List contexts, namespaces and pods and read pod logs, using the kubectl already on the server. Reading only: it never switches your context, never execs into a pod, and never applies or deletes anything.',
     defaultEnabled: false
   }
 ]

@@ -170,7 +170,7 @@ describe('the cadence', () => {
     expect(h.accessCalls).toEqual(['fleet:a'])
   })
 
-  it('does not read every home directory on the host every two minutes', async () => {
+  it('does not read every home directory on the server every two minutes', async () => {
     const h = harness()
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(29 * 120_000)

@@ -920,7 +920,7 @@ export const PG_QUERIES = Object.freeze({
        current_user AS username,
        EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint AS uptime_seconds`,
 
-  replication: `SELECT application_name, host(client_addr) AS client_addr, state, sync_state,
+  replication: `SELECT application_name, server(client_addr) AS client_addr, state, sync_state,
        EXTRACT(EPOCH FROM write_lag) AS write_lag_seconds,
        EXTRACT(EPOCH FROM flush_lag) AS flush_lag_seconds,
        EXTRACT(EPOCH FROM replay_lag) AS replay_lag_seconds,
@@ -1796,7 +1796,7 @@ export const MYSQL_QUERIES = Object.freeze({
 
   bufferPool: `SELECT @@innodb_buffer_pool_size AS bytes, @@innodb_buffer_pool_instances AS instances`,
 
-  processlist: `SELECT ID AS id, USER AS user, HOST AS host, DB AS db, COMMAND AS command,
+  processlist: `SELECT ID AS id, USER AS user, HOST AS server, DB AS db, COMMAND AS command,
        TIME AS seconds, STATE AS state, LEFT(INFO, 200) AS info
   FROM information_schema.PROCESSLIST WHERE COMMAND <> 'Sleep' ORDER BY TIME DESC LIMIT ?`,
 

@@ -12,7 +12,7 @@ describe('webhook URL validation', () => {
     expect(r.ok).toBe(true)
   })
 
-  it('refuses plain http to a remote host', () => {
+  it('refuses plain http to a remote server', () => {
     // The URL is a bearer credential -- anyone holding a Slack webhook can
     // post as you -- so http would put it on the wire in clear.
     const r = validateWebhookUrl('http://example.com/hook')

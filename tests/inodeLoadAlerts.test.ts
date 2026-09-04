@@ -209,7 +209,7 @@ describe('the probe', () => {
     expect(parsed.load1).toBe(4.15)
   })
 
-  it('reports null when the host answered neither question', () => {
+  it('reports null when the server answered neither question', () => {
     const parsed = parseMetricsForTests('__INODE__\n__LOAD__\n')
     expect(parsed.inodePct).toBeNull()
     expect(parsed.load1).toBeNull()

@@ -72,7 +72,7 @@ export function ReclaimDialog({
   if (diff !== null) {
     return (
       <div className="bc-confirm">
-        <div className="s-title">This host is not what the list said it was.</div>
+        <div className="s-title">This server is not what the list said it was.</div>
         <div className="s-desc danger">
           <TriangleAlert size={12} /> Nothing was removed. The disk was read again just before running, and
           it disagrees with the list you approved — so the ids that would have been sent no longer describe

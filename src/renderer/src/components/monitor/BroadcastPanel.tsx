@@ -266,7 +266,7 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
           <button
             className="btn danger"
             onClick={() => void window.shellpilot?.broadcast?.cancel(runId.current)}
-            title="Hosts that have not started will not start. A host already running is left to finish — killing it mid-write is how a change ends up half applied."
+            title="Servers that have not started will not start. A server already running is left to finish — killing it mid-write is how a change ends up half applied."
           >
             <Square size={13} /> Stop
           </button>
@@ -387,10 +387,10 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
             <div className="panel-note is-watch">
               {refused.length === 1
                 ? `${refused[0].serverName} refused this command for this account.`
-                : `${refused.length} hosts refused this command for this account.`}{' '}
+                : `${refused.length} servers refused this command for this account.`}{' '}
               Nothing was retried as root. Prefixing the command with{' '}
               <span className="mono">sudo</span> will re-run it here — and will ask you to confirm
-              again, because running as root across several hosts is a bigger thing than running it
+              again, because running as root across several servers is a bigger thing than running it
               as yourself.
             </div>
           )}
@@ -411,7 +411,7 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
             {targets.length === 0
               ? 'Pick the servers to run on from the row above, type a command, then press Run.'
               : `${targets.length} server${targets.length === 1 ? '' : 's'} selected. Type a command above, then press Run.`}{' '}
-            Results appear here, one block per host, and a host that refuses is reported rather
+            Results appear here, one block per server, and a server that refuses is reported rather
             than retried as root.
           </p>
         </div>

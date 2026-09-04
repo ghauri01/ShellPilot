@@ -478,7 +478,7 @@ export function coverageSentence(c: FleetCoverage): string | null {
   // updates" is a property of the DISTRIBUTION that no amount of waiting or
   // privilege will change — three different things a reader does three
   // different things about.
-  if (c.noFacts.length) parts.push(`no host facts collected yet for ${list(c.noFacts)}`)
+  if (c.noFacts.length) parts.push(`no server facts collected yet for ${list(c.noFacts)}`)
   if (c.noPackageManager.length) parts.push(`no package manager on ${list(c.noPackageManager)}`)
   if (c.securityUnsupported.length) {
     parts.push(`${list(c.securityUnsupported)} can never report security updates`)
@@ -487,5 +487,5 @@ export function coverageSentence(c: FleetCoverage): string | null {
 
   const n = c.searched.length
   const f = c.factsSearched.length
-  return `Units and ports searched on ${n} host${n === 1 ? '' : 's'}, host facts on ${f} — ${parts.join('; ')}.`
+  return `Units and ports searched on ${n} server${n === 1 ? '' : 's'}, server facts on ${f} — ${parts.join('; ')}.`
 }

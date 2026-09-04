@@ -227,7 +227,7 @@ describe('how hard the operator has to press, and why it is not about how many',
 // The re-preview, which is the whole feature
 // ---------------------------------------------------------------------------
 
-describe('the re-preview, and the refusal when the host moved under it', () => {
+describe('the re-preview, and the refusal when the server moved under it', () => {
   const selected = [
     item({ kind: 'container', id: '9b2c7e4d1a08', label: 'old-frontend', size: '412MB' }),
     item({ kind: 'volume', id: 'stack_pgdata', label: 'stack_pgdata', size: '2.41GB' })
@@ -529,7 +529,7 @@ describe("the headline figure, which is still docker's and not a sum", () => {
     for (const key of Object.keys(planDockerReclaim(p.items))) expect(key).not.toMatch(/total|bytes/i)
   })
 
-  it('would overstate the disk by 161MB on the recorded host if it summed', () => {
+  it('would overstate the disk by 161MB on the recorded server if it summed', () => {
     // Kept as a live number rather than a comment: two images share a 152.5MB
     // base and two more share 8.658MB, so summing SIZE invents disk that is
     // not there. The offer set carries UNIQUE SIZE for exactly this reason.

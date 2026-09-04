@@ -37,8 +37,8 @@ function harness(over: { failFor?: string[] } = {}) {
 
 const unit = { kind: 'unit' as const, target: 'nginx.service' }
 
-describe('tailing a log across hosts', () => {
-  it('streams lines tagged with the host that produced them', async () => {
+describe('tailing a log across servers', () => {
+  it('streams lines tagged with the server that produced them', async () => {
     // An interleaved stream where you cannot tell which machine said what is
     // worse than separate tails, because it looks authoritative.
     const h = harness()
@@ -75,7 +75,7 @@ describe('tailing a log across hosts', () => {
     expect(h.lines[0]).toMatchObject({ text: 'permission denied', isError: true })
   })
 
-  it('keeps the other hosts when one refuses', async () => {
+  it('keeps the other servers when one refuses', async () => {
     // Comparing a failing host against a working one is most of why this reads
     // several at once.
     const h = harness({ failFor: ['a'] })
@@ -85,7 +85,7 @@ describe('tailing a log across hosts', () => {
     expect(h.states.some((s) => s.serverId === 'b' && s.state === 'streaming')).toBe(true)
   })
 
-  it('reports failure when no host accepts', async () => {
+  it('reports failure when no server accepts', async () => {
     const h = harness({ failFor: ['a'] })
     expect(await h.tailer.start('t1', unit, h.targets(['a']))).toMatchObject({ ok: false })
     expect(h.tailer.isActive('t1')).toBe(false)
@@ -103,7 +103,7 @@ describe('tailing a log across hosts', () => {
 })
 
 describe('stopping', () => {
-  it('stops every host and forgets the tail', async () => {
+  it('stops every server and forgets the tail', async () => {
     const h = harness()
     await h.tailer.start('t1', unit, h.targets(['a', 'b']))
     h.tailer.stop('t1')
@@ -129,7 +129,7 @@ describe('stopping', () => {
   })
 })
 
-describe('a host that will not stop logging', () => {
+describe('a server that will not stop logging', () => {
   it('caps the rate and says how many it dropped', async () => {
     // A misconfigured service emitting tens of thousands of lines a second
     // becomes an IPC flood, and the user's conclusion is "ShellPilot froze"
@@ -225,7 +225,7 @@ describe('stopping or restarting a tail that is still starting', () => {
   })
 })
 
-describe('a host that never sends a newline', () => {
+describe('a server that never sends a newline', () => {
   it('emits the buffer in pieces rather than growing it forever', async () => {
     // The partial-line buffer is memory in main sized by whatever the remote
     // host feels like sending: a binary file under `tail -F`, a progress bar,
@@ -249,7 +249,7 @@ describe('a host that never sends a newline', () => {
     expect(h.lines[1].text).toHaveLength(3)
   })
 
-  it("keeps each host's buffer to itself", async () => {
+  it("keeps each server's buffer to itself", async () => {
     // Partial lines are per host; merging them would splice one machine's
     // sentence onto another's.
     const h = harness()
@@ -262,7 +262,7 @@ describe('a host that never sends a newline', () => {
   })
 })
 
-describe('the last thing a throttled host said', () => {
+describe('the last thing a throttled server said', () => {
   it('reports the drops when the stream ends', async () => {
     // The count was only flushed by a later line arriving, so the final window
     // had nowhere to report: a host that screamed and then died left the pane
@@ -310,7 +310,7 @@ describe('what the preflight says, and where it says it', () => {
     expect(h.lines.map((l) => l.text)).toEqual(['real log line'])
   })
 
-  it('puts the diagnosis on the host state, where it can be shown all tail long', async () => {
+  it('puts the diagnosis on the server state, where it can be shown all tail long', async () => {
     // Not into the stream. A tail is long-lived and a notice written once as a
     // log line has scrolled away within the second.
     const h = harness()

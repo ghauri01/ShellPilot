@@ -346,7 +346,7 @@ export type BroadcastHostOutcome =
 export const BROADCAST_OUTCOME_LABEL: Record<BroadcastHostOutcome, string> = {
   ok: 'ok',
   nonzero: 'non-zero exit',
-  'missing-command': 'command not on this host',
+  'missing-command': 'command not on this server',
   'permission-denied': 'permission denied',
   timeout: 'timed out',
   unreachable: 'unreachable',
@@ -757,7 +757,7 @@ export function verifyApproval(
       ok: false,
       reason:
         `${added.map((t) => t.serverName).join(', ')} ${added.length === 1 ? 'was' : 'were'} not in ` +
-        'the target list that was confirmed. A host added after the fact runs on nobody’s ' +
+        'the target list that was confirmed. A server added after the fact runs on nobody’s ' +
         'approval.'
     }
   }
@@ -773,7 +773,7 @@ export function verifyApproval(
         ok: false,
         reason:
           `${t.serverName} was confirmed in wave "${cohort || 'all at once'}" and is now in ` +
-          `"${t.cohort ?? 'all at once'}". Moving a host between waves changes how many run at ` +
+          `"${t.cohort ?? 'all at once'}". Moving a server between waves changes how many run at ` +
           'once, which is what the confirmation was sized against.'
       }
     }

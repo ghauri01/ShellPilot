@@ -173,7 +173,7 @@ describe('what the panel shows about environment', () => {
   it('says on screen that the withholding is deliberate', async () => {
     await openProject(panelBridge())
     expect(document.body.textContent).toContain('never their values')
-    expect(document.body.textContent).toContain('open the file on the host')
+    expect(document.body.textContent).toContain('open the file on the server')
   })
 
   it('does not claim a .env is empty when it could not be read', async () => {
@@ -298,7 +298,7 @@ describe('pull and up go through the job engine', () => {
 })
 
 describe('the image tag edit', () => {
-  it('sends the line the operator was shown, so the host can refuse a stale edit', async () => {
+  it('sends the line the operator was shown, so the server can refuse a stale edit', async () => {
     const stub = panelBridge()
     await openProject(stub)
     await userEvent.click(screen.getByTitle(/Change cache's image tag/))

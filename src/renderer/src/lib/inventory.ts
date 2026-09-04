@@ -67,7 +67,7 @@ export type CellGap =
  * mistaken for zero.
  */
 export const GAP_LABEL: Record<CellGap, string> = {
-  absent: 'not on this host',
+  absent: 'not on this server',
   denied: 'not permitted',
   'no-tool': 'no tool for it',
   'stale-metadata': 'from a stale cache',
@@ -90,9 +90,9 @@ export const GAP_HELP: Record<CellGap, string> = {
   'not-collected':
     'Host facts have not been collected for this server yet. They are collected about once an hour, on the same background sweep as metrics, so a server added recently will not have any until that sweep reaches it.',
   'probe-failed':
-    'The facts probe ran on this host and did not complete. A host can answer a metrics sample perfectly and still refuse this one, so this is reported separately from the host being reachable.',
+    'The facts probe ran on this server and did not complete. A server can answer a metrics sample perfectly and still refuse this one, so this is reported separately from the server being reachable.',
   'not-sampled':
-    'This value comes from the metrics sweep rather than the hourly facts probe, and this host has not been sampled yet.'
+    'This value comes from the metrics sweep rather than the hourly facts probe, and this server has not been sampled yet.'
 }
 
 /**
@@ -243,20 +243,20 @@ export interface InventoryColumn {
 export const INVENTORY_COLUMNS: InventoryColumn[] = [
   { id: 'host', label: 'Host', primary: true },
   { id: 'distro', label: 'Distribution', primary: true },
-  { id: 'pkg', label: 'Packages', primary: true, help: 'The package manager this host uses.' },
+  { id: 'pkg', label: 'Packages', primary: true, help: 'The package manager this server uses.' },
   {
     id: 'pending',
     label: 'Updates',
     primary: true,
     numeric: true,
-    help: 'Updates the local package cache knows about. ShellPilot never refreshes that cache — refreshing is a network operation and on some package managers it can break the host — so read this next to the metadata age.'
+    help: 'Updates the local package cache knows about. ShellPilot never refreshes that cache — refreshing is a network operation and on some package managers it can break the server — so read this next to the metadata age.'
   },
   {
     id: 'security',
     label: 'Security',
     primary: true,
     numeric: true,
-    help: 'Security updates specifically, where the distribution publishes them. Arch and Alpine have no security channel at all, and dnf cannot answer where the repositories omit updateinfo — those hosts say so rather than reporting zero.'
+    help: 'Security updates specifically, where the distribution publishes them. Arch and Alpine have no security channel at all, and dnf cannot answer where the repositories omit updateinfo — those servers say so rather than reporting zero.'
   },
   { id: 'reboot', label: 'Reboot', primary: true },
   {

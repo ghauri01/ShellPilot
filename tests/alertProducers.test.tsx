@@ -165,7 +165,7 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('a host that stops answering', () => {
+describe('a server that stops answering', () => {
   it('raises when the sweep reports an error, and clears on the next sample', async () => {
     await mount()
     await act(async () => {
@@ -184,7 +184,7 @@ describe('a host that stops answering', () => {
     expect(chip('srv-1:host-unreachable')).toBeUndefined()
   })
 
-  it('does not put the host error text on the wire', async () => {
+  it('does not put the server error text on the wire', async () => {
     await mount()
     await act(async () => {
       bridge.sample({ serverId: 'srv-1', at: T0, error: 'ssh: handshake failed for root@10.0.0.9' })
@@ -204,7 +204,7 @@ describe('a host that stops answering', () => {
     expect(JSON.stringify(bridge.recorded)).not.toContain('10.0.0.9')
   })
 
-  it('says nothing for a sweep that carried neither a host nor an error', async () => {
+  it('says nothing for a sweep that carried neither a server nor an error', async () => {
     await mount()
     await act(async () => {
       bridge.sample({ serverId: 'srv-1', at: T0 })
@@ -230,7 +230,7 @@ describe('a job step that failed', () => {
       host: { serverId: 'srv-1', serverName: 'web-1', state }
     }) as unknown as JobProgress
 
-  it('raises on a failed host and names the job', async () => {
+  it('raises on a failed server and names the job', async () => {
     await mount()
     await act(async () => {
       bridge.progress({ jobId: 'job-1', job: { title: 'nightly upgrade' } } as unknown as JobProgress)
@@ -241,7 +241,7 @@ describe('a job step that failed', () => {
     expect(raises()[0].summary).toBe('web-1 failed a job step (nightly upgrade)')
   })
 
-  it('clears when a later step on that host succeeds', async () => {
+  it('clears when a later step on that server succeeds', async () => {
     await mount()
     await act(async () => {
       bridge.progress(hostEvent('failed'))

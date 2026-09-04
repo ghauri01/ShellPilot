@@ -102,7 +102,7 @@ function SourceStatus({ sources }: { sources?: CronSourceReport[] }): React.JSX.
   if (!sources || sources.length === 0) {
     return (
       <div className="faint" style={{ fontSize: 11 }}>
-        This host did not report which sources it managed to read, so this list may be incomplete.
+        This server did not report which sources it managed to read, so this list may be incomplete.
       </div>
     )
   }
@@ -295,7 +295,7 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
         serverId: target.serverId,
         ok: res.ok,
         text: res.ok
-          ? `Changed. The crontab as it was is on the host at ${res.backupPath ?? 'the backup path it reported'}.`
+          ? `Changed. The crontab as it was is on the server at ${res.backupPath ?? 'the backup path it reported'}.`
           : res.detail
       })
       setPending(null)
@@ -511,7 +511,7 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
         <>
           <div className="panel-stats">
             <span>
-              {total} job{total === 1 ? '' : 's'} across {visible.length - failed.length} host
+              {total} job{total === 1 ? '' : 's'} across {visible.length - failed.length} server
               {visible.length - failed.length === 1 ? '' : 's'}
             </span>
             {/* Lines that looked like jobs but did not parse are counted, not
@@ -524,7 +524,7 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
                 at. */}
             {partial > 0 && (
               <span className="state-unknown">
-                {partial} host{partial === 1 ? '' : 's'} only partly readable
+                {partial} server{partial === 1 ? '' : 's'} only partly readable
               </span>
             )}
           </div>

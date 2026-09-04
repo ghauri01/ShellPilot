@@ -84,7 +84,7 @@ afterEach(() => {
 })
 
 describe('a CPU and a memory reading that could not be taken', () => {
-  it('does not post an all-clear for a host that is still pegged', () => {
+  it('does not post an all-clear for a server that is still pegged', () => {
     sample(95, 95)
     expect(raises()).toHaveLength(2)
     expect(chips()).toEqual(['cpu', 'ram'])

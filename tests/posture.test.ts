@@ -84,7 +84,7 @@ describe('the shipped collector, as text', () => {
     expect(POSTURE_COMMAND).not.toMatch(/set -e/)
   })
 
-  it('changes nothing on the host', () => {
+  it('changes nothing on the server', () => {
     // The refusal src/shared/posture.ts states, asserted rather than promised.
     // Every one of these can lock the operator out of the host they would use
     // to undo it, and none of them belongs in a background probe that runs on
@@ -123,7 +123,7 @@ describe('the shipped collector, as text', () => {
     }
   })
 
-  it('caps and de-controls every value on the host', () => {
+  it('caps and de-controls every value on the server', () => {
     // The property that makes the format unforgeable: a value can never become
     // a second line, so it can never forge a record tag or the status marker.
     expect(POSTURE_COMMAND).toMatch(/tr -d '\\000-\\037\\177'/)
@@ -392,7 +392,7 @@ describe('what reaches the durable store', () => {
 describe('the estate roll-up counts the gaps rather than skipping them', () => {
   const collected = (lines: string[]): { posture: HostPosture | null } => ({ posture: parse(lines.join('\n')) })
 
-  it('never lets an unread host land in the "fine" column', () => {
+  it('never lets an unread server land in the "fine" column', () => {
     const s = summarisePosture([
       // Read, and genuinely on.
       collected(['V fw-tool ufw', 'V fw-active active', POSTURE_STATUS_MARKER, 'firewall ok - ufw']),
@@ -406,7 +406,7 @@ describe('the estate roll-up counts the gaps rather than skipping them', () => {
     expect(s).toMatchObject({ hosts: 4, collected: 3, firewallActive: 1, firewallInactive: 0, firewallUnknown: 3 })
   })
 
-  it('keeps "this host has no SELinux or AppArmor" apart from "nobody could look"', () => {
+  it('keeps "this server has no SELinux or AppArmor" apart from "nobody could look"', () => {
     const s = summarisePosture([
       collected([POSTURE_STATUS_MARKER, 'mandatory-access absent - neither is installed']),
       collected([POSTURE_STATUS_MARKER, 'mandatory-access denied - selinuxfs is mounted and unreadable'])
@@ -432,7 +432,7 @@ describe('the estate roll-up counts the gaps rather than skipping them', () => {
     expect(s.macUnknown).toBe(1)
   })
 
-  it('counts a host whose sshd could not be read as unknown, not as unproblematic', () => {
+  it('counts a server whose sshd could not be read as unknown, not as unproblematic', () => {
     const s = summarisePosture([
       collected(['V sshd-src files', 'D permitrootlogin yes', POSTURE_STATUS_MARKER, 'sshd-hardening ok - files']),
       collected([POSTURE_STATUS_MARKER, 'sshd-hardening denied - /etc/ssh cannot be entered'])
@@ -625,7 +625,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(p.firewall?.rules).toBe(3)
   })
 
-  it('reports a refused ufw as denied, NEVER as a host with no rules', () => {
+  it('reports a refused ufw as denied, NEVER as a server with no rules', () => {
     // THE bug this whole item is shaped around. `ufw status` prints its refusal
     // on stderr and nothing on stdout, so a collector that trusted an empty
     // answer would report a wide-open box as having no rules at all.
@@ -665,7 +665,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     }
   })
 
-  it('reads a host with no firewall tooling at all as unsupported, not as open', () => {
+  it('reads a server with no firewall tooling at all as unsupported, not as open', () => {
     // `no-tool` would be defensible and `ok` with zero rules would not: the
     // kernel can be filtering a ruleset loaded at boot with nothing left on
     // disk to ask, and this build cannot tell that apart from an open box.
@@ -766,7 +766,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(on).toContain('fw-rule-collection')
   })
 
-  it('lists the ufw rules, capped and marked as the host’s own words', () => {
+  it('lists the ufw rules, capped and marked as the server’s own words', () => {
     const h = host()
     h.script('ufw', `printf '${UFW_STATUS}\\n'`)
     const p = h.collect({ have: ['ufw'], firewallRules: true })
@@ -842,7 +842,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(front?.truncated).toBe(true)
   })
 
-  it('caps a very long rule line on the host rather than in this process', () => {
+  it('caps a very long rule line on the server rather than in this process', () => {
     const h = host()
     h.script(
       'ufw',
@@ -963,7 +963,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(p.mandatoryAccess?.mode).toBeNull()
   })
 
-  it('reads a host with neither SELinux nor AppArmor as absent, having checked', () => {
+  it('reads a server with neither SELinux nor AppArmor as absent, having checked', () => {
     const p = host().collect({ have: [] })
     expect(statusOf(p, 'mandatory-access')).toBe('absent')
     expect(p.mandatoryAccess).toBeNull()
@@ -1072,7 +1072,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     }
   })
 
-  it('reads a host with /etc/ssh and no sshd_config in it as absent, having checked', () => {
+  it('reads a server with /etc/ssh and no sshd_config in it as absent, having checked', () => {
     const h = host()
     h.dir('etc/ssh')
     const p = h.collect({ sudo: false })
@@ -1244,7 +1244,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(p.failedLogins?.window).toContain(String(FAILED_LOGIN_WINDOW_HOURS))
   })
 
-  it('reads a host with neither lastb nor the journal as no-tool', () => {
+  it('reads a server with neither lastb nor the journal as no-tool', () => {
     const p = host().collect({ have: [] })
     expect(statusOf(p, 'failed-logins')).toBe('no-tool')
     expect(p.failedLogins).toBeNull()
@@ -1403,7 +1403,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(postureAlertReadings(p).oomKills).toBe(true)
   })
 
-  it('reads a host with no kernel log of any kind as no-tool', () => {
+  it('reads a server with no kernel log of any kind as no-tool', () => {
     const p = host().collect({ have: [] })
     expect(statusOf(p, 'oom-kills')).toBe('no-tool')
     expect(p.oomKills).toBeNull()
@@ -1530,7 +1530,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(postureAlertReadings(p).certDays).toBeNull()
   })
 
-  it('reads a host with none of the certificate directories as absent, and dates nothing', () => {
+  it('reads a server with none of the certificate directories as absent, and dates nothing', () => {
     const p = host().collect({ have: [] })
     expect(statusOf(p, 'certificates')).toBe('absent')
     expect(p.certificates?.certificates).toEqual([])
@@ -1557,7 +1557,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
 
   // ---- the whole thing ---------------------------------------------------
 
-  it('returns every source and exits 0 on a host that can answer nothing', () => {
+  it('returns every source and exits 0 on a server that can answer nothing', () => {
     // No firewall tool, no MAC, no /etc/ssh, no lastb, no journal. The
     // collector still returns a status for all four and exits cleanly, which is
     // what "no set -e, every read conditional" buys.

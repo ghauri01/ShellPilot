@@ -138,7 +138,7 @@ export function FrpManager(): React.JSX.Element {
             ))}
             <div className="row">
               <button className="btn sm" onClick={() => setSettingUp(true)}>
-                Set up a tunnel host
+                Set up a tunnel server
               </button>
             </div>
           </div>

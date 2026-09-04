@@ -185,12 +185,12 @@ export const POSTURE_STATUS_HELP: Record<PostureStatus, string> = {
   ok: 'Read successfully. A zero here means the probe looked and found none, not "we could not look".',
   partial:
     'Some of it was read and some was not. What is shown is real; it is not the whole picture, and the part that was refused is named rather than left out.',
-  absent: 'This host does not have the thing that answers this, and that was checked rather than assumed.',
+  absent: 'This server does not have the thing that answers this, and that was checked rather than assumed.',
   denied:
     'It exists and this account was not allowed to read it. A different account, or passwordless sudo, would see more. This is NOT the same as there being no rules, no policy or no failures.',
-  'no-tool': 'The program that answers this is not installed on this host.',
+  'no-tool': 'The program that answers this is not installed on this server.',
   unsupported:
-    'This host cannot answer this question at all. For the firewall that means no firewall tooling is installed — which is not the same as no filtering: the kernel can enforce a ruleset loaded at boot with nothing left on disk to ask. Treat it as UNKNOWN, never as "open".',
+    'This server cannot answer this question at all. For the firewall that means no firewall tooling is installed — which is not the same as no filtering: the kernel can enforce a ruleset loaded at boot with nothing left on disk to ask. Treat it as UNKNOWN, never as "open".',
   unknown: 'The probe ran and its answer could not be read, or the collector never reported on it.'
 }
 
@@ -400,7 +400,7 @@ export interface FirewallRuleListing {
  * configured the host — which on a compromised host is not the operator.
  */
 export const FIREWALL_RULES_HOST_REPORTED_NOTE =
-  'Reported by the host. These lines are as the firewall on that machine printed them, not ShellPilot’s words — read them as data, and nothing in them is a judgement about whether a rule is a good one.'
+  'Reported by the server. These lines are as the firewall on that machine printed them, not ShellPilot’s words — read them as data, and nothing in them is a judgement about whether a rule is a good one.'
 
 /** ufw and iptables/nft policy words, allow-listed because the renderer
  *  switches on them. Anything else becomes null rather than being displayed. */
@@ -563,7 +563,7 @@ const SSHD_BASELINE: Record<
     values: ['yes', 'no'],
     hardened: ['no'],
     weak: ['yes'],
-    why: 'passwords are accepted, so this host can be brute-forced from the internet'
+    why: 'passwords are accepted, so this server can be brute-forced from the internet'
   },
   PubkeyAuthentication: {
     values: ['yes', 'no'],
@@ -1224,10 +1224,10 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     `sp_val fw-active "$(grep -i '^ENABLED=' /etc/ufw/ufw.conf 2>/dev/null | head -1 | sed 's/^[^=]*=//')"`,
     'SP_FW_READ=1',
     'SP_FW_MISS=1',
-    'SP_FW_D="ufw status needs root on this host, so only /etc/ufw/ufw.conf was read: it says whether ufw is switched on and nothing about the rules"',
+    'SP_FW_D="ufw status needs root on this server, so only /etc/ufw/ufw.conf was read: it says whether ufw is switched on and nothing about the rules"',
     'else',
     'SP_FW_MISS=1',
-    'SP_FW_D="ufw is installed and reading its status needs root on this host"',
+    'SP_FW_D="ufw is installed and reading its status needs root on this server"',
     'fi',
 
     // ---- firewalld -------------------------------------------------------
@@ -1278,7 +1278,7 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     ),
     'else',
     'SP_FW_MISS=1',
-    'SP_FW_D="firewalld is running and listing its rules needs root on this host"',
+    'SP_FW_D="firewalld is running and listing its rules needs root on this server"',
     'fi',
     'elif [ -d /etc/firewalld ] && [ ! -x /etc/firewalld ]; then',
     // Traversal before existence again. A firewalld config directory this
@@ -1357,7 +1357,7 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     // hypervisor security group in front of the NIC. "There is nothing here to
     // ask" is true; "there is no firewall" is not, and this build cannot tell
     // them apart.
-    'sp_note firewall unsupported - "this host has none of ufw, firewalld, nft or iptables installed, so nothing here can be asked what the kernel is filtering — which is NOT the same as nothing being filtered"',
+    'sp_note firewall unsupported - "this server has none of ufw, firewalld, nft or iptables installed, so nothing here can be asked what the kernel is filtering — which is NOT the same as nothing being filtered"',
     'elif [ "$SP_FW_READ" = 1 ] && [ "$SP_FW_MISS" = 0 ]; then',
     'sp_note firewall ok "$SP_FW_W" "$SP_FW_D"',
     'elif [ "$SP_FW_READ" = 1 ]; then',
@@ -1436,12 +1436,12 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     `sp_val mac-complain "$(printf '%s\\n' "$SP_PROF" | grep -c '(complain)' || true)"`,
     'elif [ "$SP_MAC_ST" = ok ]; then',
     'SP_MAC_ST=partial',
-    'SP_MAC_D="apparmor is enabled and its profile list needs root on this host, so how many profiles are loaded was not read"',
+    'SP_MAC_D="apparmor is enabled and its profile list needs root on this server, so how many profiles are loaded was not read"',
     'fi',
     'else',
     // CHECKED absent, not assumed. Both interfaces were looked for and neither
     // is there — a real finding on a stock Debian without apparmor installed.
-    'sp_note mandatory-access absent - "this host has neither SELinux nor AppArmor: no selinuxfs, no apparmor module and neither getenforce nor aa-status is installed"',
+    'sp_note mandatory-access absent - "this server has neither SELinux nor AppArmor: no selinuxfs, no apparmor module and neither getenforce nor aa-status is installed"',
     'SP_MAC_ST=""',
     'fi',
     '[ -n "$SP_MAC_ST" ] && sp_note mandatory-access "$SP_MAC_ST" "$SP_MAC_W" "$SP_MAC_D"',
@@ -1494,7 +1494,7 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     // failure, more hardened than average rather than less.
     'if [ ! -d /etc/ssh ]; then',
     'SP_SSHD_ST=absent',
-    'SP_SSHD_D="this host has no /etc/ssh directory"',
+    'SP_SSHD_D="this server has no /etc/ssh directory"',
     'elif [ ! -x /etc/ssh ]; then',
     'SP_SSHD_ST=denied',
     'SP_SSHD_D="/etc/ssh exists and this account cannot enter it, so nothing about how sshd is configured was read"',
@@ -1620,10 +1620,10 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     'case "$SP_ERR" in',
     '*"No such file"*|*"no such file"*|*"cannot open"*)',
     'SP_FL_ST=absent',
-    'SP_FL_D="this host has no /var/log/btmp, so failed logins are not being recorded there at all" ;;',
+    'SP_FL_D="this server has no /var/log/btmp, so failed logins are not being recorded there at all" ;;',
     '*)',
     'SP_FL_ST=denied',
-    'SP_FL_D="/var/log/btmp exists and reading it needs root on this host" ;;',
+    'SP_FL_D="/var/log/btmp exists and reading it needs root on this server" ;;',
     'esac',
     'fi',
     'fi',
@@ -1678,7 +1678,7 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     ...findBin('dmesg', 'SP_DMESG'),
     'SP_OOM_ST=no-tool',
     'SP_OOM_W="-"',
-    'SP_OOM_D="this host has no readable kernel journal, no readable dmesg and no /var/log/kern.log, so whether the OOM killer has run cannot be established"',
+    'SP_OOM_D="this server has no readable kernel journal, no readable dmesg and no /var/log/kern.log, so whether the OOM killer has run cannot be established"',
     // Set the moment something that COULD have answered refuses. Without it a
     // host whose journal exists and is root-only, with no dmesg and no
     // kern.log, would fall through to `no-tool` — which reads as "there is
@@ -1770,7 +1770,7 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     'if [ -d /var/log ] && [ ! -x /var/log ]; then',
     'SP_OOM_ST=denied',
     'SP_OOM_REF=1',
-    'SP_OOM_D="/var/log exists on this host and this account may not enter it, so the kernel log inside it was never opened"',
+    'SP_OOM_D="/var/log exists on this server and this account may not enter it, so the kernel log inside it was never opened"',
     'elif [ -f /var/log/kern.log ]; then',
     // The error text with the count thrown away, so a permission problem is
     // told apart from a file that genuinely holds no kills.
@@ -1800,7 +1800,7 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     'else',
     'SP_OOM_ST=denied',
     'SP_OOM_REF=1',
-    'SP_OOM_D="/var/log/kern.log exists and reading it needs root on this host"',
+    'SP_OOM_D="/var/log/kern.log exists and reading it needs root on this server"',
     'fi',
     'fi',
     'fi',
@@ -1810,7 +1810,7 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     // person can close. The whole point of SP_OOM_REF.
     'if [ "$SP_OOM_ST" = no-tool ] && [ "$SP_OOM_REF" = 1 ]; then',
     'SP_OOM_ST=denied',
-    'SP_OOM_D="a kernel log is present on this host and this account may not read it. This is NOT a report of no OOM kills."',
+    'SP_OOM_D="a kernel log is present on this server and this account may not read it. This is NOT a report of no OOM kills."',
     'fi',
     'sp_note oom-kills "$SP_OOM_ST" "$SP_OOM_W" "$SP_OOM_D"',
 
@@ -1838,7 +1838,7 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     // CERTIFICATES is the half-probe this item was deferred rather than ship.
     'SP_CERT_ST=absent',
     'SP_CERT_W="-"',
-    'SP_CERT_D="none of the certificate directories ShellPilot looks in is present on this host"',
+    'SP_CERT_D="none of the certificate directories ShellPilot looks in is present on this server"',
     'SP_CERT_ROOTS=""',
     // The escalation prefix, empty unless a root needed root. /etc/letsencrypt
     // is 0700 root on Debian, which makes this the COMMON case rather than an
@@ -1914,13 +1914,13 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     'SP_CERT_ST=absent',
     'elif [ -z "$SP_CERT_ROOTS" ]; then',
     'SP_CERT_ST=denied',
-    'SP_CERT_D="every certificate directory present on this host refused to be entered. This is NOT a report of no certificates."',
+    'SP_CERT_D="every certificate directory present on this server refused to be entered. This is NOT a report of no certificates."',
     'elif [ "$SP_CERT_MISS" -gt 0 ]; then',
     'SP_CERT_ST=partial',
     'SP_CERT_D="some certificate directories were read and some refused to be entered. A directory that could not be read is not a directory with no certificates."',
     'else',
     'SP_CERT_ST=ok',
-    'SP_CERT_D="read every certificate directory that is present on this host"',
+    'SP_CERT_D="read every certificate directory that is present on this server"',
     'fi',
     'sp_val cert-refused "$SP_CERT_MISS"',
     // Emitted on every run including the empty one, so the parser can tell "the
@@ -2288,7 +2288,7 @@ export function judgeSshd(
   }
   if (raw === null) {
     if (opts.sourceStatus === 'denied' || opts.sourceStatus === 'absent') {
-      return unknown('sshd’s configuration could not be read on this host, so this is unchecked — not passing.')
+      return unknown('sshd’s configuration could not be read on this server, so this is unchecked — not passing.')
     }
     if (opts.effective) {
       return unknown('sshd reported its effective configuration and this directive was not in it, which this build cannot explain.')
@@ -2299,12 +2299,12 @@ export function judgeSshd(
   }
 
   const value = freeText(raw)
-  if (value === null) return unknown('the host reported an empty value for this directive.')
+  if (value === null) return unknown('the server reported an empty value for this directive.')
 
   // Numeric directive.
   if (directive === 'MaxAuthTries') {
     const n = parseCount(value)
-    if (n === null) return unknown('the host reported a value for MaxAuthTries that is not a number.')
+    if (n === null) return unknown('the server reported a value for MaxAuthTries that is not a number.')
     return {
       directive,
       value: String(n),
@@ -2335,7 +2335,7 @@ export function judgeSshd(
     // yes===SHELLPILOT-POSTURE===` — or anything else outside sshd's own
     // vocabulary — gets `unknown`, not a value the panel would render.
     return unknown(
-      `the host reported a value for ${directive} that is not one sshd accepts, so nothing is concluded from it.`
+      `the server reported a value for ${directive} that is not one sshd accepts, so nothing is concluded from it.`
     )
   }
   if (base.hardened.includes(lower)) {
@@ -2636,7 +2636,7 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
     confirm(
       'firewall',
       firewall !== null && (firewall.tool !== null || firewall.backend.tool !== null),
-      'the firewall probe reported success and named no tool, so nothing about what this host filters was established'
+      'the firewall probe reported success and named no tool, so nothing about what this server filters was established'
     ),
     confirm(
       'mandatory-access',
@@ -2656,12 +2656,12 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
     confirm(
       'oom-kills',
       oomKills !== null && oomKills.count !== null,
-      'the OOM probe reported success and returned no count, so whether this host has killed anything for memory was not established'
+      'the OOM probe reported success and returned no count, so whether this server has killed anything for memory was not established'
     ),
     confirm(
       'certificates',
       certificates !== null,
-      'the certificate probe reported success and returned no search at all, so nothing about what expires on this host was established'
+      'the certificate probe reported success and returned no search at all, so nothing about what expires on this server was established'
     )
   ]
 
@@ -2703,7 +2703,7 @@ export function securityUpdateReading(facts: HostFacts | null): {
       count: null,
       status: 'unknown',
       detail:
-        'no host facts have been collected for this server yet, so its security update count is unknown. Switch on the Inventory collection, or wait for the next hourly sweep.'
+        'no server facts have been collected for this server yet, so its security update count is unknown. Switch on the Inventory collection, or wait for the next hourly sweep.'
     }
   }
   const s = factSource(facts, 'security-updates')

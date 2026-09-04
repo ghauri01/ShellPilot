@@ -158,7 +158,7 @@ describe('the approval record', () => {
     expect(a.confirmedAt).toBe(AT)
   })
 
-  it('does not carry a host address, a username or a credential', () => {
+  it('does not carry a server address, a username or a credential', () => {
     // `approvalFor` copies field by field precisely so a caller handing it a
     // whole Server row cannot smuggle one into a record kept for a year and
     // written to a log.
@@ -249,7 +249,7 @@ describe('starting a job', () => {
         approval: approvalOf(spec(), approved)
       })
     ).rejects.toThrow(/db-1 was not in the target list that was confirmed/)
-    expect(h.reached('a'), 'not even the host that WAS approved is started').toBe(false)
+    expect(h.reached('a'), 'not even the server that WAS approved is started').toBe(false)
     expect(h.reached('b')).toBe(false)
   })
 
@@ -412,7 +412,7 @@ const twoHostApproval = (sp: JobSpec = spec()): CommandApproval =>
   ])
 
 describe('resuming after a restart', () => {
-  it('replays a stored approval that still matches, and follows the host that is running', async () => {
+  it('replays a stored approval that still matches, and follows the server that is running', async () => {
     const s = await openStore()
     seedInterrupted(s, { approval: twoHostApproval() })
 
@@ -421,7 +421,7 @@ describe('resuming after a restart', () => {
     const h = harness(s)
     expect(h.runner.reclaim({ cfgFor: () => ({ id: 'a' }) }).map((j) => j.id)).toEqual(['j1'])
     await settle()
-    expect(h.reached('a'), 'the detached host is picked up').toBe(true)
+    expect(h.reached('a'), 'the detached server is picked up').toBe(true)
     await h.finish('a')
     await h.runner.whenSettled('j1')
 
@@ -430,7 +430,7 @@ describe('resuming after a restart', () => {
     expect(s.readJob('j1')?.targets.find((t) => t.serverId === 'a')?.state).toBe('ok')
   })
 
-  it('finishes the running host and refuses to start the one it never reached', async () => {
+  it('finishes the running server and refuses to start the one it never reached', async () => {
     const s = await openStore()
     seedInterrupted(s, { approval: twoHostApproval() })
     const h = harness(s)
@@ -440,14 +440,14 @@ describe('resuming after a restart', () => {
     // THE ASSERTION THAT MATTERS: not that host b's row says skipped, but that
     // no channel to it was ever opened. A runner could produce that row while
     // still having run the command.
-    expect(h.reached('b'), 'host b was never started').toBe(false)
+    expect(h.reached('b'), 'server b was never started').toBe(false)
     await h.finish('a')
     await h.runner.whenSettled('j1')
 
     const job = s.readJob('j1')
     const a = job?.targets.find((t) => t.serverId === 'a')
     const b = job?.targets.find((t) => t.serverId === 'b')
-    expect(a?.state, 'the host that was already running finished').toBe('ok')
+    expect(a?.state, 'the server that was already running finished').toBe('ok')
     expect(b?.state).toBe('skipped')
     expect(b?.outcome).toBe('cancelled')
     // The refusal names the confirmation it would have had to run on. B2 made
@@ -460,7 +460,7 @@ describe('resuming after a restart', () => {
     expect(h.events('job-reclaimed')[0].payload).toMatchObject({ sealed: 1, approval: 'verified' })
   })
 
-  it('still follows a running host when the record no longer matches, and says so', async () => {
+  it('still follows a running server when the record no longer matches, and says so', async () => {
     const s = await openStore()
     // The spec in the row was edited under the approval — or the classifier
     // moved. Either way the record and the rows disagree.
@@ -476,7 +476,7 @@ describe('resuming after a restart', () => {
     // whether or not ShellPilot is watching; refusing to read its output would
     // throw away the exit status of something already happening and leave the
     // marker directory behind.
-    expect(h.reached('a'), 'the running host is still followed').toBe(true)
+    expect(h.reached('a'), 'the running server is still followed').toBe(true)
     expect(h.reached('b'), 'and nothing new is started').toBe(false)
     await h.finish('a')
     await h.runner.whenSettled('j1')
@@ -503,7 +503,7 @@ describe('resuming after a restart', () => {
     expect(b?.error).toMatch(/carries no confirmation this process could check/)
   })
 
-  it('a job running in THIS process reaches every host it was given', async () => {
+  it('a job running in THIS process reaches every server it was given', async () => {
     // The other half of the re-consent rule, and the contrast that makes the
     // test above mean something: within one process lifetime the approval is
     // carried, and host b is started normally. It is only across a restart that
@@ -578,7 +578,7 @@ describe('verifyJobApproval', () => {
     })
   })
 
-  it('refuses a host moved into a bigger wave', () => {
+  it('refuses a server moved into a bigger wave', () => {
     // Blast radius is what is simultaneous, and a cohort is what decides it.
     const staged: JobTargetRef[] = [
       { serverId: 'a', serverName: 'web-1', cohort: 'wave-1' },
@@ -597,7 +597,7 @@ describe('verifyJobApproval', () => {
 // ===========================================================================
 
 describe('the approval log', () => {
-  it('records a decision with the risk, the phrase, the hosts and the reason', () => {
+  it('records a decision with the risk, the phrase, the servers and the reason', () => {
     recordJobApproval({
       surface: 'job',
       event: 'refused',

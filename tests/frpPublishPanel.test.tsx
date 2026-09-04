@@ -28,7 +28,7 @@ const tokens: { token: string; profileName: string }[] = []
 const HOST_PROFILE = (): VpnProfile => ({
   id: 'vpn-host',
   workspaceId: useApp.getState().activeId(),
-  name: 'Tunnel host',
+  name: 'Tunnel server',
   autoStart: false,
   spec: {
     kind: 'frp',
@@ -145,7 +145,7 @@ describe('the one click says what it is about to publish, before it publishes it
   })
 })
 
-describe('a tunnel host that is not set up is explained, not papered over', () => {
+describe('a tunnel server that is not set up is explained, not papered over', () => {
   beforeEach(() => {
     useApp.setState({ vpns: [] })
   })
@@ -163,7 +163,7 @@ describe('a tunnel host that is not set up is explained, not papered over', () =
     expect(screen.queryByRole('button', { name: /^Publish$/ })).toBe(null)
   })
 
-  it('explains a tunnel host whose domain was never filled in', async () => {
+  it('explains a tunnel server whose domain was never filled in', async () => {
     const half = HOST_PROFILE()
     ;(half.spec as FrpSpec).publicHost = {
       baseDomain: '',
@@ -174,7 +174,7 @@ describe('a tunnel host that is not set up is explained, not papered over', () =
 
     await askForAUrl('3000')
     expect(document.body.textContent).toContain(
-      '"Tunnel host" has no domain. frp routes a public name to this machine, but the name has to be one you own and have pointed at the server.'
+      '"Tunnel server" has no domain. frp routes a public name to this machine, but the name has to be one you own and have pointed at the server.'
     )
     expect(document.body.textContent).not.toContain('://')
   })
@@ -187,11 +187,11 @@ describe('the guided setup happens once', () => {
 
   it('says what the operator has to own, and then stops saying it', async () => {
     const user = await askForAUrl('3000')
-    await user.click(screen.getByRole('button', { name: /Set up a tunnel host/ }))
+    await user.click(screen.getByRole('button', { name: /Set up a tunnel server/ }))
 
     // Said here, in full, once.
     expect(
-      await screen.findByText(/ShellPilot does not host public addresses/)
+      await screen.findByText(/ShellPilot does not server public addresses/)
     ).toBeTruthy()
 
     await user.type(screen.getByPlaceholderText('frp.example.com'), 'frp.example.com')
@@ -211,7 +211,7 @@ describe('the guided setup happens once', () => {
     // carries on by itself.
     await waitFor(() =>
       expect(
-        screen.queryByText(/ShellPilot does not host public addresses/)
+        screen.queryByText(/ShellPilot does not server public addresses/)
       ).toBe(null)
     )
     expect(
@@ -226,13 +226,13 @@ describe('the guided setup happens once', () => {
     await user.click(screen.getByRole('button', { name: /^Cancel$/ }))
     await user.click(screen.getByRole('button', { name: /Get a public URL/ }))
     expect(await screen.findByRole('button', { name: /Publish/ })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /Set up a tunnel host/ })).toBe(null)
-    expect(document.body.textContent).not.toContain('ShellPilot does not host public addresses')
+    expect(screen.queryByRole('button', { name: /Set up a tunnel server/ })).toBe(null)
+    expect(document.body.textContent).not.toContain('ShellPilot does not server public addresses')
   })
 
   it('stores the domain on the profile, so it survives the dialog closing', async () => {
     const user = await askForAUrl('3000')
-    await user.click(screen.getByRole('button', { name: /Set up a tunnel host/ }))
+    await user.click(screen.getByRole('button', { name: /Set up a tunnel server/ }))
     await user.type(screen.getByPlaceholderText('frp.example.com'), 'frp.example.com')
     await user.type(screen.getByPlaceholderText('tunnel.example.com'), '*.tunnel.example.com')
     await user.click(screen.getByRole('switch', { name: /I have created this record/ }))

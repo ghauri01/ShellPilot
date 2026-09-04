@@ -108,7 +108,7 @@ const isDisarm = (c: string): boolean => c.includes(': > "$SP_M"')
 const isVerify = (c: string): boolean => c.includes(ACCESS_VERIFIED_PREFIX)
 
 describe('the disarm is issued only after an independent session', () => {
-  it('confirms the change once a fresh session has proved the host still lets us in', async () => {
+  it('confirms the change once a fresh session has proved the server still lets us in', async () => {
     const s = session()
     const report = await committer(s).confirm({}, req())
 
@@ -135,7 +135,7 @@ describe('the disarm is issued only after an independent session', () => {
     expect(report.detail).toContain('/home/ops/.ssh/authorized_keys.shellpilot-t42.bak')
   })
 
-  it('does not confirm when the check fails on the host', async () => {
+  it('does not confirm when the check fails on the server', async () => {
     const s = session({ verifyCode: 3, verifyErr: 'no staged change with this token is waiting here\n' })
     const report = await committer(s).confirm({}, req())
     expect(s.ran.filter(isDisarm)).toEqual([])
@@ -161,14 +161,14 @@ describe('the disarm is issued only after an independent session', () => {
     expect(report.detail).toContain('the same already-authenticated transport that wrote the file')
   })
 
-  it('does not confirm a change staged on some other host', async () => {
+  it('does not confirm a change staged on some other server', async () => {
     // A session that landed somewhere else answers, and answers about a
     // different change. The token in the output is what ties the two together.
     const s = session({ verifyOut: `${ACCESS_VERIFIED_PREFIX}t99\n` })
     const report = await committer(s).confirm({}, req())
     expect(s.ran.filter(isDisarm)).toEqual([])
     expect(report.outcome).toBe('reverted-verification-failed')
-    expect(report.detail).toContain('not the host and account the change was made on')
+    expect(report.detail).toContain('not the server and account the change was made on')
   })
 
   it('does not confirm after the window has closed, however well the check went', async () => {
@@ -212,17 +212,17 @@ describe('the three outcomes read as three different things', () => {
 
   it('says committed, says rejected and says unconfirmed in three distinct sentences', async () => {
     const committed = describeAccessOutcome({ ...base, outcome: 'committed', reason: '' })
-    const failed = describeAccessOutcome({ ...base, outcome: 'reverted-verification-failed', reason: 'the host said no.' })
+    const failed = describeAccessOutcome({ ...base, outcome: 'reverted-verification-failed', reason: 'the server said no.' })
     const unconfirmed = describeAccessOutcome({ ...base, outcome: 'reverted-unconfirmed', reason: 'nobody was there.' })
 
     expect(committed).toBe(
-      "Committed on web-1. A second session authenticated after the change and called off the host's rollback, so ops's authorized_keys is now permanent. The previous file is at /b.bak until the 300-second window closes, after which the host removes it."
+      "Committed on web-1. A second session authenticated after the change and called off the server's rollback, so ops's authorized_keys is now permanent. The previous file is at /b.bak until the 300-second window closes, after which the server removes it."
     )
     expect(failed).toBe(
-      "Reverted on web-1: the check failed. the host said no. The host's rollback was armed and confirmed running before anything was replaced, and was left armed, so ops's previous authorized_keys should be back within 300s of the change. It is restored from /b.bak; if you can still reach the host, that is where to look."
+      "Reverted on web-1: the check failed. the server said no. The server's rollback was armed and confirmed running before anything was replaced, and was left armed, so ops's previous authorized_keys should be back within 300s of the change. It is restored from /b.bak; if you can still reach the server, that is where to look."
     )
     expect(unconfirmed).toBe(
-      "Reverted on web-1: nothing confirmed it in time. nobody was there. That is the dead-man's switch doing its job rather than the change failing — ops's previous authorized_keys is back, the host is exactly as it was, and it can be staged again."
+      "Reverted on web-1: nothing confirmed it in time. nobody was there. That is the dead-man's switch doing its job rather than the change failing — ops's previous authorized_keys is back, the server is exactly as it was, and it can be staged again."
     )
     expect(new Set([committed, failed, unconfirmed]).size).toBe(3)
   })
@@ -353,7 +353,7 @@ describe.skipIf(process.platform === 'win32')('the confirmation, run for real', 
     expect(v.out).toContain('no staged change with this token is waiting here')
   })
 
-  it('cannot resurrect a change the host has already put back', async () => {
+  it('cannot resurrect a change the server has already put back', async () => {
     // The property the deadline check in judgeAccessVerification mirrors, here
     // on disk. Once the watchdog has fired it deletes the backup, so a late
     // verification fails on the host as well — two independent reasons a

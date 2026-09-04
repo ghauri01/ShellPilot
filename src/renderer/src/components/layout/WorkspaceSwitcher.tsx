@@ -51,7 +51,7 @@ export function WorkspaceSwitcher(): React.JSX.Element {
   }
 
   return (
-    <div className="tooltip-host no-drag" ref={ref}>
+    <div className="tooltip-server no-drag" ref={ref}>
       <button className="ws-trigger" onClick={() => setOpen((v) => !v)}>
         <span className="ws-dot" style={{ background: colorVar[active.color], color: colorVar[active.color] }} />
         <span>{active.name}</span>

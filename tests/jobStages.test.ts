@@ -225,7 +225,7 @@ describe('waves', () => {
 // =========================================================================
 
 describe('the health gate between waves', () => {
-  it('stops the run when the finished wave left a host with a failed unit', async () => {
+  it('stops the run when the finished wave left a server with a failed unit', async () => {
     const store = await openStore()
     const h = harness(store)
     const req = approved({ jobId: 'j2', spec: spec(), targets: waved(['a', 'b', 'c']) })
@@ -255,7 +255,7 @@ describe('the health gate between waves', () => {
     expect(rows.b.state).toBe('skipped')
     expect(rows.c.state).toBe('skipped')
     // And the row answers the only question anyone asks afterwards.
-    expect(rows.b.error).toContain('Nothing was installed on this host')
+    expect(rows.b.error).toContain('Nothing was installed on this server')
     expect(rows.b.error).toContain('nginx.service')
 
     // `halted` is TERMINAL. If it were not, the job would be adopted at the
@@ -265,7 +265,7 @@ describe('the health gate between waves', () => {
     expect(store.unfinishedJobs().map((j) => j.id)).not.toContain('j2')
   })
 
-  it('stops when the finished wave left a host unreachable', async () => {
+  it('stops when the finished wave left a server unreachable', async () => {
     const store = await openStore()
     const h = harness(store)
     const req = approved({ jobId: 'j3', spec: spec(), targets: waved(['a', 'b']) })
@@ -373,7 +373,7 @@ describe('the health gate between waves', () => {
     expect(store.readJob('j8')!.state).toBe('done')
   })
 
-  it('reports a host that cannot answer for its units without blocking on it', async () => {
+  it('reports a server that cannot answer for its units without blocking on it', async () => {
     const store = await openStore()
     const h = harness(store)
     const req = approved({ jobId: 'j9', spec: spec(), targets: waved(['a', 'b']) })
@@ -479,7 +479,7 @@ describe('a patch run and its approval record', () => {
     expect(h.isOpening('a')).toBe(false)
   })
 
-  it('refuses a host moved into a different wave', async () => {
+  it('refuses a server moved into a different wave', async () => {
     // Moving a host between waves changes how many run at once, which is what
     // the confirmation was sized against.
     const store = await openStore()
@@ -499,7 +499,7 @@ describe('a patch run and its approval record', () => {
       },
       { targets: confirmed }
     )
-    await expect(h.runner.run(req)).rejects.toThrow(/Moving a host between waves/)
+    await expect(h.runner.run(req)).rejects.toThrow(/Moving a server between waves/)
     expect(store.readJob('jb')).toBeNull()
   })
 

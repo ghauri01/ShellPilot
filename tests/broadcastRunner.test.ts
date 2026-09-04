@@ -68,15 +68,15 @@ function makeRunner(over: {
   return { runner, events, started, gates }
 }
 
-describe('running a command across hosts', () => {
-  it('reports a result for every host', async () => {
+describe('running a command across servers', () => {
+  it('reports a result for every server', async () => {
     const h = harness()
     const out = await h.runner.run(req({ runId: 'r', command: 'uptime', targets: targets(4) }))
     expect(out).toHaveLength(4)
     expect(out.every((r) => r.state === 'ok')).toBe(true)
   })
 
-  it('emits a running event before each host and a result after', async () => {
+  it('emits a running event before each server and a result after', async () => {
     const h = harness()
     await h.runner.run(req({ runId: 'r', command: 'uptime', targets: targets(2) }))
     const states = h.events.filter((e) => !e.done).map((e) => e.host.state)
@@ -99,7 +99,7 @@ describe('running a command across hosts', () => {
     expect(out[0]).toMatchObject({ state: 'ok', exitCode: 1 })
   })
 
-  it('keeps going when one host is unreachable', async () => {
+  it('keeps going when one server is unreachable', async () => {
     let n = 0
     const h = makeRunner({
       exec: async () => {
@@ -114,7 +114,7 @@ describe('running a command across hosts', () => {
     expect(out.find((r) => r.state === 'failed')?.error).toMatch(/ETIMEDOUT/)
   })
 
-  it('caps per-host output and says it did', async () => {
+  it('caps per-server output and says it did', async () => {
     const h = makeRunner({
       exec: async () => ({ ok: true, code: 0, stdout: 'x'.repeat(BROADCAST_OUTPUT_CAP + 500) })
     })
@@ -143,7 +143,7 @@ describe('running a command across hosts', () => {
 })
 
 describe('cancelling', () => {
-  it('stops hosts that have not started, and says they were skipped', async () => {
+  it('stops servers that have not started, and says they were skipped', async () => {
     // The property the confirmation model depends on. Not "stops eventually":
     // the remaining hosts must never run at all.
     let done = 0
@@ -228,8 +228,8 @@ describe('two runs under one id', () => {
   })
 })
 
-describe('a host that never answers', () => {
-  it('ends the run anyway, and says which host it gave up on', async () => {
+describe('a server that never answers', () => {
+  it('ends the run anyway, and says which server it gave up on', async () => {
     // sshExec starts its own timer only after the connection is up, so a
     // connect that never completes is not covered by the per-host timeout at
     // all. Without a guard here the worker awaits forever: no result, no
@@ -249,7 +249,7 @@ describe('a host that never answers', () => {
     expect(runner.isRunning('r')).toBe(false)
   })
 
-  it('does not give up on a host that answers within the grace', async () => {
+  it('does not give up on a server that answers within the grace', async () => {
     const runner = new BroadcastRunner({
       stallGraceMs: 200,
       exec: async () => {
@@ -288,7 +288,7 @@ describe('the panel that drives it', () => {
     expect(panel).toMatch(/\{!running && \([\s\S]{0,200}setActivity\('connections'\)/)
   })
 
-  it('builds each host cfg from the server row it already has', () => {
+  it('builds each server cfg from the server row it already has', () => {
     // `byId.get(t.serverId)!` was an assertion nobody could prove from the
     // call site; the rows are right there.
     expect(panel).not.toMatch(/\.get\([^)]*\)!/)
@@ -338,7 +338,7 @@ describe('telling the fan-out apart', () => {
     return out[0]
   }
 
-  it('marks a host that does not have the command', async () => {
+  it('marks a server that does not have the command', async () => {
     // 127 with the shell's own wording. This is the single most common
     // fan-out surprise and it used to be indistinguishable from a command
     // that ran and failed.
@@ -375,7 +375,7 @@ describe('telling the fan-out apart', () => {
     expect(r.state).toBe('ok')
   })
 
-  it('marks a host that refused the command', async () => {
+  it('marks a server that refused the command', async () => {
     const r = await one({ ok: true, code: 126, stdout: '', stderr: 'bash: /usr/local/bin/x: Permission denied' })
     expect(r.outcome).toBe('permission-denied')
   })
@@ -402,7 +402,7 @@ describe('telling the fan-out apart', () => {
     expect(r.outcome).toBe('nonzero')
   })
 
-  it('tells a timeout from an unreachable host', async () => {
+  it('tells a timeout from an unreachable server', async () => {
     // Different machines to go and look at: one is a slow command or a slow
     // link, the other is a box or a bastion that is down.
     const slow = await one({ ok: false, error: 'Command timed out after 60000ms' })
@@ -441,7 +441,7 @@ describe('telling the fan-out apart', () => {
     expect(r.outcome).toBe('missing-command')
   })
 
-  it('marks a host that was never started', async () => {
+  it('marks a server that was never started', async () => {
     const h = makeRunner({ exec: async () => ({ ok: true, code: 0, stdout: '' }) })
     h.runner.cancel('r')
     const started = h.runner.run(req({ runId: 'r', command: 'uptime', targets: targets(3) }))

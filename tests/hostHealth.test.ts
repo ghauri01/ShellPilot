@@ -64,7 +64,7 @@ describe('level', () => {
 })
 
 describe('summariseFleetHealth', () => {
-  it('separates hosts needing attention from the rest', () => {
+  it('separates servers needing attention from the rest', () => {
     const h = summariseFleetHealth([server('a'), server('b')], {
       a: host({ services: [failedUnit('nginx')] }),
       b: host()
@@ -84,7 +84,7 @@ describe('summariseFleetHealth', () => {
     expect(h.attention[0].failed?.map((u) => u.name)).toEqual(['x', 'y'])
   })
 
-  it('never reads a host without systemd as a host with nothing failed', () => {
+  it('never reads a server without systemd as a server with nothing failed', () => {
     const h = summariseFleetHealth([server('a')], { a: host({ services: null }) })
     expect(h.attention).toHaveLength(0)
     expect(h.rest[0].failed).toBeNull()
@@ -108,7 +108,7 @@ describe('summariseFleetHealth', () => {
     expect(h.rest[1].listeners).toEqual([])
   })
 
-  it('still lists a host whose service and port probes both failed', () => {
+  it('still lists a server whose service and port probes both failed', () => {
     // It reported CPU, memory and disk perfectly well; dropping it entirely
     // would understate how much of the estate is covered.
     const h = summariseFleetHealth([server('a')], {
@@ -126,7 +126,7 @@ describe('summariseFleetHealth', () => {
     expect(h.diskHosts).toBe(1)
   })
 
-  it('does not alarm on a host that reported no filesystem at all', () => {
+  it('does not alarm on a server that reported no filesystem at all', () => {
     const h = summariseFleetHealth([server('a')], {
       a: host({ diskPct: 100, diskTotal: 0, diskUsed: 0 })
     })
@@ -167,7 +167,7 @@ describe('summariseFleetHealth', () => {
     expect(one.attention.map((r) => r.name)).toEqual(['aaa', 'bbb'])
   })
 
-  it('leaves the healthy hosts in the order they were given', () => {
+  it('leaves the healthy servers in the order they were given', () => {
     const h = summariseFleetHealth([server('c', 'ccc'), server('a', 'aaa'), server('b', 'bbb')], {
       a: host(),
       b: host(),
@@ -177,10 +177,10 @@ describe('summariseFleetHealth', () => {
   })
 })
 
-describe('hosts that could not be checked', () => {
+describe('servers that could not be checked', () => {
   const failure = (error: string, at = 1_000): { error: string; at: number } => ({ error, at })
 
-  it('lists an unreachable host instead of counting it as silent', () => {
+  it('lists an unreachable server instead of counting it as silent', () => {
     // Silent means "we have never heard anything". A refused connection is
     // something heard, and it is the answer the user needs to see.
     const h = summariseFleetHealth([server('a')], {}, { a: failure('Connection refused') })
@@ -200,8 +200,8 @@ describe('hosts that could not be checked', () => {
     expect(h.unreachable[0].last?.listeners).toEqual([listener(443, '*')])
   })
 
-  it('has no last sample for a host that has never answered', () => {
-    const h = summariseFleetHealth([server('a')], {}, { a: failure('No route to host') })
+  it('has no last sample for a server that has never answered', () => {
+    const h = summariseFleetHealth([server('a')], {}, { a: failure('No route to server') })
     expect(h.unreachable[0].last).toBeNull()
   })
 
@@ -215,7 +215,7 @@ describe('hosts that could not be checked', () => {
     expect(h.attention).toEqual([])
   })
 
-  it('does not raise an alarm from a stale failure on an unreachable host', () => {
+  it('does not raise an alarm from a stale failure on an unreachable server', () => {
     // The unit may well have been restarted in the meantime; we cannot say.
     const h = summariseFleetHealth(
       [server('a')],
@@ -229,24 +229,24 @@ describe('hosts that could not be checked', () => {
     expect(diskLine(h)).toBeNull()
   })
 
-  it('leaves an unreachable host out of the reporting count', () => {
+  it('leaves an unreachable server out of the reporting count', () => {
     const h = summariseFleetHealth([server('a'), server('b')], { b: host() }, {
       a: failure('Connection refused')
     })
     expect(coverageLine(h)).toBe('1 of 2 servers reporting')
   })
 
-  it('says how many hosts could not be checked, in the right number', () => {
+  it('says how many servers could not be checked, in the right number', () => {
     const one = summariseFleetHealth([server('a')], {}, { a: failure('x') })
     const two = summariseFleetHealth([server('a'), server('b')], {}, {
       a: failure('x'),
       b: failure('y')
     })
-    expect(unreachableLine(one)).toBe('1 host could not be checked')
-    expect(unreachableLine(two)).toBe('2 hosts could not be checked')
+    expect(unreachableLine(one)).toBe('1 server could not be checked')
+    expect(unreachableLine(two)).toBe('2 servers could not be checked')
   })
 
-  it('says nothing when every host answered', () => {
+  it('says nothing when every server answered', () => {
     expect(unreachableLine(summariseFleetHealth([server('a')], { a: host() }))).toBeNull()
   })
 
@@ -314,8 +314,8 @@ describe('summary copy', () => {
   })
 
   it('agrees with itself about singular and plural', () => {
-    expect(failureLine(withFailures(1, 1))).toBe('1 failed service on 1 host')
-    expect(failureLine(withFailures(4, 2))).toBe('4 failed services on 2 hosts')
+    expect(failureLine(withFailures(1, 1))).toBe('1 failed service on 1 server')
+    expect(failureLine(withFailures(4, 2))).toBe('4 failed services on 2 servers')
   })
 
   it('names how much of the estate the panel actually covers', () => {
@@ -326,7 +326,7 @@ describe('summary copy', () => {
     expect(coverageLine(partial)).toBe('2 of 3 servers reporting · 1 cannot list services')
   })
 
-  it('says when a host could not list its ports, which is not "no ports"', () => {
+  it('says when a server could not list its ports, which is not "no ports"', () => {
     const h = summariseFleetHealth([server('a'), server('b')], {
       a: host({ listeners: null, listenerSource: null }),
       b: host({ listeners: [] })
@@ -366,11 +366,11 @@ describe('summary copy', () => {
     )
   })
 
-  it('counts hosts low on disk', () => {
+  it('counts servers low on disk', () => {
     const h = summariseFleetHealth([server('a'), server('b')], {
       a: host({ diskPct: 99 }),
       b: host({ diskPct: 92 })
     })
-    expect(diskLine(h)).toBe('2 hosts low on disk')
+    expect(diskLine(h)).toBe('2 servers low on disk')
   })
 })

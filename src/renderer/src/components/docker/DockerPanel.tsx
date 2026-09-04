@@ -634,14 +634,14 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
                 Retry with sudo
               </button>
               <span className="faint">
-                This account has passwordless sudo on that host, so containers can be read as root.
+                This account has passwordless sudo on that server, so containers can be read as root.
               </span>
             </div>
           )}
           {probe.reason === 'permission-denied' && sudoAvailable === false && (
             <div className="faint" style={{ marginTop: 6 }}>
               sudo would need a password here, and there is no terminal to type it into. Add this
-              user to the docker group on the host, or configure passwordless sudo for it.
+              user to the docker group on the server, or configure passwordless sudo for it.
             </div>
           )}
         </div>
@@ -1398,7 +1398,7 @@ function DiskItems({
       {empty && (
         <div className="faint" style={{ fontSize: 11 }}>
           Docker answered, and every table it printed was empty: there is nothing stored on this
-          host. That is the reading, not a read that failed.
+          server. That is the reading, not a read that failed.
         </div>
       )}
 

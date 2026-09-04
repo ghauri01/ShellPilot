@@ -215,12 +215,12 @@ describe('a gap is never a zero', () => {
     // host as excluded — which is only true if `unsupported` was neither summed
     // as 0 nor summed at all.
     expect(document.body.textContent).toMatch(/5 security updates/)
-    expect(document.body.textContent).toMatch(/1 host can never report a security update count/i)
+    expect(document.body.textContent).toMatch(/1 server can never report a security update count/i)
     expect(document.body.textContent).toMatch(/not in the 5 above/i)
     await Promise.resolve()
   })
 
-  it('renders a host with no facts yet as not-collected, not as zero updates', () => {
+  it('renders a server with no facts yet as not-collected, not as zero updates', () => {
     // Facts are hourly. A server added ten minutes ago genuinely has none, and
     // "0 pending updates, 0 security updates, no reboot needed" is the single
     // most dangerous thing this panel could say about a host nobody has asked.
@@ -277,7 +277,7 @@ describe('a gap is never a zero', () => {
     // The estate line must be too. A bare "0 security updates" with nothing
     // beside it is the lie.
     const text = document.body.textContent ?? ''
-    expect(text).toMatch(/3 hosts could not answer/i)
+    expect(text).toMatch(/3 servers could not answer/i)
 
     // And the gap is named as one that can CLOSE — a different account gets an
     // answer here, which is the whole difference from `unsupported`.
@@ -381,12 +381,12 @@ describe('the second staleness axis', () => {
 
     // And the estate line says how many hosts the totals above it are drawn
     // from a stale cache on — one, not two.
-    expect(document.body.textContent).toMatch(/1 host counted from a stale package cache/i)
+    expect(document.body.textContent).toMatch(/1 server counted from a stale package cache/i)
   })
 })
 
 describe('sorting', () => {
-  it('sorts hosts with no update count LAST, in both directions', async () => {
+  it('sorts servers with no update count LAST, in both directions', async () => {
     // The decision, pinned. A gap is not a magnitude: sorting it as 0 puts "we
     // could not count the updates on this host" at the top of an ascending sort
     // among the hosts that genuinely have none, which is the same lie the text
@@ -492,7 +492,7 @@ describe('the first thing a user sees', () => {
     seed('srv-u', { metrics: metrics() })
     render(<InventoryPanel servers={[server('srv-u', 'ubuntu-01')]} />)
     const text = document.body.textContent ?? ''
-    expect(text).toMatch(/No host facts have been collected yet/i)
+    expect(text).toMatch(/No server facts have been collected yet/i)
     expect(text).toMatch(/once an hour/i)
     expect(text).toMatch(/background checking/i)
     expect(screen.getByRole('button', { name: /Check now/ })).toBeTruthy()

@@ -34,9 +34,9 @@ const COPY: Record<AlertCoverage, string> = {
   running: 'Background checks are running, so alerts fire wherever you are in the app.',
   'requested-not-running':
     'Background checks are switched on but not running right now — see the reason below. ' +
-    'Until they are, a host is only sampled while its monitor is on screen.',
+    'Until they are, a server is only sampled while its monitor is on screen.',
   'foreground-only':
-    'Without background checks below, a host is only sampled while its monitor is on screen — ' +
+    'Without background checks below, a server is only sampled while its monitor is on screen — ' +
     'so an alert can only fire while you are already looking at it.'
 }
 

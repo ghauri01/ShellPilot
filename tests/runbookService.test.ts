@@ -136,7 +136,7 @@ describe('a note', () => {
     expect(mode).toBe(0o600)
   })
 
-  it('keeps the fleet-wide note and the per-host note apart', () => {
+  it('keeps the fleet-wide note and the per-server note apart', () => {
     const d = deps()
     saveRunbookNote(d, 'disk', null, 'Fleet: check journald first.')
     saveRunbookNote(d, 'disk', 'web-1', 'web-1 keeps its backups on /.')
@@ -216,7 +216,7 @@ describe('what was run the last three times it fired', () => {
     expect(r.status === 'ok' && r.occurrences[0].jobs[0].commands[0].outcome).toBe('succeeded')
   })
 
-  it('does not attribute a job that ran on a different host', async () => {
+  it('does not attribute a job that ran on a different server', async () => {
     const s = await store()
     raise(s, 'raised', T0)
     job(s, 'j1', T0 + 5 * MIN, ['fix-db'], { hosts: ['db-1'] })
@@ -228,7 +228,7 @@ describe('what was run the last three times it fired', () => {
     expect(other.status).toBe('never-fired')
   })
 
-  it('does not attribute a job belonging to a different alert kind on the same host', async () => {
+  it('does not attribute a job belonging to a different alert kind on the same server', async () => {
     const s = await store()
     // A CPU alert on the same host, in the same minutes. The disk runbook must
     // not claim its incident.
@@ -276,7 +276,7 @@ describe('what was run the last three times it fired', () => {
     expect(r).toEqual({ status: 'unavailable', reason: 'store-unreadable' })
   })
 
-  it('will not answer a per-host question without a host', async () => {
+  it('will not answer a per-server question without a server', async () => {
     const s = await store()
     raise(s, 'raised', T0)
     job(s, 'j1', T0 + 5 * MIN, ['whatever'])
@@ -296,7 +296,7 @@ describe('what was run the last three times it fired', () => {
     expect(text).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz012345')
   })
 
-  it('carries what the host said as host-reported, separate from what we ran', async () => {
+  it('carries what the server said as host-reported, separate from what we ran', async () => {
     const s = await store()
     raise(s, 'raised', T0)
     // `nonzero` is what `classifyBroadcastResult` stores for a command that ran
@@ -406,7 +406,7 @@ describe('what was run the last three times it fired', () => {
     ])
   })
 
-  it('finds that job on a host that has run hundreds since', async () => {
+  it('finds that job on a server that has run hundreds since', async () => {
     // The read is capped, and a cap over a 400-day window is a different cap
     // from one over ninety days: the newest two hundred jobs on a busy host
     // are all from the last fortnight, and the one that answered the spring

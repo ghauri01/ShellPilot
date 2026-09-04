@@ -102,7 +102,7 @@ describe('one disk predicate, two paths', () => {
     expect(chips()).toEqual(['disk'])
   })
 
-  it('ignores a host that reported no disk at all', () => {
+  it('ignores a server that reported no disk at all', () => {
     // `df` returning nothing is not an empty disk. The two questions — "was
     // this measured?" and "is it too full?" — are answered in the two places
     // that hold the answers: the alert path's `null` disk, and the row
@@ -344,7 +344,7 @@ describe('a disk nobody could measure', () => {
     expect(chips()).toEqual([])
   })
 
-  it('does NOT post an all-clear for a host that is still alerting', () => {
+  it('does NOT post an all-clear for a server that is still alerting', () => {
     // metrics.ts yields diskPct 0 when the df probe fails. Passing that would
     // post "back below 85%" for a host that may well still be full — a false
     // all-clear manufactured out of a measurement failure.

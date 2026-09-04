@@ -94,13 +94,13 @@ export type ComposeFailure = DockerFailure | 'compose-unavailable'
 
 export const COMPOSE_FAILURE_HELP: Record<ComposeFailure, string> = {
   'not-installed':
-    'No docker on this host. Looked on PATH and in /usr/bin, /usr/local/bin, /snap/bin, /opt/homebrew/bin and /usr/sbin.',
+    'No docker on this server. Looked on PATH and in /usr/bin, /usr/local/bin, /snap/bin, /opt/homebrew/bin and /usr/sbin.',
   'daemon-unreachable':
     'Docker is installed but its daemon is not answering, so it cannot say which compose projects it is running.',
   'permission-denied':
     'This user cannot talk to the docker socket, so compose cannot be asked anything. The compose FILES may still be readable — the filesystem search below does not go through the daemon.',
   'compose-unavailable':
-    'Docker is here, but `docker compose` is not. That is normal on hosts still running the v1 `docker-compose` script, which is a separate program with a different command line. ShellPilot does not drive v1: its flags differ enough that guessing would be running an unverified command on someone else\u2019s host.',
+    'Docker is here, but `docker compose` is not. That is normal on servers still running the v1 `docker-compose` script, which is a separate program with a different command line. ShellPilot does not drive v1: its flags differ enough that guessing would be running an unverified command on someone else\u2019s server.',
   unknown: 'Compose returned an error that could not be classified. The raw message is below.'
 }
 
@@ -963,9 +963,9 @@ export function joinComposeState(
  */
 export const COMPOSE_ENV_DISCLOSURE =
   'ShellPilot reads the NAMES of the variables in this file and never their values. ' +
-  'The values are cut off on the host itself, so they do not cross the connection, ' +
+  'The values are cut off on the server itself, so they do not cross the connection, ' +
   'are not held in memory here, and cannot appear in an error message. A variable is ' +
-  'shown as set or empty; to see a value, open the file on the host.'
+  'shown as set or empty; to see a value, open the file on the server.'
 
 export interface ComposeEnvName {
   name: string

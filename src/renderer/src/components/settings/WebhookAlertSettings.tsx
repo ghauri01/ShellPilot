@@ -130,7 +130,7 @@ export function WebhookAlertSettings(): React.JSX.Element {
           <div className="s-desc">
             POSTs a small JSON message to any HTTPS endpoint — Slack, Discord, Teams and most
             alerting systems accept one. Only the server&rsquo;s name, what fired and when are sent;
-            never a host, an IP, a log line or command output.
+            never a server, an IP, a log line or command output.
             {!cfg.hasUrl && ' Add a URL below to enable this.'}
           </div>
           <div className="s-desc">

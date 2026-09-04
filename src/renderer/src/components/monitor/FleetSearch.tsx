@@ -78,7 +78,7 @@ export function FleetSearch({
         <Search size={14} className="faint" />
         <input
           className="input"
-          placeholder="Search units, ports, distributions and hosts across the workspace…"
+          placeholder="Search units, ports, distributions and servers across the workspace…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -124,11 +124,11 @@ export function FleetSearch({
               ) : (
                 <>
                   <p className="panel-empty-title">
-                    Nothing matched on the hosts that could be searched.
+                    Nothing matched on the servers that could be searched.
                   </p>
                   <p className="panel-empty-body">
                     Try a shorter term — this searches unit names, listening ports, distributions
-                    and host names.
+                    and server names.
                   </p>
                 </>
               )}

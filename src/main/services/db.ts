@@ -48,14 +48,14 @@ async function build(cfg: DbConnectConfig): Promise<Conn> {
 
   if (cfg.uri && /^mongodb\+srv:/i.test(cfg.uri)) {
     throw new Error(
-      'mongodb+srv:// resolves several hosts via DNS and cannot be tunnelled. Use the host/port fields, or a plain mongodb:// string.'
+      'mongodb+srv:// resolves several servers via DNS and cannot be tunnelled. Use the server/port fields, or a plain mongodb:// string.'
     )
   }
 
   const from = cfg.uri ? uriEndpoint(cfg.uri) : null
   const targetHost = from?.host || cfg.host
   const targetPort = from?.port || cfg.port || DEFAULT_PORT[cfg.kind]
-  if (!targetHost) throw new Error('No database host to tunnel to.')
+  if (!targetHost) throw new Error('No database server to tunnel to.')
 
   const { openEphemeralForward } = await import('./tunnel')
   const fwd = await openEphemeralForward(cfg.ssh, targetHost, targetPort)
@@ -100,7 +100,7 @@ async function buildOverVpn(cfg: DbConnectConfig): Promise<Conn> {
 
   if (cfg.uri && /^mongodb\+srv:/i.test(cfg.uri)) {
     throw new Error(
-      'mongodb+srv:// resolves several hosts via DNS and cannot be tunnelled. Use the host/port fields, or a plain mongodb:// string.'
+      'mongodb+srv:// resolves several servers via DNS and cannot be tunnelled. Use the server/port fields, or a plain mongodb:// string.'
     )
   }
 
@@ -114,7 +114,7 @@ async function buildOverVpn(cfg: DbConnectConfig): Promise<Conn> {
   const from = cfg.uri ? uriEndpoint(cfg.uri) : null
   const dbHost = from?.host || cfg.host
   const dbPort = from?.port || cfg.port || DEFAULT_PORT[cfg.kind]
-  if (!dbHost) throw new Error('No database host to connect to.')
+  if (!dbHost) throw new Error('No database server to connect to.')
 
   // With a bastion as well, the VPN carries the *bastion*, not the database:
   // the SSH hop is what is on the far network, and the database is reached

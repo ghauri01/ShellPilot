@@ -86,7 +86,7 @@ describe('a step change is not a trend', () => {
 })
 
 describe('a gap is not a flat line', () => {
-  it('splits the series where the host stopped answering', () => {
+  it('splits the series where the server stopped answering', () => {
     const before = points(T0 - 2 * DAY - 12 * HOUR, 73, HOUR, 'hourly', (i) => 40 + i * 0.4)
     const after = points(T0, 13, HOUR, 'hourly', () => 80)
     const both = [...before, ...after]
@@ -154,7 +154,7 @@ describe('a series too young to have a rate', () => {
     expect(f.points).toBe(6)
   })
 
-  it('refuses a series that stopped reporting, rather than extrapolating a dead host', () => {
+  it('refuses a series that stopped reporting, rather than extrapolating a dead server', () => {
     const stopped = points(T0 - 2 * DAY, 145, HOUR, 'hourly', (i) => 60 + i * 0.1)
     const f = forecast(stopped, 90, T0)
     expect(f.ok === false && f.reason).toBe('stale')
@@ -391,7 +391,7 @@ describe('the report main hands the panel', () => {
     expect(r.trends[2].low).toBe(20)
   })
 
-  it('reports nothing at all for a host with no history, without throwing', () => {
+  it('reports nothing at all for a server with no history, without throwing', () => {
     const r = buildCapacityReport('srv-new', {}, {
       now: T0,
       from: T0 - DAY,

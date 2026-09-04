@@ -511,7 +511,7 @@ export function validateFrpSpec(spec: FrpSpec, confirm?: FrpConfirmations): VpnV
   if (!spec.serverAddr.trim()) {
     issues.error('serverAddr', 'server-addr-missing', 'Enter the frp server address.')
   } else if (issues.text('serverAddr', spec.serverAddr) && !HOSTISH.test(spec.serverAddr)) {
-    issues.error('serverAddr', 'server-addr-invalid', 'This is not a host name or address.')
+    issues.error('serverAddr', 'server-addr-invalid', 'This is not a server name or address.')
   }
   if (!isPort(spec.serverPort)) {
     issues.error('serverPort', 'server-port-invalid', 'Enter a port between 1 and 65535.')

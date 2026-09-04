@@ -643,11 +643,11 @@ CREATE TABLE IF NOT EXISTS meta (
   v TEXT NOT NULL
 ) WITHOUT ROWID;
 
--- Hosts and metrics are interned to small integers. The samples table stores
+-- Servers and metrics are interned to small integers. The samples table stores
 -- the integer, never the string: 'srv-3f9c…' repeated 86,400 times a day is
 -- most of the file, and the whole point of the measured 21.9 bytes/row is that
 -- there is nothing in a row but four small values.
-CREATE TABLE IF NOT EXISTS hosts (
+CREATE TABLE IF NOT EXISTS servers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   host_key TEXT NOT NULL UNIQUE
 );
@@ -657,15 +657,15 @@ CREATE TABLE IF NOT EXISTS metric_names (
   name TEXT NOT NULL UNIQUE
 );
 
--- WITHOUT ROWID and PRIMARY KEY(ts, host, metric): the primary key IS the
+-- WITHOUT ROWID and PRIMARY KEY(ts, server, metric): the primary key IS the
 -- table, so there is no second B-tree to pay for. Measured at 21.9 bytes/row.
 -- ts leads because every read is a time range.
 CREATE TABLE IF NOT EXISTS samples (
   ts INTEGER NOT NULL,
-  host INTEGER NOT NULL,
+  server INTEGER NOT NULL,
   metric INTEGER NOT NULL,
   v REAL NOT NULL,
-  PRIMARY KEY (ts, host, metric)
+  PRIMARY KEY (ts, server, metric)
 ) WITHOUT ROWID;
 
 -- The downsampled tier. v_avg/v_min/v_max rather than avg/min/max because the
@@ -675,36 +675,36 @@ CREATE TABLE IF NOT EXISTS samples (
 -- correctly (weighted) instead of averaging averages.
 CREATE TABLE IF NOT EXISTS samples_hourly (
   ts INTEGER NOT NULL,
-  host INTEGER NOT NULL,
+  server INTEGER NOT NULL,
   metric INTEGER NOT NULL,
   v_avg REAL NOT NULL,
   v_min REAL NOT NULL,
   v_max REAL NOT NULL,
   n INTEGER NOT NULL,
-  PRIMARY KEY (ts, host, metric)
+  PRIMARY KEY (ts, server, metric)
 ) WITHOUT ROWID;
 
--- Alerts raised and resolved, jobs, fact changes, approvals. host is nullable:
--- some events are about the estate, not a host.
+-- Alerts raised and resolved, jobs, fact changes, approvals. server is nullable:
+-- some events are about the estate, not a server.
 CREATE TABLE IF NOT EXISTS events (
   ts INTEGER NOT NULL,
   kind TEXT NOT NULL,
-  host INTEGER,
+  server INTEGER,
   payload TEXT
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
-CREATE INDEX IF NOT EXISTS events_host_ts ON events (host, ts);
+CREATE INDEX IF NOT EXISTS events_host_ts ON events (server, ts);
 
--- One row per key, last_seen bumped in place. Shaped for item C (host facts):
--- a fact is a (host, key) with a value and a lifetime, and "when did this
+-- One row per key, last_seen bumped in place. Shaped for item C (server facts):
+-- a fact is a (server, key) with a value and a lifetime, and "when did this
 -- first appear" is the question that makes the table worth having.
 CREATE TABLE IF NOT EXISTS facts (
-  host INTEGER NOT NULL,
+  server INTEGER NOT NULL,
   key TEXT NOT NULL,
   value TEXT NOT NULL,
   first_seen INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  PRIMARY KEY (host, key)
+  PRIMARY KEY (server, key)
 ) WITHOUT ROWID;
 
 -- ---------------------------------------------------------------------------
@@ -712,7 +712,7 @@ CREATE TABLE IF NOT EXISTS facts (
 --
 -- Three tables and a deliberate asymmetry between them: the two small ones are
 -- kept for a year and the big one for a month. A job row is a title, a spec and
--- five timestamps; the output behind it is up to 256 KB per host. "When did we
+-- five timestamps; the output behind it is up to 256 KB per server. "When did we
 -- last upgrade web-2 and did it exit 0" is worth a year of rows and costs
 -- almost nothing; the dpkg chatter that answers "what exactly did it say" is
 -- worth a month and costs everything. See jobRetain().
@@ -722,8 +722,8 @@ CREATE TABLE IF NOT EXISTS facts (
 -- a restart unchanged so a re-adopted job is the SAME job rather than a new row
 -- describing it.
 --
--- host ids are NOT interned here, unlike samples and facts. A job has a handful
--- of hosts and is written once; interning buys nothing and costs the ability to
+-- server ids are NOT interned here, unlike samples and facts. A job has a handful
+-- of servers and is written once; interning buys nothing and costs the ability to
 -- read a job's targets without a join. The server NAME is stored beside the id
 -- for the same reason the broadcast result carries it: a server deleted from
 -- the workspace next month must not turn last month's job into a list of uuids.
@@ -763,7 +763,7 @@ CREATE INDEX IF NOT EXISTS job_created ON job (created_at);
 -- keep that read off a full scan of a year of jobs.
 CREATE INDEX IF NOT EXISTS job_state ON job (state);
 
--- One row per host. Field names are BroadcastHostResult's, exactly, so the
+-- One row per server. Field names are BroadcastHostResult's, exactly, so the
 -- renderer's existing result type can be pointed at a job without a
 -- translation layer — ord and the four columns after it are the ones only a
 -- persisted run needs.
@@ -778,13 +778,13 @@ CREATE TABLE IF NOT EXISTS job_target (
   error TEXT,
   started_at INTEGER,
   ended_at INTEGER,
-  -- Bytes of output persisted for this host, and bytes dropped from the middle
+  -- Bytes of output persisted for this server, and bytes dropped from the middle
   -- of it. out_elided is not decoration: without it a long output is
   -- indistinguishable from a short one, which is how a head-only cap turns
   -- "dpkg failed" into "the command produced no error".
   out_offset INTEGER NOT NULL DEFAULT 0,
   out_elided INTEGER NOT NULL DEFAULT 0,
-  -- B2's marker handle, as JSON: which directory on the host holds this step's
+  -- B2's marker handle, as JSON: which directory on the server holds this step's
   -- cmd/pid/out/rc, which instance launched it, and how many bytes of its out
   -- have been read from it. NULL for every attached row, which is how a reader tells
   -- the two apart a month later.
@@ -796,15 +796,15 @@ CREATE TABLE IF NOT EXISTS job_target (
   detached TEXT,
   PRIMARY KEY (job_id, server_id)
 ) WITHOUT ROWID;
--- Item 28's read: which jobs touched ONE host. The primary key leads with
+-- Item 28's read: which jobs touched ONE server. The primary key leads with
 -- job_id, so without this "every job that ran on web-2" is a full scan of a
--- year of targets on every host — which is the read a runbook does on every
+-- year of targets on every server — which is the read a runbook does on every
 -- open, once per alert kind. A WITHOUT ROWID table's index entries carry the
 -- primary key rather than a rowid, so this costs the two ids and buys the
 -- scan back.
 CREATE INDEX IF NOT EXISTS job_target_server ON job_target (server_id);
 
--- The output itself, in arrival order per host. seq is the runner's own
+-- The output itself, in arrival order per server. seq is the runner's own
 -- counter, so two chunks in the same millisecond keep their order — the same
 -- tie-break the events table needs and for the same reason.
 CREATE TABLE IF NOT EXISTS job_output (
@@ -975,8 +975,8 @@ const CAPACITY_METRIC_IDS = CAPACITY_METRICS.map((m) => METRICS.indexOf(m) + 1).
 /** The four filter shapes, in the order readEvents selects them:
  *  host+kind, host, kind, neither. */
 const EVENT_WHERE = [
-  'e.host = ?1 AND e.kind = ?2',
-  'e.host = ?1',
+  'e.server = ?1 AND e.kind = ?2',
+  'e.server = ?1',
   'e.kind = ?2',
   '1 = 1'
 ] as const
@@ -989,7 +989,7 @@ const TS_MAX = 8_640_000_000_000_000
 function eventQuery(where: string, cursor: boolean): string {
   return (
     'SELECT e.ts AS ts, e.rowid AS id, e.kind AS kind, h.host_key AS host_key, e.payload AS payload ' +
-    'FROM events e LEFT JOIN hosts h ON h.id = e.host ' +
+    'FROM events e LEFT JOIN servers h ON h.id = e.server ' +
     `WHERE ${where} AND e.ts >= ?3 AND e.ts <= ?4` +
     // The cursor's timestamp is also folded into ?4 by the caller, so the range
     // stays sargable and this pair only breaks the tie inside one millisecond.
@@ -1020,7 +1020,7 @@ export const EVENT_QUERIES_FOR_TESTS: readonly string[] = EVENT_WHERE.map((w) =>
  *  `SEARCH facts USING PRIMARY KEY (host=? AND key>? AND key<?)`. A range is
  *  case-sensitive like the keep-check, and needs no escaping. */
 const FACTS_PREFIX_QUERY =
-  'SELECT key, value FROM facts WHERE host = ? AND key >= ? AND key < ? ORDER BY key'
+  'SELECT key, value FROM facts WHERE server = ? AND key >= ? AND key < ? ORDER BY key'
 
 /** Read-only, for the same query-plan guard. */
 export const FACTS_PREFIX_QUERY_FOR_TESTS = FACTS_PREFIX_QUERY
@@ -1354,31 +1354,31 @@ function buildStore(
   // Named prepared statements, all of them, prepared once. Nothing here builds
   // SQL from a caller's string.
   const st = {
-    hostId: db.prepare('SELECT id FROM hosts WHERE host_key = ?'),
-    hostInsert: db.prepare('INSERT INTO hosts (host_key) VALUES (?) ON CONFLICT(host_key) DO NOTHING'),
+    hostId: db.prepare('SELECT id FROM servers WHERE host_key = ?'),
+    hostInsert: db.prepare('INSERT INTO servers (host_key) VALUES (?) ON CONFLICT(host_key) DO NOTHING'),
     sampleInsert: db.prepare(
-      'INSERT INTO samples (ts, host, metric, v) VALUES (?, ?, ?, ?) ' +
-        'ON CONFLICT(ts, host, metric) DO UPDATE SET v = excluded.v'
+      'INSERT INTO samples (ts, server, metric, v) VALUES (?, ?, ?, ?) ' +
+        'ON CONFLICT(ts, server, metric) DO UPDATE SET v = excluded.v'
     ),
     seriesRead: db.prepare(
-      'SELECT ts, v FROM samples WHERE host = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts'
+      'SELECT ts, v FROM samples WHERE server = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts'
     ),
     hourlyRead: db.prepare(
       'SELECT ts, v_avg AS v, v_min AS mn, v_max AS mx, n AS n FROM samples_hourly ' +
-        'WHERE host = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts'
+        'WHERE server = ? AND metric = ? AND ts >= ? AND ts <= ? ORDER BY ts'
     ),
     // Both tiers, three metrics, one scan each. See the note above
     // CAPACITY_METRIC_IDS.
     trendRead: db.prepare(
-      `SELECT ts, metric, v FROM samples WHERE host = ? AND ts >= ? AND ts <= ? ` +
+      `SELECT ts, metric, v FROM samples WHERE server = ? AND ts >= ? AND ts <= ? ` +
         `AND metric IN (${CAPACITY_METRIC_IDS}) ORDER BY ts`
     ),
     trendHourlyRead: db.prepare(
       `SELECT ts, metric, v_avg AS v, v_min AS mn, v_max AS mx, n AS n FROM samples_hourly ` +
-        `WHERE host = ? AND ts >= ? AND ts <= ? ` +
+        `WHERE server = ? AND ts >= ? AND ts <= ? ` +
         `AND metric IN (${CAPACITY_METRIC_IDS}) ORDER BY ts`
     ),
-    eventInsert: db.prepare('INSERT INTO events (ts, kind, host, payload) VALUES (?, ?, ?, ?)'),
+    eventInsert: db.prepare('INSERT INTO events (ts, kind, server, payload) VALUES (?, ?, ?, ?)'),
     // Rewrites the event a run of flapping is being folded into. See
     // FLAP_WINDOW_MS.
     eventRewrite: db.prepare('UPDATE events SET ts = ?, payload = ? WHERE rowid = ?'),
@@ -1386,26 +1386,26 @@ function buildStore(
     // built from literals in this file. See the note above EVENT_WHERE.
     eventRead: EVENT_WHERE.map((w) => db.prepare(eventQuery(w, false))),
     eventReadFrom: EVENT_WHERE.map((w) => db.prepare(eventQuery(w, true))),
-    factGet: db.prepare('SELECT value, first_seen FROM facts WHERE host = ? AND key = ?'),
+    factGet: db.prepare('SELECT value, first_seen FROM facts WHERE server = ? AND key = ?'),
     factInsert: db.prepare(
-      'INSERT INTO facts (host, key, value, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)'
+      'INSERT INTO facts (server, key, value, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)'
     ),
-    factTouch: db.prepare('UPDATE facts SET last_seen = ? WHERE host = ? AND key = ?'),
-    factChange: db.prepare('UPDATE facts SET value = ?, last_seen = ? WHERE host = ? AND key = ?'),
+    factTouch: db.prepare('UPDATE facts SET last_seen = ? WHERE server = ? AND key = ?'),
+    factChange: db.prepare('UPDATE facts SET value = ?, last_seen = ? WHERE server = ? AND key = ?'),
     factsRead: db.prepare(
-      'SELECT key, value, first_seen, last_seen FROM facts WHERE host = ? ORDER BY key'
+      'SELECT key, value, first_seen, last_seen FROM facts WHERE server = ? ORDER BY key'
     ),
     factsByPrefix: db.prepare(FACTS_PREFIX_QUERY),
     // An empty prefix means "every fact for this host", which has no upper
     // bound to compute.
-    factsAll: db.prepare('SELECT key, value FROM facts WHERE host = ? ORDER BY key'),
-    factDelete: db.prepare('DELETE FROM facts WHERE host = ? AND key = ?'),
+    factsAll: db.prepare('SELECT key, value FROM facts WHERE server = ? ORDER BY key'),
+    factDelete: db.prepare('DELETE FROM facts WHERE server = ? AND key = ?'),
     // Retention.
     rollup: db.prepare(
-      'INSERT INTO samples_hourly (ts, host, metric, v_avg, v_min, v_max, n) ' +
-        'SELECT (ts / 3600000) * 3600000, host, metric, avg(v), min(v), max(v), count(*) ' +
+      'INSERT INTO samples_hourly (ts, server, metric, v_avg, v_min, v_max, n) ' +
+        'SELECT (ts / 3600000) * 3600000, server, metric, avg(v), min(v), max(v), count(*) ' +
         'FROM samples WHERE ts < ? GROUP BY 1, 2, 3 ' +
-        'ON CONFLICT(ts, host, metric) DO UPDATE SET ' +
+        'ON CONFLICT(ts, server, metric) DO UPDATE SET ' +
         // Weighted, so re-running the pass over a partially rolled-up hour does
         // not average an average and quietly bias the result.
         '  v_avg = (samples_hourly.v_avg * samples_hourly.n + excluded.v_avg * excluded.n) ' +
@@ -2033,7 +2033,7 @@ function buildStore(
     },
 
     updateJobTarget(jobId, serverId, patch) {
-      if (droppedWrite(`a job host transition (${jobId}/${serverId})`)) return
+      if (droppedWrite(`a job server transition (${jobId}/${serverId})`)) return
       const row = st.jobTargetOne.get(jobId, serverId) as SqliteRow | undefined
       if (row === undefined) return
       const pick = <K extends keyof JobTargetPatch>(key: K, column: string): unknown =>

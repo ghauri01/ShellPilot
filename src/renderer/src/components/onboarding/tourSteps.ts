@@ -30,7 +30,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'connections',
     title: 'Connections, and jump hosts that chain',
-    body: 'Add a server once and reuse it everywhere. Each can route through unlimited jump hosts, each with its own credentials. Existing hosts import straight from your ~/.ssh/config.',
+    body: 'Add a server once and reuse it everywhere. Each can route through unlimited jump hosts, each with its own credentials. Existing servers import straight from your ~/.ssh/config.',
     view: 'connections',
     action: 'Add a server, or import your SSH config.'
   },
@@ -44,7 +44,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'monitor',
     title: 'Monitoring, including what is broken',
-    body: 'Live CPU, memory, disk and network per server, totalled across the fleet. Failed systemd units and listening ports come back on the same poll, so you can see what a host exposes and what has fallen over without opening a shell.',
+    body: 'Live CPU, memory, disk and network per server, totalled across the fleet. Failed systemd units and listening ports come back on the same poll, so you can see what a server exposes and what has fallen over without opening a shell.',
     view: 'monitor'
   },
   {

@@ -341,7 +341,7 @@ function metaSql(kind: DbKind, cmd: string, arg: string): string | null {
       case 'df':
         return "SELECT n.nspname AS schema, p.proname AS name FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY 1,2"
       case 'conninfo':
-        return 'SELECT current_database() AS database, current_user AS user, inet_server_addr()::text AS host, version() AS version'
+        return 'SELECT current_database() AS database, current_user AS user, inet_server_addr()::text AS server, version() AS version'
       case 'd':
         if (!t) return metaSql(kind, 'dt', '')
         return `SELECT column_name AS column, data_type AS type, is_nullable AS nullable, column_default AS default FROM information_schema.columns WHERE table_name = ${sqlLiteral(t.replace(/^.*\./, ''))} ORDER BY ordinal_position`
@@ -361,7 +361,7 @@ function metaSql(kind: DbKind, cmd: string, arg: string): string | null {
       case 'di':
         return t ? `SHOW INDEX FROM \`${t.replace(/`/g, '')}\`` : null
       case 'du':
-        return 'SELECT user AS name, host FROM mysql.user ORDER BY 1'
+        return 'SELECT user AS name, server FROM mysql.user ORDER BY 1'
       case 'conninfo':
         return 'SELECT DATABASE() AS database, USER() AS user, VERSION() AS version'
       case 'd':

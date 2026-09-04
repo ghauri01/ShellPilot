@@ -80,7 +80,7 @@ const arch = (): HostFacts =>
 // The honesty requirement inherited from item C
 // =========================================================================
 
-describe('a host that cannot report security updates', () => {
+describe('a server that cannot report security updates', () => {
   it('is excluded from the total and never counted as zero', () => {
     const rows = [
       buildPatchRow(input('ubuntu', facts({ securityUpdates: 4 }))),
@@ -124,7 +124,7 @@ describe('a host that cannot report security updates', () => {
     expect(s.securityUnknown).toBe(1)
   })
 
-  it('will not answer "no work" for a host that could not answer', () => {
+  it('will not answer "no work" for a server that could not answer', () => {
     // THE NULL-IS-NOT-ZERO RULE, APPLIED TO hasWork. A boolean has no room for
     // "cannot say", so it spends "cannot say" as "no" — and "select everything
     // with work" then silently omits precisely the hosts nobody can vouch for,
@@ -174,7 +174,7 @@ describe('a host that cannot report security updates', () => {
     }
   })
 
-  it('does not blank a host whose count came from a stale cache', () => {
+  it('does not blank a server whose count came from a stale cache', () => {
     const stale = facts({ pendingUpdates: 12, sources: sources({ 'package-metadata': 'stale-metadata' }) })
     const row = buildPatchRow(input('a', stale))
     expect(row.pending.value).toBe(12)
@@ -193,7 +193,7 @@ describe('a host that cannot report security updates', () => {
     expect(s.allClear).toBe(false)
   })
 
-  it('says which reason a host has no facts at all', () => {
+  it('says which reason a server has no facts at all', () => {
     const never = buildPatchRow(input('a', null))
     const failed = buildPatchRow(input('b', null, { factsError: 'Connection refused' }))
     expect(never.pending.gap).toBe('not-collected')
@@ -345,7 +345,7 @@ describe('planning a patch run', () => {
     expect(plan.blocks).toEqual([])
   })
 
-  it('only restarts the hosts that say they need it', () => {
+  it('only restarts the servers that say they need it', () => {
     const plan = planPatch({
       scope: 'all',
       hosts: [
@@ -378,7 +378,7 @@ describe('planning a patch run', () => {
     expect(plan.hosts.find((h) => h.serverId === 'app')!.reboot).toBe(false)
   })
 
-  it('splits by package manager rather than substituting a command per host', () => {
+  it('splits by package manager rather than substituting a command per server', () => {
     // `verifyApproval` compares the step TEXT, so a spec whose command changed
     // per host could not be checked against the record at all.
     const plan = planPatch({
@@ -396,7 +396,7 @@ describe('planning a patch run', () => {
     for (const j of plan.jobs) expect(j.spec.steps).toHaveLength(1)
   })
 
-  it('excludes a host it has no command for, by name and with a reason', () => {
+  it('excludes a server it has no command for, by name and with a reason', () => {
     const plan = planPatch({
       scope: 'security',
       hosts: [
@@ -426,7 +426,7 @@ describe('planning a patch run', () => {
     expect(plan.unmatchedNote).toContain('1 hop is not backed by a saved server')
   })
 
-  it('refuses the reboot when an "unmatched" hop is a host in this very run', () => {
+  it('refuses the reboot when an "unmatched" hop is a server in this very run', () => {
     // The one case where the hole is not hypothetical, and the one the counted
     // note handled worst: web-1 routes through bare bastion.example, that
     // machine IS saved as `bastion`, and this run is about to restart it. The
@@ -548,7 +548,7 @@ describe('the reboot step', () => {
     expect(v.reason).toContain('cannot prove')
   })
 
-  it('calls a host that came back with failed units degraded, not ok', () => {
+  it('calls a server that came back with failed units degraded, not ok', () => {
     const after = parseRebootVerify(
       'shellpilot-postboot/1\nboot-id=new\nuptime=9\nunit-state=degraded\nfailed=nginx.service postgresql.service \n'
     )
@@ -583,7 +583,7 @@ describe('the health gate between waves', () => {
     expect(v.ok === false && v.reason).toContain('cannot say what the wave did')
   })
 
-  it('treats a host that has never been sampled as stale, not as healthy', () => {
+  it('treats a server that has never been sampled as stale, not as healthy', () => {
     const v = evaluateGate([gh('a', { sampledAt: null })], { since: 1_000 })
     expect(v.ok).toBe(false)
   })
@@ -595,7 +595,7 @@ describe('the health gate between waves', () => {
     expect(v.ok === false && v.reason).toContain('nginx.service')
   })
 
-  it('stops on a host that stopped answering', () => {
+  it('stops on a server that stopped answering', () => {
     const v = evaluateGate([gh('a', { unreachable: true, unreachableError: 'Connection refused' })], {
       since: 1_000
     })
@@ -603,7 +603,7 @@ describe('the health gate between waves', () => {
     expect(v.ok === false && v.reason).toContain('Connection refused')
   })
 
-  it('reports a host that cannot report unit state without blocking on it', () => {
+  it('reports a server that cannot report unit state without blocking on it', () => {
     // Blocking would make a host without systemd permanently unpatchable in a
     // staged run. Saying nothing would let it vouch for itself.
     const v = evaluateGate([gh('a'), gh('b', { failedUnits: null })], { since: 1_000 })

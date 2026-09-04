@@ -551,7 +551,7 @@ describe('nothing an agent can reach imports the job engine', () => {
       `A module reachable from the MCP bridge or the ShellPilot CLI now imports the job engine.\n\n` +
         `${offenders.join('\n')}\n\n` +
         `DURABILITY DEFEATS REVOCATION. denyAllPending() — the stop-all-AI-access switch — works ` +
-        `by resolving requests that are PENDING. A job already running on fifteen hosts has ` +
+        `by resolving requests that are PENDING. A job already running on fifteen servers has ` +
         `nothing pending: no request to deny, no approval to withdraw, and no session revocation ` +
         `that reaches the channels already open. The switch would return cleanly, report a ` +
         `number, and the estate upgrade would keep going. That is not a weaker guarantee than ` +

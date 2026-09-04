@@ -51,8 +51,8 @@ function SortHeader({
         onClick={() => onSort(column.id)}
         title={
           column.help
-            ? `${column.help} Click to sort; hosts with no value for this column always sort last.`
-            : 'Click to sort. Hosts with no value for this column always sort last.'
+            ? `${column.help} Click to sort; servers with no value for this column always sort last.`
+            : 'Click to sort. Servers with no value for this column always sort last.'
         }
       >
         {column.label}
@@ -197,7 +197,7 @@ export function InventoryPanel({
         </span>
         <h2 className="ui-section-title">Inventory</h2>
         <p className="ui-note panel-head-purpose">
-          What each host is running and what it is owed — distribution, kernel, pending and
+          What each server is running and what it is owed — distribution, kernel, pending and
           security updates. Read from package caches as they are; nothing is installed or
           refreshed.
         </p>
@@ -206,7 +206,7 @@ export function InventoryPanel({
             <button
               className="btn ghost sm"
               onClick={() => setHardware((h) => !h)}
-              title="Kernel, architecture, CPU model, RAM and virtualisation — what the host IS, as opposed to what it needs."
+              title="Kernel, architecture, CPU model, RAM and virtualisation — what the server IS, as opposed to what it needs."
             >
               {hardware ? 'Hide hardware' : 'Show hardware'}
             </button>
@@ -215,7 +215,7 @@ export function InventoryPanel({
             className="btn primary"
             disabled={busy || servers.length === 0}
             onClick={() => void check()}
-            title="Sweeps the estate now and re-reads what has already been collected. Facts are re-collected at most once an hour per host, so a host checked recently keeps the figures it has."
+            title="Sweeps the estate now and re-reads what has already been collected. Facts are re-collected at most once an hour per server, so a server checked recently keeps the figures it has."
           >
             <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
           </button>
@@ -232,7 +232,7 @@ export function InventoryPanel({
         // it never had: the primary stays in the header, where it is in the
         // same place on every panel, so it is deliberately NOT repeated here.
         <div className="panel-empty">
-          <p className="panel-empty-title">No host facts have been collected yet.</p>
+          <p className="panel-empty-title">No server facts have been collected yet.</p>
           <p className="panel-empty-body">
             ShellPilot collects them about once an hour, on the same background sweep as metrics —
             so a server added in the last hour, or an estate whose background checking has just
@@ -251,14 +251,14 @@ export function InventoryPanel({
         <>
           <div className="panel-stats">
             <span>
-              {summary.hosts} host{summary.hosts === 1 ? '' : 's'} · facts for {summary.withFacts}
+              {summary.hosts} server{summary.hosts === 1 ? '' : 's'} · facts for {summary.withFacts}
             </span>
             <span>
               {summary.pendingTotal} pending update{summary.pendingTotal === 1 ? '' : 's'}
               {/* Counted, not skipped. A total drawn from nine hosts out of
                   twelve is a different number from a total drawn from twelve. */}
               {summary.pendingUnknown > 0 && (
-                <span className="state-unknown"> · {summary.pendingUnknown} host
+                <span className="state-unknown"> · {summary.pendingUnknown} server
                   {summary.pendingUnknown === 1 ? '' : 's'} could not be counted</span>
               )}
             </span>
@@ -271,7 +271,7 @@ export function InventoryPanel({
                   not one word more, which is the exact sentence a non-root
                   account must never be shown during the week a CVE lands. */}
               {summary.securityUnknown > 0 && (
-                <span className="state-unknown"> · {summary.securityUnknown} host
+                <span className="state-unknown"> · {summary.securityUnknown} server
                   {summary.securityUnknown === 1 ? '' : 's'} could not answer</span>
               )}
             </span>
@@ -282,15 +282,15 @@ export function InventoryPanel({
             {summary.staleMetadata > 0 && (
               <span
                 className="state-watch"
-                title="ShellPilot never refreshes a package cache — refreshing is a network operation and on some package managers it can break the host — so a count read out of an old cache is reported with the cache's age beside it rather than silently presented as current."
+                title="ShellPilot never refreshes a package cache — refreshing is a network operation and on some package managers it can break the server — so a count read out of an old cache is reported with the cache's age beside it rather than silently presented as current."
               >
-                {summary.staleMetadata} host{summary.staleMetadata === 1 ? '' : 's'} counted from a
+                {summary.staleMetadata} server{summary.staleMetadata === 1 ? '' : 's'} counted from a
                 stale package cache
               </span>
             )}
             {summary.rebootsOwed > 0 && (
               <span className="state-watch">
-                {summary.rebootsOwed} host{summary.rebootsOwed === 1 ? '' : 's'} awaiting a reboot
+                {summary.rebootsOwed} server{summary.rebootsOwed === 1 ? '' : 's'} awaiting a reboot
               </span>
             )}
           </div>
@@ -302,11 +302,11 @@ export function InventoryPanel({
           {summary.securityUnanswerable > 0 && (
             <div className="panel-note is-unknown">
               <ShieldQuestion size={12} />{' '}
-              {summary.securityUnanswerable} host
+              {summary.securityUnanswerable} server
               {summary.securityUnanswerable === 1 ? '' : 's'} can never report a security update
               count, so {summary.securityUnanswerable === 1 ? 'it is' : 'they are'} not in the{' '}
               {summary.securityTotal} above. Arch and Alpine have no security channel at all, and
-              dnf cannot answer where the repositories publish no updateinfo. Treat those hosts as
+              dnf cannot answer where the repositories publish no updateinfo. Treat those servers as
               unknown, never as zero.
             </div>
           )}
@@ -321,13 +321,13 @@ export function InventoryPanel({
               fact about their estate, and the reverse. */}
           {summary.securityUnknown > 0 && (
             <div className="panel-note is-unknown">
-              <ShieldQuestion size={12} /> {summary.securityUnknown} host
+              <ShieldQuestion size={12} /> {summary.securityUnknown} server
               {summary.securityUnknown === 1 ? '' : 's'} did not answer the security question, so{' '}
               {summary.securityUnknown === 1 ? 'it is' : 'they are'} not in the{' '}
               {summary.securityTotal} above. These are gaps that can close: a probe refused for want
-              of privilege answers for an account that has it, and a host whose facts have not been
+              of privilege answers for an account that has it, and a server whose facts have not been
               collected yet answers on the next sweep. The Security column says which applies to
-              which host.
+              which server.
             </div>
           )}
 

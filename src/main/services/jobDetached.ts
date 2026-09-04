@@ -204,7 +204,7 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
     // three-step job does not probe an unreachable host three times.
     const cap: JobHostCapability = r.ok
       ? parseJobProbe(r.stdout)
-      : { root: null, launcher: 'none', base64: false, uid: null, ok: false, reason: r.error ?? 'the host did not answer the capability probe' }
+      : { root: null, launcher: 'none', base64: false, uid: null, ok: false, reason: r.error ?? 'the server did not answer the capability probe' }
     caps.set(req.serverId, cap)
     const report: JobHostCapabilityReport = {
       serverId: req.serverId,
@@ -264,7 +264,7 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
 
     const cap = await capabilityFor(req)
     if (!cap.ok || cap.root === null || cap.launcher === 'none') {
-      req.onState?.({ degraded: cap.reason ?? 'this host cannot run a detached job' })
+      req.onState?.({ degraded: cap.reason ?? 'this server cannot run a detached job' })
       return await deps.attached(req)
     }
 
@@ -332,7 +332,7 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
         code: null,
         error:
           `This job’s recorded marker directory (${JSON.stringify(handle.dir)}) is not one ` +
-          'ShellPilot creates, so nothing was read from the host and nothing was removed from it.',
+          'ShellPilot creates, so nothing was read from the server and nothing was removed from it.',
         finalState: 'orphaned',
         finalOutcome: 'orphaned',
         detachedHandle: null
@@ -431,7 +431,7 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
       // data point and a parked JOB loses nothing at all, because the byte
       // offset makes the next poll pick up exactly where this one would have.
       if (deps.vaultUnlocked && !deps.vaultUnlocked()) {
-        say('detached', 'Paused: the vault is locked, so this host cannot be polled. The job is ' +
+        say('detached', 'Paused: the vault is locked, so this server cannot be polled. The job is ' +
           'still running on it and polling resumes when the vault is unlocked.')
         await sleep(parkMs)
         continue
@@ -670,7 +670,7 @@ export function detachedJobExecutor(deps: DetachedDeps): DetachedExecutor {
             ok: false,
             code: null,
             error:
-              'The marker directory for this job is no longer on the host, so its exit status ' +
+              'The marker directory for this job is no longer on the server, so its exit status ' +
               'cannot be read. Another ShellPilot may have reaped it, or the state directory was ' +
               'cleared underneath it.',
             finalState: 'orphaned',

@@ -78,7 +78,7 @@ describe('summariseAccessGroup — built-in groups', () => {
     )
     expect(s.sentence).toBe(
       'Can see server details, run commands, read files, download files, query databases, and read server metrics without asking. ' +
-        'Cannot use sudo, add servers to the workspace, start and stop VPNs, and list reverse proxies, write files, upload files, open SSH tunnels, read the host inventory and its pending security updates, or collect this host’s firewall rule list.'
+        'Cannot use sudo, add servers to the workspace, start and stop VPNs, and list reverse proxies, write files, upload files, open SSH tunnels, read the server inventory and its pending security updates, or collect this server’s firewall rule list.'
     )
     expect(s.counts).toEqual({ allow: 6, ask: 0, deny: 8 })
     expect(s.elevated).toEqual([])
@@ -104,12 +104,12 @@ describe('summariseAccessGroup — built-in groups', () => {
       'Asks you first before adding servers to the workspace, starting and stopping VPNs, and listing reverse proxies, writing files, uploading files, and opening SSH tunnels.'
     )
     expect(s.clauses[2]).toBe(
-      'Cannot use sudo, read the host inventory and its pending security updates, or collect this host’s firewall rule list.'
+      'Cannot use sudo, read the server inventory and its pending security updates, or collect this server’s firewall rule list.'
     )
     expect(s.elevated).toEqual([])
   })
 
-  it('Sudo Access asks before sudo, and denies only host facts', () => {
+  it('Sudo Access asks before sudo, and denies only server facts', () => {
     const s = summariseAccessGroup(
       group(
         allowAll({
@@ -128,7 +128,7 @@ describe('summariseAccessGroup — built-in groups', () => {
     // including this one, because a count of unpatched security updates is a
     // vulnerability report rather than a health check — see AI_CAPABILITIES.
     expect(s.clauses[2]).toBe(
-      'Cannot read the host inventory and its pending security updates or collect this host’s firewall rule list.'
+      'Cannot read the server inventory and its pending security updates or collect this server’s firewall rule list.'
     )
     // Asking is not granting: nothing here happens without a human.
     expect(s.elevated).toEqual([])
@@ -301,10 +301,10 @@ function seededFilePolicies(): AccessGroup['filePolicies'] {
 // mode and RETURNS IT — the `blanket.decision === 'deny'` check below it is
 // only reached when nothing matched. So a path rule outranks the capability in
 // both directions, and these are the cases where a flat clause would lie.
-const HF = 'read the host inventory and its pending security updates'
+const HF = 'read the server inventory and its pending security updates'
 // Denied on every seeded group too, and last in declaration order among the
 // denials, so it is the tail of every flat "Cannot" clause below.
-const FW = 'collect this host’s firewall rule list'
+const FW = 'collect this server’s firewall rule list'
 
 describe('summariseAccessGroup — path rules outrank the capability', () => {
   it('does not claim a group cannot read files when a rule allows a path', () => {

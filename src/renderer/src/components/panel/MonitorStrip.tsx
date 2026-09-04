@@ -38,7 +38,7 @@ export function MonitorStrip({
 
   if (!open) {
     return (
-      <button className="monitor-strip collapsed" onClick={toggle} title="Show host metrics">
+      <button className="monitor-strip collapsed" onClick={toggle} title="Show server metrics">
         <Activity size={13} />
         <span>Monitor</span>
         <span className="spacer" />
@@ -86,7 +86,7 @@ export function MonitorStrip({
             {m.host.hostname} · {m.host.cores} vCPU
           </span>
         )}
-        <button className="icon-btn xs" onClick={toggle} title="Hide host metrics">
+        <button className="icon-btn xs" onClick={toggle} title="Hide server metrics">
           <ChevronDown size={14} />
         </button>
       </div>

@@ -193,7 +193,7 @@ describe('a MongoDB member that is not reachable', () => {
     expect(value.members).toHaveLength(3)
   })
 
-  it('redacts the host names out of the heartbeat message before it is shown or stored', () => {
+  it('redacts the server names out of the heartbeat message before it is shown or stored', () => {
     // The raw text is 300 characters and reads `… target:[sp-mongo2:27017]
     // db:admin cmd:{ replSetHeartbeat: "rs0", … from: "sp-mongo1:27017" … }`.
     const raw = (DOWN.replSetGetStatus.result?.members as Record<string, unknown>[])[1].lastHeartbeatMessage as string

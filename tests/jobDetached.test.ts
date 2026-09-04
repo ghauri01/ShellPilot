@@ -178,7 +178,7 @@ class FakeHost {
     const m = JOB_CMD_PREFIX.exec(command)
     if (!m) {
       throw new Error(
-        `the fake host does not recognise this command, which means shared/jobs.ts changed its ` +
+        `the fake server does not recognise this command, which means shared/jobs.ts changed its ` +
           `wrapper and this fake is now simulating a protocol nothing speaks:\n${command.slice(0, 200)}`
       )
     }
@@ -532,7 +532,7 @@ function request(over: Partial<JobExecRequest> = {}) {
 // The launch, and exactly what it puts on the host
 // =========================================================================
 
-describe('what a detached launch writes to a host', () => {
+describe('what a detached launch writes to a server', () => {
   it('creates one directory with five files, and nothing that runs afterwards', async () => {
     const host = new FakeHost()
     const h = harness(host)
@@ -629,7 +629,7 @@ describe('what a detached launch writes to a host', () => {
 // =========================================================================
 
 describe('when the connection dies underneath a running job', () => {
-  it('reports the host as detached, not unreachable', async () => {
+  it('reports the server as detached, not unreachable', async () => {
     // THE HEADLINE. `unreachable` points at the host and means "go and look at
     // that machine"; the machine is fine and the upgrade is still going. On the
     // attached path this same event was dpkg taking a SIGHUP.
@@ -724,7 +724,7 @@ describe('when the connection dies underneath a running job', () => {
     await p
   })
 
-  it('lets only JOB_RECONNECT_GLOBAL_MAX hosts dial at once', async () => {
+  it('lets only JOB_RECONNECT_GLOBAL_MAX servers dial at once', async () => {
     // The laptop-wake case: every host notices the dead link in the same
     // millisecond, and per-host backoff cannot help because they are
     // synchronised by the wake rather than by each other. The cap is therefore
@@ -735,7 +735,7 @@ describe('when the connection dies underneath a running job', () => {
     // is satisfied by "no gate at all" the moment somebody raises that constant
     // to six — the assertion would then be reading back the number of hosts.
     const hostCount = JOB_RECONNECT_GLOBAL_MAX + 3
-    expect(hostCount, 'there must be more hosts than slots or nothing is being gated').toBeGreaterThan(
+    expect(hostCount, 'there must be more servers than slots or nothing is being gated').toBeGreaterThan(
       JOB_RECONNECT_GLOBAL_MAX
     )
     const hosts = new Map<string, FakeHost>()
@@ -773,7 +773,7 @@ describe('when the connection dies underneath a running job', () => {
     // observable rather than instantaneous.
     holding = true
     for (let i = 0; i < hostCount; i++) await h.tick()
-    expect(peak, `${hostCount} hosts must not dial one bastion at once`).toBe(JOB_RECONNECT_GLOBAL_MAX)
+    expect(peak, `${hostCount} servers must not dial one bastion at once`).toBe(JOB_RECONNECT_GLOBAL_MAX)
     expect(peak, 'and the cap must actually be a cap').toBeLessThan(hostCount)
     expect(holds).toHaveLength(JOB_RECONNECT_GLOBAL_MAX)
 
@@ -965,7 +965,7 @@ describe('reclaiming a marker', () => {
     await h.tick()
     const r = await p
     expect(r.finalState).toBe('orphaned')
-    expect(r.error).toMatch(/no longer on the host/i)
+    expect(r.error).toMatch(/no longer on the server/i)
   })
 })
 
@@ -974,7 +974,7 @@ describe('reclaiming a marker', () => {
 // =========================================================================
 
 describe('a step that restarts the machine', () => {
-  it('is rebooting, not unreachable, while the host is down', async () => {
+  it('is rebooting, not unreachable, while the server is down', async () => {
     const host = new FakeHost()
     const h = harness(host)
     const { req, states } = request({ command: 'sudo reboot' })
@@ -1017,14 +1017,14 @@ describe('a step that restarts the machine', () => {
 // Degrading
 // =========================================================================
 
-describe('a host that cannot detach', () => {
-  it('falls back to the attached executor and says which host and why', async () => {
+describe('a server that cannot detach', () => {
+  it('falls back to the attached executor and says which server and why', async () => {
     const host = new FakeHost({ root: null })
     const h = harness(host)
     const { req, states, output } = request()
     const r = await h.exec(req)
 
-    expect(host.dirs.size, 'nothing may be written to a host that failed the probe').toBe(0)
+    expect(host.dirs.size, 'nothing may be written to a server that failed the probe').toBe(0)
     expect(h.attachedCalls).toEqual(['apt full-upgrade -y'])
     expect(output.join('')).toBe('attached output\n')
     expect(r.ok).toBe(true)
@@ -1045,7 +1045,7 @@ describe('a host that cannot detach', () => {
     expect(states.find((s) => s.degraded)?.degraded).toMatch(/neither setsid nor nohup/i)
   })
 
-  it('falls back when the host answers the probe with something else entirely', async () => {
+  it('falls back when the server answers the probe with something else entirely', async () => {
     const host = new FakeHost({ probeGarbage: true })
     const h = harness(host)
     const { req } = request()
@@ -1054,7 +1054,7 @@ describe('a host that cannot detach', () => {
     expect(h.caps[0].reason).toMatch(/may not be a POSIX sh/i)
   })
 
-  it('probes a host once, not once per step', async () => {
+  it('probes a server once, not once per step', async () => {
     const host = new FakeHost({ root: null })
     const h = harness(host)
     for (let step = 1; step <= 3; step++) {
@@ -1070,12 +1070,12 @@ describe('a host that cannot detach', () => {
     const h = harness(host, { enabled: () => false })
     const { req } = request()
     const r = await h.exec(req)
-    expect(host.commands, 'the switch means nothing at all is sent to the host').toEqual([])
+    expect(host.commands, 'the switch means nothing at all is sent to the server').toEqual([])
     expect(h.attachedCalls).toHaveLength(1)
     expect(r.ok).toBe(true)
   })
 
-  it('uses the base64 body only where the host has base64', async () => {
+  it('uses the base64 body only where the server has base64', async () => {
     const host = new FakeHost({ base64: false })
     const h = harness(host)
     const { req, output } = request()
@@ -1096,7 +1096,7 @@ describe('a host that cannot detach', () => {
 // =========================================================================
 
 describe('when the vault is locked', () => {
-  it('parks rather than erroring, and does not touch the host', async () => {
+  it('parks rather than erroring, and does not touch the server', async () => {
     // fleetSampler's rule. The difference is the consequence: a parked SAMPLE
     // loses a data point, and a parked POLL loses nothing, because the byte
     // cursor makes the next one pick up exactly where this would have.
@@ -1320,7 +1320,7 @@ describe('picking a job up after a restart', () => {
     await run
 
     const mid = s.readJob('j1')
-    expect(mid?.targets[0].state, 'a detached host is not abandoned').toBe('detached')
+    expect(mid?.targets[0].state, 'a detached server is not abandoned').toBe('detached')
     expect(isJobDetachedHandle(mid?.targets[0].detached)).toBe(true)
     expect(mid?.state, 'the job row stays open for the next launch to reclaim').toBe('running')
 
@@ -1358,7 +1358,7 @@ describe('picking a job up after a restart', () => {
     expect(done?.targets[0].outOffset).toBe('first half\nsecond half\n'.length)
   })
 
-  it('does not start hosts the job never reached', async () => {
+  it('does not start servers the job never reached', async () => {
     // A restart is not an authorisation. The confirmation a human gave does not
     // survive into this process yet — that is B3 — so twelve untouched hosts
     // are closed rather than launched on the strength of a record.
@@ -1621,7 +1621,7 @@ describe('stopping a job this build cannot identify', () => {
     await h.tick()
 
     const r = await p
-    expect(host.signals, 'nothing may be sent to a pid this host cannot vouch for').toEqual([
+    expect(host.signals, 'nothing may be sent to a pid this server cannot vouch for').toEqual([
       'unverified'
     ])
     expect(r.ok).toBe(false)
@@ -1717,7 +1717,7 @@ describe('stopping a job this build cannot identify', () => {
       }
     })
     const r = await h.exec(req)
-    expect(host.commands, 'nothing at all is sent to the host').toEqual([])
+    expect(host.commands, 'nothing at all is sent to the server').toEqual([])
     expect(r.finalState).toBe('orphaned')
     expect(r.error).toContain('/etc')
   })
@@ -1736,8 +1736,8 @@ describe('stopping a job this build cannot identify', () => {
 // What the sweep is allowed to believe
 // =========================================================================
 
-describe('the sweep and the host’s clock', () => {
-  it('does not sweep on a host whose clock disagrees with ours', () => {
+describe('the sweep and the server’s clock', () => {
+  it('does not sweep on a server whose clock disagrees with ours', () => {
     // `find -mtime +7` asks the HOST how old something is. A machine whose RTC
     // came up in 2001 answers that everything is ancient — and what it would
     // then delete includes a FINISHED, unreaped job's `rc` and `out`, which the
@@ -1753,7 +1753,7 @@ describe('the sweep and the host’s clock', () => {
     expect(probe).toContain("SP_SWEEP=no-clock; SP_HOSTNOW=")
   })
 
-  it('says what a detached job actually leaves on a host', () => {
+  it('says what a detached job actually leaves on a server', () => {
     // The note used to promise "five small files". Five of them are small; the
     // sixth is the job's own output and is as large as the command makes it.
     // See JOB_OUT_SIZE_NOTE for why there is no cap on it — the only portable
@@ -1770,7 +1770,7 @@ describe('the sweep and the host’s clock', () => {
 // =========================================================================
 
 describe('the launch grace', () => {
-  it('is long enough that a slow host is not called a failed launch', () => {
+  it('is long enough that a slow server is not called a failed launch', () => {
     // The wrapper writes `pid` as its own first act, so the window this covers
     // is milliseconds on any host that is running at all.
     expect(JOB_LAUNCH_GRACE_MS).toBeGreaterThanOrEqual(10_000)

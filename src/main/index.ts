@@ -834,7 +834,7 @@ function startHistory(): void {
         }
       })
       if (reclaimed.length > 0) {
-        console.log(`[jobs] resumed ${reclaimed.length} detached job(s) still running on their hosts`)
+        console.log(`[jobs] resumed ${reclaimed.length} detached job(s) still running on their servers`)
       }
     } catch (err) {
       console.error('[jobs] adoption failed:', err)
@@ -1329,7 +1329,7 @@ ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRu
     // Not a warning and not a retry. What was agreed to is not what this would
     // run, and there is no version of that worth resolving automatically.
     throw new Error(
-      'This change was not started: what would run on the hosts is not what was confirmed. The collection has changed since the plan was shown, so look at it again.'
+      'This change was not started: what would run on the servers is not what was confirmed. The collection has changed since the plan was shown, so look at it again.'
     )
   }
 
@@ -1349,7 +1349,7 @@ ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRu
       notStaged.push({
         serverId: target.serverId,
         serverName: target.serverName,
-        detail: 'the collection for this host changed while the change was being confirmed.'
+        detail: 'the collection for this server changed while the change was being confirmed.'
       })
       continue
     }
@@ -1372,7 +1372,7 @@ ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRu
         serverId: target.serverId,
         serverName: target.serverName,
         detail:
-          (staged.stderr || staged.error || `the host exited ${String(staged.code)}`)
+          (staged.stderr || staged.error || `the server exited ${String(staged.code)}`)
             .trim()
             .split('\n')[0]
             .slice(0, 200) || 'the staged write did not run'

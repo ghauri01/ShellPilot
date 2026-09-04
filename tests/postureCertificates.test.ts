@@ -171,7 +171,7 @@ describe('a certificate that could not be read is never a certificate that is va
     expect(postureAlertReadings(p).certDays).toBe(-26)
   })
 
-  it('takes the SOONEST expiry across the host, not the first or the last', () => {
+  it('takes the SOONEST expiry across the server, not the first or the last', () => {
     const p = collect([
       [CERT_FAR, '/etc/nginx/a.pem'],
       [CERT_SOON, '/etc/nginx/b.pem'],
@@ -214,7 +214,7 @@ describe('a certificate that could not be read is never a certificate that is va
     expect(soonestCertificateExpiry(p.certificates)).toBeNull()
   })
 
-  it('a directory that could not be entered is NOT a host with no certificates', () => {
+  it('a directory that could not be entered is NOT a server with no certificates', () => {
     // The line this whole half of the item exists for. /etc/letsencrypt is
     // 0700 root on Debian, so this is the common case.
     const p = parsePosture(
@@ -222,7 +222,7 @@ describe('a certificate that could not be read is never a certificate that is va
         'V cert-searched 1',
         'V cert-refused 2',
         '===SHELLPILOT-POSTURE===',
-        'certificates denied - every certificate directory present on this host refused to be entered'
+        'certificates denied - every certificate directory present on this server refused to be entered'
       ].join('\n'),
       NOW
     )

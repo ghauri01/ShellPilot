@@ -101,7 +101,7 @@ describe('what is NOT worth retrying as root', () => {
     expect(h.commands.some((c) => c.includes('sudo'))).toBe(false)
   })
 
-  it('does not probe sudo at all on a healthy host', async () => {
+  it('does not probe sudo at all on a healthy server', async () => {
     // An ordinary host should never pay for a capability it does not need.
     const h = reader(() => ({ ok: true, stdout: okOutput() }))
     const r = await h.reader.list({})
@@ -249,7 +249,7 @@ describe('every read gets the same failover, not just the list', () => {
       expect(r.reason).toBe('permission-denied')
     })
 
-    it(`${c.name} does not probe sudo on a healthy host`, async () => {
+    it(`${c.name} does not probe sudo on a healthy server`, async () => {
       const h = reader(() => ({ ok: true, stdout: c.ok() }))
       expect((await c.call(h.reader)).ok).toBe(true)
       expect(h.commands.some((x) => x.includes('sudo'))).toBe(false)
@@ -297,7 +297,7 @@ describe('changing state does NOT auto-escalate', () => {
     expect(h.commands).toHaveLength(0)
   })
 
-  it('reports per container when the host answered', async () => {
+  it('reports per container when the server answered', async () => {
     const h = reader(() => ({
       ok: true,
       stdout: [DOCKER_MARKERS.act, 'web', 'Error response from daemon: No such container: db'].join('\n')
@@ -307,7 +307,7 @@ describe('changing state does NOT auto-escalate', () => {
     expect(r.ok && r.outcomes.map((o) => o.ok)).toEqual([true, false])
   })
 
-  it('does not turn an unreachable host into a docker diagnosis', async () => {
+  it('does not turn an unreachable server into a docker diagnosis', async () => {
     const h = reader(() => ({ ok: false, stdout: '' }))
     const r = await h.reader.act({}, 'stop', ['web'])
     expect(r.ok).toBe(false)

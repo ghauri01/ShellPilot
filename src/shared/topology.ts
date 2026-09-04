@@ -354,7 +354,7 @@ export function unmatchedHopNote(topo: Topology): string | null {
   return (
     `${n} ${n === 1 ? 'hop is' : 'hops are'} not backed by a saved server (on ${who}), so the ` +
     'reboot checks below cannot see them. Two servers can share a bastion that ShellPilot has ' +
-    'never been told about; if one of the hosts below is that machine, nothing here will say so.'
+    'never been told about; if one of the servers below is that machine, nothing here will say so.'
   )
 }
 
@@ -403,7 +403,7 @@ export function rebootBlockFor(topo: Topology, serverId: string): RebootBlock | 
         `that hop by the address ${addresses.join(', ')} rather than by a saved-server reference; ` +
         `${name} is the saved server at that address. The same machine reached under two names is ` +
         'exactly the case a serverId-only check cannot see, so it is refused here rather than ' +
-        'counted as an unmatched hop. If they are genuinely different machines, correct the host ' +
+        'counted as an unmatched hop. If they are genuinely different machines, correct the server ' +
         'or port on one of them.'
 
   return {

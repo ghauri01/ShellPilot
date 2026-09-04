@@ -268,13 +268,13 @@ function NotYetChecked({
       </div>
       {sampling ? (
         <div className="fh-note ui-note">
-          No host has reported yet. Background checking is on, so this fills in as hosts answer —
+          No server has reported yet. Background checking is on, so this fills in as servers answer —
           failed services and disks close to full will be listed here.
         </div>
       ) : (
         <>
           <div className="fh-note ui-note">
-            No host has reported yet. Background checking is off, so a host is only looked at while
+            No server has reported yet. Background checking is off, so a server is only looked at while
             its card is on screen — nothing is watching for failed services or full disks in between.
             Turning it on in Settings → Monitoring sweeps the whole estate on a schedule and fills
             this panel in.
@@ -377,7 +377,7 @@ export function FleetHealth({ servers }: { servers: Server[] }): React.JSX.Eleme
         <>
           <button className="btn sm ghost fh-rest-toggle" onClick={() => setShowRest(!showRest)}>
             {showRest ? <ChevronDown size={13} /> : <ChevronRight size={13} />} {health.rest.length}{' '}
-            {health.rest.length === 1 ? 'other host' : 'other hosts'}
+            {health.rest.length === 1 ? 'other server' : 'other servers'}
           </button>
           {showRest && (
             <div className="fh-list">

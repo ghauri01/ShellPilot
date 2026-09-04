@@ -372,7 +372,7 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
       }
       if (spec.httpProxy) {
         if (!spec.httpProxy.host.trim()) {
-          error('httpProxy.host', 'bad-host', 'The proxy needs a host name.')
+          error('httpProxy.host', 'bad-host', 'The proxy needs a server name.')
         }
         if (!isPort(spec.httpProxy.port)) {
           error('httpProxy.port', 'bad-port', 'The proxy port must be between 1 and 65535.')
@@ -380,7 +380,7 @@ export function createOpenVpnDriver(opts: OpenVpnDriverOptions = {}): OpenVpnDri
       }
       for (const [i, remote] of (spec.remotes ?? []).entries()) {
         if (!remote.host.trim()) {
-          error(`remotes[${i}].host`, 'bad-host', 'The server needs a host name.')
+          error(`remotes[${i}].host`, 'bad-host', 'The server needs a server name.')
         }
         if (!isPort(remote.port)) {
           error(`remotes[${i}].port`, 'bad-port', 'The server port must be between 1 and 65535.')

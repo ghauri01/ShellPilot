@@ -127,7 +127,7 @@ describe('characters a shell would rewrite', () => {
 // not a decision anyone can reason about, and click-through on the one dialog
 // where click-through is how a machine-in-the-middle succeeds is exactly what
 // host verification exists to prevent.
-describe('what the fan-out paths ask of an unknown host', () => {
+describe('what the fan-out paths ask of an unknown server', () => {
   const read = (p: string): string => readFileSync(join(__dirname, '..', p), 'utf8')
 
   it('refuses to prompt from broadcast, log tailing and cron', () => {
@@ -164,7 +164,7 @@ describe('what the fan-out paths ask of an unknown host', () => {
 // real estate is most of the time, and which used to end as an empty pane or a
 // line of shell output styled as a log entry.
 
-describe('a host with no journal at all', () => {
+describe('a server with no journal at all', () => {
   it('checks journalctl exists before deciding anything else', () => {
     // Alpine, most containers, anything pre-systemd. The tail used to emit
     // `sh: journalctl: not found` into the pane as a log line, which reads as
@@ -368,7 +368,7 @@ describe('the preflight and the tail on one channel', () => {
 
   it('reads a marker line and leaves an ordinary line alone', () => {
     expect(parseLogMark(`${LOG_MARK}entries=0`)).toEqual({ key: 'entries', value: '0' })
-    expect(parseLogMark('Sep 01 10:00:00 host sshd[1]: Accepted publickey')).toBeNull()
+    expect(parseLogMark('Sep 01 10:00:00 server sshd[1]: Accepted publickey')).toBeNull()
     expect(parseLogMark(`${LOG_MARK}nonsense`)).toBeNull()
     expect(parseLogMark(`${LOG_MARK}=1`)).toBeNull()
   })

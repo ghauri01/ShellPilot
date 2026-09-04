@@ -118,7 +118,7 @@ describe('systemd timers', () => {
   })
 })
 
-describe('collecting from one host', () => {
+describe('collecting from one server', () => {
   const output = [
     '===SHELLPILOT-USER===',
     '0 2 * * * /home/me/backup.sh',
@@ -156,7 +156,7 @@ describe('collecting from one host', () => {
     expect(parseCronCollection(output).entries.some((e) => e.kind === 'systemd-timer')).toBe(true)
   })
 
-  it('survives a host with nothing scheduled', () => {
+  it('survives a server with nothing scheduled', () => {
     const empty = ['===SHELLPILOT-USER===', '===SHELLPILOT-SYSTEM===', '===SHELLPILOT-CROND===', '===SHELLPILOT-TIMERS==='].join('\n')
     const r = parseCronCollection(empty)
     expect(r.entries).toEqual([])
@@ -795,7 +795,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(entries.map((e) => e.kind)).toEqual(['user-crontab'])
   })
 
-  it('says a host has no systemd rather than that it has no timers', () => {
+  it('says a server has no systemd rather than that it has no timers', () => {
     writeFileSync(
       join(host.bin, 'systemctl'),
       '#!/bin/sh\necho "System has not been booted with systemd as init system (PID 1)." >&2\nexit 1\n'
@@ -863,7 +863,7 @@ describe('the panel that shows it', () => {
     'utf8'
   )
 
-  it('does not claim a host has nothing scheduled unless every source answered', () => {
+  it('does not claim a server has nothing scheduled unless every source answered', () => {
     // The sentence this whole change exists to stop: "Nothing scheduled."
     // under a host whose /etc/cron.d we were simply not allowed to open.
     expect(panel).toMatch(/incomplete\.length === 0\s*\?\s*'Nothing scheduled\.'/)

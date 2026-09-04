@@ -294,13 +294,13 @@ function plural(n: number, one: string, many = `${one}s`): string {
 /** "4 failed services on 3 hosts", or null when nothing has failed. */
 export function failureLine(h: FleetHealth): string | null {
   if (h.failedUnits === 0) return null
-  return `${h.failedUnits} failed ${plural(h.failedUnits, 'service')} on ${h.failingHosts} ${plural(h.failingHosts, 'host')}`
+  return `${h.failedUnits} failed ${plural(h.failedUnits, 'service')} on ${h.failingHosts} ${plural(h.failingHosts, 'server')}`
 }
 
 /** "2 hosts low on disk", or null when none is. */
 export function diskLine(h: FleetHealth): string | null {
   if (h.diskHosts === 0) return null
-  return `${h.diskHosts} ${plural(h.diskHosts, 'host')} low on disk`
+  return `${h.diskHosts} ${plural(h.diskHosts, 'server')} low on disk`
 }
 
 /**
@@ -311,7 +311,7 @@ export function diskLine(h: FleetHealth): string | null {
 export function unreachableLine(h: FleetHealth): string | null {
   if (h.unreachable.length === 0) return null
   const n = h.unreachable.length
-  return `${n} ${plural(n, 'host')} could not be checked`
+  return `${n} ${plural(n, 'server')} could not be checked`
 }
 
 /**

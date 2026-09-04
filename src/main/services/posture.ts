@@ -139,7 +139,7 @@ export class PostureReader {
         // not hardened" for a connection that never opened would put a
         // fabricated security finding — in either direction — in front of
         // somebody acting on it.
-        return { ok: false, reason: 'unreachable', detail: r.error ?? 'could not reach the host' }
+        return { ok: false, reason: 'unreachable', detail: r.error ?? 'could not reach the server' }
       }
       // stderr is NOT merged into stdout, unlike the Docker reader. Every probe
       // in the collector redirects its own stderr to /dev/null, so anything on
@@ -155,7 +155,7 @@ export class PostureReader {
         // collector, there is no partial answer worth keeping here: without the
         // status block every value is unattributed, and an unattributed
         // firewall reading is exactly what this item exists to refuse.
-        const detail = (r.stderr ?? '').trim().slice(0, 200) || 'the host returned no collector output'
+        const detail = (r.stderr ?? '').trim().slice(0, 200) || 'the server returned no collector output'
         return { ok: false, reason: 'no-output', detail }
       }
       return { ok: true, posture: parsePosture(stdout, (this.deps.now ?? Date.now)()) }

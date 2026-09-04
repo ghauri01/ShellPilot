@@ -192,13 +192,13 @@ const revoke = (o: Partial<Parameters<typeof planAccessChange>[0]> = {}): Return
 // ---------------------------------------------------------------------------
 
 describe('rule 1 — never remove the key this session is on', () => {
-  it('refuses when the host says that key is the one we authenticated with', async () => {
+  it('refuses when the server says that key is the one we authenticated with', async () => {
     // sshd's own answer, via SSH_AUTH_INFO_0. The only authoritative source, and
     // where it exists the check is exact rather than a guess.
     const plan = revoke({ targets: [target(host({ authinfo: [`publickey ssh-ed25519 ${A}`] }))] })
     expect(plan.write).toBeNull()
     expect(plan.blocks.map((b) => b.kind)).toEqual(['is-session-key'])
-    expect(plan.blocks[0].reason).toContain('own way back into the host')
+    expect(plan.blocks[0].reason).toContain('own way back into the server')
   })
 
   it('refuses a fingerprint the caller named as protected', async () => {
@@ -217,7 +217,7 @@ describe('rule 1 — never remove the key this session is on', () => {
     expect(plan.disarm).toEqual([])
   })
 
-  it('refuses to touch the connecting account at all when the host will not say', async () => {
+  it('refuses to touch the connecting account at all when the server will not say', async () => {
     // ExposeAuthInfo is off by default, so this is what most hosts look like.
     // Without that fact nothing can prove the key being removed is not the one
     // holding the connection open — so the account ShellPilot connects as is
@@ -242,7 +242,7 @@ describe('rule 1 — never remove the key this session is on', () => {
     expect(plan.targets.map((t) => t.serverId)).toEqual(['a'])
   })
 
-  it('refuses when the session key is the SECOND factor the host named', async () => {
+  it('refuses when the session key is the SECOND factor the server named', async () => {
     // `AuthenticationMethods publickey,publickey`. sshd reports one factor per
     // line of SSH_AUTH_INFO_0, and only the first was ever looked at — so on a
     // two-factor host the second key was unprotected and revocable.
@@ -256,7 +256,7 @@ describe('rule 1 — never remove the key this session is on', () => {
     expect(plan.write).toBeNull()
   })
 
-  it('refuses conservatively when the key the host named was cut, rather than trusting the stump', async () => {
+  it('refuses conservatively when the key the server named was cut, rather than trusting the stump', async () => {
     // THE BYPASS, at the level it mattered. A blob cut by the collector still
     // decodes — to a different key — so `is-session-key` did not fire, and the
     // list was non-empty so the conservative branch did not fire either. Both
@@ -274,7 +274,7 @@ describe('rule 1 — never remove the key this session is on', () => {
     expect(plan.write).toBeNull()
   })
 
-  it('still refuses that other account when the host names the key and it matches', async () => {
+  it('still refuses that other account when the server names the key and it matches', async () => {
     // The authoritative check is not scoped to the connecting account: a key
     // shared between accounts is still the key this session is on.
     const plan = revoke({
@@ -403,7 +403,7 @@ describe('rule 2 — nothing is committed without a second, independent session'
     expect(command).toContain(`${ACCESS_ROLLBACK_SECONDS}s`)
   })
 
-  it('runs one host at a time', async () => {
+  it('runs one server at a time', async () => {
     // A key change rolled across a selection in parallel is the case where a
     // mistake reaches every machine before the first failure is visible;
     // serialised, the second host is still reachable while the first is being
@@ -442,7 +442,7 @@ describe('rule 2 — nothing is committed without a second, independent session'
 // Rule 3
 // ---------------------------------------------------------------------------
 
-describe('rule 3 — always leave a timestamped backup on the host', () => {
+describe('rule 3 — always leave a timestamped backup on the server', () => {
   it('copies the file before anything else touches it', async () => {
     const command = revoke({ targets: [target(host({ self: 'root' }))], fingerprint: B_FP }).write!.command
     const backup = command.indexOf('cp -p "$SP_F" "$SP_B"')
@@ -485,7 +485,7 @@ describe('what a change refuses to be', () => {
     expect(plan.blocks.map((b) => b.kind)).toEqual(['not-the-file-sshd-reads'])
   })
 
-  it('refuses a host whose sshd reads only authorized_keys2', async () => {
+  it('refuses a server whose sshd reads only authorized_keys2', async () => {
     // BLOCKER 4. Setting AuthorizedKeysFile REPLACES OpenSSH's default list
     // rather than adding to it. Every path this host names is a member of that
     // list, so the subset check said "the default is in force" and the gate
@@ -500,7 +500,7 @@ describe('what a change refuses to be', () => {
     expect(plan.write).toBeNull()
   })
 
-  it('refuses a host whose sshd config could only be read in part', async () => {
+  it('refuses a server whose sshd config could only be read in part', async () => {
     // BLOCKER 5's write half. The read half already downgrades this source to
     // `partial` and takes `keyFileIsDefault` to null; what matters here is that
     // the GATE consumes it rather than merely putting a banner on a screen.
@@ -537,7 +537,7 @@ describe('what a change refuses to be', () => {
     expect(plan.blocks[0].reason).toContain('could not be checked')
   })
 
-  it('does not block a legacy file on a host whose sshd does not read one', async () => {
+  it('does not block a legacy file on a server whose sshd does not read one', async () => {
     // The over-block this would otherwise be. `AuthorizedKeysFile
     // .ssh/authorized_keys` alone means keys2 is not read, so its presence
     // changes nothing about who can log in.
@@ -549,7 +549,7 @@ describe('what a change refuses to be', () => {
     expect(plan.write).not.toBeNull()
   })
 
-  it('leaves out a host the key is not on rather than counting it as revoked', async () => {
+  it('leaves out a server the key is not on rather than counting it as revoked', async () => {
     const plan = revoke({
       fingerprint: 'SHA256:notonanyhostanywhere',
       targets: [target(host({ self: 'root' }))]
@@ -824,7 +824,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     expect(lines[1]).toContain(B)
   })
 
-  it('removes every line carrying the key, however many this host has', async () => {
+  it('removes every line carrying the key, however many this server has', async () => {
     // The expected count is computed ON THE HOST now. It used to be taken from
     // the FIRST target in the selection and baked into the one command every
     // host runs, so the order the operator happened to select hosts in decided
@@ -837,7 +837,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     expect(h.read()).toContain(B)
   })
 
-  it('refuses when the key is not in the file this host actually has', async () => {
+  it('refuses when the key is not in the file this server actually has', async () => {
     // A collection that has gone stale, where the key is already gone. That
     // used to surface as "the new file has 2 lines and 1 was expected", which
     // is the truth about the wrong thing.
@@ -929,7 +929,7 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     expect(r.out).not.toContain('STAGED:')
   })
 
-  it('changes nothing on a host with no way to detach a process at all', async () => {
+  it('changes nothing on a server with no way to detach a process at all', async () => {
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
     const before = h.read()
     const r = h.run(

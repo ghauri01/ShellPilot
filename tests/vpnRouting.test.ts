@@ -231,7 +231,7 @@ describe('routing helpers', () => {
     expect(claimsDefault([{ destination: '10.8.0.0/24', interfaceName: 'wg0' }], 'inet')).toBe(false)
   })
 
-  it('reports an IPv6 leak, and only when the host actually has IPv6 (E16)', () => {
+  it('reports an IPv6 leak, and only when the server actually has IPv6 (E16)', () => {
     const v6Default = { destination: '::/0', gateway: 'fe80::1', interfaceName: 'eth0', family: 'inet6' as const }
     const leak = detectIpv6Leak([{ destination: '0.0.0.0/0', interfaceName: 'wg0' }], [v6Default])
     expect(leak?.kind).toBe('ipv6-leak')

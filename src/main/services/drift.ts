@@ -196,7 +196,7 @@ export class DriftReader {
         // which the comparison would render as "not collected" at best and
         // could render as "matches" if anything downstream ever got sloppy — is
         // the failure mode this whole item is shaped around refusing.
-        return { ok: false, reason: 'unreachable', detail: r.error ?? 'could not reach the host' }
+        return { ok: false, reason: 'unreachable', detail: r.error ?? 'could not reach the server' }
       }
       // stderr is NOT merged into stdout. Every read in the collector redirects
       // its own stderr, so anything on stderr came from the shell or the
@@ -204,7 +204,7 @@ export class DriftReader {
       // region where a line beginning `D ` would be read as file content.
       const stdout = r.stdout ?? ''
       if (!stdout.includes(DRIFT_MARKER)) {
-        const detail = (r.stderr ?? '').trim().slice(0, 200) || 'the host returned no collector output'
+        const detail = (r.stderr ?? '').trim().slice(0, 200) || 'the server returned no collector output'
         return { ok: false, reason: 'no-output', detail }
       }
       const parsed = parseDriftCollection(stdout, watches)

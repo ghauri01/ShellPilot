@@ -128,14 +128,14 @@ describe('naming this change’s backup', () => {
   })
 })
 
-describe('planning against a host', () => {
-  it('refuses a crontab the read half only partly read, and says which host', async () => {
+describe('planning against a server', () => {
+  it('refuses a crontab the read half only partly read, and says which server', async () => {
     const sources: CronSourceReport[] = [
       { id: 'user-crontab', label: 'crontab -l', status: 'partial', detail: 'read 1 of 2 files' }
     ]
     const r = await planCronEditOnHost(
       deps(async () => {
-        throw new Error('must not reach the host')
+        throw new Error('must not reach the server')
       }),
       TARGET,
       { op: 'add', schedule: '@daily', command: '/x' },
@@ -159,7 +159,7 @@ describe('planning against a host', () => {
     expect(r.reason).toContain('the part it could not read is the part it would delete')
   })
 
-  it('reports a host it could not reach rather than planning against nothing', async () => {
+  it('reports a server it could not reach rather than planning against nothing', async () => {
     const r = await planCronEditOnHost(
       deps(async () => ({ ok: false, code: null, error: 'connection refused' })),
       TARGET,
@@ -169,7 +169,7 @@ describe('planning against a host', () => {
     expect(r.reason).toContain('connection refused')
   })
 
-  it('says when the host has no crontab command at all', async () => {
+  it('says when the server has no crontab command at all', async () => {
     const r = await planCronEditOnHost(
       deps(async () => ({
         ok: true,
@@ -198,7 +198,7 @@ describe('planning against a host', () => {
   })
 })
 
-describe.skipIf(process.platform === 'win32')('plan and write, against a host running the real commands', () => {
+describe.skipIf(process.platform === 'win32')('plan and write, against a server running the real commands', () => {
   it('reads the crontab byte for byte, including a missing final newline', async () => {
     // The read command exists precisely because the collector's section
     // printing appends a newline. If this regressed, every plan against a file
@@ -216,7 +216,7 @@ describe.skipIf(process.platform === 'win32')('plan and write, against a host ru
     expect(r.after).toBe('# nightly\n0 4 * * * /usr/bin/backup')
   })
 
-  it('plans, is approved, writes, and the host ends up with exactly those bytes', async () => {
+  it('plans, is approved, writes, and the server ends up with exactly those bytes', async () => {
     const h = fakeHost('# nightly\n0 3 * * * /usr/bin/backup\n')
     const d = h.deps()
     const plan = await planCronEditOnHost(d, TARGET, {
@@ -264,7 +264,7 @@ describe.skipIf(process.platform === 'win32')('plan and write, against a host ru
 
 describe('the approval, which a cron edit goes through rather than around', () => {
   const noHost = deps(async () => {
-    throw new Error('must not reach the host')
+    throw new Error('must not reach the server')
   })
 
   it('refuses to write with no approval record at all, and records the refusal', async () => {
@@ -301,7 +301,7 @@ describe('the approval, which a cron edit goes through rather than around', () =
     expect(recorded.map((e) => e.event)).toEqual(['refused'])
   })
 
-  it('refuses a host that was not in the list that was confirmed', async () => {
+  it('refuses a server that was not in the list that was confirmed', async () => {
     const token = '20260903T101112Z-abcdef'
     const { buildCronWriteCommand } = await import('../src/shared/cron')
     const command = buildCronWriteCommand({ before: '', after: '@daily /x\n', token })
@@ -317,7 +317,7 @@ describe('the approval, which a cron edit goes through rather than around', () =
     expect(res.detail).toContain('db-01')
   })
 
-  it('never reaches a host with a token that is not a token', async () => {
+  it('never reaches a server with a token that is not a token', async () => {
     const res = await writeCronEdit(noHost, TARGET, {
       before: '',
       after: '@daily /x\n',
@@ -339,7 +339,7 @@ describe('a connection that dies mid-write', () => {
     const command = buildCronWriteCommand({ before: '', after: '@daily /x\n', token })
     const target = { serverId: TARGET.serverId, serverName: TARGET.serverName }
     const res = await writeCronEdit(
-      deps(async () => ({ ok: false, code: null, error: 'connection closed by remote host' })),
+      deps(async () => ({ ok: false, code: null, error: 'connection closed by remote server' })),
       TARGET,
       {
         before: '',
@@ -355,7 +355,7 @@ describe('a connection that dies mid-write', () => {
     // sentence: "the command never reported" and "we never got the answer" are
     // two different situations and the operator is the one who has to tell
     // them apart.
-    expect(res.detail).toContain('connection closed by remote host')
+    expect(res.detail).toContain('connection closed by remote server')
     expect(res.detail).toContain('may or may not have been applied')
     // The approval was granted and the record says so. It ran; we just do not
     // know how it ended.

@@ -153,7 +153,7 @@ export const CRON_SOURCE_LABEL: Record<CronSourceId, string> = {
 export const CRON_STATUS_HELP: Record<CronSourceStatus, string> = {
   ok: 'read in full',
   partial: 'only partly readable — some files were refused',
-  absent: 'not present on this host',
+  absent: 'not present on this server',
   denied: 'exists, but this account may not read it (and root was not available without a password)',
   'no-tool': 'nothing here can schedule a job — the tool that would read it is not installed or not running',
   unknown: 'the collector did not report on this source'
@@ -748,7 +748,7 @@ export function buildCronCollectCommand(opts: CronCollectOptions = {}): string {
 
     'echo "===SHELLPILOT-USER==="',
     'if [ -z "$SP_CRONTAB" ]; then',
-    'sp_note user-crontab no-tool - "this host has no crontab command"',
+    'sp_note user-crontab no-tool - "this server has no crontab command"',
     'elif SP_OUT=$("$SP_CRONTAB" -l 2>/dev/null); then',
     `printf '%s\\n' "$SP_OUT"`,
     'sp_note user-crontab ok -',
@@ -841,7 +841,7 @@ export function buildCronCollectCommand(opts: CronCollectOptions = {}): string {
     'break',
     'done',
     'if [ -z "$SP_DIR" ]; then',
-    'sp_note other-crontabs absent - "no per-user crontab spool on this host"',
+    'sp_note other-crontabs absent - "no per-user crontab spool on this server"',
     'elif [ -r "$SP_DIR" ] && [ -x "$SP_DIR" ]; then',
     'for f in "$SP_DIR"/*; do',
     '[ -f "$f" ] || continue',
@@ -884,7 +884,7 @@ export function buildCronCollectCommand(opts: CronCollectOptions = {}): string {
 
     'echo "===SHELLPILOT-TIMERS==="',
     'if [ -z "$SP_SYSTEMCTL" ]; then',
-    'sp_note systemd-timers no-tool - "this host has no systemctl"',
+    'sp_note systemd-timers no-tool - "this server has no systemctl"',
     'elif SP_TXT=$("$SP_SYSTEMCTL" list-timers --all --no-pager 2>&1); then',
     `printf '%s\\n' "$SP_TXT"`,
     'sp_note systemd-timers ok -',
@@ -1347,17 +1347,17 @@ export function planCronEdit(doc: CronDocument, edit: CronEdit): CronEditPlan {
     const target = lines[edit.lineIndex]
     if (target === undefined) {
       return refuse(
-        `this crontab has ${lines.length} line${lines.length === 1 ? '' : 's'} and the job being changed was line ${edit.lineIndex + 1}. It has been edited on the host since it was read; read it again.`
+        `this crontab has ${lines.length} line${lines.length === 1 ? '' : 's'} and the job being changed was line ${edit.lineIndex + 1}. It has been edited on the server since it was read; read it again.`
       )
     }
     if (target.kind !== 'job') {
       return refuse(
-        `line ${edit.lineIndex + 1} of this crontab is not a job any more. It has been edited on the host since it was read; read it again.`
+        `line ${edit.lineIndex + 1} of this crontab is not a job any more. It has been edited on the server since it was read; read it again.`
       )
     }
     if (target.text !== edit.lineText) {
       return refuse(
-        `line ${edit.lineIndex + 1} of this crontab now reads \`${target.text.trim()}\` and was \`${edit.lineText.trim()}\` when it was read. It has been edited on the host since; read it again.`
+        `line ${edit.lineIndex + 1} of this crontab now reads \`${target.text.trim()}\` and was \`${edit.lineText.trim()}\` when it was read. It has been edited on the server since; read it again.`
       )
     }
     // A line carrying a bare `\r` in the middle cannot be rebuilt without
@@ -1549,11 +1549,11 @@ export function buildCronWriteCommand(o: CronWriteRequest): string {
     resolveBinary('crontab'),
     'SP_CRONTAB=""',
     'command -v "$SP_BIN" >/dev/null 2>&1 && SP_CRONTAB="$SP_BIN"',
-    '[ -n "$SP_CRONTAB" ] || { sp_say "this host has no crontab command"; sp_end no-tool - 3; }',
+    '[ -n "$SP_CRONTAB" ] || { sp_say "this server has no crontab command"; sp_end no-tool - 3; }',
     // `cmp` is what proves both the backup and the read-back. Without it there
     // is no verification, and a write with no verification is not one this
     // command is willing to make.
-    'command -v cmp >/dev/null 2>&1 || { sp_say "this host has no cmp, so the write could not be verified"; sp_end no-cmp - 3; }',
+    'command -v cmp >/dev/null 2>&1 || { sp_say "this server has no cmp, so the write could not be verified"; sp_end no-cmp - 3; }',
     '[ -n "$HOME" ] && [ -d "$HOME" ] && [ -w "$HOME" ] || { sp_say "this account has no writable home directory, so no backup could be kept"; sp_end no-home - 3; }',
 
     `SP_B="$HOME/${bak}"`,
@@ -1567,7 +1567,7 @@ export function buildCronWriteCommand(o: CronWriteRequest): string {
     // The two failures are not the same failure: the directory already existing
     // is another change in flight, anything else is a home this account cannot
     // write, and they have different fixes.
-    'mkdir "$SP_LOCK" 2>/dev/null || { [ -d "$SP_LOCK" ] && { sp_say "another crontab change is running on this host right now"; sp_end locked - 6; }; sp_say "a lock could not be created in the home directory"; sp_end locked - 3; }',
+    'mkdir "$SP_LOCK" 2>/dev/null || { [ -d "$SP_LOCK" ] && { sp_say "another crontab change is running on this server right now"; sp_end locked - 6; }; sp_say "a lock could not be created in the home directory"; sp_end locked - 3; }',
     `trap 'rmdir "$SP_LOCK" 2>/dev/null' EXIT INT TERM HUP`,
 
     // ---- 1. Is this still the file the change was planned against? --------
@@ -1587,7 +1587,7 @@ export function buildCronWriteCommand(o: CronWriteRequest): string {
     // by whether the plan expected an empty file — and if it did not, the
     // comparison below refuses anyway.
     '[ "$SP_RC" = 0 ] || [ ! -s "$SP_E" ] || { rm -f "$SP_E" "$SP_B"; sp_say "this account’s crontab could not be read back to be backed up"; sp_end backup-failed - 3; }',
-    'cmp -s "$SP_B" "$SP_E" || { rm -f "$SP_E" "$SP_B"; sp_say "the crontab on this host is not the one this change was planned against — it has been edited since it was read, so nothing was changed"; sp_end changed - 4; }',
+    'cmp -s "$SP_B" "$SP_E" || { rm -f "$SP_E" "$SP_B"; sp_say "the crontab on this server is not the one this change was planned against — it has been edited since it was read, so nothing was changed"; sp_end changed - 4; }',
     // Belt and braces on the backup itself. `cmp` above proves it matches what
     // we expected, which on a non-empty crontab already proves it landed; this
     // catches the one case that does not — an empty expected file, where a
@@ -1609,7 +1609,7 @@ export function buildCronWriteCommand(o: CronWriteRequest): string {
     ':',
     'else',
     'rm -f "$SP_T"',
-    'sp_say "the host’s crontab command refused the new file: $SP_MSG"',
+    'sp_say "the server’s crontab command refused the new file: $SP_MSG"',
     'sp_end rejected "$SP_B" 4',
     'fi',
 
@@ -1690,7 +1690,7 @@ export function parseCronWriteResult(stdout: string): CronWriteResult {
     return {
       outcome: 'no-answer',
       detail:
-        'the host did not report what happened to this change. It may or may not have been applied — read the crontab again before doing anything else.'
+        'the server did not report what happened to this change. It may or may not have been applied — read the crontab again before doing anything else.'
     }
   }
   const [outcome, backup] = m[1].trim().split(/\s+/)
@@ -1768,7 +1768,7 @@ export function parseCronRead(output: string): CronReadResult {
     return {
       status: 'unknown',
       text: '',
-      detail: 'the host did not answer with a crontab at all, so nothing was read.'
+      detail: 'the server did not answer with a crontab at all, so nothing was read.'
     }
   }
   const [word, ...rest] = m[1].trim().split(/\s+/)
@@ -1810,7 +1810,7 @@ export function resolveCronEdit(
   if (index === -1) {
     return {
       ok: false,
-      reason: `\`${req.line}\` is not in this crontab any more. It has been edited on the host since it was read; read it again.`
+      reason: `\`${req.line}\` is not in this crontab any more. It has been edited on the server since it was read; read it again.`
     }
   }
   const lineText = doc.lines[index].text

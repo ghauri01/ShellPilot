@@ -206,7 +206,7 @@ async function post(url: string, payload: AlertPayload): Promise<WebhookTestResu
         return {
           ok: false,
           status: res.status,
-          error: `The endpoint redirected (HTTP ${res.status}). Point the webhook at its final URL — redirects are not followed, because the destination could be an internal or cleartext host.`
+          error: `The endpoint redirected (HTTP ${res.status}). Point the webhook at its final URL — redirects are not followed, because the destination could be an internal or cleartext server.`
         }
       }
       // Deliberate: the response body is never read. That is what keeps a

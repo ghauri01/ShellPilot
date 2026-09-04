@@ -125,7 +125,7 @@ export function CommandPalette(): React.JSX.Element {
         id: 'a-import',
         group: 'Actions',
         title: 'Import Servers from ~/.ssh/config',
-        sub: 'Bulk-import hosts you already have, ProxyJump included',
+        sub: 'Bulk-import servers you already have, ProxyJump included',
         icon: <Download size={16} />,
         run: () => {
           store.setActivity('connections')

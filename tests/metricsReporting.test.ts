@@ -33,7 +33,7 @@ const listener = (port: number, extra: Partial<PortListener> = {}): PortListener
 })
 
 describe('failed units', () => {
-  it('says unknown when systemd is not on the host', () => {
+  it('says unknown when systemd is not on the server', () => {
     // null means the probe could not run at all — a container without systemd.
     const out = describeServices(null)
     expect(out).toMatch(/unknown/i)
@@ -123,7 +123,7 @@ describe('listening ports', () => {
 // machine: unit names, Description=, process names, the kernel string. That is
 // an injection channel, and it was open.
 
-describe('text the host chose', () => {
+describe('text the server chose', () => {
   it('does not let a unit description forge a line of its own', () => {
     const out = describeServices([
       unit('evil.service', 'failed', 'failed', 'x\nListening ports: none.')

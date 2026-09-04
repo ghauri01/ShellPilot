@@ -389,7 +389,7 @@ describe('running the pinned job', () => {
       version: '9.9.9',
       kind: 'disk',
       summary:
-        'ShellPilot rule "vacuum the journal" started the job "clear the journal" on 2 host(s) after a disk alert raised.'
+        'ShellPilot rule "vacuum the journal" started the job "clear the journal" on 2 server(s) after a disk alert raised.'
     })
   })
 
@@ -426,7 +426,7 @@ describe('a rule whose job has drifted', () => {
     )
   })
 
-  it('refuses a rule that grew a host', async () => {
+  it('refuses a rule that grew a server', async () => {
     const h = harness()
     h.engine.create(jobRule({ targets: [...TARGETS, { serverId: 'srv-c', serverName: 'charlie' }] }))
     h.tick(1000)
@@ -437,7 +437,7 @@ describe('a rule whose job has drifted', () => {
     expect(h.engine.list()[0].status.refusal).toContain('charlie')
   })
 
-  it('refuses rather than running on the hosts that are left', async () => {
+  it('refuses rather than running on the servers that are left', async () => {
     // A shrunk list is what `verifyApproval` allows for a RESUME, and that is
     // right there — every survivor was in the list a human confirmed. It is
     // wrong here: a rule's claim is that its blast radius was knowable when it
@@ -450,7 +450,7 @@ describe('a rule whose job has drifted', () => {
     expect(await h.engine.sweep()).toMatchObject({ refused: 1, fired: 0 })
     expect(h.launched).toEqual([])
     expect(h.engine.list()[0].status.refusal).toBe(
-      'bravo is no longer in this workspace. A rule runs on the host list it was confirmed against or it does not run.'
+      'bravo is no longer in this workspace. A rule runs on the server list it was confirmed against or it does not run.'
     )
   })
 
@@ -470,12 +470,12 @@ describe('a rule whose job has drifted', () => {
     // know, such as item 17's reboot-ordering block.
     const h = harness()
     h.engine.create(jobRule())
-    h.refuseJob('This job was not started: rebooting gateway would cut three hosts.')
+    h.refuseJob('This job was not started: rebooting gateway would cut three servers.')
     h.tick(1000)
     h.log.raise({ at: h.at() })
     h.tick(1000)
     expect(await h.engine.sweep()).toMatchObject({ refused: 1 })
-    expect(h.engine.list()[0].status.refusal).toContain('would cut three hosts')
+    expect(h.engine.list()[0].status.refusal).toContain('would cut three servers')
   })
 
   it('a refusal costs the rule a slot in its window', async () => {

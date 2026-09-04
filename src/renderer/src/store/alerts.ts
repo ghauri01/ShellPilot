@@ -784,7 +784,7 @@ const SUBJECT: Record<NumericAlertKind, string> = {
   // "on this host" and it means it: the probe reads a bounded set of named
   // directories, so a certificate somewhere else on the box raises nothing
   // here — the same caveat disk states about `df -kP /`.
-  'cert-expiry': 'The soonest certificate on this host'
+  'cert-expiry': 'The soonest certificate on this server'
 }
 
 // How each kind's line reads in a sentence, because the kinds do not compare

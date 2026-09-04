@@ -213,7 +213,7 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
               value={host}
               onChange={(e) => setHost(e.target.value)}
             >
-              <option value="">Every host</option>
+              <option value="">Every server</option>
               {servers.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name}
@@ -246,8 +246,8 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
 
           {page.hostFilterHidUnattributed !== undefined && (
             <div className="panel-note is-unknown" data-testid="changelog-host-filter-note">
-              {page.hostFilterHidUnattributed} entries in this window name no host at all — a local
-              shell, or a job that had not reached one — so filtering by host hides them. They are
+              {page.hostFilterHidUnattributed} entries in this window name no server at all — a local
+              shell, or a job that had not reached one — so filtering by server hides them. They are
               not absent; they are unattributed.
             </div>
           )}
@@ -271,7 +271,7 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
                 quiet period.
               </p>
               <p className="panel-empty-body">
-                Widening the time range, or clearing the host filter, is the next thing to try.
+                Widening the time range, or clearing the server filter, is the next thing to try.
               </p>
             </div>
           ) : (

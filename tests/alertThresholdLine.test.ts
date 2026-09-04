@@ -78,7 +78,7 @@ afterEach(() => {
 // A silenced `record` is enough here: what is on trial is the line, not the log.
 void ({} as StoredAlertEvent)
 
-describe('a host held to a line its owner typed', () => {
+describe('a server held to a line its owner typed', () => {
   it('says nothing five points below the number in the box', () => {
     // The reproduction. A per-host threshold of 50 and a CPU of 45.
     sample(45)
@@ -112,7 +112,7 @@ describe('a host held to a line its owner typed', () => {
     expect(resolves()[0].summary).toBe('web-1: CPU back below 50%')
   })
 
-  it('does not let a host sitting on the line earn a fresh raise on every step', () => {
+  it('does not let a server sitting on the line earn a fresh raise on every step', () => {
     // The recovery margin has not gone anywhere; it governs the talking. 48 is
     // off the line but not five points below it, so stepping back over does
     // not read as a new incident and MIN_GAP still has to elapse.

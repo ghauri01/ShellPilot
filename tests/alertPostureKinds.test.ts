@@ -121,7 +121,7 @@ describe('a certificate running out', () => {
     cert(-3)
     expect(shown[0].title).toBe('web-1: Certificate 3 days PAST expiry')
     expect(raises()[0].summary).toBe(
-      'web-1: The soonest certificate on this host 3 days PAST expiry (threshold 30 days)'
+      'web-1: The soonest certificate on this server 3 days PAST expiry (threshold 30 days)'
     )
   })
 
@@ -197,7 +197,7 @@ describe('a certificate running out', () => {
     cert(89)
     expect(resolves()).toHaveLength(1)
     expect(resolves()[0].summary).toBe(
-      'web-1: The soonest certificate on this host renewed and back above 30 days'
+      'web-1: The soonest certificate on this server renewed and back above 30 days'
     )
     expect(chips()).toEqual([])
   })
@@ -261,7 +261,7 @@ describe('a certificate running out', () => {
 // oom-kill: a state with an observable resolve
 // ---------------------------------------------------------------------------
 
-describe('a host killing processes for memory', () => {
+describe('a server killing processes for memory', () => {
   it('speaks once on the crossing and says what was killed', () => {
     oom(true, '3 killed across 2 processes')
     expect(raises()).toHaveLength(1)

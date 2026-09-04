@@ -147,7 +147,7 @@ describe('the cadence', () => {
     expect(h.postureCalls).toEqual(['fleet:a'])
   })
 
-  it('does not fork sshd and read the ruleset on every host every two minutes', async () => {
+  it('does not fork sshd and read the ruleset on every server every two minutes', async () => {
     const h = harness()
     await vi.advanceTimersByTimeAsync(0)
     await vi.advanceTimersByTimeAsync(29 * 120_000)
@@ -350,7 +350,7 @@ describe('the reader tells three failures apart', () => {
       now: () => NOW
     })
 
-  it('calls a transport failure unreachable and infers NOTHING about the host', async () => {
+  it('calls a transport failure unreachable and infers NOTHING about the server', async () => {
     // The single most important line in src/main/services/posture.ts.
     // "No firewall rules, sshd not hardened" for a connection that never opened
     // is a fabricated security finding.
@@ -358,7 +358,7 @@ describe('the reader tells three failures apart', () => {
     expect(p).toEqual({ ok: false, reason: 'unreachable', detail: 'connect ETIMEDOUT' })
   })
 
-  it('calls output with no status block no-output rather than a host with four unknowns', async () => {
+  it('calls output with no status block no-output rather than a server with four unknowns', async () => {
     const p = await reader({ ok: true, stdout: 'V fw-tool ufw\n', stderr: 'sh: bad substitution' }).read({})
     expect(p).toMatchObject({ ok: false, reason: 'no-output', detail: 'sh: bad substitution' })
   })

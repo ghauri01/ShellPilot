@@ -44,7 +44,7 @@ export function MonitorView({
           `${bytes(m.host.memUsed)}${m.host.memPct === null ? '' : ` (${m.host.memPct.toFixed(0)}%)`}`
         ],
         ['Used disk', `${bytes(m.host.diskUsed)} (${m.host.diskPct.toFixed(0)}%)`],
-        ['Host / IP', server.host]
+        ['Server / IP', server.host]
       ]
     : [
         ['Hostname', server.name.toLowerCase().replace(/\s+/g, '-')],

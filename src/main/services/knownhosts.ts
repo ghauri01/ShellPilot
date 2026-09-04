@@ -129,18 +129,18 @@ export function verifyHostKey(
   const prompt = dialog
     .showMessageBox({
       type: recognised ? 'question' : 'warning',
-      title: recognised ? 'Confirm host' : 'Unknown host',
+      title: recognised ? 'Confirm server' : 'Unknown server',
       message: recognised
         ? `${id} is already trusted in your ~/.ssh/known_hosts.`
         : `The authenticity of ${id} cannot be established.`,
       detail: recognised
         ? `Fingerprint: ${fp}\n\nThis is the same key OpenSSH has for ${canonicalHostname(host, port)}. ` +
-          'ShellPilot keeps its own list of trusted hosts, so it has to be added here once too.'
+          'ShellPilot keeps its own list of trusted servers, so it has to be added here once too.'
         : openssh.knownUnderAnotherKey
-          ? `Fingerprint: ${fp}\n\nWarning: ~/.ssh/known_hosts has an entry for this host under a different key. ` +
+          ? `Fingerprint: ${fp}\n\nWarning: ~/.ssh/known_hosts has an entry for this server under a different key. ` +
             'That can mean the server was rebuilt, or that this connection is being intercepted. ' +
             'Check the fingerprint before trusting it.'
-          : `Fingerprint: ${fp}\n\nTrust this host and remember it for future connections?`,
+          : `Fingerprint: ${fp}\n\nTrust this server and remember it for future connections?`,
       buttons: ['Trust and connect', 'Cancel'],
       // Pre-selecting Trust is only defensible when we have independent
       // evidence for this exact key; anything else keeps Cancel as the default.

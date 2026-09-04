@@ -87,7 +87,7 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string; detail: string 
     id: 'serverMetrics',
     label: 'Server metrics, services & ports',
     detail:
-      'CPU, memory, disk and uptime — and also every failed systemd unit and every listening port with the process that owns it. That is a service and port inventory of the host, not only its capacity.'
+      'CPU, memory, disk and uptime — and also every failed systemd unit and every listening port with the process that owns it. That is a service and port inventory of the server, not only its capacity.'
   },
   // Its own capability, NOT a widening of Server metrics, and that was decided
   // rather than defaulted. "How many unpatched security updates, and which
@@ -102,7 +102,7 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string; detail: string 
     id: 'hostFacts',
     label: 'Host inventory & pending security updates',
     detail:
-      'Distribution and version, CPU model, architecture, virtualisation type, package manager, how many updates are pending, how many of those are SECURITY updates, and whether the host is waiting on a reboot. That is a patch-status report: it tells an agent which of your hosts are unpatched and against what.'
+      'Distribution and version, CPU model, architecture, virtualisation type, package manager, how many updates are pending, how many of those are SECURITY updates, and whether the server is waiting on a reboot. That is a patch-status report: it tells an agent which of your servers are unpatched and against what.'
   },
   // Its own capability again, and this one is not reachable by an agent AT ALL
   // — which is why the detail says so rather than leaving a reader to assume
@@ -123,9 +123,9 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string; detail: string 
   // the screen to answer, so anything short of 'allow' means do not read them.
   {
     id: 'firewallRules',
-    label: 'Firewall rules: the addresses and ports this host accepts',
+    label: 'Firewall rules: the addresses and ports this server accepts',
     detail:
-      'The rule lines themselves, as ufw, firewalld, nft or iptables print them — every address, port and protocol named in them, capped and stripped of control characters on the host. That is an inventory of what this host is exposed on and to whom, which is the thing an attacker would otherwise have to scan for. No agent can read it whatever this is set to: it is not behind any MCP tool. Setting it to allow lets ShellPilot COLLECT the rules for this server, for a person to read in Security posture; anything else and they are never asked for.'
+      'The rule lines themselves, as ufw, firewalld, nft or iptables print them — every address, port and protocol named in them, capped and stripped of control characters on the server. That is an inventory of what this server is exposed on and to whom, which is the thing an attacker would otherwise have to scan for. No agent can read it whatever this is set to: it is not behind any MCP tool. Setting it to allow lets ShellPilot COLLECT the rules for this server, for a person to read in Security posture; anything else and they are never asked for.'
   },
   {
     id: 'manageServers',

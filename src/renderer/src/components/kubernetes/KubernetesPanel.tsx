@@ -767,7 +767,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
       {!probe && !loading && eligible.length > 0 && (
         <div className="s-desc">
           Runs <span className="mono">kubectl</span> on the selected server, using whatever
-          kubeconfig that host already has. Reading only, with one exception:{' '}
+          kubeconfig that server already has. Reading only, with one exception:{' '}
           <span className="mono">rollout restart</span>, which asks first. It never switches your
           context, never execs into a pod, and never deletes anything.
         </div>

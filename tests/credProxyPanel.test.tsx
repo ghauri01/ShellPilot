@@ -182,14 +182,14 @@ describe('a rule reads as a sentence about where a credential goes', () => {
   it('surfaces the exact refusal when a rule will not save', async () => {
     mount({
       rules: [],
-      saveRule: async () => ({ ok: false, error: '"Host" cannot carry a credential.' })
+      saveRule: async () => ({ ok: false, error: '"Server" cannot carry a credential.' })
     })
     const user = userEvent.setup()
 
     await user.click(await screen.findByRole('button', { name: 'Add rule' }))
     await user.click(screen.getByRole('button', { name: 'Save rule' }))
 
-    expect(await screen.findByText('"Host" cannot carry a credential.')).toBeTruthy()
+    expect(await screen.findByText('"Server" cannot carry a credential.')).toBeTruthy()
   })
 
   it('sends the draft as a rule, with the injection the form chose', async () => {

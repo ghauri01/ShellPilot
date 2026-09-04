@@ -435,7 +435,7 @@ describe('actors', () => {
     expect(page.entries.map((e) => e.actor)).toEqual(['agent', 'human', 'human'])
   })
 
-  it('files a host going unreachable as neither, because nobody did it', () => {
+  it('files a server going unreachable as neither, because nobody did it', () => {
     const page = readChangeLog(
       deps({ history: () => historyOf([{ ts: T0, kind: 'host-unreachable', hostId: 'srv-1', id: 1 }]) })
     )
@@ -482,7 +482,7 @@ describe('filters', () => {
     expect(page.entries.map((e) => e.kind)).toEqual(['shell'])
   })
 
-  it('filters by host id or by host name, because the sources disagree about which they keep', () => {
+  it('filters by server id or by server name, because the sources disagree about which they keep', () => {
     writeJsonl(APPROVAL_FILE, [approvalRow({ id: 'a1', hosts: ['web-01'] })])
     writeJsonl(AUDIT_FILE, [auditRow({ id: 'g1', serverId: 'srv-1', serverName: 'db-01' })])
     const byName = readChangeLog(deps(), { hosts: ['web-01'] })
@@ -491,7 +491,7 @@ describe('filters', () => {
     expect(byId.entries.map((e) => e.id)).toEqual(['audit:g1'])
   })
 
-  it('says how many unattributed rows a host filter hid', () => {
+  it('says how many unattributed rows a server filter hid', () => {
     // A local shell names no host. Dropping it from a host-filtered page
     // without a word is how a filtered timeline claims a quiet afternoon.
     writeJsonl(LOCAL_SESSION_FILE, [localRow({ id: 'l1' }), localRow({ id: 'l2' })])
@@ -501,13 +501,13 @@ describe('filters', () => {
     expect(page.hostFilterHidUnattributed).toBe(2)
   })
 
-  it('does not count a row the time filter already excluded as hidden by the host filter', () => {
+  it('does not count a row the time filter already excluded as hidden by the server filter', () => {
     writeJsonl(LOCAL_SESSION_FILE, [localRow({ id: 'l1', timestamp: iso(T0 - 86_400_000) })])
     const page = readChangeLog(deps(), { hosts: ['srv-1'], from: T0 - 1000 })
     expect(page.hostFilterHidUnattributed).toBeUndefined()
   })
 
-  it('names a host by its display name when the store only kept an id', () => {
+  it('names a server by its display name when the store only kept an id', () => {
     const page = readChangeLog(
       deps({
         history: () => historyOf([{ ts: T0, kind: 'host-unreachable', hostId: 'srv-1', id: 1 }]),

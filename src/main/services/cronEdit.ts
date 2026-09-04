@@ -101,7 +101,7 @@ const WRITE_TIMEOUT = 30_000
 
 /** One sentence for a host that did not answer, or answered with a refusal. */
 function execFailure(r: ExecLike): string | null {
-  if (!r.ok) return r.error ?? 'the host could not be reached'
+  if (!r.ok) return r.error ?? 'the server could not be reached'
   // Output the transport had to cut short is not output this can plan against.
   // A crontab clipped at the transport's cap parses into a document that is
   // MISSING ITS TAIL, and writing that back would delete every job past the
@@ -236,7 +236,7 @@ export async function writeCronEdit(
       ...host,
       ok: false,
       outcome: 'no-answer',
-      detail: `${r.error ?? 'the host could not be reached'}. The change may or may not have been applied — read the crontab again before doing anything else.`
+      detail: `${r.error ?? 'the server could not be reached'}. The change may or may not have been applied — read the crontab again before doing anything else.`
     }
   }
   const result = parseCronWriteResult(r.stdout ?? '')

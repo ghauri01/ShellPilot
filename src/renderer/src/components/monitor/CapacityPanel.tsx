@@ -240,7 +240,7 @@ export function CapacityPanel({ servers }: { servers: Server[] }): React.JSX.Ele
         </span>
         <h2 className="ui-section-title">Capacity trends</h2>
         <p className="ui-note panel-head-purpose">
-          How one host&rsquo;s CPU, memory and disk have moved over time, drawn from samples the
+          How one server&rsquo;s CPU, memory and disk have moved over time, drawn from samples the
           fleet sampler already writes. Nothing extra is measured for this panel.
         </p>
         <div className="panel-head-actions">

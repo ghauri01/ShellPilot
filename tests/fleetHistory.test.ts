@@ -214,7 +214,7 @@ describe('a sweep against a real store', () => {
     })
   })
 
-  it('records an unreachable host once, not once per sweep', async () => {
+  it('records an unreachable server once, not once per sweep', async () => {
     let ok = true
     const s = sampler(() => (ok ? { ok: true, data: metrics() } : { ok: false, error: 'timeout' }))
     s.configure({ enabled: true, intervalMs: 120_000, targets: [target('a')] })
@@ -290,7 +290,7 @@ describe('the store never breaks a sweep', () => {
     expect(await run(() => angry)).toEqual(['fleet:a', 'fleet:b', 'fleet:a', 'fleet:b'])
   })
 
-  it('writes one transaction per sweep, not one per host', async () => {
+  it('writes one transaction per sweep, not one per server', async () => {
     let transactions = 0
     let samples = 0
     const counter: HistoryWriter = {

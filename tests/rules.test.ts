@@ -165,7 +165,7 @@ describe('matching an event', () => {
     expect(ruleMatches(rule(), row({ event: 'stood-down' }))).toBe(false)
   })
 
-  it('narrows to one host when the filter names one', () => {
+  it('narrows to one server when the filter names one', () => {
     const r = rule({ filter: { serverId: 'srv-a' } })
     expect(ruleMatches(r, row({ serverId: 'srv-a' }))).toBe(true)
     expect(ruleMatches(r, row({ serverId: 'srv-b' }))).toBe(false)
@@ -298,7 +298,7 @@ describe('what a rule is authorised to run', () => {
     expect(reason).toContain('An edited command needs a fresh confirmation.')
   })
 
-  it('refuses a rule that grew a host after it was written', () => {
+  it('refuses a rule that grew a server after it was written', () => {
     const grown = jobAction({
       targets: [...TARGETS, { serverId: 'srv-c', serverName: 'charlie' }]
     })
@@ -344,7 +344,7 @@ describe('what the endpoint is told', () => {
   it('says the automation ran rather than repeating the alert', () => {
     const notice = ruleNotice(rule({ action: jobAction() }), row(), 'job-started')
     expect(notice.summary).toBe(
-      'ShellPilot rule "vacuum the journal" started the job "clear the journal" on 2 host(s) after a disk alert raised.'
+      'ShellPilot rule "vacuum the journal" started the job "clear the journal" on 2 server(s) after a disk alert raised.'
     )
     expect(notice.kind).toBe('disk')
     expect(notice.server).toBe('alpha')

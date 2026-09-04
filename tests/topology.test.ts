@@ -30,8 +30,8 @@ function srv(id: string, name: string, via: (string | null)[] = []): TopologySer
   }
 }
 
-describe('the jump-host graph', () => {
-  it('names the servers that route through a host', () => {
+describe('the jump-server graph', () => {
+  it('names the servers that route through a server', () => {
     const topo = buildTopology([
       srv('bastion', 'bastion'),
       srv('web', 'web-1', ['bastion']),
@@ -44,7 +44,7 @@ describe('the jump-host graph', () => {
     expect(isJumpHost(topo, 'web')).toBe(false)
   })
 
-  it('refuses a reboot of a host other servers connect through', () => {
+  it('refuses a reboot of a server other servers connect through', () => {
     const topo = buildTopology([srv('bastion', 'bastion'), srv('web', 'web-1', ['bastion'])])
     const block = rebootBlockFor(topo, 'bastion')
     expect(block).not.toBeNull()
@@ -191,7 +191,7 @@ describe('a bastion the graph can only recognise by its address', () => {
     expect(rebootBlockFor(topo, 'id2')).not.toBeNull()
   })
 
-  it('matches on host AND port, so a different service on one box is not one machine', () => {
+  it('matches on server AND port, so a different service on one box is not one machine', () => {
     const topo = buildTopology([
       { id: 'b', name: 'bastion', host: 'shared.example', port: 2222 },
       { id: 'w', name: 'web-1', route: [{ host: 'shared.example', port: 22 }] }
@@ -258,7 +258,7 @@ describe('a bastion the graph can only recognise by its address', () => {
   })
 })
 
-describe('saved databases on a host', () => {
+describe('saved databases on a server', () => {
   const servers = [srv('a', 'db-a'), srv('b', 'db-b'), srv('c', 'db-c')]
   const dbs = [
     { id: 'd1', name: 'orders (primary)', kind: 'postgres', database: 'orders', sshServerId: 'a' },
@@ -266,7 +266,7 @@ describe('saved databases on a host', () => {
     { id: 'd3', name: 'analytics', kind: 'postgres', database: 'analytics', sshServerId: 'c' }
   ]
 
-  it('refuses to restart two hosts carrying the same saved database in one wave', () => {
+  it('refuses to restart two servers carrying the same saved database in one wave', () => {
     const topo = buildTopology(servers, dbs)
     expect(databasesOn(topo, 'a').map((d) => d.database)).toEqual(['orders'])
     const blocks = sameWaveDatabaseBlocks(topo, ['a', 'b'])

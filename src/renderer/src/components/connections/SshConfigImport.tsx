@@ -158,7 +158,7 @@ export function SshConfigImport(): React.JSX.Element {
 
       {!loading && !error && hosts.length === 0 && (
         <div className="faint" style={{ padding: 12 }}>
-          No concrete hosts found. Entries using only wildcards (<span className="mono">Host *</span>) are
+          No concrete servers found. Entries using only wildcards (<span className="mono">Host *</span>) are
           treated as defaults and are not imported on their own.
         </div>
       )}

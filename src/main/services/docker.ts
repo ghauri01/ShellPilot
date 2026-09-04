@@ -141,7 +141,7 @@ export class DockerReader {
       // A transport failure is not a docker failure, and saying "docker is
       // not installed" when the host was simply unreachable sends someone to
       // fix the wrong machine.
-      return onTransportFailure(r.error ?? 'could not reach the host')
+      return onTransportFailure(r.error ?? 'could not reach the server')
     }
     // Both streams, joined on a newline rather than glued. The collectors
     // redirect docker's own stderr into stdout, so anything left on stderr

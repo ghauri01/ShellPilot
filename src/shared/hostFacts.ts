@@ -120,13 +120,13 @@ export const FACT_STATUSES: FactStatus[] = [
  */
 export const FACT_STATUS_HELP: Record<FactStatus, string> = {
   ok: 'Read successfully. A zero here means zero, not "we could not look".',
-  absent: 'This host does not have the file or flag that answers this, so there is nothing to read.',
+  absent: 'This server does not have the file or flag that answers this, so there is nothing to read.',
   denied: 'It exists and this account was not allowed to read it. A different account might see more.',
-  'no-tool': 'The program that answers this is not installed on this host.',
+  'no-tool': 'The program that answers this is not installed on this server.',
   'stale-metadata':
-    'The answer was read from a package cache that has not been refreshed recently, so it describes the estate as it was then, not now. ShellPilot never refreshes it, because that is a network operation and on some package managers it can break the host.',
+    'The answer was read from a package cache that has not been refreshed recently, so it describes the estate as it was then, not now. ShellPilot never refreshes it, because that is a network operation and on some package managers it can break the server.',
   unsupported:
-    'This host cannot answer this question at all — not because of a permission or a missing tool, but because the distribution does not publish the data. Treat it as UNKNOWN, never as zero.',
+    'This server cannot answer this question at all — not because of a permission or a missing tool, but because the distribution does not publish the data. Treat it as UNKNOWN, never as zero.',
   unknown: 'The probe ran and its answer could not be read, or the collector never reported on it.'
 }
 
@@ -480,7 +480,7 @@ export function buildHostFactsCommand(opts: HostFactsCollectOptions = {}): strin
     'elif [ -e /etc/os-release ] || [ -e /usr/lib/os-release ]; then',
     'sp_note os-release denied - "os-release exists and this account cannot read it"',
     'else',
-    'sp_note os-release absent - "this host has no os-release file"',
+    'sp_note os-release absent - "this server has no os-release file"',
     'fi',
 
     // ---- architecture ----------------------------------------------------
@@ -506,7 +506,7 @@ export function buildHostFactsCommand(opts: HostFactsCollectOptions = {}): strin
     'elif [ -e /proc/cpuinfo ]; then',
     'sp_note cpu denied -',
     'else',
-    'sp_note cpu absent - "this host has no /proc/cpuinfo"',
+    'sp_note cpu absent - "this server has no /proc/cpuinfo"',
     'fi',
 
     // ---- virtualisation --------------------------------------------------
@@ -657,7 +657,7 @@ export function buildHostFactsCommand(opts: HostFactsCollectOptions = {}): strin
     `SP_UIN=$(printf '%s\\n' "$SP_UI" | grep -c -E '[0-9]+[[:space:]]+(Security|Bugfix|Enhancement|New Package|Other)' || true)`,
     'if [ "$SP_UIN" -gt 0 ]; then',
     `sp_val security "$("$SP_PMB" -C --quiet --security check-update 2>/dev/null | grep -c -E '${PKG_ROW}' || true)"`,
-    'sp_note security-updates ok - "this host\'s repositories publish updateinfo"',
+    'sp_note security-updates ok - "this server\'s repositories publish updateinfo"',
     'elif [ "$SP_PEND" -gt 0 ]; then',
     'sp_note security-updates unsupported - "updateinfo returned nothing while updates are pending, so dnf would report zero security updates whether or not any exist"',
     'elif [ "$SP_PEND" = 0 ]; then',
@@ -687,7 +687,7 @@ export function buildHostFactsCommand(opts: HostFactsCollectOptions = {}): strin
     'case "$SP_RC" in',
     '0) sp_val reboot no; sp_note reboot-required ok "${SP_ROOT:--}" "needs-restarting -r exited 0" ;;',
     '1) sp_val reboot yes; sp_note reboot-required ok "${SP_ROOT:--}" "needs-restarting -r exited 1" ;;',
-    '*) sp_note reboot-required no-tool - "needs-restarting is not available on this host" ;;',
+    '*) sp_note reboot-required no-tool - "needs-restarting is not available on this server" ;;',
     'esac',
     'fi',
     'SP_MT=$(ls -t /var/cache/dnf/*/repodata/repomd.xml /var/cache/yum/*/*/repomd.xml 2>/dev/null | head -1)',
@@ -745,7 +745,7 @@ export function buildHostFactsCommand(opts: HostFactsCollectOptions = {}): strin
     'else',
     'sp_note updates unknown - "pacman -Qu exited $SP_RC"',
     'fi',
-    'sp_note security-updates unsupported - "Arch Linux has no security update channel, so this number cannot exist on any Arch host"',
+    'sp_note security-updates unsupported - "Arch Linux has no security update channel, so this number cannot exist on any Arch server"',
     'if [ "$SP_RB" = 0 ]; then',
     'sp_note reboot-required unsupported - "Arch Linux publishes no reboot-required flag"',
     'fi',
@@ -764,7 +764,7 @@ export function buildHostFactsCommand(opts: HostFactsCollectOptions = {}): strin
     'else',
     'sp_note updates unknown - "apk version exited $SP_RC"',
     'fi',
-    'sp_note security-updates unsupported - "Alpine records security fixes in build metadata, not in the installed package index, so no count exists on the host"',
+    'sp_note security-updates unsupported - "Alpine records security fixes in build metadata, not in the installed package index, so no count exists on the server"',
     'if [ "$SP_RB" = 0 ]; then',
     'sp_note reboot-required unsupported - "Alpine publishes no reboot-required flag"',
     'fi',

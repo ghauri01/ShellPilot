@@ -259,7 +259,7 @@ describe('planning a job', () => {
   })
 })
 
-describe('classifying a host', () => {
+describe('classifying a server', () => {
   it('extends the broadcast rules rather than restating them', () => {
     // The one thing that must not drift: a non-zero exit is a result. `grep`
     // finding nothing exits 1 and is a perfectly good answer.
@@ -269,14 +269,14 @@ describe('classifying a host', () => {
     ).toBe('missing-command')
   })
 
-  it('has no answer while a host is waiting', () => {
+  it('has no answer while a server is waiting', () => {
     // `waiting` is not `pending`: the job has reached this host and is holding.
     // Neither is an outcome, and a category for "we do not know yet" would be
     // counted in a summary as though it were an answer.
     expect(classifyJobResult({ serverId: 'a', serverName: 'a', state: 'waiting' })).toBeNull()
   })
 
-  it('calls an abandoned host abandoned, not unreachable', () => {
+  it('calls an abandoned server abandoned, not unreachable', () => {
     // The host did nothing wrong. Filing this under `unreachable` points at the
     // machine; under `timeout` it claims we waited and gave up. Neither is what
     // happened: the app stopped and sshd sent SIGHUP.
@@ -287,7 +287,7 @@ describe('classifying a host', () => {
 })
 
 describe('running a job', () => {
-  it('writes the row before the first host is touched', async () => {
+  it('writes the row before the first server is touched', async () => {
     const store = await openStore()
     const h = harness(store)
     const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a']) }))
@@ -311,7 +311,7 @@ describe('running a job', () => {
     expect(done.targets[0]).toMatchObject({ state: 'ok', outcome: 'ok', exitCode: 0, ms: 500 })
   })
 
-  it('keeps the other hosts when one is unreachable', async () => {
+  it('keeps the other servers when one is unreachable', async () => {
     const store = await openStore()
     const h = harness(store)
     const p = h.runner.run(approved({ jobId: 'j1', spec: spec(), targets: h.targets(['a', 'b']) }))
@@ -325,7 +325,7 @@ describe('running a job', () => {
     expect(byId.b).toMatchObject({ state: 'ok', outcome: 'ok' })
   })
 
-  it('stops a host at the first step that does not exit zero', async () => {
+  it('stops a server at the first step that does not exit zero', async () => {
     // `a && b`, because that is what a person typing two steps means. A job
     // whose second step ran after its first failed did something nobody asked
     // for.
@@ -376,7 +376,7 @@ describe('running a job', () => {
 })
 
 describe('cancelling', () => {
-  it('leaves a running host alone and stops the queued ones', async () => {
+  it('leaves a running server alone and stops the queued ones', async () => {
     const store = await openStore()
     const h = harness(store)
     const p = h.runner.run(approved({
@@ -402,8 +402,8 @@ describe('cancelling', () => {
     // at the exec it never releases, and a timeout is a much worse failure
     // message than "expected true to be false" on the line that says what went
     // wrong.
-    expect(h.isOpening('b'), 'host b was reached despite the cancel').toBe(false)
-    expect(h.isOpening('c'), 'host c was reached despite the cancel').toBe(false)
+    expect(h.isOpening('b'), 'server b was reached despite the cancel').toBe(false)
+    expect(h.isOpening('c'), 'server c was reached despite the cancel').toBe(false)
 
     const done = await p
     const byId = Object.fromEntries(done.targets.map((t) => [t.serverId, t]))
@@ -462,7 +462,7 @@ describe('a job that was running when ShellPilot stopped', () => {
     // classifyJobResult over the same row is a summary that changes depending
     // on which of the two a reader happened to use.
     expect(byId.b).toMatchObject({ state: 'skipped', outcome: 'cancelled' })
-    expect(byId.b.error).toMatch(/before this host was reached/)
+    expect(byId.b.error).toMatch(/before this server was reached/)
     expect(classifyJobResult(byId.b)).toBe(byId.b.outcome)
     expect(classifyJobResult(byId.a)).toBe(byId.a.outcome)
   })
@@ -974,7 +974,7 @@ describe('retention', () => {
 })
 
 describe('disposal', () => {
-  it('stops queued hosts when the window goes', async () => {
+  it('stops queued servers when the window goes', async () => {
     // A job outlives its panel by design, so a window closing is exactly the
     // case where one would keep working through its queue with nowhere to
     // report.
@@ -1129,7 +1129,7 @@ describe('the attached executor', () => {
 })
 
 describe('re-running a job id', () => {
-  it('reports no host it never touched, and no output from the run before', async () => {
+  it('reports no server it never touched, and no output from the run before', async () => {
     // run() only refuses a LIVE id. A finished one is re-runnable, the job row
     // is replaced — and the target and output rows were not, so a second run
     // over one host inherited the first run's other host and interleaved its
@@ -1150,7 +1150,7 @@ describe('re-running a job id', () => {
 
     expect(
       done.targets.map((t) => t.serverId),
-      'a host the second run never contacted was reported as part of it'
+      'a server the second run never contacted was reported as part of it'
     ).toEqual(['a'])
     expect(store.readJobOutput('j1', 'a').map((r) => r.text)).toEqual(['RUN2-ONLY\n'])
     expect(store.readJobOutput('j1', 'b')).toEqual([])

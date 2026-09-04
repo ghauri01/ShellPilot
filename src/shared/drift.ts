@@ -115,10 +115,10 @@ export const DRIFT_STATUS_HELP: Record<DriftStatus, string> = {
   ok: 'Read in full and compared. A verdict of "identical" here means identical, not "we could not look".',
   partial:
     'The file is larger than the read cap, so only the beginning could be read — and a comparison over the beginning would call two files with different endings the same. It is reported, and not compared.',
-  absent: 'This host does not have the file, and that was checked rather than inferred from a failed stat.',
+  absent: 'This server does not have the file, and that was checked rather than inferred from a failed stat.',
   denied:
     'It exists and this account was not allowed to read it, or the directory above it could not be traversed. This is NOT the same as the file being absent, and it is NOT the same as matching.',
-  'no-tool': 'The host has no base64, so the collector had no safe way to carry the content back.',
+  'no-tool': 'The server has no base64, so the collector had no safe way to carry the content back.',
   unsupported: 'The path exists and is not a regular file. There is nothing here to compare.',
   unknown:
     'The probe ran and this file was not reported on, or its content arrived cut off. Treat as UNKNOWN — never as "none" and never as "the same as everyone else".'
@@ -175,14 +175,14 @@ export const DRIFT_RULES: DriftRule[] = [
     id: 'line-endings',
     label: 'Line endings',
     detail:
-      'Treats a CRLF line ending as a LF one. A file edited on Windows and the same file edited on the host are the same file.',
+      'Treats a CRLF line ending as a LF one. A file edited on Windows and the same file edited on the server are the same file.',
     example: { before: 'listen 80;\\r\\n', after: 'listen 80;\\n' }
   },
   {
     id: 'include-lines',
     label: 'Include directives',
     detail:
-      'Drops whole lines whose first word is include, Include, include_dir, includedir or .include. These point at per-host drop-in directories, so they differ by design — and dropping them means the CONTENT of those drop-ins is not compared either, because this reads one path per host.',
+      'Drops whole lines whose first word is include, Include, include_dir, includedir or .include. These point at per-server drop-in directories, so they differ by design — and dropping them means the CONTENT of those drop-ins is not compared either, because this reads one path per server.',
     example: { before: 'Include /etc/ssh/sshd_config.d/*.conf', after: '(line removed)' }
   },
   {
@@ -201,9 +201,9 @@ export const DRIFT_RULES: DriftRule[] = [
   },
   {
     id: 'hostnames',
-    label: "The host's own name",
+    label: "The server's own name",
     detail:
-      "Replaces this host's hostname, its short name and the server's name in ShellPilot with a placeholder, case-insensitively. A template that stamps the machine's name into a file makes every copy unique; this is what makes them comparable. It cannot see a per-host name it was not told about.",
+      "Replaces this server's hostname, its short name and the server's name in ShellPilot with a placeholder, case-insensitively. A template that stamps the machine's name into a file makes every copy unique; this is what makes them comparable. It cannot see a per-server name it was not told about.",
     example: { before: 'server_name web-03.example.internal;', after: 'server_name <host>.example.internal;' }
   },
   {
@@ -300,7 +300,7 @@ export const DRIFT_WATCHES: DriftWatch[] = [
       'inner-space',
       'blank-lines'
     ],
-    note: 'Include lines are dropped because a drop-in directory is per-host by design. Order is NOT normalised: in sshd_config the first occurrence of a keyword wins, so two files with the same lines in a different order are two different configurations.'
+    note: 'Include lines are dropped because a drop-in directory is per-server by design. Order is NOT normalised: in sshd_config the first occurrence of a keyword wins, so two files with the same lines in a different order are two different configurations.'
   },
   {
     id: 'nginx-conf',
@@ -316,7 +316,7 @@ export const DRIFT_WATCHES: DriftWatch[] = [
       'inner-space',
       'blank-lines'
     ],
-    note: 'Hostnames are substituted because server_name is templated per host. Order is not normalised: location matching is ordered.'
+    note: 'Hostnames are substituted because server_name is templated per server. Order is not normalised: location matching is ordered.'
   },
   {
     id: 'resolv-conf',
@@ -324,7 +324,7 @@ export const DRIFT_WATCHES: DriftWatch[] = [
     path: '/etc/resolv.conf',
     comment: '#',
     rules: ['line-endings', 'comments', 'trailing-space', 'inner-space', 'blank-lines'],
-    note: 'Order is not normalised: nameserver lines are tried in the order they appear, so a host that lists the secondary first is genuinely different.'
+    note: 'Order is not normalised: nameserver lines are tried in the order they appear, so a server that lists the secondary first is genuinely different.'
   },
   {
     id: 'hosts',
@@ -340,7 +340,7 @@ export const DRIFT_WATCHES: DriftWatch[] = [
       'blank-lines',
       'line-order'
     ],
-    note: 'The one watch with line-order on: /etc/hosts is a lookup table, not a sequence, and every host has its own name in it — which the hostnames rule substitutes so the tables can be compared at all.'
+    note: 'The one watch with line-order on: /etc/hosts is a lookup table, not a sequence, and every server has its own name in it — which the hostnames rule substitutes so the tables can be compared at all.'
   },
   {
     id: 'sysctl-conf',
@@ -948,7 +948,7 @@ export function compareDrift(input: DriftComparisonInput): DriftComparison {
         ...common,
         verdict: 'unread' as const,
         status: 'unknown' as const,
-        detail: r.error ?? 'this host has not been collected yet'
+        detail: r.error ?? 'this server has not been collected yet'
       }
     }
     if (reading.status === 'absent') {
@@ -1017,7 +1017,7 @@ export function driftCoverageSentence(c: DriftCoverage): string | null {
   }
   if (parts.length === 0) return null
   const n = c.compared.length
-  return `Compared on ${n} host${n === 1 ? '' : 's'} — ${parts.join('; ')}.`
+  return `Compared on ${n} server${n === 1 ? '' : 's'} — ${parts.join('; ')}.`
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,7 +1057,7 @@ export function driftCoverageSentence(c: DriftCoverage): string | null {
  * plan and the approval a job carries.
  */
 export const DRIFT_NO_PUSH =
-  'Configuration drift reads and compares. It never writes a file to a host to bring it into line: ' +
+  'Configuration drift reads and compares. It never writes a file to a server to bring it into line: ' +
   'that is a job, and it goes through a plan you read and an approval minted against it, not a button ' +
-  'on a comparison. Nor could this panel decide which side is right — a host that was fixed first and a ' +
-  'host that drifted look the same from here.'
+  'on a comparison. Nor could this panel decide which side is right — a server that was fixed first and a ' +
+  'server that drifted look the same from here.'

@@ -75,7 +75,7 @@ describe('reads escalate, exactly as docker reads do', () => {
     expect(r.reason).toBe('permission-denied')
   })
 
-  it('does not retry a host that has no compose plugin', async () => {
+  it('does not retry a server that has no compose plugin', async () => {
     // Root does not install the plugin, so the retry would only double the
     // wait before the same answer.
     const h = reader(() => ({
@@ -95,7 +95,7 @@ describe('reads escalate, exactly as docker reads do', () => {
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.reason).toBe('unknown')
-    expect(r.detail).toBe('could not reach the host')
+    expect(r.detail).toBe('could not reach the server')
   })
 
   it('rejects the call when the project reference cannot be proved safe', async () => {
@@ -110,7 +110,7 @@ describe('reads escalate, exactly as docker reads do', () => {
 })
 
 describe('env names never come back with values', () => {
-  it('asks the host for names and gets names', async () => {
+  it('asks the server for names and gets names', async () => {
     const h = reader(() => ({
       ok: true,
       stdout: [
@@ -181,7 +181,7 @@ describe('writeImageTag', () => {
     expect(write).toContain(`<<'${COMPOSE_HEREDOC}'`)
   })
 
-  it('refuses when the file on the host is not the one the operator saw', async () => {
+  it('refuses when the file on the server is not the one the operator saw', async () => {
     // Somebody else edited it between the panel reading it and the operator
     // pressing the button. Writing the line they approved would put it in the
     // wrong place.

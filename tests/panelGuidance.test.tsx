@@ -99,7 +99,7 @@ describe('the panel the complaint named: Docker with nothing read', () => {
     expect(screen.getByText(/docker ps/)).toBeTruthy()
   })
 
-  it('leaves the button reachable, and it reads the selected host', async () => {
+  it('leaves the button reachable, and it reads the selected server', async () => {
     const { list } = stub()
     render(<DockerPanel servers={SERVERS} />)
 
@@ -128,7 +128,7 @@ describe('an inventory that has collected nothing', () => {
     // The sentence was always right; it named two next steps and offered
     // neither as a control. Check now is now the panel's primary, and the
     // Settings half has a button.
-    expect(screen.getByText(/No host facts have been collected yet/)).toBeTruthy()
+    expect(screen.getByText(/No server facts have been collected yet/)).toBeTruthy()
     expect(screen.getByRole('button', { name: /Check now/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Open Monitoring settings/ })).toBeTruthy()
   })
@@ -179,7 +179,7 @@ describe('a broadcast composer that has run nothing', () => {
     expect(screen.getByText(/Pick the servers to run on from the row above/)).toBeTruthy()
   })
 
-  it('counts the hosts back once some are picked', async () => {
+  it('counts the servers back once some are picked', async () => {
     stubBridge({})
     render(<BroadcastPanel servers={SERVERS} />)
 

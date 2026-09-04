@@ -64,7 +64,7 @@ async function verdictFor(name: string): Promise<string> {
   return (row.cells[1].textContent ?? '').trim()
 }
 
-describe('a host that could not be read', () => {
+describe('a server that could not be read', () => {
   it('is never shown as matching', async () => {
     // The failure this codebase has been bitten by repeatedly. A denied read is
     // its own word, in its own colour, with the status's own explanation beside
@@ -157,7 +157,7 @@ describe('a difference a rule ate', () => {
   })
 })
 
-describe('a host that does not have the file', () => {
+describe('a server that does not have the file', () => {
   it('gets its own answer rather than being called divergent or unread', async () => {
     // "All twelve web servers have this nginx.conf. Three do not."
     stub({
@@ -166,7 +166,7 @@ describe('a host that does not have the file', () => {
       c: { drift: drift(reading({ status: 'absent', hash: undefined, normalisedHash: undefined })) }
     })
     render(<DriftPanel servers={SERVERS} />)
-    expect(await verdictFor('web-03')).toBe('not on this host')
+    expect(await verdictFor('web-03')).toBe('not on this server')
     expect(await screen.findByText(/1 do not have the file/)).toBeTruthy()
   })
 })
@@ -213,11 +213,11 @@ describe('the baseline', () => {
     })
     render(<DriftPanel servers={SERVERS} />)
     const note = await screen.findByTestId('drift-chosen-baseline')
-    expect(note.textContent).toContain('a host that was fixed first looks exactly like a host that drifted')
+    expect(note.textContent).toContain('a server that was fixed first looks exactly like a server that drifted')
     expect(await verdictFor('web-03')).toBe('differs')
   })
 
-  it('stops saying so once a host is pinned', async () => {
+  it('stops saying so once a server is pinned', async () => {
     stub({
       a: { drift: drift(reading()) },
       b: { drift: drift(reading({ hash: 'h-x', normalisedHash: 'n-x' })) }
@@ -235,11 +235,11 @@ describe('what the panel refuses', () => {
     stub({ a: { drift: drift(reading()) } })
     render(<DriftPanel servers={[SERVERS[0]]} />)
     const refusal = await screen.findByTestId('drift-no-push')
-    expect(refusal.textContent).toContain('never writes a file to a host')
+    expect(refusal.textContent).toContain('never writes a file to a server')
     expect(refusal.textContent).toContain('that is a job')
   })
 
-  it('offers no control that could change a host', async () => {
+  it('offers no control that could change a server', async () => {
     stub({
       a: { drift: drift(reading()) },
       b: { drift: drift(reading({ hash: 'h-x', normalisedHash: 'n-x' })) }

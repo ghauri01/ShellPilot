@@ -85,7 +85,7 @@ export type DockerFailure =
 
 export const DOCKER_FAILURE_HELP: Record<DockerFailure, string> = {
   'not-installed':
-    'No docker on this host. Looked on PATH and in /usr/bin, /usr/local/bin, /snap/bin, /opt/homebrew/bin and /usr/sbin. If it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
+    'No docker on this server. Looked on PATH and in /usr/bin, /usr/local/bin, /snap/bin, /opt/homebrew/bin and /usr/sbin. If it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
   'daemon-unreachable':
     'Docker is installed but its daemon is not answering. It may not be running, or it may be listening on a socket this user cannot see.',
   'permission-denied':

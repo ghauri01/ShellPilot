@@ -522,7 +522,7 @@ export class JobRunner {
           this.deps.store.updateJobTarget(job.id, t.serverId, {
             state: 'skipped',
             outcome: 'cancelled',
-            error: 'ShellPilot stopped before this host was reached.',
+            error: 'ShellPilot stopped before this server was reached.',
             endedAt: at
           })
         }
@@ -706,7 +706,7 @@ export class JobRunner {
                 state: 'orphaned',
                 outcome: 'orphaned',
                 error:
-                  'This host is no longer in the workspace, so its job cannot be followed. Its ' +
+                  'This server is no longer in the workspace, so its job cannot be followed. Its ' +
                   `marker directory is still on the machine at ${handle.dir} and holds the ` +
                   'output and exit status.',
                 endedAt: this.now

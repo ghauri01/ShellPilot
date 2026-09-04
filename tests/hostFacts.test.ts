@@ -116,7 +116,7 @@ describe('the shipped collector, as text', () => {
     expect(HOST_FACTS_COMMAND.trimEnd().endsWith('"$SP_STATUS"')).toBe(true)
   })
 
-  it('strips control characters from every value on the host', () => {
+  it('strips control characters from every value on the server', () => {
     // The single defence that makes the format unforgeable: a value can never
     // become a second line, so it can never invent a key or a status.
     expect(HOST_FACTS_COMMAND).toMatch(/sp_val\(\)[^\n]*tr -d '\\000-\\037\\177'/)
@@ -201,7 +201,7 @@ const DEBIAN_STATUSES = [
 const status = (f: HostFacts, id: FactSourceId): string => factSource(f, id).status
 
 describe('parsing a collection', () => {
-  it('reads a complete apt host', () => {
+  it('reads a complete apt server', () => {
     const f = parseHostFacts(collected(DEBIAN_VALUES, DEBIAN_STATUSES), NOW)
     expect(f.distroId).toBe('debian')
     expect(f.distroVersion).toBe('12')
@@ -397,7 +397,7 @@ describe('facts on their way into the durable store', () => {
     expect(stored['host:source:security-updates']).toBe('unsupported')
   })
 
-  it('writes a key for every field, so retirement never half-empties a host', () => {
+  it('writes a key for every field, so retirement never half-empties a server', () => {
     const f = parseHostFacts('', NOW)
     const stored = hostFactsToFacts(f)
     // A completely failed probe still produces a full key set. The sampler
@@ -431,7 +431,7 @@ describe('the reader', () => {
     })
   })
 
-  it('tells "the host said nothing" apart from "the host said it could not see"', async () => {
+  it('tells "the server said nothing" apart from "the server said it could not see"', async () => {
     const reader = new HostFactsReader({
       exec: async () => ({ ok: true, code: 127, stdout: '', stderr: 'sh: not found' })
     })
@@ -608,7 +608,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     )
   })
 
-  it('reads a host with nothing on it, and says so nine times over', () => {
+  it('reads a server with nothing on it, and says so nine times over', () => {
     const f = host.collect()
     expect(f.distroId).toBe('debian')
     expect(f.prettyName).toBe('Debian GNU/Linux 12 (bookworm)')
@@ -721,7 +721,7 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(status(f, 'reboot-required')).toBe('ok')
   })
 
-  it('refuses to report "no reboot needed" on a host that cannot raise the flag', () => {
+  it('refuses to report "no reboot needed" on a server that cannot raise the flag', () => {
     // /var/run/reboot-required is written by update-notifier-common's apt hook.
     // On a minimal Debian without it the file is never created however many
     // kernels are installed, so its absence proves nothing — and a confident

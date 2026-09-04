@@ -82,7 +82,7 @@ function limitText(maxFirings: number, windowMs: number): string {
 function when(rule: RuleView): string {
   const kind = KIND_LABEL[rule.trigger.kind as RuleAlertKind] ?? rule.trigger.kind
   const parts = [`${kind} ${rule.trigger.event}`]
-  if (rule.filter.serverId !== undefined) parts.push('on one host')
+  if (rule.filter.serverId !== undefined) parts.push('on one server')
   if (rule.filter.minValue !== undefined) parts.push(`at or above ${rule.filter.minValue}`)
   return parts.join(', ')
 }
@@ -353,7 +353,7 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
         <h2 className="ui-section-title">Rules</h2>
         <p className="ui-note panel-head-purpose">
           When an alert fires, run a job or post to the webhook. A rule runs the job it was
-          confirmed with, on the hosts it was confirmed for, and refuses if either has changed.
+          confirmed with, on the servers it was confirmed for, and refuses if either has changed.
         </p>
         <div className="panel-head-actions">
           <button className="btn primary" onClick={() => setOpen((v) => !v)}>
@@ -397,7 +397,7 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
             <label className="col" style={{ gap: 4, fontSize: 12 }}>
               on
               <select value={hostFilter} onChange={(e) => setHostFilter(e.target.value)}>
-                <option value="">any host</option>
+                <option value="">any server</option>
                 {servers.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name}
@@ -482,7 +482,7 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
                 />
               </label>
               <div className="col" style={{ gap: 4, fontSize: 12 }}>
-                Hosts
+                Servers
                 <div className="col" style={{ gap: 2, maxHeight: 160, overflowY: 'auto' }}>
                   {servers.map((s) => (
                     <label key={s.id} className="row" style={{ gap: 6 }}>
@@ -505,7 +505,7 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
                 <div className="col" style={{ gap: 2, fontSize: 12 }}>
                   <div>
                     <span className="faint">This runs on </span>
-                    {plan.blastRadius} host(s) at once
+                    {plan.blastRadius} server(s) at once
                     <span className="faint"> and reads as </span>
                     {plan.risk}
                     <span className="faint">, every time it fires.</span>
@@ -522,7 +522,7 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
                 {/* Always typed, for a job rule. `planJob` would ask for a click
                     here; a standing authorisation is a different thing being
                     agreed to, and the word says which one. */}
-                This rule runs commands on those hosts unattended, whenever it fires. Type{' '}
+                This rule runs commands on those servers unattended, whenever it fires. Type{' '}
                 <b>{RULE_UNATTENDED_PHRASE}</b> to confirm.
                 <input
                   value={phrase}
@@ -560,7 +560,7 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
           <p className="panel-empty-title">No rules. Nothing runs on its own.</p>
           <p className="panel-empty-body">
             Press <b>New rule</b> to connect an alert to a job or to the webhook. Every rule is
-            confirmed once, against a specific job and specific hosts, and refuses to run if either
+            confirmed once, against a specific job and specific servers, and refuses to run if either
             of those changes afterwards.
           </p>
         </div>

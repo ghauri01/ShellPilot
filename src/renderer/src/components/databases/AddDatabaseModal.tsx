@@ -94,7 +94,7 @@ export function AddDatabaseModal(): React.JSX.Element {
   const uriPlaceholder: Record<DbKind, string> = {
     postgres: 'postgresql://user:pass@host:5432/dbname',
     mysql: 'mysql://user:pass@host:3306/dbname',
-    mssql: 'Server=host,1433;Database=db;User Id=user;Password=pass;Encrypt=true',
+    mssql: 'Server=server,1433;Database=db;User Id=user;Password=pass;Encrypt=true',
     mongodb: 'mongodb+srv://user:pass@cluster.mongodb.net/dbname',
     redis: 'redis://:pass@host:6379/0'
   }
@@ -173,7 +173,7 @@ export function AddDatabaseModal(): React.JSX.Element {
         <>
           <div className="field-row">
             <div className="field" style={{ gridColumn: 'span 1' }}>
-              <label className="field-label">Host / IP</label>
+              <label className="field-label">Server / IP</label>
               <input className="input" value={host} onChange={(e) => setHost(e.target.value)} />
             </div>
             <div className="field">
@@ -231,9 +231,9 @@ export function AddDatabaseModal(): React.JSX.Element {
           ))}
         </select>
         <span className="field-hint">
-          Reaches a database that is only routable from the bastion. The host and port above are
+          Reaches a database that is only routable from the bastion. The server and port above are
           resolved on the server, not on this machine.
-          {kind === 'mongodb' && ' mongodb+srv:// strings cannot be tunnelled — use host/port.'}
+          {kind === 'mongodb' && ' mongodb+srv:// strings cannot be tunnelled — use server/port.'}
         </span>
       </div>
 

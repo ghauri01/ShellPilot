@@ -86,7 +86,7 @@ export class HostFactsReader {
         // A transport failure is not a host failure. Saying "this host has no
         // package manager" when the SSH connection never opened would put a
         // fabricated inventory row in front of an operator.
-        return { ok: false, reason: 'unreachable', detail: r.error ?? 'could not reach the host' }
+        return { ok: false, reason: 'unreachable', detail: r.error ?? 'could not reach the server' }
       }
       // stderr is NOT merged into stdout here, unlike the Docker reader.
       //
@@ -102,7 +102,7 @@ export class HostFactsReader {
       // Reported as its own failure rather than as a host with nine unknowns,
       // which would look like a real collection from a very unhelpful machine.
       if (!stdout.includes(FACTS_STATUS_MARKER) && !/^V /m.test(stdout)) {
-        const detail = (r.stderr ?? '').trim().slice(0, 200) || 'the host returned no collector output'
+        const detail = (r.stderr ?? '').trim().slice(0, 200) || 'the server returned no collector output'
         return { ok: false, reason: 'no-output', detail }
       }
       return { ok: true, facts }

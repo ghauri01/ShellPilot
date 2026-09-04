@@ -83,7 +83,7 @@ function mount(rules: RuleView[], over: Record<string, unknown> = {}) {
 }
 
 describe('reading a rule back', () => {
-  it('shows the command and the hosts, not a job id', async () => {
+  it('shows the command and the servers, not a job id', async () => {
     // A standing authorisation nobody can read back is not consent, it is a
     // setting. The step TEXT is what somebody has to be able to check a year
     // later, and a job id is not it.
@@ -134,12 +134,12 @@ describe('reading a rule back', () => {
           ruleId: 'r1',
           fired: [T0],
           suppressed: 0,
-          refusal: 'rebooting gateway would cut three hosts.',
+          refusal: 'rebooting gateway would cut three servers.',
           refusedAt: T0
         }
       })
     ])
-    expect(await screen.findByText(/would cut three hosts/)).toBeTruthy()
+    expect(await screen.findByText(/would cut three servers/)).toBeTruthy()
   })
 
   it('says nothing runs on its own when there are none', async () => {
@@ -234,7 +234,7 @@ describe('writing a job rule', () => {
     await user.click(screen.getByLabelText('alpha'))
     await user.click(screen.getByLabelText('bravo'))
 
-    expect(await screen.findByText(/2 host\(s\) at once/)).toBeTruthy()
+    expect(await screen.findByText(/2 server\(s\) at once/)).toBeTruthy()
     expect(screen.getByText(/destructive/)).toBeTruthy()
     expect(screen.getByText(/every time it fires/)).toBeTruthy()
   })

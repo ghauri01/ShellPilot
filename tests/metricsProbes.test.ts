@@ -185,7 +185,7 @@ const NET = [
   'vethbf86cd0a: 9679005   23646    0    0    0     0          0         0  6082462   27670    0    0    0    0       0          0'
 ]
 
-describe('network totals on a host with bridges', () => {
+describe('network totals on a server with bridges', () => {
   it('counts only the physical interface when sysfs names one', () => {
     // The bug: a packet for a container is counted on eth0, again on the
     // bridge, and again on the veth. Measured at 5-9x the truth on a real

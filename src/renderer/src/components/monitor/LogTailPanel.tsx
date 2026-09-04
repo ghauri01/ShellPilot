@@ -404,11 +404,11 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
           placeholder={
             kind === 'container'
               ? containers.length
-                ? `${containers[0]} — ${containers.length} on this host`
+                ? `${containers[0]} — ${containers.length} on this server`
                 : 'new_system-redis-1'
               : kind === 'unit'
               ? units.length
-                ? `nginx.service — ${units.length} on this host`
+                ? `nginx.service — ${units.length} on this server`
                 : 'nginx.service'
               : '/var/log/syslog'
           }
@@ -429,7 +429,7 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
           className="btn ghost sm"
           title={
             options.length
-              ? `Pick from ${options.length} on this host`
+              ? `Pick from ${options.length} on this server`
               : 'Select a server to load the list'
           }
           disabled={running || options.length === 0}
@@ -456,7 +456,7 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
 
       <p className="ui-note">
         Follows a systemd unit, a file or a container&rsquo;s output across the servers you pick,
-        interleaved into one stream. A host that refuses is named rather than left out.
+        interleaved into one stream. A server that refuses is named rather than left out.
       </p>
 
       {/* -p and --since are the two flags people reach for during an incident,
@@ -553,7 +553,7 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
                 able to see at any moment that these lines came from a
                 privileged read, not only in the second after they started it. */}
             {d.usedSudo && (
-              <span className="chip warn" title="This host refused the unprivileged read, so it was retried with sudo -n">
+              <span className="chip warn" title="This server refused the unprivileged read, so it was retried with sudo -n">
                 <ShieldAlert size={11} /> reading as root
               </span>
             )}
@@ -602,7 +602,7 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
                 // quiet host unless it says what it is 12 of.
                 `${shown.length} of ${lines.length} lines match`
               )}
-              {paused && ' — paused, the host is still being followed'}
+              {paused && ' — paused, the server is still being followed'}
             </span>
             <label className="row" style={{ gap: 6 }}>
               <span
@@ -635,7 +635,7 @@ export function LogTailPanel({ servers, jump }: { servers: Server[]; jump?: LogT
             {selected.size === 0
               ? 'Pick one or more servers above, name a unit, file or container, then press Tail.'
               : `Name a ${kind === 'unit' ? 'unit' : kind === 'file' ? 'file path' : 'container'} above, then press Tail.`}{' '}
-            Lines from every selected host arrive in one stream, colour-coded by host, and the
+            Lines from every selected server arrive in one stream, colour-coded by server, and the
             filter accepts text, <span className="mono">/regex/</span> or{' '}
             <span className="mono">!exclude</span>.
           </p>

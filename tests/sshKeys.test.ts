@@ -37,7 +37,7 @@ describe('default ssh key detection', () => {
 
   it('finds private keys and ignores everything else in the folder', () => {
     writeFileSync(join(ssh, 'id_ed25519'), OPENSSH_PLAIN)
-    writeFileSync(join(ssh, 'id_ed25519.pub'), 'ssh-ed25519 AAAAC3Nza user@host\n')
+    writeFileSync(join(ssh, 'id_ed25519.pub'), 'ssh-ed25519 AAAAC3Nza user@server\n')
     writeFileSync(join(ssh, 'config'), 'Host example\n  User root\n')
     writeFileSync(join(ssh, 'known_hosts'), 'github.com ssh-ed25519 AAAA\n')
     writeFileSync(join(ssh, 'known_hosts_custom'), 'example.com ssh-rsa AAAA\n')
@@ -48,7 +48,7 @@ describe('default ssh key detection', () => {
 
   it('labels the algorithm from the matching .pub', () => {
     writeFileSync(join(ssh, 'id_ed25519'), OPENSSH_PLAIN)
-    writeFileSync(join(ssh, 'id_ed25519.pub'), 'ssh-ed25519 AAAAC3Nza user@host\n')
+    writeFileSync(join(ssh, 'id_ed25519.pub'), 'ssh-ed25519 AAAAC3Nza user@server\n')
     writeFileSync(join(ssh, 'id_rsa'), OPENSSH_PLAIN)
 
     const keys = listDefaultKeys()

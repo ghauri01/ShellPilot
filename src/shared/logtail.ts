@@ -258,7 +258,7 @@ export interface LogDiagnosis {
 export const LOG_ISSUE_HELP: Record<LogTailIssue, string> = {
   ok: '',
   'no-journal':
-    'No journalctl on this host, so it is not running systemd — Alpine, a container, or a pre-systemd distribution. Switch to File and give a path such as /var/log/messages.',
+    'No journalctl on this server, so it is not running systemd — Alpine, a container, or a pre-systemd distribution. Switch to File and give a path such as /var/log/messages.',
   'no-tail': 'No tail on the PATH an SSH session gets, which is unusual enough to be worth checking by hand.',
   'unit-not-loaded':
     'systemd does not know this unit. Check the name: journalctl will follow a unit that does not exist and show you nothing at all.',
@@ -269,14 +269,14 @@ export const LOG_ISSUE_HELP: Record<LogTailIssue, string> = {
   'file-missing':
     'That path does not exist yet. tail -F keeps waiting and picks the file up the moment it appears — right when you are watching for a log about to be written, and an empty pane forever otherwise.',
   'file-denied':
-    'That file exists but this account cannot read it. /var/log/secure and /var/log/audit/audit.log are root-only on most hosts.',
+    'That file exists but this account cannot read it. /var/log/secure and /var/log/audit/audit.log are root-only on most servers.',
   'file-is-dir': 'That path is a directory, not a file.',
   'no-docker':
-    'No docker on this host. Looked on PATH and in the usual install directories — if it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
+    'No docker on this server. Looked on PATH and in the usual install directories — if it lives somewhere else, a symlink into /usr/local/bin is the usual fix.',
   'docker-denied':
     'This account cannot reach the docker socket, so it cannot read container logs. Adding it to the docker group grants root-equivalent access on most installs, which is a decision worth making deliberately.',
   'container-missing':
-    'No container with that name or id on this host. It may have been removed, or the name may belong to a different host.',
+    'No container with that name or id on this server. It may have been removed, or the name may belong to a different server.',
   'container-stopped':
     'That container is not running. Its logs are still readable — this is history, not a live stream, and nothing new will arrive until it starts again.'
 }

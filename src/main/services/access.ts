@@ -107,7 +107,7 @@ export class AccessReader {
         // most important line in the file. Reporting "this host trusts no keys"
         // when the connection never opened would put a fabricated all-clear in
         // front of somebody running an access review.
-        return { ok: false, reason: 'unreachable', detail: r.error ?? 'could not reach the host' }
+        return { ok: false, reason: 'unreachable', detail: r.error ?? 'could not reach the server' }
       }
       // stderr is NOT merged into stdout, unlike the Docker reader. Every probe
       // in the collector redirects its own stderr to /dev/null, so anything on
@@ -120,7 +120,7 @@ export class AccessReader {
         // No status block means no collection. Reported as its own failure
         // rather than as a host with six unknowns and no accounts, which would
         // look like a real reading of a very empty machine.
-        const detail = (r.stderr ?? '').trim().slice(0, 200) || 'the host returned no collector output'
+        const detail = (r.stderr ?? '').trim().slice(0, 200) || 'the server returned no collector output'
         return { ok: false, reason: 'no-output', detail }
       }
       const access = parseAccessCollection(stdout, {
@@ -289,7 +289,7 @@ export class AccessCommitter {
           // to undo it and there is nothing to investigate.
           outcome = 'reverted-unconfirmed'
           const said = (disarm.stderr ?? '').trim().split('\n')[0].slice(0, 160)
-          reason = `the host let a new session in, but the confirmation could not be written to it (${said || disarm.error || `exit ${String(disarm.code)}`}).`
+          reason = `the server let a new session in, but the confirmation could not be written to it (${said || disarm.error || `exit ${String(disarm.code)}`}).`
         }
       }
 

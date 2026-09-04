@@ -221,7 +221,7 @@ function RunbookBody({
   // about two different scopes.
   const owned = hostId === null ? view.kindNote : view.hostNote
   const text = draft ?? owned?.text ?? ''
-  const scope = hostId === null ? `every host` : hostName
+  const scope = hostId === null ? `every server` : hostName
 
   const commit = (): void => {
     void saveRunbookNote(kind, hostId, text).then((r) => {
@@ -240,7 +240,7 @@ function RunbookBody({
       )}
 
       <div className="s-desc" data-testid="runbook-note-provenance">
-        Your note for {LABEL[kind]} on {scope}. This is text you wrote; nothing on a host can
+        Your note for {LABEL[kind]} on {scope}. This is text you wrote; nothing on a server can
         change it.
       </div>
       <textarea
@@ -260,7 +260,7 @@ function RunbookBody({
       )}
       {hostId !== null && view.kindNote && (
         <div className="s-desc" data-testid="runbook-kind-note">
-          <b>Every host, for {LABEL[kind]}:</b> {view.kindNote.text}
+          <b>Every server, for {LABEL[kind]}:</b> {view.kindNote.text}
         </div>
       )}
 
@@ -423,7 +423,7 @@ function OutstandingCard({
         </button>
         <button
           className="btn ghost sm"
-          title="Your note for this alert, and what was actually run the last three times it fired on this host."
+          title="Your note for this alert, and what was actually run the last three times it fired on this server."
           onClick={onRunbook}
         >
           Runbook
@@ -735,11 +735,11 @@ export function AlertsPanel(): React.JSX.Element {
             </select>
             <select
               className="input"
-              aria-label="Runbook host"
+              aria-label="Runbook server"
               value={runbook.hostId ?? ''}
               onChange={(e) => setRunbook((r) => ({ ...r, hostId: e.target.value || null }))}
             >
-              <option value="">Every host</option>
+              <option value="">Every server</option>
               {servers.map((srv) => (
                 <option key={srv.id} value={srv.id}>
                   {srv.name}
@@ -765,14 +765,14 @@ export function AlertsPanel(): React.JSX.Element {
         <summary className="disclosure-head">
           <ChevronRight size={14} className="chev" />
           <SlidersHorizontal size={13} />
-          Per-host thresholds — CPU and memory, where the estate is not uniform
+          Per-server thresholds — CPU and memory, where the estate is not uniform
         </summary>
         <div className="disclosure-body">
           <div className="s-desc">
-            The CPU and memory line for one host, where the estate is not uniform — a build box at
+            The CPU and memory line for one server, where the estate is not uniform — a build box at
             95% is working and a database at 95% is in trouble. Blank uses the workspace default of{' '}
-            {globalThreshold}%. Disk, inodes and load are deliberately not settable per host: they
-            are the numbers the Fleet Monitor colours a bar at and lists a host under, and an alert
+            {globalThreshold}%. Disk, inodes and load are deliberately not settable per server: they
+            are the numbers the Fleet Monitor colours a bar at and lists a server under, and an alert
             firing at a different number from the screen it sends you to is worse than no alert.
           </div>
           {servers.length === 0 ? (

@@ -223,7 +223,7 @@ describe('sweep behaviour', () => {
     expect(h.calls).toHaveLength(3)
   })
 
-  it('reports an unreachable host and carries on to the rest', async () => {
+  it('reports an unreachable server and carries on to the rest', async () => {
     // One dead server is not a reason to stop asking about the other fourteen.
     const events: FleetSampleEvent[] = []
     const sampler = new FleetSampler({
@@ -470,7 +470,7 @@ describe('what the sampler remembers for the MCP bridge', () => {
     await vi.advanceTimersByTimeAsync(0)
     const goodAt = h.sampler.lookup('a')?.entry.at
 
-    h.failNext('host unreachable')
+    h.failNext('server unreachable')
     await vi.advanceTimersByTimeAsync(60_000)
 
     const found = h.sampler.lookup('a')
@@ -478,10 +478,10 @@ describe('what the sampler remembers for the MCP bridge', () => {
     // now" are different answers and an agent needs each of them.
     expect(found?.entry.host).toBeTruthy()
     expect(found?.entry.at).toBe(goodAt)
-    expect(found?.entry.error).toBe('host unreachable')
+    expect(found?.entry.error).toBe('server unreachable')
   })
 
-  it('clears the error once the host answers again', async () => {
+  it('clears the error once the server answers again', async () => {
     const h = harness()
     h.sampler.configure({ enabled: true, intervalMs: 60_000, targets: [target('a')] })
     await vi.advanceTimersByTimeAsync(0)

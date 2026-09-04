@@ -100,7 +100,7 @@ describe('PVC capacity', () => {
 })
 
 describe('ingress', () => {
-  it('reads host, path, backend and TLS secret name', () => {
+  it('reads server, path, backend and TLS secret name', () => {
     const r = parseK8sResources(fixture('resources.txt'), 0)
     if (!r.ingresses.ok) throw new Error('expected the ingress read to succeed')
     const ing = r.ingresses.items[0]
@@ -290,7 +290,7 @@ describe('the deprecated-API scan', () => {
   })
 })
 
-describe('helm, which most hosts do not have', () => {
+describe('helm, which most servers do not have', () => {
   it('resolves the binary the way kubectl is resolved', () => {
     // `ssh host cmd` runs a non-login shell whose PATH has no /usr/local/bin,
     // which is where helm usually lives.
@@ -340,11 +340,11 @@ describe('helm, which most hosts do not have', () => {
   })
 })
 
-describe('a host that cannot be reached says so', () => {
+describe('a server that cannot be reached says so', () => {
   const reader = (ok: boolean): KubernetesReader =>
     new KubernetesReader({ exec: async () => ({ ok, error: ok ? undefined : 'connect ETIMEDOUT' }) })
 
-  it('does not report an unreachable host as a helm-less one', () => {
+  it('does not report an unreachable server as a helm-less one', () => {
     // Two completely different fixes: install helm, or fix the network.
     return reader(false)
       .helm({}, 'kind-spk8s')
@@ -356,7 +356,7 @@ describe('a host that cannot be reached says so', () => {
       })
   })
 
-  it('does not report an unreachable host as a cluster with no deprecated APIs', async () => {
+  it('does not report an unreachable server as a cluster with no deprecated APIs', async () => {
     const scan = await reader(false).apiScan({}, 'kind-spk8s')
     expect(scan.findings).toEqual([])
     expect(scan.notChecked[0]).toContain('the scan did not run at all')

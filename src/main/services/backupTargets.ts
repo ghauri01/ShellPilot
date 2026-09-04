@@ -725,7 +725,7 @@ export function databaseDumpTarget(
         'This connection is defined by a connection string, and rebuilding a dump command out of one is how a dump ends up pointed at the wrong database.'
     }
   }
-  if (!db.host || !db.database) return { error: 'This database has no host or database name saved.' }
+  if (!db.host || !db.database) return { error: 'This database has no server or database name saved.' }
   const resolved = resolveDbSecrets<{ id: string; password?: string; uri?: string }>({ id: db.id })
   return {
     target: {

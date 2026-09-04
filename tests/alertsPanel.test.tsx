@@ -156,7 +156,7 @@ describe('the history the chip cannot show', () => {
   })
 })
 
-describe('the per-host threshold box', () => {
+describe('the per-server threshold box', () => {
   const server = {
     id: 's1',
     workspaceId: 'ws-default',
@@ -387,7 +387,7 @@ describe('the chip is a pointer at the inbox', () => {
     expect(useApp.getState().activity).toBe('monitor')
   })
 
-  it('names the host and the reading in its tooltip', () => {
+  it('names the server and the reading in its tooltip', () => {
     useAlerts.setState({
       active: {
         's1:disk': { serverId: 's1', serverName: 'web-1', kind: 'disk', value: 91, since: T0 },
@@ -563,7 +563,7 @@ describe('the explanation, kept but folded', () => {
     await waitFor(() => expect(screen.getByText('Background checks on')).toBeTruthy())
   })
 
-  it('files per-host thresholds behind their own fold, out of the alert flow', async () => {
+  it('files per-server thresholds behind their own fold, out of the alert flow', async () => {
     // Configuration, not an alert. It used to sit between the outstanding list
     // and the history, with a paragraph of justification attached.
     useApp.setState({
@@ -592,7 +592,7 @@ describe('the explanation, kept but folded', () => {
     // Folded, and still whole: the box and the paragraph explaining why disk,
     // inodes and load are not settable per host are both in there.
     expect(fold.contains(screen.getByLabelText('CPU and memory threshold for web-1'))).toBe(true)
-    expect(fold.textContent).toContain('deliberately not settable per host')
+    expect(fold.textContent).toContain('deliberately not settable per server')
   })
 })
 

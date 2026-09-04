@@ -167,7 +167,7 @@ export function AddServerModal(): React.JSX.Element {
 
       <div className="field-row">
         <div className="field" style={{ gridColumn: 'span 1' }}>
-          <label className="field-label">Host / IP</label>
+          <label className="field-label">Server / IP</label>
           <input className="input" placeholder="10.20.0.10" value={host} onChange={(e) => setHost(e.target.value)} />
         </div>
         <div className="field-row" style={{ gridColumn: 'span 1' }}>

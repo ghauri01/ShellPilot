@@ -120,7 +120,7 @@ describe('the drift probe in the sweep', () => {
     expect(h.calls).toHaveLength(1)
   })
 
-  it('hands the probe the host name from this sweep, so the hostname rule has one', async () => {
+  it('hands the probe the server name from this sweep, so the hostname rule has one', async () => {
     // Without it, every templated file in the estate is unique and the whole
     // comparison is noise. Taken from THIS sweep's sample rather than a cached
     // one: a renamed host normalised against the name it used to have reads as

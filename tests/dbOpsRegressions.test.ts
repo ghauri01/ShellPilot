@@ -286,11 +286,11 @@ describe('what goes into the durable store', () => {
       Seconds_Behind_Master: null,
       Last_IO_Errno: 2005,
       Last_IO_Error:
-        "error connecting to master 'replicator@db-eu.internal:3306' - retry-time: 60 retries: 1 message: Unknown MySQL server host 'db-eu.internal' (-2)"
+        "error connecting to master 'replicator@db-eu.internal:3306' - retry-time: 60 retries: 1 message: Unknown MySQL server server 'db-eu.internal' (-2)"
     }
   ])
 
-  it('the replication username and source host are not written down verbatim', () => {
+  it('the replication username and source server are not written down verbatim', () => {
     const v = judgeMysqlChannel(channel[0])
     expect(v.because).not.toMatch(/replicator@/)
     expect(redactDbIdentifiers("user 'repl'@'10.0.0.9'")).not.toMatch(/10\.0\.0\.9/)

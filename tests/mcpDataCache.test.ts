@@ -43,7 +43,7 @@ describe('mcpDataCache', () => {
     expect(prodServers.some((s) => s.workspaceId === 'ws-dev')).toBe(false)
   })
 
-  it('preserves the jump-host chain for credential resolution', () => {
+  it('preserves the jump-server chain for credential resolution', () => {
     const s1 = getCachedServer('s1')!
     expect(s1.route).toHaveLength(1)
     expect(s1.route[0].serverId).toBe('bastion-1')

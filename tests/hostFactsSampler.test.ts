@@ -172,7 +172,7 @@ describe('the facts cadence', () => {
     expect(h.factCalls).toEqual(['fleet:a'])
   })
 
-  it('does not probe a host that just failed its metrics sample', async () => {
+  it('does not probe a server that just failed its metrics sample', async () => {
     // A host that refused a metrics channel will refuse this one too, and
     // paying a 45-second timeout to find that out again costs the rest of the
     // estate its place in the sweep.
@@ -229,10 +229,10 @@ describe('what the cache keeps between collections', () => {
     // two facts and an operator needs both.
     const h = harness()
     await vi.advanceTimersByTimeAsync(0)
-    h.failMetrics('host went away')
+    h.failMetrics('server went away')
     await vi.advanceTimersByTimeAsync(3 * 120_000)
     expect(h.sampler.factsFor('a').facts?.packageManager).toBe('apt')
-    expect(h.sampler.lookup('a')?.entry.error).toBe('host went away')
+    expect(h.sampler.lookup('a')?.entry.error).toBe('server went away')
   })
 
   it('keeps the last good facts when the probe itself starts failing', async () => {
@@ -290,17 +290,17 @@ describe('what the renderer is told', () => {
 
   it('reports a facts failure separately from a metrics failure', async () => {
     const h = harness()
-    h.failFacts('the host answered but returned no usable facts')
+    h.failFacts('the server answered but returned no usable facts')
     await vi.advanceTimersByTimeAsync(0)
     // The metrics half succeeded; only the facts half did not.
     expect(h.events[0].host).toBeDefined()
     expect(h.events[0].error).toBeUndefined()
-    expect(h.events[0].factsError).toBe('the host answered but returned no usable facts')
+    expect(h.events[0].factsError).toBe('the server answered but returned no usable facts')
   })
 })
 
 describe('what reaches the durable store', () => {
-  it('writes host facts under their own prefix, into item A’s store', async () => {
+  it('writes server facts under their own prefix, into item A’s store', async () => {
     const h = harness()
     await vi.advanceTimersByTimeAsync(0)
     const keys = h.store.upserts.filter((u) => u.key.startsWith('host:')).map((u) => u.key)
@@ -320,7 +320,7 @@ describe('what reaches the durable store', () => {
     expect(sec?.value).toBe('unknown')
   })
 
-  it('does not retire host facts on a sweep that did not collect them', async () => {
+  it('does not retire server facts on a sweep that did not collect them', async () => {
     // Retiring against an empty set would delete the whole inventory thirty
     // times an hour and record a fact-removed event for every key each time.
     const h = harness()

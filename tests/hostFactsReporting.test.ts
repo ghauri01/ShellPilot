@@ -159,7 +159,7 @@ describe('the two staleness axes', () => {
   it('warns when the cache behind the counts is old, and says it will not refresh it', () => {
     const stale = String(Math.floor((NOW - METADATA_STALE_MS - 86_400_000) / 1000))
     const out = describeHostFacts(build({ ...VALUES, 'meta-at': stale }, OK_STATUSES), NOW)
-    expect(out).toMatch(/describe the host as it was then/)
+    expect(out).toMatch(/describe the server as it was then/)
     expect(out).toMatch(/never refreshes it/)
     // The counts survive. They are qualified, not deleted.
     expect(out).toContain('Pending updates: 7')

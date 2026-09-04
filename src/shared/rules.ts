@@ -463,7 +463,7 @@ const OUTCOME_WORDS: Record<RuleOutcome, string> = {
 export function ruleNotice(rule: Rule, row: StoredAlertRow, outcome: RuleOutcome): RuleNotice {
   const what =
     rule.action.type === 'job'
-      ? `${OUTCOME_WORDS[outcome]} the job "${rule.action.spec.title}" on ${rule.action.targets.length} host(s)`
+      ? `${OUTCOME_WORDS[outcome]} the job "${rule.action.spec.title}" on ${rule.action.targets.length} server(s)`
       : OUTCOME_WORDS[outcome]
   const notice: RuleNotice = {
     event: 'raised',

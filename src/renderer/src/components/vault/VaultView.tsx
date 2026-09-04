@@ -576,7 +576,7 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
             label="Public key"
             value={entry.publicKey ?? ''}
             onChange={(v) => set({ publicKey: v })}
-            placeholder="ssh-ed25519 AAAA… user@host"
+            placeholder="ssh-ed25519 AAAA… user@server"
           />
         </>
       )}

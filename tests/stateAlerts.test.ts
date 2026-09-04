@@ -87,7 +87,7 @@ afterEach(() => {
 })
 
 describe('a kind that is a state rather than a reading', () => {
-  it('raises once for a host that stops answering, and clears when it answers', () => {
+  it('raises once for a server that stops answering, and clears when it answers', () => {
     alerts.checkStateAlert('s1', 'web-1', 'host-unreachable', true)
     expect(raises()).toHaveLength(1)
     expect(raises()[0].summary).toBe('web-1 did not answer the last check')
@@ -179,7 +179,7 @@ describe('a state that could not be measured', () => {
 })
 
 describe('a state that survives a restart', () => {
-  it('does not re-announce a host that was unreachable when the app closed', () => {
+  it('does not re-announce a server that was unreachable when the app closed', () => {
     alerts.checkStateAlert('s1', 'web-1', 'host-unreachable', true)
     expect(raises()).toHaveLength(1)
     const rows = loggedRows()
@@ -237,7 +237,7 @@ describe('a state whose resolve never arrives', () => {
     expect(chips()['t1:tunnel-down']).toBeDefined()
   })
 
-  it('hears the next job failure on a host whose failed job was never re-run', () => {
+  it('hears the next job failure on a server whose failed job was never re-run', () => {
     alerts.checkStateAlert('s1', 'web-1', 'job-failed', true, 'nightly upgrade')
     expect(raises()).toHaveLength(1)
 
@@ -263,7 +263,7 @@ describe('a state whose resolve never arrives', () => {
     expect(raises()).toHaveLength(1)
   })
 
-  it('does not re-announce an unreachable host across an ordinary restart', () => {
+  it('does not re-announce an unreachable server across an ordinary restart', () => {
     // The hold has to survive what it was built to survive. A host that was
     // unreachable when the app closed and is unreachable when it opens has not
     // crossed anything, and the sampler corroborates it every couple of
