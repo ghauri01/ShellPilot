@@ -1,4 +1,4 @@
-import { KeyRound, Lock, Globe, StickyNote, User, FileKey, Shield } from 'lucide-react'
+import { KeyRound, Lock, Globe, StickyNote, User, FileKey, Shield, Trash2 } from 'lucide-react'
 import { useVault } from '../../store/vault'
 import { clsx } from '../../lib/format'
 import { useApp } from '../../store/app'
@@ -18,6 +18,7 @@ export function VaultSidebar(): React.JSX.Element {
   const entries = useVault((s) => s.entries)
   const selectedId = useVault((s) => s.selectedId)
   const select = useVault((s) => s.select)
+  const remove = useVault((s) => s.deleteEntry)
   const query = useVault((s) => s.query)
   const setQuery = useVault((s) => s.setQuery)
   const activeWorkspaceId = useApp((s) => s.activeWorkspaceId)
@@ -75,6 +76,39 @@ export function VaultSidebar(): React.JSX.Element {
               </span>
             )}
             <span className="label">{e.name}</span>
+            {/* Deleting was only reachable by selecting an entry and finding the
+                bin in the editor, and it happened on the first click with no
+                confirmation -- for a secret that cannot be recovered afterwards.
+                The row's own control asks first, and names what it is about to
+                destroy so the answer is to a question and not to a reflex. */}
+            <button
+              className="faint"
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                padding: '2px 4px',
+                marginLeft: 'auto',
+                display: 'flex',
+                alignItems: 'center',
+                color: 'inherit'
+              }}
+              title={`Delete ${e.name}`}
+              aria-label={`Delete ${e.name}`}
+              onClick={(ev) => {
+                ev.stopPropagation()
+                if (
+                  !window.confirm(
+                    `Delete “${e.name}” from the vault?\n\nThis cannot be undone, and anything using this entry will stop being able to authenticate.`
+                  )
+                ) {
+                  return
+                }
+                void remove(e.id)
+              }}
+            >
+              <Trash2 size={12} />
+            </button>
           </div>
         ))}
         {shown.length === 0 && (

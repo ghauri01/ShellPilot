@@ -496,6 +496,15 @@ function EntryEditor({ entry }: { entry: VaultEntry }): React.JSX.Element {
           className="btn sm danger"
           title="Delete this entry"
           onClick={() => {
+            // Same question the sidebar asks. Two delete paths that disagree
+            // about whether this is confirmable is worse than either.
+            if (
+              !window.confirm(
+                `Delete “${entry.name}” from the vault?\n\nThis cannot be undone, and anything using this entry will stop being able to authenticate.`
+              )
+            ) {
+              return
+            }
             remove(entry.id)
             toast(`${entry.name} deleted`)
           }}
