@@ -207,8 +207,7 @@ describe.skipIf(process.platform === 'win32')('plan and write, against a host ru
     const h = fakeHost('# nightly\n0 3 * * * /usr/bin/backup')
     const r = await planCronEditOnHost(h.deps(), TARGET, {
       op: 'update',
-      lineIndex: 1,
-      lineText: '0 3 * * * /usr/bin/backup',
+      line: '0 3 * * * /usr/bin/backup',
       schedule: '0 4 * * *',
       command: '/usr/bin/backup'
     })

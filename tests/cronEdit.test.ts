@@ -11,6 +11,7 @@ import {
   isValidCronSchedule,
   planCronEdit,
   cronEditRefusal,
+  resolveCronEdit,
   CRON_EDITABLE_KINDS,
   buildCronWriteCommand,
   parseCronWriteResult,
@@ -697,5 +698,53 @@ describe('the shape of an edit, as the planner sees it', () => {
     expect(plan.before).toBe(before)
     expect(plan.after).toBe(`${before}@hourly /usr/bin/poll\n`)
     expect(plan.summary).toContain('@hourly /usr/bin/poll')
+  })
+})
+
+describe('pointing at a job by its line rather than its position', () => {
+  it('carries the line a job came from, so the panel has something to point at', () => {
+    const d = doc(FILES.aligned)
+    expect(d.entries.map((e) => e.line)).toEqual([
+      '0  3    * * *   /usr/bin/backup --all',
+      '30 4    * * 1   /usr/bin/weekly'
+    ])
+  })
+
+  it('does not claim a systemd timer has a line to edit', () => {
+    // It is not a line in a file. That absence is an answer, not an omission.
+    const timers = parseCrontabDocument('', 'systemd', 'systemd-timer', false)
+    expect(timers.entries).toEqual([])
+  })
+
+  it('resolves a line to its position in the file the host just handed over', () => {
+    const d = doc(FILES.commentBetween)
+    const r = resolveCronEdit(d, { op: 'remove', line: '30 4 * * 1 /usr/bin/weekly' })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.edit).toEqual({ op: 'remove', lineIndex: 4, lineText: '30 4 * * 1 /usr/bin/weekly' })
+  })
+
+  it('resolves through the indentation the panel never saw', () => {
+    const d = doc('  0 3 * * * /usr/bin/backup  \n')
+    const r = resolveCronEdit(d, { op: 'remove', line: '0 3 * * * /usr/bin/backup' })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    // The RAW line, with its whitespace, is what the planner is handed — the
+    // trimmed form is only how the panel names it.
+    expect(r.edit).toMatchObject({ lineIndex: 0, lineText: '  0 3 * * * /usr/bin/backup  ' })
+  })
+
+  it('refuses when the job the panel is pointing at is no longer in the file', () => {
+    const d = doc(FILES.plain)
+    const r = resolveCronEdit(d, { op: 'remove', line: '0 3 * * * /usr/bin/gone' })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toContain('is not in this crontab any more')
+  })
+
+  it('does not resolve a line onto a comment that happens to read the same', () => {
+    const d = doc('# 0 3 * * * /usr/bin/backup\n30 4 * * 1 /usr/bin/weekly\n')
+    const r = resolveCronEdit(d, { op: 'remove', line: '0 3 * * * /usr/bin/backup' })
+    expect(r.ok).toBe(false)
   })
 })

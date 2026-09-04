@@ -58,6 +58,20 @@ export interface CronEntry {
   /** systemd timers only. */
   nextRun?: string
   lastRun?: string
+  /**
+   * The line this came from, `\r` stripped and trimmed, exactly as the parser
+   * saw it.
+   *
+   * Absent on a systemd timer, which is not a line in a file and has nothing to
+   * point at — and that absence is the edit half's answer to "can this be
+   * changed" as much as the source kind is.
+   *
+   * It exists because a job's IDENTITY has to survive a round trip through the
+   * renderer and back. An index into a list does not: the list on screen was
+   * read minutes ago and the file may have moved under it, and an index that
+   * still resolves against a changed file resolves to the wrong job silently.
+   */
+  line?: string
 }
 
 export interface CronParseResult {
@@ -1149,7 +1163,7 @@ export function parseCrontabDocument(
       lines.push({ kind: 'unparsed', text: raw, eol })
       continue
     }
-    const entry = entryFromLayout(layout, origin, kind)
+    const entry = { ...entryFromLayout(layout, origin, kind), line }
     entries.push(entry)
     lines.push({ kind: 'job', text: raw, eol, entry })
   }
@@ -1766,4 +1780,97 @@ export function parseCronRead(output: string): CronReadResult {
     text: status === 'ok' ? m[2] : '',
     ...(detail === '' ? {} : { detail })
   }
+}
+
+// ---- What crosses the wire ----------------------------------------------
+
+/**
+ * An edit as the PANEL asks for it: by the line's own text, never by position.
+ *
+ * The panel's list was read minutes ago. An index into it still resolves
+ * against a file that has since changed — to the wrong job, silently — whereas
+ * a line that is no longer in the file is a question with an obvious answer.
+ * `resolveCronEdit` turns one of these into the positional form the planner
+ * takes, against the document that was just read from the host, or refuses.
+ */
+export type CronEditRequest =
+  | { op: 'add'; schedule: string; command: string; input?: string }
+  | { op: 'update'; line: string; schedule: string; command: string; input?: string }
+  | { op: 'remove'; line: string }
+
+/** Find the line the panel meant in the file the host just handed over. */
+export function resolveCronEdit(
+  doc: CronDocument,
+  req: CronEditRequest
+): { ok: true; edit: CronEdit } | { ok: false; reason: string } {
+  if (req.op === 'add') return { ok: true, edit: req }
+  const index = doc.lines.findIndex(
+    (l) => l.kind === 'job' && l.text.replace(/\r/g, '').trim() === req.line
+  )
+  if (index === -1) {
+    return {
+      ok: false,
+      reason: `\`${req.line}\` is not in this crontab any more. It has been edited on the host since it was read; read it again.`
+    }
+  }
+  const lineText = doc.lines[index].text
+  return {
+    ok: true,
+    edit:
+      req.op === 'remove'
+        ? { op: 'remove', lineIndex: index, lineText }
+        : {
+            op: 'update',
+            lineIndex: index,
+            lineText,
+            schedule: req.schedule,
+            command: req.command,
+            ...(req.input === undefined ? {} : { input: req.input })
+          }
+  }
+}
+
+export interface CronEditTargetRef {
+  serverId: string
+  serverName: string
+  cfg: unknown
+}
+
+/** What `cron:plan-edit` answers with. Every field but `ok` is absent on a refusal. */
+export interface CronEditPlanReply {
+  ok: boolean
+  reason?: string
+  before?: string
+  after?: string
+  summary?: string
+  addedFinalNewline?: boolean
+  token?: string
+  command?: string
+}
+
+export interface CronWriteReply extends CronWriteResult {
+  ok: boolean
+  serverId: string
+  serverName: string
+}
+
+/**
+ * The two channels an edit needs, named so the panel, the preload and main all
+ * agree on one shape — the way the compose module's bridge already does.
+ *
+ * The panel checks for these at runtime rather than assuming them, for the same
+ * reason it treats `sources` as optional: a main process that has not been
+ * taught the channels answers nothing, and an edit button that does nothing is
+ * worse than no edit button.
+ */
+export interface CronEditBridge {
+  planEdit: (
+    target: CronEditTargetRef,
+    edit: CronEditRequest,
+    opts?: { sources?: CronSourceReport[] }
+  ) => Promise<CronEditPlanReply>
+  write: (
+    target: CronEditTargetRef,
+    req: { before: string; after: string; token: string; runId: string; approval?: unknown }
+  ) => Promise<CronWriteReply>
 }

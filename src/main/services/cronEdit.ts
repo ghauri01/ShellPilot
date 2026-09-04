@@ -6,11 +6,14 @@ import {
   parseCronWriteResult,
   parseCrontabDocument,
   planCronEdit,
+  resolveCronEdit,
   summariseCronSources,
-  type CronEdit,
   type CronEditPlan,
+  type CronEditPlanReply,
+  type CronEditRequest,
+  type CronEditTargetRef,
   type CronSourceReport,
-  type CronWriteResult
+  type CronWriteReply
 } from '../../shared/cron'
 import { planBroadcast, verifyApproval } from '../../shared/broadcast'
 
@@ -45,12 +48,6 @@ import { planBroadcast, verifyApproval } from '../../shared/broadcast'
 // path that records what a human was asked and checks that the thing about to
 // run is still the thing they answered about — not around it.
 
-export interface CronEditTarget {
-  serverId: string
-  serverName: string
-  cfg: unknown
-}
-
 interface ExecLike {
   ok: boolean
   code: number | null
@@ -80,28 +77,6 @@ export interface CronEditDeps {
     commands: string[]
     reason?: string
   }) => void
-}
-
-/** What the panel needs in order to show a confirmation that means something. */
-export interface CronEditPlanResponse {
-  ok: boolean
-  /** Why not, when `ok` is false. Always a sentence, never a code. */
-  reason?: string
-  /** The bytes on the host now, and the bytes that would replace them. */
-  before?: string
-  after?: string
-  summary?: string
-  addedFinalNewline?: boolean
-  /** Names this change's backup on the host. Round-trips through the renderer. */
-  token?: string
-  /** The command that would run, for the confirmation dialog and the record. */
-  command?: string
-}
-
-export interface CronWriteResponse extends CronWriteResult {
-  ok: boolean
-  serverId: string
-  serverName: string
 }
 
 /**
@@ -147,10 +122,10 @@ function execFailure(r: ExecLike): string | null {
  */
 export async function planCronEditOnHost(
   deps: CronEditDeps,
-  target: CronEditTarget,
-  edit: CronEdit,
+  target: CronEditTargetRef,
+  req: CronEditRequest,
   opts: { sources?: CronSourceReport[] } = {}
-): Promise<CronEditPlanResponse> {
+): Promise<CronEditPlanReply> {
   // The collection's own verdict, when the panel has one to offer. A `partial`
   // or `denied` user-crontab source means the list on screen is not the whole
   // file, and an edit planned against a list that is missing lines is an edit
@@ -183,7 +158,12 @@ export async function planCronEditOnHost(
   }
 
   const doc = parseCrontabDocument(read.text, 'crontab -l', 'user-crontab', false)
-  const plan: CronEditPlan = planCronEdit(doc, edit)
+  // The panel points at a LINE, not at a position. Resolving it against the
+  // file the host just handed over is where "that job is not there any more"
+  // gets answered, rather than an index quietly landing on a different job.
+  const resolved = resolveCronEdit(doc, req)
+  if (!resolved.ok) return { ok: false, reason: resolved.reason }
+  const plan: CronEditPlan = planCronEdit(doc, resolved.edit)
   if (!plan.ok) return { ok: false, reason: plan.reason }
 
   const token = mintCronToken()
@@ -209,9 +189,9 @@ export async function planCronEditOnHost(
  */
 export async function writeCronEdit(
   deps: CronEditDeps,
-  target: CronEditTarget,
+  target: CronEditTargetRef,
   req: { before: string; after: string; token: string; runId: string; approval?: unknown }
-): Promise<CronWriteResponse> {
+): Promise<CronWriteReply> {
   const host = { serverId: target.serverId, serverName: target.serverName }
   let command: string
   try {
