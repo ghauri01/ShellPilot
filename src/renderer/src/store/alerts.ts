@@ -214,9 +214,27 @@ const LOWER_IS_WORSE: Record<NumericAlertKind, boolean> = {
   'cert-expiry': true
 }
 
-/** Whether `value` is at least as bad as `worse` allowing for the direction. */
-const escalated = (kind: NumericAlertKind, value: number, said: number): boolean =>
-  LOWER_IS_WORSE[kind] ? value <= said - ESCALATE_BY[kind] : value >= said + ESCALATE_BY[kind]
+/**
+ * Whether `value` is at least as bad as `said`, allowing for the direction.
+ *
+ * ZERO IS A BOUNDARY FOR A DOWNWARD KIND, NOT JUST ANOTHER NUMBER. For a
+ * certificate, one day left and one day past expiry are two days apart and are
+ * not two degrees of the same thing: on one side the service works, on the
+ * other it stopped. With only the step rule, `+1` to `-1` is a two-day move
+ * against a seven-day step, so the moment that matters most would have waited
+ * for the next repeat — up to a day after the certificate died.
+ *
+ * So crossing it counts, whatever the step. This says nothing about the upward
+ * kinds, where zero is simply the bottom of the scale and crossing it is not a
+ * thing that happens.
+ */
+const escalated = (kind: NumericAlertKind, value: number, said: number): boolean => {
+  if (LOWER_IS_WORSE[kind]) {
+    if (said > 0 && value <= 0) return true
+    return value <= said - ESCALATE_BY[kind]
+  }
+  return value >= said + ESCALATE_BY[kind]
+}
 
 /** Whether the value has come back far enough past the line to count as a real
  *  recovery rather than merely stepping off it. */

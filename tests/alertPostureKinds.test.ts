@@ -130,6 +130,34 @@ describe('a certificate running out', () => {
     expect(shown[0].title).toBe('web-1: Certificate expiring today')
   })
 
+  it('announces the day it actually expires, without waiting out the daily window', () => {
+    // The step rule alone does not carry this. ESCALATE_BY is seven days, so
+    // one-day-left to one-day-past is a two-day move and would have been left
+    // to the next repeat — up to a day after the certificate stopped working,
+    // which is the one moment this kind exists for.
+    //
+    // Zero is a boundary for a downward kind rather than another number on the
+    // scale: on one side the service works and on the other it does not, so
+    // crossing it is a change of kind, not of degree.
+    cert(1)
+    expect(raises()).toHaveLength(1)
+
+    cert(-1)
+    expect(raises()).toHaveLength(2)
+    expect(shown[1].title).toBe('web-1: Certificate 1 days PAST expiry')
+  })
+
+  it('does not treat every step below the line as a crossing', () => {
+    // The negative here is the paired assertion: without it the rule above
+    // could be "always escalate for a downward kind", which would announce a
+    // certificate every single day of the month before it expires.
+    cert(20)
+    expect(raises()).toHaveLength(1)
+
+    cert(18)
+    expect(raises()).toHaveLength(1)
+  })
+
   it('escalates when it gets a week worse, without waiting out the daily window', () => {
     // Monotone movement towards an outage is the one shape a flap never has,
     // and a fortnight of silence between 29 days and 8 is how a certificate
