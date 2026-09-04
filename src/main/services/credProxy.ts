@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { timingSafeEqual } from 'node:crypto'
 import {
   CRED_PROXY_TOKEN_HEADER,
@@ -148,8 +149,10 @@ function tokenEquals(a: string, b: string): boolean {
  *
  *  The listener already binds 127.0.0.1, so this should never fire. It is here
  *  because "bound to loopback" is a property of one line of setup code that a
- *  future edit could change to 0.0.0.0 for a plausible-sounding reason, and
- *  the refusal should not depend on remembering why that line is what it is. */
+ *  future edit could widen to a wildcard address for a plausible-sounding
+ *  reason, and the refusal should not depend on remembering why that line is
+ *  what it is. (The literal for that wildcard is deliberately not written
+ *  anywhere in this file — tests/credProxyWiring.test.ts greps for it.) */
 export function isLoopbackAddress(addr: string | undefined): boolean {
   if (!addr) return false
   const a = addr.startsWith('::ffff:') ? addr.slice(7) : addr
@@ -293,9 +296,9 @@ export class CredProxy {
         resolve({ ok: false, error: err.message })
       }
       server.once('error', onError)
-      // 127.0.0.1, never 0.0.0.0 and never a configurable host. A proxy that
-      // holds API credentials and listens on a LAN interface is a credential
-      // server for the network it is on.
+      // 127.0.0.1, never a wildcard and never a configurable host. A proxy
+      // that holds API credentials and listens on a LAN interface is a
+      // credential server for the network it is on.
       server.listen(this.file.port, '127.0.0.1', () => {
         server.removeListener('error', onError)
         resolve({ ok: true })
@@ -614,3 +617,45 @@ function readBody(req: IncomingMessage, max: number): Promise<Buffer> {
 }
 
 export { emptyFile as emptyCredProxyFile }
+
+// --------------------------------------------------------------------- io
+//
+// Paths in, no `electron` import. main/index.ts resolves userData and hands
+// these the filenames, which is what keeps this module out of the reach of
+// anything that would have to import the app object to use it.
+
+/** The rule file as it is on disk, or an empty one. A corrupt file reads as
+ *  empty rather than throwing: a proxy that will not start because a JSON file
+ *  lost a brace is a proxy whose failure mode is "every script on this machine
+ *  stops working", and `sanitiseRules` already treats the contents as hostile. */
+export function readCredProxyFile(path: string): unknown {
+  try {
+    if (existsSync(path)) return JSON.parse(readFileSync(path, 'utf8'))
+  } catch (err) {
+    console.error('[credproxy] rule file unreadable, starting empty:', err)
+  }
+  return emptyFile()
+}
+
+/** Written temp-then-rename, like the vault and the workspace locks. A
+ *  half-written rule file is a rule file that has lost a destination. */
+export function writeCredProxyFile(path: string, file: CredProxyFile): void {
+  try {
+    writeFileSync(`${path}.tmp`, JSON.stringify(file), { mode: 0o600 })
+    renameSync(`${path}.tmp`, path)
+  } catch (err) {
+    console.error('[credproxy] rule file save failed:', err)
+  }
+}
+
+/** Append-only JSON lines, the same shape auditLog.ts uses and for the same
+ *  reason: a crash mid-write can corrupt at most the last line. Rows are
+ *  already redacted by the time they arrive here — see `redactThenCap` — and
+ *  they never carried a body, a header or a query string in the first place. */
+export function appendCredProxyAudit(path: string, call: CredProxyCall): void {
+  try {
+    appendFileSync(path, `${JSON.stringify(call)}\n`, { mode: 0o600 })
+  } catch (err) {
+    console.error('[credproxy] failed to append an audit row:', err)
+  }
+}

@@ -5,7 +5,7 @@ import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, session, Menu,
 import { join } from 'node:path'
 import { readFileSync, existsSync, writeFileSync, renameSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import {
   sshConnect,
   sshWrite,
@@ -217,7 +217,21 @@ import { RULES_FILE } from '../shared/rules'
 import type { RuleDraftWire } from '../shared/rules'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
-import { resolveDbSecrets, resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
+import {
+  isVaultLockedError,
+  resolveDbSecrets,
+  resolveChainSecrets,
+  resolveVaultField,
+  type SecretBlob
+} from './services/credentialResolver'
+import {
+  CredProxy,
+  appendCredProxyAudit,
+  readCredProxyFile,
+  writeCredProxyFile
+} from './services/credProxy'
+import { DEFAULT_CRED_PROXY_PORT } from '../shared/credproxy'
+import type { CredProxyCall, CredProxyStatus } from '../shared/credproxy'
 import {
   refreshMcpDataCache,
   listCachedWorkspaces,
@@ -2150,6 +2164,109 @@ ipcMain.handle('webhook:test', () => webhookTest())
 ipcMain.handle('webhook:notify', (_e, payload: AlertPayload) => {
   webhookNotify(payload)
 })
+
+// ---- The API credential proxy ----
+//
+// Roadmap item 7. A local process makes an authenticated call to a third-party
+// API without ever holding the key: it points its base URL at the loopback
+// listener, and the credential is injected at the boundary from the vault.
+//
+// The design argument — a base-URL rewrite rather than TLS interception,
+// because a tool whose pitch is "your secrets never leave" should not ship a
+// CA into the user's trust store — is in src/shared/credproxy.ts. The
+// forwarding rules are in services/credProxy.ts.
+//
+// Constructed once, here, for the same reason the job runner is: a second
+// construction site would be a second listener with its own idea of which
+// credential may go where, and "read main/index.ts to see the whole model" is
+// the property that makes this checkable at all.
+//
+// DELIBERATELY NOT REACHABLE FROM THE MCP BRIDGE, in either direction. An
+// agent that could write a rule would be choosing a destination for one of the
+// user's API keys, held in a file, outliving the session that made it and
+// every revocation that session could receive; an agent that could call the
+// proxy would spend the user's API budget under a credential it never held.
+// tests/jobsNotExposed.test.ts fails on the import closure and on the symbol
+// names, which is what keeps that true without anyone having to remember it.
+const CRED_PROXY_TOKEN_SECRET_ID = 'credproxy.client.token'
+
+const credProxy = ((): CredProxy => {
+  const rulesPath = join(app.getPath('userData'), 'shellpilot-credproxy.json')
+  const auditPath = join(app.getPath('userData'), 'shellpilot-credproxy-audit.jsonl')
+  return new CredProxy(
+    {
+      now: () => Date.now(),
+      newId: () => randomUUID(),
+      read: () => readCredProxyFile(rulesPath),
+      write: (file) => writeCredProxyFile(rulesPath, file),
+      // Resolved through credentialResolver at request time, never cached, so
+      // nothing holds a copy of an API key after the vault re-locks. The two
+      // failures are kept apart on purpose: a locked vault is a state the user
+      // can fix, and an empty entry is a rule pointing at nothing.
+      resolveCredential: (ref) => {
+        try {
+          const value = resolveVaultField(ref)
+          return value === null
+            ? { ok: false, reason: 'credential-missing' }
+            : { ok: true, value }
+        } catch (err) {
+          if (isVaultLockedError(err)) return { ok: false, reason: 'vault-locked' }
+          return { ok: false, reason: 'credential-missing' }
+        }
+      },
+      clientToken: () => getSecret(CRED_PROXY_TOKEN_SECRET_ID),
+      recordCall: (call) => appendCredProxyAudit(auditPath, call)
+    },
+    DEFAULT_CRED_PROXY_PORT
+  )
+})()
+
+// Resumes a listener the user had switched on, the way the fleet sampler
+// resumes: a proxy that has to be re-enabled by hand after every restart is a
+// proxy whose scripts break every morning, and the failure would look like the
+// far end being down.
+if (credProxy.status().enabled) {
+  void credProxy.start().then((r) => {
+    if (!r.ok) console.error('[credproxy] could not resume the listener:', r.error)
+  })
+}
+
+ipcMain.handle('credproxy:status', (): CredProxyStatus => credProxy.status())
+ipcMain.handle('credproxy:rules', () => credProxy.rules())
+ipcMain.handle('credproxy:calls', (_e, limit?: number): CredProxyCall[] => credProxy.calls(limit))
+ipcMain.handle('credproxy:save-rule', (_e, draft: unknown) => credProxy.saveRule(draft))
+ipcMain.handle('credproxy:remove-rule', (_e, id: string) => credProxy.removeRule(String(id)))
+ipcMain.handle('credproxy:start', async (_e, port?: number) => {
+  const res = await credProxy.start(typeof port === 'number' ? port : undefined)
+  return { ...res, status: credProxy.status() }
+})
+ipcMain.handle('credproxy:stop', async () => {
+  await credProxy.disable()
+  return credProxy.status()
+})
+
+// The token DOES cross to the renderer, unlike the webhook URL, and that is a
+// deliberate difference rather than an oversight. The webhook URL is a
+// credential the user never has to see; this one is a credential the user has
+// to PASTE INTO THEIR OWN SCRIPT, so a proxy whose token never leaves main is
+// a proxy nobody can call. The panel states what holding it grants.
+ipcMain.handle('credproxy:token', (): { ok: boolean; token?: string; error?: string } => {
+  const existing = getSecret(CRED_PROXY_TOKEN_SECRET_ID)
+  if (existing !== null) return { ok: true, token: existing }
+  return mintCredProxyToken()
+})
+ipcMain.handle('credproxy:rotate-token', () => mintCredProxyToken())
+
+function mintCredProxyToken(): { ok: boolean; token?: string; error?: string } {
+  // 32 bytes of urandom. The token is the only thing standing between a rule
+  // and every other process running as this user, so it is not derived from
+  // anything and not shorter than the keys it stands in for.
+  const token = `cpx_${randomBytes(32).toString('hex')}`
+  if (!setSecret(CRED_PROXY_TOKEN_SECRET_ID, token)) {
+    return { ok: false, error: 'Could not store the token — OS encryption is unavailable.' }
+  }
+  return { ok: true, token }
+}
 
 // ---- The alert log ----
 //

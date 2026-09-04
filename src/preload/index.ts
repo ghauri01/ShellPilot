@@ -74,6 +74,7 @@ import type {
   WebhookDeliveryStatus,
   WebhookTestResult
 } from '../shared/webhook'
+import type { CredProxyCall, CredProxyRule, CredProxyStatus } from '../shared/credproxy'
 import type {
   LocalCloseInfo,
   LocalConnectConfig,
@@ -342,6 +343,37 @@ const api = {
       ipcRenderer.invoke('webhook:set-url', url),
     test: (): Promise<WebhookTestResult> => ipcRenderer.invoke('webhook:test'),
     notify: (payload: AlertPayload): Promise<void> => ipcRenderer.invoke('webhook:notify', payload)
+  },
+  // The API credential proxy — roadmap item 7.
+  //
+  // The one credential in this bridge that deliberately travels TOWARDS the
+  // renderer is `token()`. Every other secret in this app stays in main, and
+  // the webhook URL a few lines above is the model: there is no getter for it
+  // because the user never needs to see it. This one is different in kind —
+  // it is the string the user pastes into their own script, so a token that
+  // never leaves main is a proxy nobody can call. It is not an API key; it is
+  // what a caller presents INSTEAD of one, and the panel says so out loud.
+  //
+  // The API keys themselves never appear here, in either direction. A rule
+  // carries a vault entry id, and the value behind it is read in main at
+  // request time and injected onto the wire.
+  credproxy: {
+    status: (): Promise<CredProxyStatus> => ipcRenderer.invoke('credproxy:status'),
+    rules: (): Promise<CredProxyRule[]> => ipcRenderer.invoke('credproxy:rules'),
+    calls: (limit?: number): Promise<CredProxyCall[]> => ipcRenderer.invoke('credproxy:calls', limit),
+    saveRule: (
+      draft: unknown
+    ): Promise<{ ok: true; rule: CredProxyRule } | { ok: false; error: string }> =>
+      ipcRenderer.invoke('credproxy:save-rule', draft),
+    removeRule: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('credproxy:remove-rule', id),
+    start: (port?: number): Promise<{ ok: boolean; error?: string; status: CredProxyStatus }> =>
+      ipcRenderer.invoke('credproxy:start', port),
+    stop: (): Promise<CredProxyStatus> => ipcRenderer.invoke('credproxy:stop'),
+    token: (): Promise<{ ok: boolean; token?: string; error?: string }> =>
+      ipcRenderer.invoke('credproxy:token'),
+    rotateToken: (): Promise<{ ok: boolean; token?: string; error?: string }> =>
+      ipcRenderer.invoke('credproxy:rotate-token')
   },
   // The durable side of alerting — roadmap item 19b.
   //
