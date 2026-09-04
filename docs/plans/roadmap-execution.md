@@ -728,3 +728,53 @@ So the rule for this branch, in order of strength:
 The underlying lesson generalises past git: **when several writers share mutable state,
 protocols that depend on everyone behaving lose to mechanisms that do not.** Three rules here
 asked for good behaviour from every agent. The fourth asks for nothing from anyone.
+
+### What type-checking 4,384 tests actually found
+
+The count went 342 → 0 and the count is the least interesting part. Six classes of defect
+came out, none of which lint, review or a passing suite could have shown.
+
+**A test and its code agreed on a value that does not exist.** `outcomeOf` branched on
+`outcome === 'failed'`, which has never been a member of `JobHostOutcome`. Every failure
+except two fell through to `unknown`, so a command exiting non-zero — the commonest failure
+there is — was reported as "we cannot say how that went". The fixture seeded the same
+non-existent value, behind an `as 'ok'` cast, so the test agreed with the bug. Both halves
+were wrong in the same direction and reading either alone showed nothing.
+
+**A test proved nothing about the mechanism in its own name.** `does not use /dev/stdin when
+a helper stands between us and the engine` decides whether an OpenVPN config — carrying the
+private key — goes down a pipe or is written to a file. Every elevator stub omitted
+`carriesStdin`, and the harness dropped it in transit, so it was `undefined` and the file path
+was taken unconditionally. **A driver that ignored the flag entirely would have satisfied that
+test.** It now has a positive control, and the driver does honour the flag — nothing had been
+checking.
+
+**Three suites do not cover the path they exist for.** `VpnDriverContext.dropped` was absent
+from every driver-test context in three files, so a driver calling it would have thrown. Its
+own comment says it exists because emitting an error alone leaves the manager holding the run
+directory, the resolved plaintext secrets and every registration for dead sessions. No test in
+any of the three exercises that path. The field is on the harnesses now; the assertions are
+still unwritten work.
+
+**A security fallback was reached only by accident.** The policy fixture named 10 of 13
+capabilities. The three added later never reached it, so every group in that file hit
+`evaluateCapability`'s `?? 'deny'` — whose comment says an `undefined` would behave like ALLOW
+at the call sites and silently widen every saved group. The fallback had no deliberate test
+and would have stopped being exercised the moment somebody filled the gap.
+
+**Two tests asserted against a second call.** `'error' in authenticate(t) && authenticate(t).error`
+narrows one result and asserts on another, and authenticates twice against a store the kill
+switch had just mutated.
+
+**And a tail of options and enum members that no longer exist** — an argument removed
+deliberately because it let one host's count decide what ran on all of them, a `risk` that was
+never a risk, a job state used where a host state belongs.
+
+Two numbers worth keeping. **196 of the 342 came from one line**: adding the renderer's
+`env.d.ts`, without which every component a `.tsx` test rendered reported missing properties.
+And the cast count went **down by seven** — none added, and seven removed that had each been
+standing in for a type the fixture should have had. A suite that type-checks because it is
+full of casts is the same lie as one that type-checks because nobody looked.
+
+`typecheck:tests` is now inside `npm run typecheck`, which both CI workflows already run, so
+it is enforced from that commit without touching a workflow file.
