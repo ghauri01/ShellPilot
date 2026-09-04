@@ -1,0 +1,4 @@
+===SHELLPILOT-EXEC===
+it's /root and 2026 and 'quoted'
+uid=0(root) gid=0(root) groups=0(root),10(wheel)
+toolbox

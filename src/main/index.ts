@@ -69,7 +69,7 @@ import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
 import { AccessCommitter, AccessReader } from './services/access'
-import { PostureReader } from './services/posture'
+import { PostureReader, firewallRulesGranted } from './services/posture'
 import { DriftReader } from './services/drift'
 import { readChangeLog } from './services/changelog'
 import { readRunbook, saveRunbookNote } from './services/runbooks'
@@ -245,12 +245,17 @@ import {
   createGroup,
   saveGroup,
   deleteGroup,
+  getGroup,
   listAssignments,
   setAssignment,
   removeAssignment,
   listServerMeta,
   setServerAliases
 } from './services/policyStore'
+// The same resolution the MCP bridge uses for a server: the assignment on the
+// server wins over the one on its workspace. Imported for the firewall rule
+// gate below — see groupForServer.
+import { resolveGroupId } from './services/policyEngine'
 import type { AccessGroup, ApprovalRequest, McpGlobalConfig, PolicyAssignment } from '../shared/mcp'
 import {
   getMcpConfig,
@@ -962,6 +967,23 @@ const postureReader = new PostureReader({
     sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
 })
 
+// Which access group governs a server, resolved exactly as the MCP bridge
+// resolves it: the assignment on the server, else the one on its workspace,
+// else none — and none means No AI Access.
+//
+// Used for one thing, roadmap item 31's firewall rule lines. The decision it
+// feeds lives in services/posture.ts as `firewallRulesGranted`, where a test
+// can assert it; this is only the lookup. A server the cache has not seen
+// resolves to null and therefore to no rules, which is the direction to be
+// wrong in: the panel then says "not collected" and names the capability to
+// grant, which is a sentence somebody can act on.
+function groupForServer(serverId: string): AccessGroup | null {
+  const server = getCachedServer(serverId)
+  if (!server) return null
+  const groupId = resolveGroupId(listAssignments(), serverId, server.workspaceId)
+  return groupId ? getGroup(groupId) : null
+}
+
 // Configuration drift, on the same slow clock — roadmap item 25. One reader for
 // the whole process, for the reason the other three are one: it holds no state
 // beyond the exec function, and every probe is a single round trip.
@@ -1009,8 +1031,20 @@ const fleetSampler = new FleetSampler({
   // and reading a host's firewall must never be what raises a host-key trust
   // dialog the user cannot connect to anything they just did.
   postureEnabled: () => postureModuleOn,
-  samplePosture: async (_key, cfg) => {
-    const probe = await postureReader.read(resolveChainSecrets(cfg as SshConnectConfig))
+  samplePosture: async (key, cfg) => {
+    // The RULE LINES are collected per server and only where somebody granted
+    // them — roadmap item 31. The posture module's toggle above decides
+    // whether this probe runs at all; this decides whether it asks for the one
+    // thing in it that is not a count, which is the addresses and ports the
+    // host accepts traffic on.
+    //
+    // The sampler keys on 'fleet:<serverId>' and the capability is per server,
+    // so the id is taken back out rather than the gate being widened to the
+    // whole estate. fleetKey() is the only thing that writes that prefix.
+    const serverId = key.startsWith('fleet:') ? key.slice('fleet:'.length) : key
+    const probe = await postureReader.read(resolveChainSecrets(cfg as SshConnectConfig), {
+      firewallRules: firewallRulesGranted(groupForServer(serverId))
+    })
     return probe.ok ? { ok: true, posture: probe.posture } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
   },
   // The configuration drift half — roadmap item 25. Injected like the other

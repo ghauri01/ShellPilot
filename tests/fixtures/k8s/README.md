@@ -96,6 +96,31 @@ Each is one run of `buildK8sDrainCommand(node, 'kind-spk8s')`.
 | `drain-two-pdbs.txt` | **The trap documentation would not have shown.** With two PDBs overlapping one pod — one on `matchLabels: {app: catalog}`, one on `matchExpressions: tier In (web, api)` — the API server answers `This pod has more than one PodDisruptionBudget, which the eviction subresource does not support.` *regardless of what either budget allows*. Both budgets had disruptions to spare. Nothing was evicted. |
 | `drain-bare-pod.txt` | The refusal on a pod with no controller, with kubectl's real doubled wording: `cannot delete cannot delete Pods that declare no controller`. The node was cordoned **before** the refusal, which the read-back shows. |
 
+### Execs
+
+Each is one run of `buildK8sExecCommand(...)` against a two-container `busybox:1.36`
+pod (`shop/toolbox`), except where noted.
+
+| File | What it shows |
+|---|---|
+| `exec-ok.txt` | `echo "it's $HOME and \`date -u +%Y\` and 'quoted'"; id; hostname` in the `shell` container. `$HOME` and the backticks were expanded **inside the container**, which is the correct semantics and the reason the command is quoted exactly once on the way out. |
+| `exec-silent.txt` | `touch /tmp/sp-probe`. Prints nothing and worked — so for exec, unlike a cordon, an empty answer is a success. |
+| `exec-nonzero.txt` | `cat /nope/missing` in the `sidecar` container. Two lines, **neither of them a kubectl error**: the program's own stderr and kubectl's `command terminated with exit code 1`. A successful exec of a failing command. |
+| `exec-no-shell.txt` | The same command against a `registry.k8s.io/pause` container, which is what a distroless image looks like from here: `OCI runtime exec failed … stat /bin/sh: no such file or directory`. |
+| `exec-forbidden.txt` | Impersonating `deployer`, who can list pods in `shop`. The denial names **`pods/exec`**, a different subresource from `pods` — which is the RBAC point in one sentence. |
+
+Two bugs were found by recording these rather than reasoning about them, and both
+are asserted in `tests/kubernetesExec.test.ts`:
+
+1. The shared `call()` helper appends `--request-timeout=10s` to the **end** of the
+   argument list. Everything after `--` belongs to the container, so the flag
+   arrived inside the pod as `sh`'s `$0`.
+2. Quoting the command **twice** — once for the SSH shell, once "for the container's
+   shell" — is wrong. kubectl hands `-c <arg>` to the container as a single argv
+   element with no shell in between, so the second layer is a literal pair of quote
+   characters. The recorded failure was
+   `line 0: echo "it's $HOME and \`date\` and 'quoted'"; id: not found`.
+
 ## What could not be captured
 
 - **A multi-node drain in anger.** `kind` nodes are containers on one host; every
@@ -116,6 +141,9 @@ Each is one run of `buildK8sDrainCommand(node, 'kind-spk8s')`.
   `helm list -A -o json` document is unproven.
 - **A metrics server.** `kind` ships without one, so nothing here exercises
   `kubectl top` beyond the `no-metrics` path the existing tests already cover.
+- **A pod whose container runs as a non-root user.** `busybox` runs as uid 0, so
+  `exec-ok.txt` shows `uid=0(root)`. Nothing here proves what an exec looks like
+  under a `runAsNonRoot` securityContext or a read-only root filesystem.
 - **An ingress controller.** Nothing was installed, so `ADDRESS` on the Ingress is
   empty in every recording. An Ingress that has been given a load-balancer address
   is unproven.

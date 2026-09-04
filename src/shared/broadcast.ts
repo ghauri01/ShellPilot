@@ -591,10 +591,23 @@ export interface ApprovalTargetRef {
  * because a redaction rule with an exception is a redaction rule someone will
  * eventually widen.
  */
+/**
+ * Which surface minted an approval.
+ *
+ * Recorded, never used to weaken a check — a verifier that behaved differently
+ * per surface would be three verifiers. `k8s-exec` was added for roadmap item
+ * 22: `kubectl exec` is the same shape of decision as a broadcast step (one
+ * command, one confirmed target list, one typed phrase) and reuses this record
+ * rather than growing a second approval vocabulary beside it.
+ */
+export type ApprovalSurface = 'broadcast' | 'job' | 'k8s-exec'
+
+export const APPROVAL_SURFACES: readonly ApprovalSurface[] = ['broadcast', 'job', 'k8s-exec']
+
 export interface CommandApproval {
   v: 1
   /** Which surface produced it. Recorded, never used to weaken a check. */
-  surface: 'broadcast' | 'job'
+  surface: ApprovalSurface
   /** The command text of every step, in order, exactly as approved. */
   commands: string[]
   targets: ApprovalTargetRef[]
@@ -612,7 +625,7 @@ export function isCommandApproval(v: unknown): v is CommandApproval {
   const a = v as Partial<CommandApproval>
   return (
     a.v === 1 &&
-    (a.surface === 'broadcast' || a.surface === 'job') &&
+    APPROVAL_SURFACES.includes(a.surface as ApprovalSurface) &&
     Array.isArray(a.commands) &&
     a.commands.every((c) => typeof c === 'string') &&
     Array.isArray(a.targets) &&
@@ -641,7 +654,7 @@ export function isCommandApproval(v: unknown): v is CommandApproval {
  * a third copy of the rule.
  */
 export function approvalFor(o: {
-  surface: 'broadcast' | 'job'
+  surface: ApprovalSurface
   commands: string[]
   targets: ApprovalTargetRef[]
   plan: { risk: BroadcastRisk; confirmation: BroadcastConfirmation }

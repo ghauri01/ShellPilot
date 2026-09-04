@@ -1,0 +1,2 @@
+===SHELLPILOT-EXEC===
+error: Internal error occurred: Internal error occurred: error executing command in container: failed to exec in container: failed to start exec "4bf13e9ea8419cf42299bf0c376b3a4cd0b76f766b2f0c6d06500038cd4eaf5a": OCI runtime exec failed: exec failed: unable to start container process: exec: "/bin/sh": stat /bin/sh: no such file or directory

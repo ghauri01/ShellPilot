@@ -872,6 +872,22 @@ describe('what must NOT be able to reach this', () => {
       'K8S_DRAIN_PHRASE',
       'k8s:drain',
       'k8s:drain-preflight',
+      // Exec, which is the one that needs no argument at all. Arbitrary code
+      // inside a container, under whatever identity that container runs as.
+      // The bridge's `execute_command` is gated per server against an access
+      // group a human wrote; `pods/exec` is a different subresource on a
+      // different system, and an agent reaching it would be running code
+      // somewhere nobody granted anything.
+      //
+      // Its approval record is on the list for the same reason `approvalLog`
+      // is: a caller that can mint one can launder consent for work it was
+      // never granted.
+      'buildK8sExecCommand',
+      'planK8sExec',
+      'parseK8sExecResult',
+      'K8S_EXEC_PHRASE',
+      'k8s:exec',
+      'k8s:exec-plan',
       // Already true before item 22 and asserted here now that the file has
       // company: the one older mutation, and the module itself.
       'buildK8sRolloutRestartCommand',

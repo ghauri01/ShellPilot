@@ -29,9 +29,6 @@
 //    repoints someone's cluster because they clicked a dropdown is how you
 //    apply a manifest to prod believing it is staging. Context is chosen per
 //    read, with `--context`, and never persisted.
-//  - Exec into a pod. That is `docker exec` with more blast radius and an
-//    entirely separate RBAC story, and it belongs behind the same approval
-//    model broadcast has rather than a button next to a pod name.
 //  - Delete anything — including a single pod, which is the one deletion people
 //    ask for. The brief was to work out whether we can TELL when it is safe,
 //    and the honest answer is only half. `.metadata.ownerReferences` does say
@@ -66,6 +63,12 @@
 // the click — are now read and are now BLOCKING. A drain that cannot see a
 // PodDisruptionBudget is refused rather than attempted. See
 // buildK8sDrainPreflightCommand and assessK8sDrain.
+//
+// EXEC now ships, behind exactly the approval model the refusal above named:
+// `approvalFor` mints a record when the human types the phrase and
+// `verifyApproval` checks the command text, the target and the confirmation
+// strength against a fresh re-derivation before anything runs. It is not a
+// shell session — one command, no TTY, no stdin. See buildK8sExecCommand.
 //
 // Single-pod DELETION is still refused, and the second half of the paragraph
 // above is still why: a drain answers "can this node lose everything on it",
@@ -148,6 +151,17 @@ export type K8sFailure =
    * silently.
    */
   | 'no-previous'
+  /**
+   * `kubectl exec` reached the container and found no shell in it.
+   *
+   * Its own class because it is the normal answer for a distroless or
+   * scratch-based image, which is most of what modern builds produce, and
+   * because the alternative wording is the container runtime's — an
+   * `OCI runtime exec failed … stat /bin/sh: no such file or directory`
+   * sentence that reads like a broken cluster rather than an image that
+   * deliberately ships no shell. Same posture as `no-metrics`.
+   */
+  | 'no-shell'
   | 'unknown'
 
 export const K8S_FAILURE_HELP: Record<K8sFailure, string> = {
@@ -168,6 +182,8 @@ export const K8S_FAILURE_HELP: Record<K8sFailure, string> = {
     'kubectl top needs a Metrics API in the cluster — metrics-server, or whatever your provider ships — and nothing is answering on it. This is not "zero usage": there is no source to ask. If metrics-server was installed in the last minute or two it may simply not have scraped yet.',
   'no-previous':
     'This container has no previous instance, which means it has not restarted. There is nothing to read, and that is good news about this pod rather than a failed read.',
+  'no-shell':
+    'This container has no shell. That is the normal state of a distroless or scratch image and is not a broken pod — there is simply no /bin/sh inside it to run a command with, so nothing this app can send will run there. A debug sidecar (kubectl debug) is the usual way in, and it is not something this panel does.',
   unknown: 'kubectl returned an error that could not be classified. The raw message is below.'
 }
 
@@ -224,6 +240,17 @@ export function classifyK8sFailure(stderr: string, exitCode: number | null): K8s
   // words "not found" appear, which is why this is checked before the
   // missing-binary rule rather than left to fall through to `unknown`.
   if (/previous terminated container/.test(s)) return 'no-previous'
+  // Before the kubeconfig rule, which matches on `no such file or directory`
+  // wordings that name a path — and the container runtime's no-shell sentence
+  // is exactly one of those, about a path inside the container rather than the
+  // user's kubeconfig.
+  if (
+    /oci runtime exec failed|exec: "[^"]*": (?:stat|executable file) .*not found|no such file or directory: unknown/.test(
+      s
+    )
+  ) {
+    return 'no-shell'
+  }
   if (/no configuration has been provided|kubeconfig|\.kube\/config/.test(s)) return 'no-kubeconfig'
   if (shellMissing) return 'not-installed'
   if (/forbidden|cannot list resource|is not allowed|rbac/.test(s)) return 'forbidden'
@@ -2274,5 +2301,261 @@ export function planK8sDrain(assessment: K8sDrainAssessment): K8sDrainPlan {
     reasons,
     caveats,
     refusals
+  }
+}
+
+// =========================================================================
+// EXEC INTO A POD
+// =========================================================================
+//
+// The file's original refusal read: "that is `docker exec` with more blast
+// radius and an entirely separate RBAC story, and it belongs behind the same
+// approval model broadcast has rather than a button next to a pod name." That
+// approval model now exists and is durable — `approvalFor` and
+// `verifyApproval` in shared/broadcast.ts — so this is that precondition, met.
+//
+// WHAT REUSING IT BUYS, over a confirm dialog:
+//  - The command text is WRITTEN DOWN at the moment the human answers, so a
+//    command edited between the dialog and the run is caught by comparison
+//    rather than trusted.
+//  - The target is written down too, so an exec approved against one host
+//    cannot be replayed against another.
+//  - The confirmation STRENGTH is re-derived and compared, so a build that
+//    later decides exec deserves more than it did cannot honour an approval
+//    minted under the weaker rule.
+// None of that is available from a boolean called `confirmed`.
+//
+// THIS IS NOT AN INTERACTIVE SHELL, and the naming says so. There is no TTY,
+// no stdin and no session: one command runs, its output comes back, and that
+// is the whole of it. An SSH exec is one-shot, and a control that looked like
+// a terminal but silently dropped everything the program wrote to stdin would
+// be worse than not having one.
+//
+// STILL REFUSED HERE, and for the same reason as everything else in this file:
+// APPLYING A MANIFEST. `kubectl apply` is a GitOps pipeline's job. A manifest
+// that reaches a cluster from a desktop button has had no review, no diff
+// against what is in git and no record anywhere but this app — which is
+// exactly how a staging manifest reaches prod. Note that it is not refused
+// because it is dangerous and exec is safe; exec is plainly the more powerful
+// of the two. It is refused because there is a system whose job this is, and
+// putting a second uncoordinated writer next to it is the problem.
+
+/**
+ * A shell single-quoted literal holding exactly these bytes.
+ *
+ * `'\''` is the only escape a POSIX single-quoted string has, and with it the
+ * quoting is total: no expansion, no substitution, no backslash processing.
+ * The same helper `shared/cron.ts` uses on a crontab body and for the same
+ * reason — this is arbitrary text somebody typed, going onto a command line,
+ * so the quoting has to be exactly right rather than nearly right.
+ *
+ * ONCE, not twice, and that was worth getting wrong to find out. The string
+ * crosses exactly one shell: the SSH login shell running our command chain.
+ * kubectl then hands `-c <arg>` to the container as a single argv element with
+ * no shell in between, so a second layer of quoting is not defence — it is a
+ * literal pair of quote characters that `/bin/sh -c` reads as part of the
+ * command name. Recorded against a real cluster, the double-quoted form came
+ * back as
+ *
+ *   line 0: echo "it's $HOME and `date` and 'quoted'"; id: not found
+ *
+ * — the entire command treated as one word that does not exist.
+ */
+function k8sShellLiteral(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`
+}
+
+/** The shell run inside the container. */
+export const K8S_EXEC_SHELL = '/bin/sh'
+
+/**
+ * Bytes of exec output carried back.
+ *
+ * A `cat` of the wrong file is the most ordinary mistake available here and it
+ * would otherwise stream a gigabyte through the SSH transport into a renderer
+ * that has to hold all of it.
+ */
+export const K8S_EXEC_OUTPUT_CAP = 200_000
+
+export interface K8sExecTarget {
+  /** The host whose kubectl runs this — recorded in the approval. */
+  serverId: string
+  serverName: string
+  namespace: string
+  pod: string
+  /** '' when the pod has one container and none was chosen. */
+  container: string
+  /** What to run. Arbitrary text; quoted, never validated. */
+  command: string
+  context?: string | null
+}
+
+/**
+ * `kubectl exec <pod> -- /bin/sh -c '<command>'`, as one shell line.
+ *
+ * Names are validated the way every other builder here validates them. The
+ * COMMAND is not, and cannot be — it is the whole point of the feature — so it
+ * is quoted instead, twice, and the approval record is what stands in for a
+ * validation the shape of this argument does not admit.
+ */
+export function buildK8sExecCommand(target: K8sExecTarget): string {
+  if (!validateNamespace(target.namespace) || !validatePodName(target.pod)) {
+    throw new Error('refusing to build a command from an invalid pod or namespace name')
+  }
+  if (target.container !== '' && !validatePodName(target.container)) {
+    throw new Error('refusing to build a command from an invalid container name')
+  }
+  if (target.command.trim() === '') {
+    throw new Error('refusing to exec an empty command')
+  }
+  const ctx =
+    target.context && validateContext(target.context) ? ` --context=${target.context}` : ''
+  const c = target.container === '' ? '' : ` --container=${target.container}`
+  // NOT `call()`, and this is the only builder in the file that cannot use it.
+  // `call` appends `--request-timeout=10s` to the end of the argument list, and
+  // everything after `--` belongs to the container: the flag arrived inside the
+  // pod as `sh`'s `$0`, which the recording shows as
+  // `--request-timeout=10s: line 0: …: not found`. Every kubectl flag has to be
+  // on the near side of the separator.
+  return [
+    k8sResolve(),
+    'echo "===SHELLPILOT-EXEC==="',
+    // No -t and no -i, deliberately. See the header: this is one command, not
+    // a session, and a TTY on a non-interactive SSH exec produces a stream
+    // nobody is reading from.
+    `${K} exec ${target.pod} --namespace=${target.namespace}${c}${ctx}${T} ` +
+      `-- ${K8S_EXEC_SHELL} -c ${k8sShellLiteral(target.command)} 2>&1 | head -c ${K8S_EXEC_OUTPUT_CAP}`
+  ].join('; ')
+}
+
+export interface K8sExecResult {
+  ok: boolean
+  /** Combined stdout and stderr from inside the container. */
+  output: string
+  /**
+   * What the program inside the container exited with, when kubectl said.
+   *
+   * SEPARATE FROM `ok`, and the distinction is the whole reason this field
+   * exists. `ok` answers "did the exec happen"; this answers "did the thing
+   * you asked for work". A `cat` of a missing file is a successful exec of a
+   * failing command — recorded output:
+   *
+   *   cat: can't open '/nope/missing': No such file or directory
+   *   command terminated with exit code 1
+   *
+   * Neither of those lines is a kubectl error, so collapsing them into `ok:
+   * false` would report an RBAC-shaped failure for a typo'd path. Reporting
+   * only `ok: true` and hiding the code is the other half of the same mistake:
+   * a command that failed would read as one that worked. kubectl prints this
+   * line only for a NON-ZERO exit, so `null` means either zero or nothing said.
+   */
+  containerExit: number | null
+  reason?: K8sFailure
+  detail?: string
+}
+
+// kubectl's own line, printed only when the program exited non-zero.
+const EXEC_EXIT_RE = /^command terminated with exit code (\d+)$/m
+
+// The wording a container with no shell produces. Recorded from `kubectl exec`
+// into a `registry.k8s.io/pause` container, which is what a distroless image
+// looks like from here.
+const NO_SHELL_RE =
+  /OCI runtime exec failed|exec: "[^"]*": (?:stat|executable file) .*not found|no such file or directory: unknown/i
+
+/**
+ * Read what came back from inside the container.
+ *
+ * THE HARD PART IS THAT THERE IS NO SUCCESS MARKER. `kubectl exec` prints
+ * whatever the program printed and nothing of its own, so an exec that worked
+ * and produced no output is indistinguishable from one that produced no output
+ * because it never ran — except by the errors kubectl itself writes. Those are
+ * the only thing classified here; everything else is the container's, including
+ * the word "error", which a program inside is perfectly entitled to print.
+ */
+export function parseK8sExecResult(output: string, exitCode: number | null): K8sExecResult {
+  const said = section(output, 'EXEC')
+  const trimmed = said.trim()
+  const exitMatch = EXEC_EXIT_RE.exec(trimmed)
+  const containerExit = exitMatch ? Number(exitMatch[1]) : null
+  if (NO_SHELL_RE.test(trimmed)) {
+    return {
+      ok: false,
+      output: trimmed,
+      containerExit,
+      reason: 'no-shell',
+      detail: trimmed.split('\n')[0]
+    }
+  }
+  const lines = trimmed === '' ? [] : trimmed.split('\n')
+  // Same rule as readTextBlock: a failure only when the error is ALL there is.
+  // A program that printed three lines of its own and then `Error: bad input`
+  // ran fine and said so, and reporting that as a kubectl failure would replace
+  // the answer the operator asked for.
+  const allError = lines.length > 0 && lines.every((l) => l.trim() === '' || looksLikeError(l))
+  if (allError) {
+    const first = lines.find((l) => looksLikeError(l)) ?? trimmed
+    return {
+      ok: false,
+      output: trimmed,
+      containerExit,
+      reason: classifyK8sFailure(first, exitCode),
+      detail: first.trim()
+    }
+  }
+  // An empty answer is a SUCCESS here, unlike a cordon. `kubectl exec … -- touch
+  // /tmp/x` prints nothing and worked.
+  return { ok: true, output: trimmed, containerExit }
+}
+
+export interface K8sExecPlan {
+  target: K8sExecTarget
+  risk: BroadcastRisk
+  confirmation: BroadcastConfirmation
+  reasons: string[]
+  caveats: string[]
+}
+
+/** The word an exec makes you type. */
+export const K8S_EXEC_PHRASE = 'EXEC'
+
+/**
+ * How hard the user has to press to run something inside a container.
+ *
+ * `destructive` and type-to-confirm ALWAYS, with no cheap case — which is the
+ * opposite of the rollout's graded rule and is not a failure to grade. A
+ * rollout restart is one known action whose blast radius can be computed from
+ * the workload; an exec is arbitrary code, and there is nothing to compute
+ * from. `ls` and `rm -rf /` are the same request from here, and a rule that
+ * tried to tell them apart would be a command classifier inside a container we
+ * cannot see, guessing at a shell we did not choose.
+ *
+ * `assessCommand` in shared/broadcast.ts is deliberately NOT reused for that
+ * reason: it grades commands running on a host we know things about, and its
+ * "ordinary" verdict would be a claim about a container image nobody here has
+ * read.
+ */
+export function planK8sExec(target: K8sExecTarget): K8sExecPlan {
+  const reasons = [
+    `runs arbitrary code inside ${target.namespace}/${target.pod}${target.container === '' ? '' : ` (container ${target.container})`}`,
+    // The RBAC point the original refusal made. `pods/exec` is a separate
+    // subresource from `pods`, and a token that can read every pod in the
+    // cluster may hold no exec permission at all — or the reverse.
+    'exec is its own RBAC subresource: what this can do inside the container is whatever the container’s own service account and user allow, not what this app can read'
+  ]
+  const caveats = [
+    'one command, no TTY and no stdin — this is not a shell session, and a program that waits for input will hang until the timeout rather than prompt',
+    'anything written to a path that is not a mounted volume is lost when the container restarts, and a crashlooping container may restart mid-command',
+    `output is truncated at ${K8S_EXEC_OUTPUT_CAP} bytes`
+  ]
+  const prodHit = [target.namespace, target.context ?? ''].find((v) => v && PROD_RE.test(v))
+  if (prodHit) reasons.push(`"${prodHit}" reads as production`)
+
+  return {
+    target,
+    risk: 'destructive',
+    confirmation: { kind: 'type-to-confirm', phrase: K8S_EXEC_PHRASE },
+    reasons,
+    caveats
   }
 }

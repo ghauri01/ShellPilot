@@ -4,6 +4,8 @@ import type {
   K8sDrainAssessment,
   K8sDrainPlan,
   K8sDrainResult,
+  K8sExecResult,
+  K8sExecTarget,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -18,6 +20,7 @@ import {
   buildK8sDiagnoseCommand,
   buildK8sDrainCommand,
   buildK8sDrainPreflightCommand,
+  buildK8sExecCommand,
   buildK8sOverviewCommand,
   buildK8sReadCommand,
   buildK8sRolloutRestartCommand,
@@ -27,12 +30,14 @@ import {
   assessK8sDrain,
   parseK8sDrainPreflight,
   parseK8sDrainResult,
+  parseK8sExecResult,
   parseK8sOutput,
   parseK8sOverview,
   parseK8sRolloutResult,
   parseK8sUsage,
   planK8sCordon,
   planK8sDrain,
+  planK8sExec,
   planK8sRollout
 } from '../../shared/kubernetes'
 
@@ -49,6 +54,8 @@ import {
 // usually does not exist, turning a precise "your token cannot list events"
 // into a vague "no configuration has been provided". See
 // K8S_SUDO_DOES_NOT_HELP.
+
+import { verifyApproval } from '../../shared/broadcast'
 
 export type K8sExec = (
   cfg: unknown,
@@ -368,6 +375,75 @@ export class KubernetesReader {
     }
   }
 
+  /**
+   * Run one command inside a container, against a written-down approval.
+   *
+   * The approval is not a boolean and this method does not take one. It takes
+   * the RECORD a human's answer produced, and it checks three things against a
+   * fresh re-derivation before anything runs:
+   *
+   *  - the command text is the one that was approved, byte for byte. The
+   *    record carries it, so an exec edited between the dialog and the run is
+   *    a comparison rather than an act of faith. This is the check a `confirmed
+   *    === true` flag cannot make at all: the flag says a dialog was answered,
+   *    not what it said.
+   *  - the host is one that was in the confirmed target list.
+   *  - the confirmation demanded now is the confirmation that was answered. A
+   *    build that later decides exec needs more than it did will not honour an
+   *    approval minted under the weaker rule.
+   *
+   * `verifyApproval` is shared/broadcast.ts's, unmodified. Re-implementing the
+   * comparison here would be a second verifier that can drift from the first,
+   * which is the failure the single-record design exists to prevent.
+   */
+  async exec(cfg: unknown, target: K8sExecTarget, approval: unknown): Promise<K8sExecResult> {
+    try {
+      // Built BEFORE the check, because the built command is what the check is
+      // about. Verifying a target object and then building from it separately
+      // would leave a gap between what was agreed and what runs.
+      const command = buildK8sExecCommand(target)
+      const plan = planK8sExec(target)
+      const verdict = verifyApproval(
+        approval,
+        {
+          commands: [command],
+          targets: [{ serverId: target.serverId, serverName: target.serverName }]
+        },
+        { risk: plan.risk, confirmation: plan.confirmation }
+      )
+      if (!verdict.ok) {
+        return { ok: false, output: '', containerExit: null, reason: 'unknown', detail: verdict.reason }
+      }
+      // 60s. An exec runs somebody else's program and there is no sensible
+      // upper bound on it, so this is a deliberate ceiling rather than a
+      // measurement: past a minute the answer is "use a job", and a command
+      // that waits on stdin would otherwise hold the transport open forever.
+      const r = await this.deps.exec(cfg, command, 60_000)
+      if (!r.ok) {
+        return {
+          ok: false,
+          output: '',
+          containerExit: null,
+          reason: 'unknown',
+          // The same reading as the restart and the drain. A transport failure
+          // leaves the exec in an UNKNOWN state: it may well have reached the
+          // host and run, and telling somebody it did not is how a command that
+          // is not idempotent gets run twice.
+          detail: `${r.error ?? 'could not reach the host'} — the command may or may not have run inside the container`
+        }
+      }
+      return parseK8sExecResult(merge(r), r.code ?? null)
+    } catch (e) {
+      return {
+        ok: false,
+        output: '',
+        containerExit: null,
+        reason: 'unknown',
+        detail: e instanceof Error ? e.message : String(e)
+      }
+    }
+  }
+
   /** Exposed so the main process can log what was approved, in its own words. */
   plan(target: K8sRolloutTarget): ReturnType<typeof planK8sRollout> {
     return planK8sRollout(target)
@@ -376,5 +452,21 @@ export class KubernetesReader {
   /** The same, for a scheduling change. */
   cordonPlan(target: K8sCordonTarget): ReturnType<typeof planK8sCordon> {
     return planK8sCordon(target)
+  }
+
+  /**
+   * The same, for an exec — and the renderer needs BOTH halves of this.
+   *
+   * The plan is what the dialog is built from, and `buildK8sExecCommand` is
+   * what the approval must record: an approval minted against anything other
+   * than the exact command string this service will rebuild is one
+   * `verifyApproval` refuses. Exposing the pair together is what keeps those
+   * from drifting apart.
+   */
+  execPlan(target: K8sExecTarget): {
+    plan: ReturnType<typeof planK8sExec>
+    command: string
+  } {
+    return { plan: planK8sExec(target), command: buildK8sExecCommand(target) }
   }
 }
