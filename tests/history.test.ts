@@ -8,6 +8,7 @@ import {
   METRICS,
   RETENTION_FULL_DAYS,
   RETENTION_HOURLY_DAYS,
+  eventRetentionDays,
   historyBytes,
   loadHistory,
   resetHistoryModuleForTests,
@@ -712,6 +713,31 @@ describe('a retention horizon per event kind', () => {
       'job-retention-skipped',
       'job-started'
     ])
+  })
+
+  it('puts each kind in one tier, and the horizons are the documented numbers', async () => {
+    // The policy without a database in front of it. Literals, because the
+    // point of the table is that somebody chose these three numbers: reading
+    // them back out of EVENT_RETENTION_TIERS would assert that an array
+    // contains what it contains.
+    expect(eventRetentionDays('alert')).toBe(400)
+    expect(eventRetentionDays('db-alarm')).toBe(400)
+    expect(eventRetentionDays('db-watch')).toBe(400)
+    expect(eventRetentionDays('job-started')).toBe(365)
+    expect(eventRetentionDays('job-retention-skipped')).toBe(365)
+    expect(eventRetentionDays('fact-changed')).toBe(90)
+    expect(eventRetentionDays('host-unreachable')).toBe(90)
+    expect(eventRetentionDays('rule-fired')).toBe(90)
+    expect(eventRetentionDays('retention-skipped')).toBe(90)
+    // A kind nobody has invented yet is retained conservatively, not forever.
+    expect(eventRetentionDays('something-new')).toBe(90)
+    // Case-sensitive, like the byte-range prefix the SQL uses. A tier that
+    // disagreed with its own SQL about this would keep a row one asked to drop.
+    expect(eventRetentionDays('JOB-started')).toBe(90)
+    expect(eventRetentionDays('Alert')).toBe(90)
+    // The alert horizon is not merely "a year": it must outlive a job row
+    // created a response window AFTER the raise it anchors.
+    expect(eventRetentionDays('alert')).toBeGreaterThan(eventRetentionDays('job-ended') + 1)
   })
 
   it('is idempotent: a second pass over the same rows drops nothing', async () => {
