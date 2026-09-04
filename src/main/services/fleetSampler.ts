@@ -724,7 +724,17 @@ export class FleetSampler {
       posture: previous?.posture,
       postureAt: previous?.postureAt,
       postureError: previous?.postureError,
-      postureErrorAt: previous?.postureErrorAt
+      postureErrorAt: previous?.postureErrorAt,
+      // And again for configuration drift — roadmap item 25 — for the same
+      // reason a third time. This one carries the bounded redacted PREVIEW of
+      // each watched file as well as the hashes, and that preview exists
+      // nowhere else: dropping it here would blank the side-by-side view thirty
+      // times an hour with no way to get it back short of the next hourly
+      // collection.
+      drift: previous?.drift,
+      driftAt: previous?.driftAt,
+      driftError: previous?.driftError,
+      driftErrorAt: previous?.driftErrorAt
     }
     this.samples.set(
       serverId,

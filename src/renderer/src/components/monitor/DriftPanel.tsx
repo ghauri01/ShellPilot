@@ -233,11 +233,17 @@ export function DriftPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
       ) : (
         <>
           <div className="row wrap muted" style={{ fontSize: 11, marginTop: 8, gap: 12 }}>
+            {/* Each count is one text node rather than a number beside a word.
+                A React fragment splits `{n} match{...}` into three nodes, which
+                reads identically and is not the same string — and a headline
+                nobody can find is a headline nobody reads. */}
             <span>
-              {comparison.matching} match{comparison.matching === 1 ? 'es' : ''}
-              {comparison.diverging > 0 && <span className="warn"> · {comparison.diverging} differ</span>}
+              <span>{`${comparison.matching} ${comparison.matching === 1 ? 'match' : 'matches'}`}</span>
+              {comparison.diverging > 0 && <span className="warn">{` · ${comparison.diverging} differ`}</span>}
               {comparison.coverage.absent.length > 0 && (
-                <span className="warn"> · {comparison.coverage.absent.length} do not have the file</span>
+                <span className="warn">
+                  {` · ${comparison.coverage.absent.length} do not have the file`}
+                </span>
               )}
             </span>
             <button className="btn ghost sm" onClick={() => setShowRules((v) => !v)}>
