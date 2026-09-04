@@ -274,6 +274,30 @@ const REVIEWED_JOB_FILES = ['jobDetached', 'jobExec', 'jobRunner']
  *  authorisation to run a command; this is a standing authorisation to send a
  *  named API KEY to a named host, held in a file, surviving every session that
  *  could have been revoked. See the note at JOB_TOOL. */
+/** `processes` covers BOTH halves of roadmap item 1 — `src/shared/processes.ts`
+ *  and `src/main/services/processes.ts` — because the match below is on a
+ *  basename and is case-insensitive.
+ *
+ *  It is the strongest case on this list, and the argument is the file's own
+ *  header taken one step further. `rules` is a standing authorisation to run a
+ *  command on a remote host; `credProxy` is a standing authorisation to send a
+ *  named API key to a named host. This is ARBITRARY CODE EXECUTION ON THE
+ *  MACHINE THE VAULT IS ON, held in a file, with a restart policy.
+ *
+ *  DURABILITY DEFEATS REVOCATION applies here without any of the softening the
+ *  job engine gets. A job on fifteen hosts has nothing pending WHILE IT RUNS,
+ *  and finishes. A supervised process has nothing pending AND DOES NOT FINISH:
+ *  `denyAllPending()` resolves every waiting approval, revokes every session
+ *  and stops the bridge, and the child is still there — still logging, still
+ *  holding its port, and with a supervisor ready to start it AGAIN the moment
+ *  it exits. There is no request to deny, no session whose revocation reaches
+ *  it, and no channel whose closure stops it.
+ *
+ *  It is also a persistence primitive rather than merely an execution one. An
+ *  agent that could write a row here would be writing a program that starts
+ *  when a human presses a button they have every reason to press — see the
+ *  auto-start refusal in shared/processes.ts, which is what keeps that from
+ *  being "starts on its own". See the note at JOB_TOOL. */
 const SHARED_JOB_MODULES = [
   'jobs',
   'patch',
@@ -281,7 +305,8 @@ const SHARED_JOB_MODULES = [
   'broadcast',
   'approvalLog',
   'rules',
-  'credProxy'
+  'credProxy',
+  'processes'
 ]
 
 const JOB_MODULE_NAMES = [...new Set([...scanJobModules(), ...SHARED_JOB_MODULES])]
@@ -354,7 +379,10 @@ describe('the job engine is enumerated by scanning, not by memory', () => {
       './rules',
       './credProxy',
       '../../shared/credproxy',
-      '../services/credProxy.js'
+      '../services/credProxy.js',
+      './processes',
+      '../../shared/processes',
+      '../services/processes.js'
     ]) {
       expect(isForbiddenSpecifier(spec), spec).toBe(true)
     }
@@ -910,7 +938,51 @@ describe('what must NOT be able to reach this', () => {
       'k8s:rollout-restart',
       'shared/kubernetes',
       'services/kubernetes',
-      'KubernetesReader'
+      'KubernetesReader',
+      // Supervised local processes — roadmap item 1, and the sharpest entry on
+      // this list.
+      //
+      // Everything above is a power over a REMOTE system, exercised through a
+      // credential that could in principle be rotated afterwards. This is a
+      // child process of ShellPilot itself, on the machine the vault is on,
+      // with a restart policy — and the restart policy is what makes the kill
+      // switch's guarantee not merely weaker but absent. `denyAllPending()`
+      // resolves what is PENDING; a supervised process has nothing pending, is
+      // not finished, and will be started again by the supervisor when it
+      // exits. Stopping the bridge does not reach it. Revoking every session
+      // does not reach it. There is nothing to deny.
+      //
+      // "It only runs what a human already defined" is the comfortable version
+      // of the argument here, the way "it only reads" is for posture and drift
+      // and "it only sends what a rule allows" is for the credential proxy. It
+      // is not one, in either direction: a caller that can CREATE a definition
+      // chooses the program, and a caller that can START one chooses the
+      // moment — and the whole point of the auto-start refusal in
+      // shared/processes.ts is that the moment belongs to a human.
+      //
+      // Not gated, not asked-for, NOT THERE. The import-closure half is
+      // `processes` in SHARED_JOB_MODULES above; these are the words.
+      'ProcessService',
+      'processService',
+      'shared/processes',
+      'services/processes',
+      'sanitiseProcess',
+      'sanitiseProcesses',
+      'processDraftProblem',
+      'toProcessView',
+      'readProcessFile',
+      'writeProcessFile',
+      'ManagedProcess',
+      'ProcessDraft',
+      'PROCESS_CRASH_LOOP',
+      'processes:list',
+      'processes:status',
+      'processes:create',
+      'processes:remove',
+      'processes:start',
+      'processes:stop',
+      'processes:restart',
+      'processes:logs'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }
