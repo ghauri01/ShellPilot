@@ -340,6 +340,104 @@ describe('the sshd detail', () => {
   })
 })
 
+describe('the firewall rules — roadmap item 31', () => {
+  const RULES = [
+    'V fw-tool ufw',
+    'V fw-active active',
+    'V fw-rules 3',
+    'V fw-rule-collection on',
+    'V fw-rule-lines-front 3',
+    'R front 22/tcp ALLOW IN Anywhere',
+    'R front 443/tcp ALLOW IN Anywhere',
+    'R front 3306/tcp ALLOW IN Anywhere',
+    POSTURE_STATUS_MARKER,
+    'firewall ok - ufw status verbose'
+  ]
+
+  const openRules = async (): Promise<HTMLElement> => {
+    await waitFor(() => expect(screen.getByTitle(/rule lines this host/i)).toBeTruthy())
+    await userEvent.click(screen.getByTitle(/rule lines this host/i))
+    return screen.findByText((_, el) => el?.getAttribute('data-rules-detail') === 'web-1')
+  }
+
+  it('answers the question the count cannot: what is open, and to whom', async () => {
+    mount({ a: { posture: collected(RULES) } }, [server('a', 'web-1')])
+    const detail = await openRules()
+    expect(detail.textContent).toContain('3306/tcp ALLOW IN Anywhere')
+    // Marked as the host's words, not ShellPilot's. The line above is text
+    // written by whoever configured that machine.
+    expect(detail.textContent).toContain('Reported by the host')
+    // And where it came from, named, so a reader can go and check it.
+    expect(detail.textContent).toContain('ufw status verbose')
+  })
+
+  it('says nobody asked for them rather than showing a host with no rules', async () => {
+    // The capability ungranted. The cell still reads "ufw · 3 rules"; the
+    // detail must NOT read as a host whose rule list is empty.
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V fw-tool ufw',
+            'V fw-active active',
+            'V fw-rules 3',
+            POSTURE_STATUS_MARKER,
+            'firewall ok - ufw status verbose'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    const detail = await openRules()
+    expect(detail.textContent).toContain('were not collected')
+    expect(detail.textContent).toContain('Firewall rules')
+    expect(detail.textContent).not.toMatch(/no rules|none/i)
+  })
+
+  it('states a truncation instead of showing a prefix as the whole list', async () => {
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V fw-tool ufw',
+            'V fw-rule-collection on',
+            'V fw-rule-lines-front 60',
+            ...Array.from({ length: 40 }, (_, i) => `R front ${i + 1}/tcp ALLOW IN Anywhere`),
+            POSTURE_STATUS_MARKER,
+            'firewall ok - ufw status verbose'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    const detail = await openRules()
+    expect(detail.textContent).toContain('40 of 60')
+  })
+
+  it('says the ruleset was refused rather than listing nothing', async () => {
+    // Granted, and the read that would have produced the lines was refused.
+    // An empty list here would render as "this host allows nothing in".
+    mount(
+      {
+        a: {
+          posture: collected([
+            'V fw-tool ufw',
+            'V fw-active yes',
+            'V fw-rule-collection on',
+            POSTURE_STATUS_MARKER,
+            'firewall partial - ufw status needs root on this host'
+          ])
+        }
+      },
+      [server('a', 'web-1')]
+    )
+    const detail = await openRules()
+    expect(detail.textContent).toContain('could not be read')
+    expect(detail.textContent).toContain('needs root on this host')
+    expect(detail.textContent).not.toMatch(/no rules|nothing is allowed/i)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // The two cells item 19b deferred
 //

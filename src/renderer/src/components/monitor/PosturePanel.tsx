@@ -4,6 +4,7 @@ import { bridgeHas } from '../../lib/bridge'
 import { clsx, duration } from '../../lib/format'
 import {
   CERT_EXPIRY_DAYS,
+  FIREWALL_RULES_HOST_REPORTED_NOTE,
   OOM_WINDOW_HOURS,
   POSTURE_SOURCE_IDS,
   POSTURE_STATUS_HELP,
@@ -387,6 +388,100 @@ function DirectiveRow({ r }: { r: SshdReading }): React.JSX.Element {
   )
 }
 
+/**
+ * The rules themselves — roadmap item 31.
+ *
+ * The firewall cell above says "ufw · 12 rules · in deny", which does not
+ * answer the question an operator opened this panel with. This does.
+ *
+ * FOUR STATES, and three of them are not a list. An empty list would render as
+ * "nothing is exposed on this host", which is the strongest possible
+ * all-clear, and it is the wrong answer for two of the four:
+ *
+ *   1. nobody granted the capability, so nothing was asked for;
+ *   2. it was granted and the read was refused;
+ *   3. it was granted, the read succeeded and the firewall lists nothing;
+ *   4. here they are.
+ *
+ * Only the third is a finding about the host. The others say what happened.
+ *
+ * Every line in state 4 is TEXT THE HOST WROTE — the same provenance
+ * `hostReportedBlock` marks for a model in mcpServer.ts, marked here for a
+ * person. And no line carries a verdict: this panel says what is there, not
+ * whether it is wise. See src/shared/posture.ts on why.
+ */
+function FirewallRules({ posture }: { posture: HostPosture }): React.JSX.Element {
+  const fw = posture.firewall
+  const s = postureSource(posture, 'firewall')
+  if (fw === null) {
+    return (
+      <div className="inv-na loud" title={POSTURE_STATUS_HELP[s.status]}>
+        Nothing was read about this host&rsquo;s firewall at all{s.detail ? ` — ${s.detail}` : ''}.
+      </div>
+    )
+  }
+  if (!fw.rulesRequested) {
+    return (
+      <div className="inv-na">
+        The rule lines were not collected for this host, and this space is therefore not a
+        statement about what it lets in. The capability <b>Firewall rules: the addresses and
+        ports this host accepts</b> is not granted to the access group that governs this server,
+        so ShellPilot never asked for them. Grant it in AI access if you want them; the counts
+        above are unaffected either way.
+      </div>
+    )
+  }
+  if (fw.ruleLines.length === 0) {
+    // Granted, and every read that would have produced a line was refused. The
+    // one thing this must never look like is a short list.
+    return (
+      <div className="inv-na loud">
+        The rule lines could not be read on this host, which is not a report of an empty ruleset.
+        {s.detail ? ` Collector said: ${s.detail}.` : ''} Most of these close with passwordless
+        sudo for the account ShellPilot connects as.
+      </div>
+    )
+  }
+  return (
+    <>
+      <b>{FIREWALL_RULES_HOST_REPORTED_NOTE}</b>
+      {fw.ruleLines.map((listing) => (
+        <div key={listing.from} data-rule-listing={listing.from} style={{ marginTop: 6 }}>
+          <div className="faint" style={{ fontSize: 11 }}>
+            {listing.from === 'front'
+              ? 'What the firewall front end lists'
+              : 'What the kernel tables underneath hold'}{' '}
+            · <span className="mono">{listing.command}</span>
+            {listing.truncated && (
+              // STATED, never silent. A prefix drawn as if it were the whole
+              // list is the same failure as a refused read drawn as an empty
+              // one, one step quieter.
+              <span className="warn">
+                {' '}
+                · showing {listing.lines.length} of {listing.matched}, cut at{' '}
+                {listing.bound.maxLines} lines on the host
+              </span>
+            )}
+          </div>
+          {listing.lines.length === 0 ? (
+            <div>
+              This was read and lists nothing. That is a reading, not a gap — and on its own it is
+              not &ldquo;this host is closed&rdquo;: the other reading, and anything in front of
+              the NIC, are separate questions.
+            </div>
+          ) : (
+            listing.lines.map((line, i) => (
+              <div key={`${listing.from}:${i}`} className="mono" style={{ fontSize: 11 }}>
+                {line}
+              </div>
+            ))
+          )}
+        </div>
+      ))}
+    </>
+  )
+}
+
 const COLUMNS: { id: string; label: string; help: string }[] = [
   { id: 'firewall', label: 'Firewall', help: 'Which firewall is active and how many rules it lists. Both the front end and the kernel tables underneath are read, because "ufw is inactive" is not "nothing is filtering".' },
   { id: 'mac', label: 'SELinux / AppArmor', help: 'Whether mandatory access control is enforcing. A host with neither is a finding, not a gap — and it is shown differently from a host that could not be asked.' },
@@ -408,6 +503,10 @@ export function PosturePanel({
   const [facts, setFacts] = useState<Record<string, HostFacts | null>>({})
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState<string | null>(null)
+  // A second expander rather than a mode on the first: an operator comparing
+  // the sshd baseline with what the firewall lets in wants both open at once,
+  // and one of them closing the other is a worse screen than two buttons.
+  const [openRules, setOpenRules] = useState<string | null>(null)
 
   const load = useCallback(async (): Promise<void> => {
     const fleet = window.shellpilot?.fleet as Record<string, unknown> | undefined
@@ -632,6 +731,18 @@ export function PosturePanel({
                             {open === r.serverId ? 'Hide sshd' : 'sshd'}
                           </button>
                         )}
+                        {r.posture && (
+                          <button
+                            className="btn ghost sm"
+                            style={{ marginLeft: 6 }}
+                            onClick={() =>
+                              setOpenRules((o) => (o === r.serverId ? null : r.serverId))
+                            }
+                            title="The rule lines this host’s firewall lists, as it printed them — or the reason there are none to show. Collected only where the Firewall rules capability is granted."
+                          >
+                            {openRules === r.serverId ? 'Hide rules' : 'rules'}
+                          </button>
+                        )}
                       </td>
                       {COLUMNS.map((c) => (
                         <CellView
@@ -642,6 +753,15 @@ export function PosturePanel({
                         />
                       ))}
                     </tr>
+                    {openRules === r.serverId && r.posture && (
+                      <tr>
+                        <td colSpan={COLUMNS.length + 1}>
+                          <div className="s-desc" data-rules-detail={r.serverName}>
+                            <FirewallRules posture={r.posture} />
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                     {open === r.serverId && r.posture?.sshd && (
                       <tr>
                         <td colSpan={COLUMNS.length + 1}>
