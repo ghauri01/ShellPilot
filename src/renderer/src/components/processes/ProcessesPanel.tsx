@@ -81,7 +81,12 @@ const emptyDraft = (): ProcessDraft => ({
 
 export function ProcessesPanel(): React.JSX.Element {
   const bridge = useMemo(processBridge, [])
-  const [rows, setRows] = useState<ManagedProcessView[]>([])
+  // `null` until the first read lands. An empty array here renders "No
+  // processes yet", which is a claim about what is running under supervision --
+  // made, before the fix, about a list nobody had fetched. The missing-bridge
+  // case is already answered honestly above, so this only ever means "asked,
+  // still waiting".
+  const [rows, setRows] = useState<ManagedProcessView[] | null>(null)
   const [status, setStatus] = useState<Record<string, ProcessStatus>>({})
   const [openId, setOpenId] = useState<string | null>(null)
   const [logs, setLogs] = useState<ProcessLogLine[]>([])
@@ -378,14 +383,18 @@ export function ProcessesPanel(): React.JSX.Element {
         </div>
       )}
 
-      {rows.length === 0 && !adding && (
+      {rows === null && !adding && (
+        <div className="s-desc state-unknown">Reading what is under supervision…</div>
+      )}
+
+      {rows?.length === 0 && !adding && (
         <div className="s-desc">
           <Activity size={14} /> No processes yet. Add one to run it under supervision —
           restarts, backoff and crash-loop detection included.
         </div>
       )}
 
-      {rows.map((p) => {
+      {(rows ?? []).map((p) => {
         const st = status[p.id]
         const state = st?.state ?? 'stopped'
         const live = state === 'running' || state === 'starting'
