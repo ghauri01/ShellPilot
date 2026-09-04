@@ -916,7 +916,29 @@ promise about unattended correctness this app cannot keep.
 
 ---
 
-### 18. Database operations
+### 18. Database operations — SHIPPED
+
+**Postgres and MySQL/MariaDB shipped in `c008c8d` and were hardened in `971c47d`. MongoDB and
+Redis are now built too**, in four commits: the captured fixtures, the pure command/parse/judge
+layer, the collectors, and the panel. Eight questions for MongoDB and nine for Redis — the ninth
+is `cluster`, which cannot fold into `replication` because a cluster in state `fail` refuses a
+third of the keyspace while every node's `INFO replication` reports a healthy master.
+
+**SQL Server is deliberately not covered**, and `DB_OPS_UNSUPPORTED_NOTE` says so on the page
+rather than leaving an empty tab to be discovered: nothing here has been run against one, and a
+set of questions written from documentation agrees with whatever its author assumed rather than
+with the server.
+
+What the MongoDB and Redis pass cost was not the commands. It was that both engines report a dead
+thing with a number that reads as healthy, in the same shape MySQL does and with different field
+names. A MongoDB member that is unreachable reports `health: 0` alongside `pingMs: 0`, `uptime: 0`
+and an `optimeDate` of the Unix epoch; a Redis replica whose master has gone reports
+`master_last_io_seconds_ago: -1`. Neither is a measurement, and every clamp a reviewer would ask
+for turns both into zero. Both were captured from real containers rather than reasoned about, and
+`tests/fixtures/dbops/README.md` records what could NOT be captured — no sharded cluster, no Redis
+Cluster, no Sentinel, no AOF, no `mongodb+srv` — rather than filling the gaps with invention.
+
+The write-up below is kept as the reasoning that produced it.
 
 The five engines are connected and can be queried. That is a client. An operator needs the other
 half: backups, replication health, connection counts, slow queries, locks, growth.
@@ -943,6 +965,11 @@ Backups belong to item 5, not here — a database dump is a job with a destinati
 second backup path beside `backup.ts` is exactly the two-schedulers mistake in another costume.
 
 **Size.** 1–1.5 weeks per engine. Postgres and MySQL first covers most estates.
+
+**What the estimate got right and wrong.** The eight-questions-per-engine framing held for both
+new engines, and the editorial half was indeed the hard part. What it missed is that "roughly
+eight questions" is the cheap half of a week and the fixtures are the expensive half: every
+finding that changed a judgement came out of a container, and none of them out of documentation.
 
 ---
 
@@ -1221,6 +1248,8 @@ than a drift.
 | **Embedded n8n (item 9)** | Item 27 gets most of the value with full access to the policy engine, the vault and the audit log, and without a second database, a second auth model and a licence question. |
 | **A third-party extension API (item 15b)** | Unchanged and worth restating: a plugin that can call `credentialResolver` is a vault with no lock. `MODULE_FORBIDDEN_IMPORTS` and `MODULE_FORBIDDEN_BRIDGE` exist to make drifting into it impossible by accident. Not before the Tauri decision — an extension API is a compatibility promise, and rewriting the host underneath one is how migrations die. |
 | **Ticketing, on-call rotation, incident management** | Webhook out to the tool that already does it. |
+| **Ghostty (item 8)** | Cut by the owner. The feasibility study still stands and is worth keeping: libghostty-vt has no PTY at all — zero spawn symbols across its thirty public headers — so it could never replace node-pty, and the full renderer admits macOS and iOS only with an NSView surface, so it cannot be embedded here. The one real prize was `snapshot.h` for session restore, and it is not worth a hand-written FFI against an API whose authors say it will change without warning. |
+| **Tauri (item 10)** | Cut by the owner, and the case got weaker while this roadmap was executed rather than stronger. The port was always "rewrite the whole main process": SSH and SFTP over ssh2, five database drivers, the MCP server, the vault, the VPN subsystem with its privileged helpers, the supervisor, the policy engine. This work then added a job engine with detached remote execution, a SQLite store, a host-facts probe, a database-operations layer, an access collector and a posture collector — all of it main-process, none of it portable. Installer size was the prize; the price is now most of a year of rewriting things that work. |
 | **Documentation generation, diagrams, architecture prose** | Except item 28, which earns its place by being nearly free once item A exists. |
 | **Applying Kubernetes manifests** | Item 22. That is a pipeline's job. |
 | **Unattended auto-patching** | Item 17. Reporting and staging, yes. A desktop app quietly upgrading an estate is a promise about unattended correctness this app cannot keep. |
@@ -1261,25 +1290,25 @@ a cheap item, and treating it as one is how a quarter disappears.
 | C | ~~**Host facts**~~ | 100% | continuous | 4 | strong | **3 / 21** | **SHIPPED** | — | Done |
 | A | ~~**Durable store**~~ | — | — | — | — | **0 / 30** | **SHIPPED** | — | Done |
 | B | ~~**Job engine B1+B2+B3**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | B4 remains | Part done |
-| 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** (pg+mysql) | mongo/redis remain | Part done |
+| 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** | mssql not covered, stated | Done |
 | 17 | ~~**Patch management**~~ | 100% | weekly | 5 | strong | **10** | **SHIPPED** | — | Done |
-| 5 | **Backups to real targets** | 90% | weekly | 5 | strong | **8** | 3.5 wk | B, scheduler | Invest |
-| 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | OOM kills, cert expiry remain | Part done |
-| 23 | **Fleet key management** | 100% | quarterly | 5 | very strong | **7** | 1 wk read / 2.5 wk full | C (read), B (write) | Differentiator |
+| 5 | ~~**Backups to real targets**~~ | 90% | weekly | 5 | strong | **8** | **SHIPPED** | — | Done |
+| 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | — | Done |
+| 23 | ~~**Fleet key management**~~ | 100% | quarterly | 5 | very strong | **7** | **READ SHIPPED** | write gated, needs a real host | Part done |
 | 20 | ~~**Compose**~~ | 60% | daily | 3 | some | **6** | **SHIPPED** | — | Done |
-| 6e | **Cron editing** | 80% | monthly | 3 | some | **5** | 2.5 wk | B | Invest |
-| 24 | **Security posture** | 60% | monthly | 3 | some | **5** | 2.5 wk | C | Invest |
-| 26 | **Capacity trends** | 70% | monthly | 3 | some | **5** | 1.5 wk | A | Fill-in |
-| 27 | **Rule engine** | 40% | continuous | 3 | some | **5** | 1.5 wk | A, B | Fill-in |
+| 6e | ~~**Cron editing**~~ | 80% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
+| 24 | ~~**Security posture**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
+| 26 | ~~**Capacity trends**~~ | 70% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
+| 27 | ~~**Rule engine**~~ | 40% | continuous | 3 | some | **5** | **SHIPPED** | — | Done |
 | 22 | **Kubernetes lifecycle** | 25% | weekly | 4 | weak | **5** | 4 wk | B | Defer |
-| 7 | **Credential proxy** | 30% | daily | 3 | very strong | **5** | 3.5 wk | — | Strategic |
-| 25 | **Configuration drift** | 50% | rare | 4 | strong | **4** | 2.5 wk | A, C | Fill-in |
-| 28 | **Runbooks on alerts** | 40% | per-incident | 3 | some | **4** | 1.5 wk | A | Fill-in |
-| 14 | **Change log** | 30% solo | per-incident | 3 | strong | **4** solo / **8** team | 2 wk | A | Conditional |
+| 7 | ~~**Credential proxy**~~ | 30% | daily | 3 | very strong | **5** | **SHIPPED** | — | Done |
+| 25 | ~~**Configuration drift**~~ | 50% | rare | 4 | strong | **4** | **SHIPPED** | — | Done |
+| 28 | ~~**Runbooks on alerts**~~ | 40% | per-incident | 3 | some | **4** | **SHIPPED** | — | Done |
+| 14 | ~~**Change log**~~ | 30% solo | per-incident | 3 | strong | **4** / **8** team | **SHIPPED** | — | Done |
 | 1 | **pm2 supervision** | 25% | daily | 3 | some | **4** | 2.5 wk local | — | Defer |
 | 2 | **frp ngrok UX** | 20% | rare | 2 | some | **3** | 2.5 wk | — | Defer |
-| 8 | **Ghostty snapshot** | 100% | — | 2 | some | **3** | unknown | — | Experiment |
-| 10 | **Tauri** | 100% | — | 2 | none | **3** | quarters | — | Standing gate |
+| 8 | ~~**Ghostty snapshot**~~ | — | — | — | — | — | **CUT** | — | Not building |
+| 10 | ~~**Tauri**~~ | — | — | — | — | — | **CUT** | — | Not building |
 
 ### The four quadrants, and the trap in the middle
 
@@ -1368,6 +1397,53 @@ turn something up.**
 **Why these rank at all.** The stated goal is a tool stable enough to daily-drive, and both
 of these are places where the project believes it has a check and does not. That is worse
 than a known absence, because it is budgeted for.
+
+---
+
+### 31. The firewall rules themselves, not a count of them
+
+**Raised by item 24 rather than planned, and it needs a decision rather than an implementation.**
+
+What shipped reads the firewall in both layers — the front end and the kernel beneath it,
+because "ufw is inactive" is not "nothing is filtering" on a cloud image with a boot-loaded
+nftables ruleset — and reports scalars: which tool, whether it is active, the default policy,
+a rule count, a deny count, the zones. Every one of those goes through the single-line
+unforgeable path, which is the strongest safety property this collector has.
+
+**But an operator reading "ufw · 12 rules · in deny" cannot tell whether 3306 is open to the
+world**, which is the question they came to ask. The next increment is a bounded, per-line
+sanitised list of the actual rules.
+
+**Why it was not built, and why that is a product decision.** A list of what is exposed on
+every host is the single most attacker-valuable thing this feature could hold, and it changes
+the threat model of the collector's output — which currently carries only counts and fixed
+vocabulary, and would then carry addresses and ports. That is the same widening the 0.8.0
+review caught when a metrics tool began returning a full service and port inventory under a
+consent that described something narrower. It should be decided deliberately, with its own
+line in the capability grid, not added because it is obviously useful.
+
+**Size.** Days to build, and the decision is the part worth taking time over.
+
+---
+
+### 32. A retention horizon per event kind
+
+**Raised by item 28, and it is a defect at a boundary rather than a missing feature.**
+
+Job rows are kept for a year; alert events for ninety days. The runbook joins the two — "what
+was run between this alert raising and clearing" — so it is bounded by the shorter of them.
+The consequence is precise and wrong: **a host with a quarterly problem reads "this has never
+fired here" while the job that fixed it in January is still on disk.** The evidence survives
+and the anchor that would find it does not.
+
+The honest fix is a longer horizon for the `alert` event kind specifically, which means
+retention stops being one number and becomes a policy keyed on kind. That is a change to the
+store's own retention rules, and item 28's author declined to smuggle it in — correctly, since
+retention is the one part of that store that must not acquire exceptions casually. It is
+cheap and it is somebody's deliberate decision.
+
+**Size.** A day, most of it deciding what the second number should be and proving the pass
+still terminates.
 
 ---
 

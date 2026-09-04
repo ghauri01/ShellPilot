@@ -1,0 +1,37 @@
+{
+  // The 4,290 tests were linted and never type-checked: `tests/` belonged to no
+  // tsconfig, so `npm run typecheck` covered `src/` and skipped every one of
+  // them. Lint catches an unused variable; only the compiler catches a test
+  // asserting against a shape the code no longer has — which is the test most
+  // likely to be quietly wrong, because it still passes.
+  //
+  // Separate from the two source configs rather than folded into them: the
+  // tests import from main, the renderer and shared, and they run under vitest
+  // with jsdom for the `.tsx` ones, so they need the union of both lib sets and
+  // neither source project should acquire a dependency on the test tree.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    // Deliberately NOT `noUnusedLocals`: a test may bind a value to document
+    // what a call returns without asserting on it, and failing the build for
+    // that would push people toward asserting something weak instead.
+    "noUnusedLocals": false,
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "vitest/globals"],
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "noEmit": true
+  },
+  // `src/renderer/src/env.d.ts` carries the `declare global { interface Window
+  // { shellpilot } }` augmentation. A renderer component reached only through a
+  // test import does not drag its own ambient declarations in, so without this
+  // every `window.shellpilot` in every component a `.tsx` test renders reports
+  // TS2339 — errors in `src/`, from a config that owns none of it. Naming the
+  // file here restores the global the renderer is actually compiled with.
+  "include": ["tests/**/*.ts", "tests/**/*.tsx", "src/renderer/src/env.d.ts"]
+}

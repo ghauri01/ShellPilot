@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import type { SshHop } from '../src/shared/ssh'
 import type { VaultEntry } from '../src/shared/vault'
 
 // The vault used to be a password manager sitting beside the SSH client with
@@ -40,7 +41,14 @@ const entry = (patch: Partial<VaultEntry>): VaultEntry => ({
   ...patch
 })
 
-const hop = (): { host: string; port: number; username: string; auth: 'key'; serverId: string } => ({
+// `SshHop` itself, not a five-field literal type. The literal had no
+// `password`, `privateKey`, `keyPath` or `passphrase` on it — the four fields
+// every assertion below reads off the RESULT — so `resolveSecrets<T>` returned
+// that same narrow T and each `cfg.privateKey` was a property access the
+// compiler had no member for. It is also why three call sites carried
+// `as never`: the cast was standing in for the type this helper should have
+// had all along.
+const hop = (): SshHop & { serverId: string } => ({
   host: '10.0.0.1',
   port: 22,
   username: 'root',
@@ -70,7 +78,7 @@ describe('resolving a credential from the vault', () => {
     vaultEntries = [entry({ id: 'v2', kind: 'login', privateKey: undefined, password: 'hunter2' })]
     secrets.set('s1', JSON.stringify({ vaultEntryId: 'v2' }))
 
-    expect(resolveSecrets({ ...hop(), auth: 'password' as never }).password).toBe('hunter2')
+    expect(resolveSecrets({ ...hop(), auth: 'password' }).password).toBe('hunter2')
   })
 
   it('fails clearly when the vault is locked instead of silently trying nothing', () => {
@@ -88,7 +96,7 @@ describe('resolving a credential from the vault', () => {
     // vault is worse than refusing to connect.
     vaultUnlocked = false
     secrets.set('s1', JSON.stringify({ vaultEntryId: 'v1', password: 'old-and-rotated' }))
-    expect(() => resolveSecrets({ ...hop(), auth: 'password' as never })).toThrow(VaultLockedError)
+    expect(() => resolveSecrets({ ...hop(), auth: 'password' })).toThrow(VaultLockedError)
   })
 
   it('leaves a server saved before the vault held credentials working unchanged', () => {
@@ -101,7 +109,7 @@ describe('resolving a credential from the vault', () => {
   it('never overrides a credential the caller supplied inline', () => {
     vaultEntries = [entry({ privateKey: 'FROM-VAULT' })]
     secrets.set('s1', JSON.stringify({ vaultEntryId: 'v1' }))
-    expect(resolveSecrets({ ...hop(), privateKey: 'INLINE' } as never).privateKey).toBe('INLINE')
+    expect(resolveSecrets({ ...hop(), privateKey: 'INLINE' }).privateKey).toBe('INLINE')
   })
 })
 

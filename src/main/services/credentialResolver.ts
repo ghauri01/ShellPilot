@@ -152,6 +152,38 @@ export function knownSecretValuesForServer(serverId: string): string[] {
 }
 
 
+// ------------------------------------------------------- API credentials
+
+/** One field of a vault entry, resolved for the API credential proxy
+ *  (roadmap item 7).
+ *
+ *  Same contract as `resolveVpnSecrets` above and for the same reason:
+ *  resolved at the moment of use and returned, never cached, so nothing holds
+ *  a copy of an API key after the vault re-locks. A locked vault throws
+ *  `VaultLockedError` rather than returning null — a null would be
+ *  indistinguishable from "the entry is empty", and the proxy's answer to
+ *  those two is different (park and say so, versus tell the user the rule
+ *  points at nothing).
+ *
+ *  The ref is typed STRUCTURALLY rather than imported from
+ *  `shared/credproxy`. This module is inside the MCP bridge's import closure
+ *  and that one is deliberately outside it — see tests/jobsNotExposed.test.ts.
+ *  Importing the type here would put the proxy's vocabulary one hop from the
+ *  bridge for the sake of a name. */
+export function resolveVaultField(ref: {
+  vaultEntryId: string
+  slot: 'password' | 'privateKey' | 'username' | 'field'
+  fieldKey?: string
+}): string | null {
+  const entry = vaultEntry(ref.vaultEntryId)
+  if (!entry) return null
+  const value =
+    ref.slot === 'field'
+      ? entry.fields.find((f) => f.key === ref.fieldKey)?.value
+      : entry[ref.slot]
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
 // A database's stored credential, resolved the same way a server's is: keyed
 // by id in the OS keychain, read only in main, never returned to a caller.
 // The jump host's own credentials live in that same store under the server id.

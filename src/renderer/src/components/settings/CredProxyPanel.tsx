@@ -1,0 +1,459 @@
+import { useCallback, useEffect, useState } from 'react'
+import { clsx } from '../../lib/format'
+import {
+  CRED_PROXY_LOOPBACK_NOTE,
+  CRED_PROXY_TOKEN_HEADER,
+  CRED_PROXY_TOKEN_NOTE,
+  credProxyBaseUrl,
+  describeInjection
+} from '../../../../shared/credproxy'
+import type {
+  CredProxyCall,
+  CredProxyInjectionKind,
+  CredProxyRule,
+  CredProxySlot,
+  CredProxyStatus
+} from '../../../../shared/credproxy'
+import type { VaultEntry } from '../../../../shared/vault'
+
+// The API credential proxy — roadmap item 7, settings half.
+//
+// What this pane has to make true, beyond letting someone type a rule:
+//
+//  * The TOKEN's power is stated where the token is, in the sentence next to
+//    the copy button, not in a docs page. A token whose holder has not been
+//    told what it grants is a token that ends up in a chat window.
+//  * "It is only on loopback" is not a permission, and the pane says so —
+//    every process running as this user can reach the port.
+//  * A rule reads as a SENTENCE about where a credential goes, because that is
+//    the thing being authorised. "Billing API — https://api.stripe.com, key
+//    from Stripe live key, sent as Authorization: Bearer."
+//  * The recent calls are visible here rather than in a separate log, because
+//    a rule that quietly stopped matching looks exactly like a rule that is
+//    working until you look at whether anything went through it.
+
+type Tone = 'ok' | 'warn' | 'danger'
+
+const INJECTIONS: { kind: CredProxyInjectionKind; label: string; needs: string | null }[] = [
+  { kind: 'bearer', label: 'Authorization: Bearer', needs: null },
+  { kind: 'header', label: 'A named header', needs: 'Header name' },
+  { kind: 'query', label: 'A query parameter', needs: 'Parameter name' },
+  { kind: 'basic', label: 'Basic auth', needs: 'Username' }
+]
+
+const SLOTS: { slot: CredProxySlot; label: string }[] = [
+  { slot: 'password', label: 'The entry’s API key / password' },
+  { slot: 'privateKey', label: 'The entry’s key material' },
+  { slot: 'username', label: 'The entry’s username' },
+  { slot: 'field', label: 'A named custom field' }
+]
+
+interface Draft {
+  id?: string
+  name: string
+  origin: string
+  vaultEntryId: string
+  slot: CredProxySlot
+  fieldKey: string
+  kind: CredProxyInjectionKind
+  injectionName: string
+}
+
+const emptyDraft = (): Draft => ({
+  name: '',
+  origin: '',
+  vaultEntryId: '',
+  slot: 'password',
+  fieldKey: '',
+  kind: 'bearer',
+  injectionName: ''
+})
+
+export function CredProxyPanel(): React.JSX.Element {
+  const [status, setStatus] = useState<CredProxyStatus | null>(null)
+  const [rules, setRules] = useState<CredProxyRule[]>([])
+  const [calls, setCalls] = useState<CredProxyCall[]>([])
+  const [entries, setEntries] = useState<VaultEntry[]>([])
+  const [token, setToken] = useState<string | null>(null)
+  const [draft, setDraft] = useState<Draft | null>(null)
+  const [msg, setMsg] = useState<{ tone: Tone; text: string } | null>(null)
+  const [portDraft, setPortDraft] = useState('')
+
+  const refresh = useCallback(async (): Promise<void> => {
+    const api = window.shellpilot?.credproxy
+    if (!api) return
+    const [s, r, c] = await Promise.all([api.status(), api.rules(), api.calls(50)])
+    if (s) {
+      setStatus(s)
+      setPortDraft(String(s.port))
+    }
+    if (r) setRules(r)
+    if (c) setCalls(c)
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  // The vault list is read only to name entries in the picker. Its VALUES are
+  // never used here — a rule stores an entry id, and main reads the credential
+  // at request time.
+  useEffect(() => {
+    void window.shellpilot?.vault?.list().then((res) => {
+      if (res?.ok && res.entries) setEntries(res.entries)
+    })
+  }, [])
+
+  // Polled while the pane is open. Calls happen on the proxy's own path, which
+  // has nothing to tell a settings screen, and they move on the order of a
+  // request rather than a frame. The interval dies with the pane.
+  useEffect(() => {
+    const t = setInterval(() => void refresh(), 5_000)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  const toggle = async (on: boolean): Promise<void> => {
+    setMsg(null)
+    const api = window.shellpilot?.credproxy
+    if (!api) return
+    if (!on) {
+      const s = await api.stop()
+      if (s) setStatus(s)
+      return
+    }
+    const port = Number(portDraft)
+    const res = await api.start(Number.isInteger(port) && port > 0 ? port : undefined)
+    if (!res) return
+    if (res.status) setStatus(res.status)
+    if (!res.ok) setMsg({ tone: 'danger', text: res.error ?? 'The listener could not start.' })
+  }
+
+  const revealToken = async (): Promise<void> => {
+    const res = await window.shellpilot?.credproxy?.token()
+    if (!res) return
+    if (res.ok && res.token) {
+      setToken(res.token)
+      void refresh()
+    } else {
+      setMsg({ tone: 'danger', text: res.error ?? 'Could not read the token.' })
+    }
+  }
+
+  const rotateToken = async (): Promise<void> => {
+    const res = await window.shellpilot?.credproxy?.rotateToken()
+    if (!res) return
+    if (res.ok && res.token) {
+      setToken(res.token)
+      setMsg({
+        tone: 'warn',
+        text: 'New token. Anything still using the old one will now be refused — update your scripts.'
+      })
+    } else {
+      setMsg({ tone: 'danger', text: res.error ?? 'Could not rotate the token.' })
+    }
+  }
+
+  const save = async (): Promise<void> => {
+    if (!draft) return
+    setMsg(null)
+    const res = await window.shellpilot?.credproxy?.saveRule({
+      id: draft.id,
+      name: draft.name,
+      origin: draft.origin,
+      credential: {
+        vaultEntryId: draft.vaultEntryId,
+        slot: draft.slot,
+        ...(draft.slot === 'field' ? { fieldKey: draft.fieldKey } : {})
+      },
+      injection: { kind: draft.kind, name: draft.injectionName },
+      enabled: true
+    })
+    if (!res) return
+    if (!res.ok) {
+      setMsg({ tone: 'danger', text: res.error })
+      return
+    }
+    setDraft(null)
+    await refresh()
+  }
+
+  const remove = async (id: string): Promise<void> => {
+    await window.shellpilot?.credproxy?.removeRule(id)
+    await refresh()
+  }
+
+  const entryName = (id: string): string =>
+    entries.find((e) => e.id === id)?.name ?? 'a vault entry that is no longer there'
+
+  const needs = INJECTIONS.find((i) => i.kind === draft?.kind)?.needs ?? null
+
+  return (
+    <div className="credproxy-panel">
+      <div className="setting-row">
+        <div className="s-info">
+          <div className="s-title">API credential proxy</div>
+          <div className="s-desc">
+            A script, a dev server or an agent calls a third-party API through ShellPilot without
+            ever holding the key. Point its base URL at the address below; the credential is added
+            here, on the way out, and never comes back in a response.
+            <br />
+            Nothing is intercepted and no certificate is installed — a caller opts in by pointing at
+            us, which is why an unconfigured tool is unaffected.
+          </div>
+        </div>
+        <span
+          className={clsx('switch', status?.listening && 'on')}
+          role="switch"
+          aria-checked={status?.listening ? 'true' : 'false'}
+          aria-label="Run the API credential proxy"
+          onClick={() => void toggle(!status?.listening)}
+        />
+      </div>
+
+      <div className="setting-row">
+        <div className="s-info">
+          <div className="s-title">Port</div>
+          <div className="s-desc">
+            {status?.address
+              ? `Listening on ${status.address}.`
+              : 'Not listening. It binds 127.0.0.1 only.'}{' '}
+            {CRED_PROXY_LOOPBACK_NOTE}
+          </div>
+        </div>
+        <input
+          className="input"
+          style={{ width: 90 }}
+          aria-label="Proxy port"
+          value={portDraft}
+          onChange={(e) => setPortDraft(e.target.value)}
+          onBlur={() => {
+            if (status?.listening) void toggle(true)
+          }}
+        />
+      </div>
+
+      {status?.parked && (
+        <div className="s-note warn" role="status">
+          {status.parked.reason === 'vault-locked'
+            ? `The vault is locked, so ${status.parked.calls} call${status.parked.calls === 1 ? '' : 's'} ${status.parked.calls === 1 ? 'was' : 'were'} parked since ${new Date(status.parked.since).toLocaleTimeString()} rather than sent without a credential. Unlock it and they will go through.`
+            : `A rule points at a vault entry that no longer holds anything. ${status.parked.calls} call${status.parked.calls === 1 ? '' : 's'} refused since ${new Date(status.parked.since).toLocaleTimeString()}.`}
+        </div>
+      )}
+
+      <div className="setting-row">
+        <div className="s-info">
+          <div className="s-title">Client token</div>
+          <div className="s-desc">
+            Send it as <code>{CRED_PROXY_TOKEN_HEADER}</code> on every request. {CRED_PROXY_TOKEN_NOTE}
+          </div>
+        </div>
+        <div className="row-actions">
+          {token ? (
+            <input className="input" readOnly value={token} aria-label="Client token" style={{ width: 260 }} />
+          ) : (
+            <button className="btn" onClick={() => void revealToken()}>
+              Show token
+            </button>
+          )}
+          <button className="btn" onClick={() => void rotateToken()}>
+            Rotate
+          </button>
+        </div>
+      </div>
+
+      {msg && (
+        <div className={clsx('s-note', msg.tone)} role="status">
+          {msg.text}
+        </div>
+      )}
+
+      {/* ---------------------------------------------------------------- */}
+
+      <div className="setting-row">
+        <div className="s-info">
+          <div className="s-title">Rules</div>
+          <div className="s-desc">
+            One destination, one credential, one way of sending it. Nothing applies by default: a
+            destination with no rule is refused, never forwarded.
+          </div>
+        </div>
+        <button className="btn" onClick={() => setDraft(emptyDraft())}>
+          Add rule
+        </button>
+      </div>
+
+      {rules.length === 0 && !draft && (
+        <div className="s-note">
+          No rules yet, so the proxy will refuse everything. That is the safe state, not a broken
+          one.
+        </div>
+      )}
+
+      <ul className="credproxy-rules">
+        {rules.map((r) => (
+          <li key={r.id} className="credproxy-rule">
+            <div>
+              <div className="rule-name">{r.name}</div>
+              <div className="rule-detail">
+                {r.origin} — key from “{entryName(r.credential.vaultEntryId)}”, sent as{' '}
+                {describeInjection(r.injection)}
+                {r.enabled ? '' : ' (switched off)'}
+              </div>
+              {status?.listening && (
+                <div className="rule-detail">
+                  Point your client at{' '}
+                  <code>{credProxyBaseUrl(status.port, r.origin)}</code>
+                </div>
+              )}
+            </div>
+            <div className="row-actions">
+              <button
+                className="btn"
+                onClick={() =>
+                  setDraft({
+                    id: r.id,
+                    name: r.name,
+                    origin: r.origin,
+                    vaultEntryId: r.credential.vaultEntryId,
+                    slot: r.credential.slot,
+                    fieldKey: r.credential.fieldKey ?? '',
+                    kind: r.injection.kind,
+                    injectionName: r.injection.name ?? ''
+                  })
+                }
+              >
+                Edit
+              </button>
+              <button className="btn danger" onClick={() => void remove(r.id)}>
+                Remove
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {draft && (
+        <div className="credproxy-draft">
+          <input
+            className="input"
+            aria-label="Rule name"
+            placeholder="Billing API"
+            value={draft.name}
+            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+          />
+          <input
+            className="input"
+            aria-label="Destination"
+            placeholder="https://api.example.com"
+            value={draft.origin}
+            onChange={(e) => setDraft({ ...draft, origin: e.target.value })}
+          />
+          <div className="s-desc">
+            The exact origin, and only that origin. A rule for api.example.com does not cover
+            api.example.com.something-else, and it does not follow a redirect anywhere either.
+          </div>
+          <select
+            className="input"
+            aria-label="Vault entry"
+            value={draft.vaultEntryId}
+            onChange={(e) => setDraft({ ...draft, vaultEntryId: e.target.value })}
+          >
+            <option value="">Choose a vault entry…</option>
+            {entries.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="input"
+            aria-label="Which field"
+            value={draft.slot}
+            onChange={(e) => setDraft({ ...draft, slot: e.target.value as CredProxySlot })}
+          >
+            {SLOTS.map((s) => (
+              <option key={s.slot} value={s.slot}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+          {draft.slot === 'field' && (
+            <input
+              className="input"
+              aria-label="Field name"
+              placeholder="publishable_key"
+              value={draft.fieldKey}
+              onChange={(e) => setDraft({ ...draft, fieldKey: e.target.value })}
+            />
+          )}
+          <select
+            className="input"
+            aria-label="How it is sent"
+            value={draft.kind}
+            onChange={(e) =>
+              setDraft({ ...draft, kind: e.target.value as CredProxyInjectionKind })
+            }
+          >
+            {INJECTIONS.map((i) => (
+              <option key={i.kind} value={i.kind}>
+                {i.label}
+              </option>
+            ))}
+          </select>
+          {needs && (
+            <input
+              className="input"
+              aria-label={needs}
+              placeholder={needs}
+              value={draft.injectionName}
+              onChange={(e) => setDraft({ ...draft, injectionName: e.target.value })}
+            />
+          )}
+          <div className="row-actions">
+            <button className="btn primary" onClick={() => void save()}>
+              Save rule
+            </button>
+            <button className="btn" onClick={() => setDraft(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------------------------------------------------------------- */}
+
+      <div className="setting-row">
+        <div className="s-info">
+          <div className="s-title">Recent calls</div>
+          <div className="s-desc">
+            Destination, rule, outcome and how long it took. Never the body, the headers or the
+            query string — a rule that puts the key in a query parameter is exactly the rule whose
+            query string must not be written down.
+          </div>
+        </div>
+      </div>
+
+      {calls.length === 0 ? (
+        <div className="s-note">Nothing has come through yet.</div>
+      ) : (
+        <ul className="credproxy-calls">
+          {calls.map((c) => (
+            <li key={c.id} className={clsx('credproxy-call', c.outcome !== 'forwarded' && 'refused')}>
+              <span className="call-method">{c.method}</span>
+              <span className="call-target">
+                {c.origin}
+                {c.path}
+              </span>
+              <span className="call-outcome">
+                {c.outcome === 'forwarded' ? `${c.status}` : c.outcome}
+              </span>
+              <span className="call-rule">{c.ruleName ?? 'no rule'}</span>
+              <span className="call-ms">{c.ms} ms</span>
+              {c.detail && <span className="call-detail">{c.detail}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}

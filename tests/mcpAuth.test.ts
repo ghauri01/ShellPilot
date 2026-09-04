@@ -81,8 +81,15 @@ describe('MCP authentication', () => {
     const b = makeSession()
     const revoked = killAllSessions()
     expect(revoked).toBe(2)
-    expect('error' in authenticate(a.token) && authenticate(a.token).error).toBe('revoked')
-    expect('error' in authenticate(b.token) && authenticate(b.token).error).toBe('revoked')
+    // Bound first, then narrowed. `'error' in authenticate(t)` narrows nothing
+    // about a SECOND, separate `authenticate(t)` call — which is what the two
+    // lines here used to be, so the result being asserted on was never the one
+    // the `in` check looked at, and `authenticate` was called twice per host
+    // against a store the kill switch had just mutated.
+    const afterA = authenticate(a.token)
+    const afterB = authenticate(b.token)
+    expect('error' in afterA && afterA.error).toBe('revoked')
+    expect('error' in afterB && afterB.error).toBe('revoked')
   })
 
   it('stores only a token hash, never the raw token', () => {

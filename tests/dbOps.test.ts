@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   DB_ANSWER_HELP,
+  DB_OPS_UNSUPPORTED_NOTE,
+  DB_QUESTIONS_BY_ENGINE,
   DB_QUESTION_LABEL,
   DB_THRESHOLDS,
   DB_VERDICT_RANK,
@@ -893,7 +895,7 @@ describe('the two statements that cannot bind a parameter', () => {
 // ===========================================================================
 
 describe('the report', () => {
-  it('covers eight questions per engine', () => {
+  it('covers eight questions per SQL engine', () => {
     expect(PG_QUESTIONS).toHaveLength(8)
     expect(MYSQL_QUESTIONS).toHaveLength(8)
     for (const id of [...PG_QUESTIONS, ...MYSQL_QUESTIONS]) expect(DB_QUESTION_LABEL[id]).toBeTruthy()
@@ -902,9 +904,22 @@ describe('the report', () => {
   it('covers only the engines it can actually answer for', () => {
     expect(supportsDbOps('postgres')).toBe(true)
     expect(supportsDbOps('mysql')).toBe(true)
-    expect(supportsDbOps('mongodb')).toBe(false)
-    expect(supportsDbOps('redis')).toBe(false)
+    // Added by the MongoDB/Redis pass. They were `false` here deliberately
+    // until there were captured fixtures and judgements behind them, rather
+    // than a thin imitation of the SQL page — see tests/dbOpsMongoRedis.test.ts.
+    expect(supportsDbOps('mongodb')).toBe(true)
+    expect(supportsDbOps('redis')).toBe(true)
+    // Still out, and the note says why rather than leaving it to be discovered.
     expect(supportsDbOps('mssql')).toBe(false)
+    expect(DB_OPS_UNSUPPORTED_NOTE).toMatch(/SQL Server is not covered/)
+  })
+
+  it('knows which questions each engine answers', () => {
+    for (const [engine, questions] of Object.entries(DB_QUESTIONS_BY_ENGINE)) {
+      expect(questions.length, engine).toBeGreaterThanOrEqual(8)
+      for (const id of questions) expect(DB_QUESTION_LABEL[id], `${engine}.${id}`).toBeTruthy()
+      expect(new Set(questions).size, engine).toBe(questions.length)
+    }
   })
 
   it('ranks unknown above ok, so a question nobody could ask is not a pass', () => {

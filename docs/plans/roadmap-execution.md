@@ -588,3 +588,193 @@ The pattern in both is the same, and it is worth naming: **the happy path was ne
 exercised end to end.** Every state the engine can reach was tested, and the two defects live
 in the ordinary sequence — a reboot that works, and a job that finishes — which the fake host
 could produce but was never asked to.
+
+### The key-change gate: what has to happen on a real host before it lifts
+
+All five blockers are fixed and each was proved to fail first. The gate stays off anyway,
+because the residual cannot be closed from a laptop, and the implementer said so rather than
+declaring victory.
+
+**The residual, precisely.** The watchdog now proves it armed before the file is moved, and
+the launcher is chosen on the host: `systemd-run --user --scope` first, then `setsid`, then
+`nohup`, and a refusal to write at all if none of them works. `systemd-run` is first for a
+reason worth keeping — it escapes the **logind session scope** that `KillUserProcesses=yes`
+kills, whereas `setsid` escapes the terminal and not the cgroup. That distinction is the
+difference between a fix and a fix-shaped comment.
+
+What it still cannot promise: a transient systemd scope lives under `user@.service`, and a
+user manager with no lingering and no other session can be stopped with everything inside it.
+The arming proof catches a watchdog that never started; it cannot catch one killed afterwards.
+If that happens the change is live and unprotected, and the leftover backup blocks further
+changes on that host until a person looks — the refusal names the file and the remedy, but
+nobody has watched it happen.
+
+**Five things to try on a real estate, in order of what they would teach:**
+
+1. **A RHEL 9 host with `KillUserProcesses=yes` and no lingering.** The one case that decides
+   whether this protocol is sound. Stage a revoke, let the session end, and see whether the
+   file comes back.
+2. **`ExposeAuthInfo yes` with `AuthenticationMethods publickey,publickey`** — both factors
+   should appear on separate lines and both should be protected from removal.
+3. **An `AuthorizedKeysFile` drop-in the connecting account cannot read** — the write gate
+   should close on `partial` on a real host, not only on a synthesised status line.
+4. **`StrictModes` under `umask 002`** — what mode the replaced file actually has as sshd
+   sees it.
+5. **`systemd-run --user --scope --quiet --collect true` on Debian, Ubuntu and Alpine** — the
+   probe should degrade to `setsid` rather than hang.
+
+**Two decisions inside the fixes worth remembering.** Overlapping changes are refused rather
+than resolved with a lock: killing the first change's watchdog while that change is still
+unconfirmed is "silently make it permanent", which is the same failure pointing the other
+way, and with one backup per host there is no safe overlap. And a session that authenticated
+with a password rather than a key is still refused, even though the host has *proved* no key
+holds it open — being wrong there costs a lockout, and being conservative costs nothing on a
+configuration nobody runs.
+
+`AccessJobSpec` and the `'access'` job kind were deleted rather than wired. Nothing ever
+created one, and the job engine cannot supply the fresh, unpooled session this protocol
+depends on — so the serialisation it needed is asserted where it actually lives.
+
+### The same commit mistake, twice, by me
+
+`1faa248` says it wires the capacity trends channel. It also contains five files belonging to
+the posture work — a panel, its tests, a module registration and two edits — swept in because
+they were staged in the index when I committed.
+
+This is the second time. After the first, I wrote down the lesson: *a green check on the
+working tree is not a green check on the commit; inspect the index.* Then I inspected the
+index **for my own two files** and committed. `git status --porcelain <path>` answers a
+question about those paths; it says nothing about what else is staged.
+
+The check that actually works is `git diff --cached --name-only` with no path argument, read
+in full, immediately before every commit — and it has to be the whole index, because the
+person who staged the other files is not in the room.
+
+Left in place rather than rewritten: the content is correct and complete, three commits sit on
+top of it, and rewriting history to fix an attribution is a poor trade against the risk. The
+record is here instead.
+
+The underlying cause is structural and worth naming: **git's index is shared mutable state and
+nothing in the tooling makes an agent's staged work visible to another agent about to commit.**
+One writer per file solves the working tree and does nothing for the index. The rule that
+actually holds is the one now in every brief — *do not `git add` until you are ready to
+commit* — and it only works if everyone follows it, which is exactly the property a shared
+mutable resource cannot guarantee.
+
+### An unreproduced flake in the access collector's status block
+
+`tests/access.test.ts > the collector, run against a host-shaped tree > always ends with a
+status block, whatever it did or did not find` fails roughly one full-suite run in four, and
+has never failed in isolation.
+
+**Worth chasing rather than muting**, because this session has investigated three flaky tests
+and all three were production bugs: a backup that wrote onto the file it was protecting and
+then reported a successful recovery from the zero-byte result; a VPN teardown that killed
+openvpn before it could close the tunnel, on every dismissed credential prompt; and a
+capacity test whose assertion ran before the write it was checking.
+
+**What has been ruled out.**
+- Not the cron wiring that was landing at the time: it fails at `HEAD` in a clean clone too.
+- Not CPU load: six spinners plus the file in isolation, 101 passing, four consecutive times.
+- Not deterministic ordering: three full verbose runs did not reproduce it.
+
+**What is suspected, and where to look first.** The assertion is on the exact list of source
+statuses, and one of them is `sudoers=partial` — which is `partial` *because the temp tree
+names accounts the machine does not have*, so `id -nG` answers for some and not others. That
+makes the expected value a function of the build machine's own user database. An earlier
+adversarial review flagged this file for exactly that: it "depends on whether root/ops/deploy
+exist on the build machine and how `id -nG` answers… false failures, not false passes, but
+they will fire in CI." That prediction has now come true, but the load-dependence is not
+explained by it, so there is a second factor.
+
+The next thing to try is a shared-resource collision: the harness builds a temp tree and
+executes real shell against it, and several other suites now do the same. A fixed path, a
+`TMPDIR` collision, or a file-descriptor ceiling under sixteen parallel workers would all
+produce exactly this shape — fine alone, occasionally wrong in company.
+
+**Not muted, not retried, not skipped.** All three would convert an unexplained failure into a
+test that no longer tests, and the record above exists so the next attempt starts from what is
+already excluded.
+
+### The git rule that actually holds, after eight incidents
+
+Every safe-commit rule written on this branch turned out to be necessary and insufficient,
+and the sequence is worth keeping because each step looked like the answer at the time.
+
+1. `git add -A` swept another agent's work into a commit. **Rule: stage explicit paths.**
+2. Explicit paths still picked up a rename another agent had *already staged*, and shipped a
+   commit that did not build. **Rule: inspect the index first.**
+3. The index was inspected — for the committer's own paths. Five files belonging to somebody
+   else went in anyway. **Rule: read the whole index, no path argument.**
+4. An agent read the whole index, found it empty, staged, and was still swept — because
+   another agent ran `git add -A` and committed *in the window between those two steps*.
+
+Step 4 is the one that settles it. **Inspection cannot close a race.** No amount of looking
+before staging protects against a concurrent writer, because the index is shared mutable state
+and reading it is not atomic with acting on it.
+
+The form that actually holds is `git commit -- <paths>`, which commits exactly those paths and
+ignores whatever else the index contains. It is not a discipline that everyone has to follow;
+it is a property of the command, and it works even when the other agent is careless.
+
+So the rule for this branch, in order of strength:
+
+- **Commit with `git commit -- <paths>`.** Never a bare `git commit` after staging.
+- Never `git add -A` or `git add .` — it is the thing that makes everyone else's careful
+  staging worthless.
+- Still read `git diff --cached --name-only` before committing, because it catches the *slow*
+  version of the problem even though it cannot catch the fast one.
+
+The underlying lesson generalises past git: **when several writers share mutable state,
+protocols that depend on everyone behaving lose to mechanisms that do not.** Three rules here
+asked for good behaviour from every agent. The fourth asks for nothing from anyone.
+
+### What type-checking 4,384 tests actually found
+
+The count went 342 → 0 and the count is the least interesting part. Six classes of defect
+came out, none of which lint, review or a passing suite could have shown.
+
+**A test and its code agreed on a value that does not exist.** `outcomeOf` branched on
+`outcome === 'failed'`, which has never been a member of `JobHostOutcome`. Every failure
+except two fell through to `unknown`, so a command exiting non-zero — the commonest failure
+there is — was reported as "we cannot say how that went". The fixture seeded the same
+non-existent value, behind an `as 'ok'` cast, so the test agreed with the bug. Both halves
+were wrong in the same direction and reading either alone showed nothing.
+
+**A test proved nothing about the mechanism in its own name.** `does not use /dev/stdin when
+a helper stands between us and the engine` decides whether an OpenVPN config — carrying the
+private key — goes down a pipe or is written to a file. Every elevator stub omitted
+`carriesStdin`, and the harness dropped it in transit, so it was `undefined` and the file path
+was taken unconditionally. **A driver that ignored the flag entirely would have satisfied that
+test.** It now has a positive control, and the driver does honour the flag — nothing had been
+checking.
+
+**Three suites do not cover the path they exist for.** `VpnDriverContext.dropped` was absent
+from every driver-test context in three files, so a driver calling it would have thrown. Its
+own comment says it exists because emitting an error alone leaves the manager holding the run
+directory, the resolved plaintext secrets and every registration for dead sessions. No test in
+any of the three exercises that path. The field is on the harnesses now; the assertions are
+still unwritten work.
+
+**A security fallback was reached only by accident.** The policy fixture named 10 of 13
+capabilities. The three added later never reached it, so every group in that file hit
+`evaluateCapability`'s `?? 'deny'` — whose comment says an `undefined` would behave like ALLOW
+at the call sites and silently widen every saved group. The fallback had no deliberate test
+and would have stopped being exercised the moment somebody filled the gap.
+
+**Two tests asserted against a second call.** `'error' in authenticate(t) && authenticate(t).error`
+narrows one result and asserts on another, and authenticates twice against a store the kill
+switch had just mutated.
+
+**And a tail of options and enum members that no longer exist** — an argument removed
+deliberately because it let one host's count decide what ran on all of them, a `risk` that was
+never a risk, a job state used where a host state belongs.
+
+Two numbers worth keeping. **196 of the 342 came from one line**: adding the renderer's
+`env.d.ts`, without which every component a `.tsx` test rendered reported missing properties.
+And the cast count went **down by seven** — none added, and seven removed that had each been
+standing in for a type the fixture should have had. A suite that type-checks because it is
+full of casts is the same lie as one that type-checks because nobody looked.
+
+`typecheck:tests` is now inside `npm run typecheck`, which both CI workflows already run, so
+it is enforced from that commit without touching a workflow file.

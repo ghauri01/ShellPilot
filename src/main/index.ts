@@ -3,9 +3,9 @@
 import './portable'
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, dialog, session, Menu, Notification, powerMonitor } from 'electron'
 import { join } from 'node:path'
-import { readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, renameSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import {
   sshConnect,
   sshWrite,
@@ -52,12 +52,29 @@ import {
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { HostFactsReader } from './services/hostFacts'
 import { FleetSampler, fleetCached, setActiveFleetSampler } from './services/fleetSampler'
-import { loadHistory, type EventCursor, type HistoryStore } from './services/history'
+import {
+  RETENTION_FULL_DAYS,
+  RETENTION_HOURLY_DAYS,
+  loadHistory,
+  type EventCursor,
+  type HistoryStore
+} from './services/history'
+import {
+  CAPACITY_THRESHOLDS,
+  buildCapacityReport,
+  type CapacityReport
+} from '../shared/capacity'
 import { BroadcastRunner } from './services/broadcast'
 import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
 import { AccessCommitter, AccessReader } from './services/access'
+import { PostureReader } from './services/posture'
+import { DriftReader } from './services/drift'
+import { readChangeLog } from './services/changelog'
+import { readRunbook, saveRunbookNote } from './services/runbooks'
+import { isRunbookKind, type RunbookNote, type RunbookView } from '../shared/runbooks'
+import type { ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
 import type {
   AccessChangePreview,
   AccessChangeTarget,
@@ -160,7 +177,26 @@ import { toVpnResult } from './services/vpn/errors'
 import { withVpnTransport, withVpnTransportDb } from './services/vpn/transport'
 import type { VpnKeygenResult, VpnKind, VpnMintResult, VpnPublicKeyResult, VpnSpec } from '../shared/vpn'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
-import { backupExport, backupImport, backupInspect, deleteAllData, relaunchApp } from './services/backup'
+import {
+  backupExport,
+  backupImport,
+  backupInspect,
+  deleteAllData,
+  discardStagedBackup,
+  dumpToDestination,
+  inspectRemoteBackup,
+  listRemoteBackups,
+  readTargets,
+  recordRun,
+  relaunchApp,
+  runBackupToDestination,
+  saveDestinations,
+  startBackupSchedule,
+  stopBackupSchedule
+} from './services/backup'
+import { databaseDumpTarget, dumpableDatabases } from './services/backupTargets'
+import { BACKUP_STAGE_LABEL } from '../shared/backup'
+import type { BackupDestination, DumpRunReport } from '../shared/backup'
 import {
   checkForUpdates,
   getUpdaterStatus,
@@ -175,9 +211,27 @@ import {
 } from './services/updater'
 import type { UpdatePrefs } from '../shared/updater'
 import { parseSshConfig } from '../shared/sshconfig'
+import { RuleEngine } from './services/rules'
+import type { RuleEventStore, RulesFile } from './services/rules'
+import { RULES_FILE } from '../shared/rules'
+import type { RuleDraftWire } from '../shared/rules'
 import { loadData, saveData } from './services/store'
 import type { SshConnectConfig } from '../shared/ssh'
-import { resolveDbSecrets, resolveChainSecrets, type SecretBlob } from './services/credentialResolver'
+import {
+  isVaultLockedError,
+  resolveDbSecrets,
+  resolveChainSecrets,
+  resolveVaultField,
+  type SecretBlob
+} from './services/credentialResolver'
+import {
+  CredProxy,
+  appendCredProxyAudit,
+  readCredProxyFile,
+  writeCredProxyFile
+} from './services/credProxy'
+import { DEFAULT_CRED_PROXY_PORT } from '../shared/credproxy'
+import type { CredProxyCall, CredProxyStatus } from '../shared/credproxy'
 import {
   refreshMcpDataCache,
   listCachedWorkspaces,
@@ -226,6 +280,7 @@ import {
 } from './services/biometrics'
 import { listAudit } from './services/auditLog'
 import { recordJobApproval } from './services/approvalLog'
+import { planCronEditOnHost, writeCronEdit } from './services/cronEdit'
 import { startMcpServer, stopMcpServer, mcpServerStatus, explainSessionAccess } from './services/mcpServer'
 
 const isDev = !app.isPackaged
@@ -369,12 +424,21 @@ function createWindow(): void {
     // kept working through its queue for a window that no longer existed, and on
     // `activate` a new window would receive events carrying tailIds it filters
     // out, so the streams were invisible and unstoppable.
-    logTailer.disposeAll()
+    // Nothing half-written at the far end: a tick that has not started must not
+  // start now, and one already running holds the process through its own
+  // promise rather than through this timer.
+  stopBackupSchedule()
+
+  logTailer.disposeAll()
     broadcast.disposeAll()
     // Same, and it matters more here: a job outlives its panel by design, so a
     // window closing is exactly the case where one would keep working through
     // its queue with nowhere to report. Queued hosts must not start.
     jobRunner.disposeAll()
+  // Stop sweeping. A sweep that started is allowed to finish its own promise;
+  // what this prevents is a new one beginning against a store that is about to
+  // close.
+  ruleEngine.stop()
   })
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
@@ -838,21 +902,76 @@ const hostFactsReader = new HostFactsReader({
 // Gating the CHANNEL rather than the panel is the point — see the note on
 // FleetSamplerDeps.accessEnabled for why this probe is the exception.
 let accessModuleOn = false
+// Whether the security posture probe may run — roadmap item 24. Kept beside
+// the access flag and refreshed from the same blob, and gated for a DIFFERENT
+// reason: the access probe is gated because of what it does on the host, this
+// one because of what it produces. A fleet-wide table of which host has no
+// firewall and still takes passwords over ssh is a map of how to attack the
+// estate, and assembling one is a thing a person switches on rather than
+// discovers. See FleetSamplerDeps.postureEnabled.
+let postureModuleOn = false
+// Whether the change log may READ — roadmap item 14. Kept beside the other two
+// and refreshed from the same blob, and gated for a third distinct reason.
+//
+// The access probe is gated for what it does on a host and the posture probe
+// for what it produces. This one produces nothing and touches no host: it opens
+// four records that are written whether or not it is on. What a person consents
+// to is having their own week ASSEMBLED out of them — which is more useful than
+// any of the four separately, and is therefore also the thing to ask about.
+//
+// Absent reads as OFF, like both of its neighbours, so an upgrade never starts
+// reading somebody's local session log for a screen they did not ask for.
+let changeLogModuleOn = false
+// Configuration drift — roadmap item 25. Gated for what it PRODUCES, which is
+// the posture module's argument rather than the access module's: the probe
+// itself reads seven world-readable files with no sudo, and the table it builds
+// is a list of which hosts are behind everybody else.
+//
+// Absent reads as OFF, like all three of its neighbours.
+let driftModuleOn = false
 function syncAccessModule(data: unknown): void {
   const modules = (data as { settings?: { modules?: Record<string, unknown> } } | null)?.settings?.modules
   accessModuleOn = modules?.access === true
+  postureModuleOn = modules?.posture === true
+  changeLogModuleOn = modules?.changeLog === true
+  driftModuleOn = modules?.drift === true
 }
 try {
   syncAccessModule(loadData())
 } catch {
   // A blob that will not parse is not consent. Off.
   accessModuleOn = false
+  postureModuleOn = false
+  changeLogModuleOn = false
+  driftModuleOn = false
 }
 
 // Fleet key and access, on the same slow clock — roadmap item 23. One reader
 // for the whole process, for the reason HostFactsReader is one: it holds no
 // state beyond the exec function, and every probe is a single round trip.
 const accessReader = new AccessReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
+})
+
+// Security posture, on the same slow clock — roadmap item 24. One reader for
+// the whole process, for the reason the other two are one: it holds no state
+// beyond the exec function, and every probe is a single round trip.
+const postureReader = new PostureReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
+})
+
+// Configuration drift, on the same slow clock — roadmap item 25. One reader for
+// the whole process, for the reason the other three are one: it holds no state
+// beyond the exec function, and every probe is a single round trip.
+//
+// It gets the SAME exec as the other three and nothing else. In particular it
+// does not get the vault, the credential resolver or anything that could hand a
+// known secret value to `redactOutput`: the pattern rules are what stand between
+// a watched file and the panel, and adding a credential reach here to improve
+// them would put the vault inside a background sweep to make a display nicer.
+const driftReader = new DriftReader({
   exec: (cfg, command, timeoutMs) =>
     sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
 })
@@ -884,6 +1003,24 @@ const fleetSampler = new FleetSampler({
   sampleAccess: async (_key, cfg) => {
     const probe = await accessReader.read(resolveChainSecrets(cfg as SshConnectConfig))
     return probe.ok ? { ok: true, access: probe.access } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
+  },
+  // The security posture half — roadmap item 24. Injected like `sampleAccess`,
+  // and allowPrompt: false for the same reason: this is the unattended caller,
+  // and reading a host's firewall must never be what raises a host-key trust
+  // dialog the user cannot connect to anything they just did.
+  postureEnabled: () => postureModuleOn,
+  samplePosture: async (_key, cfg) => {
+    const probe = await postureReader.read(resolveChainSecrets(cfg as SshConnectConfig))
+    return probe.ok ? { ok: true, posture: probe.posture } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
+  },
+  // The configuration drift half — roadmap item 25. Injected like the other
+  // three, allowPrompt: false for the reason they all are, and handed the
+  // host's own name so the `hostnames` normalisation rule has something to
+  // substitute.
+  driftEnabled: () => driftModuleOn,
+  sampleDrift: async (_key, cfg, ctx) => {
+    const probe = await driftReader.read(resolveChainSecrets(cfg as SshConnectConfig), ctx)
+    return probe.ok ? { ok: true, drift: probe.drift } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
   },
   release: (key) => metricsDisconnect(key),
   emit: (event) => {
@@ -924,6 +1061,38 @@ ipcMain.handle('fleet:facts', (_e, serverId: string) => fleetSampler.factsFor(se
 // reason 'fleet:facts' does not. There is exactly one thing deciding how often
 // every home directory on every host gets stat'ed, and it is the sampler.
 ipcMain.handle('fleet:access', (_e, serverId: string) => fleetSampler.accessFor(serverId))
+// One server's security posture, as the sweep last saw it — roadmap item 24.
+//
+// A read of what the sweep already has; it never triggers a probe, for the same
+// reason 'fleet:facts' and 'fleet:access' do not. There is exactly one thing
+// deciding how often every host gets asked for its firewall ruleset, and it is
+// the sampler.
+//
+// There is deliberately no MCP tool beside this. `fleet:posture` is a renderer
+// channel and nothing else — see the forbidden-symbol list in
+// tests/jobsNotExposed.test.ts for why an agent does not get to ask which of
+// the estate's hosts has SELinux switched off.
+ipcMain.handle('fleet:posture', (_e, serverId: string) => fleetSampler.postureFor(serverId))
+// One server's watched configuration files, as the sweep last saw them —
+// roadmap item 25.
+//
+// A read of what the sweep already has; it never triggers a probe, for the
+// reason 'fleet:facts', 'fleet:access' and 'fleet:posture' do not. There is
+// exactly one thing deciding how often every host has seven files read off it,
+// and it is the sampler.
+//
+// There is deliberately no MCP tool beside this, and the reason is sharper than
+// posture's rather than softer. A map of which hosts differ from a known-good
+// configuration is a map of which hosts are BEHIND — "these three still take
+// passwords over ssh where the other twelve do not" is a target list an agent
+// does not get to ask for. See the forbidden-symbol list in
+// tests/jobsNotExposed.test.ts.
+//
+// And there is no write beside it either, ever. src/shared/drift.ts states that
+// refusal in full: bringing a host into line is a job, with the plan and the
+// approval a job carries, and this panel could not decide which side is right
+// in any case.
+ipcMain.handle('fleet:drift', (_e, serverId: string) => fleetSampler.driftFor(serverId))
 
 // ---- Changing who can get in — roadmap item 23, the write half ----
 //
@@ -1029,7 +1198,7 @@ ipcMain.handle('access:plan', (_e, req: Omit<AccessRunRequest, 'token' | 'confir
   const { plan, refusals } = deriveAccessPlan(req, now)
   return {
     token: plan.token,
-    command: plan.spec?.steps[0].command ?? '',
+    command: plan.write?.command ?? '',
     hosts: plan.targets.map((t) => ({
       serverId: t.serverId,
       serverName: t.serverName,
@@ -1059,7 +1228,7 @@ ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRu
   }
 
   const { plan, refusals } = deriveAccessPlan(req, at)
-  const command = plan.spec?.steps[0].command ?? ''
+  const command = plan.write?.command ?? ''
   if (command === '' || command !== req.confirmedCommand) {
     // Not a warning and not a retry. What was agreed to is not what this would
     // run, and there is no version of that worth resolving automatically.
@@ -1450,6 +1619,100 @@ const jobRunner = new JobRunner({
   }
 })
 
+// ---- Rules (roadmap item 27) ----
+//
+// "When this alert fires, run that job, then call that webhook."
+//
+// Constructed HERE and nowhere else, the same single-construction-site rule
+// tests/jobsNotExposed.test.ts asserts about the job runner — a second engine
+// would be a second idea of what a rule may do. Everything it acts with is
+// injected, so the engine itself holds no executor, no credential and no
+// webhook URL:
+//
+//  * `runJob` goes through `jobRunner.run`, which re-derives `planJob` over the
+//    rule's own spec and target list and refuses if the stored approval
+//    disagrees. A rule does not get a private door into the job engine; it uses
+//    the same one a person does, and is refused by the same gate.
+//  * `notify` is `webhookNotify`, which rebuilds the payload from its own
+//    whitelist. The rule engine may say a thing happened; it may not choose the
+//    shape that leaves the machine.
+//  * `resolveTarget` resolves a PINNED serverId against the current workspace
+//    and returns null when that host is gone, which the engine treats as a
+//    refusal of the whole rule rather than as a smaller run.
+//
+// Deliberately NOT reachable from the MCP bridge or the CLI. See
+// tests/rulesNotExposed.test.ts: DURABILITY DEFEATS REVOCATION, and a rule is
+// the worst case of it — between firings it has nothing pending at all, so
+// `denyAllPending()` has no list it appears on.
+const RULES_PATH = join(app.getPath('userData'), RULES_FILE)
+
+/** Same store accessor discipline as `jobStore`: resolved per call rather than
+ *  captured, because the engine is constructed at module scope and the history
+ *  store opens asynchronously after it — or never. */
+const ruleStore: RuleEventStore = {
+  readEvents: (filter) => historyStore?.readEvents(filter) ?? [],
+  recordEvent: (kind, hostId, payload, at) => historyStore?.recordEvent(kind, hostId, payload, at)
+}
+
+const ruleEngine = new RuleEngine({
+  // A getter would be nicer; this object is cheap and the engine only reads
+  // `store` inside a sweep, so the indirection above is what makes it live.
+  get store(): RuleEventStore | null {
+    return historyStore === null ? null : ruleStore
+  },
+  now: () => Date.now(),
+  read: () => {
+    try {
+      if (existsSync(RULES_PATH)) return JSON.parse(readFileSync(RULES_PATH, 'utf8'))
+    } catch (err) {
+      // Nothing here is worth failing app start over, and every field is
+      // narrowed again by `sanitiseRules` regardless. A rules file that will
+      // not parse is no rules, which is the safe direction: it disarms rather
+      // than arming something half-read.
+      console.error('[rules] file unreadable, starting with none:', err)
+    }
+    return null
+  },
+  write: (file: RulesFile) => {
+    try {
+      // Temp-then-rename at 0600, matching store.ts/vault.ts/policyStore.ts.
+      // This file holds approval records: a torn write is a rule whose
+      // authorisation half-survived.
+      writeFileSync(`${RULES_PATH}.tmp`, JSON.stringify(file), { mode: 0o600 })
+      renameSync(`${RULES_PATH}.tmp`, RULES_PATH)
+    } catch (err) {
+      console.error('[rules] save failed:', err)
+    }
+  },
+  notify: (raw) => webhookNotify(raw),
+  version: () => app.getVersion(),
+  newId: () => randomUUID(),
+  resolveTarget: (serverId) => {
+    const server = getCachedServer(serverId)
+    // Null means "this host is not in the workspace any more", and the engine
+    // refuses the whole rule on it. Resolved fresh at every firing rather than
+    // stored with the rule, so a machine that moved is dialled at its new
+    // address and one that was deleted is not dialled at all.
+    if (!server) return null
+    return { ...serverToSshConfig(server), sessionId: `rule:${serverId}` }
+  },
+  runJob: (launch) => {
+    if (!historyStore) {
+      throw new Error(
+        'Jobs need the history store, which is not open on this machine, so this rule did not run.'
+      )
+    }
+    return jobRunner.run(launch)
+  }
+})
+
+ipcMain.handle('rules:list', () => ruleEngine.list())
+ipcMain.handle('rules:create', (_e, draft: RuleDraftWire) => ruleEngine.create(draft))
+ipcMain.handle('rules:enable', (_e, id: string, enabled: boolean) =>
+  ruleEngine.setEnabled(id, enabled === true)
+)
+ipcMain.handle('rules:remove', (_e, id: string) => ruleEngine.remove(id))
+
 ipcMain.handle('jobs:list', (_e, limit?: number) => jobRunner.list(limit))
 ipcMain.handle('jobs:get', (_e, jobId: string) => jobRunner.get(jobId))
 ipcMain.handle('jobs:run', async (_e, req: JobRunRequest) => {
@@ -1813,6 +2076,46 @@ ipcMain.handle(
   }
 )
 
+// ---- Changing what is scheduled ----
+//
+// Reading was shipped alone first so the parser could be proved before anything
+// wrote, and proving it found two silent misreads. This is the write half, and
+// it keeps that posture: the plan is derived against the host's OWN current
+// file rather than against the list the panel is showing, because a list that
+// was collected while /etc/cron.d was unreadable is missing lines, and an edit
+// planned against it deletes them.
+//
+// `exec` and `recordApproval` are injected rather than imported by the service
+// so that file stays free of electron — which is what lets the shell-level
+// tests run the real command string against a temp tree.
+const cronEditDeps = {
+  exec: (cfg: unknown, command: string, timeoutMs: number) =>
+    sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs, false),
+  recordApproval: recordJobApproval
+}
+
+ipcMain.handle(
+  'cron:plan-edit',
+  async (
+    _e,
+    target: { serverId: string; serverName: string; cfg: unknown },
+    edit: unknown,
+    opts?: { sources?: CronSourceReport[] }
+  ) => planCronEditOnHost(cronEditDeps, target as never, edit as never, opts ?? {})
+)
+
+// The write is separate from the plan on purpose: what the operator approved is
+// the `after` text they were shown, and passing it back means the thing written
+// is the thing confirmed rather than a re-derivation that may have moved.
+ipcMain.handle(
+  'cron:write-edit',
+  async (
+    _e,
+    target: { serverId: string; serverName: string; cfg: unknown },
+    req: { before: string; after: string; token: string; runId: string; approval?: unknown }
+  ) => writeCronEdit(cronEditDeps, target as never, req)
+)
+
 // ---- Webhook alerts ----
 //
 // Delivery lives in main because the renderer's CSP is `connect-src 'self'`
@@ -1861,6 +2164,109 @@ ipcMain.handle('webhook:test', () => webhookTest())
 ipcMain.handle('webhook:notify', (_e, payload: AlertPayload) => {
   webhookNotify(payload)
 })
+
+// ---- The API credential proxy ----
+//
+// Roadmap item 7. A local process makes an authenticated call to a third-party
+// API without ever holding the key: it points its base URL at the loopback
+// listener, and the credential is injected at the boundary from the vault.
+//
+// The design argument — a base-URL rewrite rather than TLS interception,
+// because a tool whose pitch is "your secrets never leave" should not ship a
+// CA into the user's trust store — is in src/shared/credproxy.ts. The
+// forwarding rules are in services/credProxy.ts.
+//
+// Constructed once, here, for the same reason the job runner is: a second
+// construction site would be a second listener with its own idea of which
+// credential may go where, and "read main/index.ts to see the whole model" is
+// the property that makes this checkable at all.
+//
+// DELIBERATELY NOT REACHABLE FROM THE MCP BRIDGE, in either direction. An
+// agent that could write a rule would be choosing a destination for one of the
+// user's API keys, held in a file, outliving the session that made it and
+// every revocation that session could receive; an agent that could call the
+// proxy would spend the user's API budget under a credential it never held.
+// tests/jobsNotExposed.test.ts fails on the import closure and on the symbol
+// names, which is what keeps that true without anyone having to remember it.
+const CRED_PROXY_TOKEN_SECRET_ID = 'credproxy.client.token'
+
+const credProxy = ((): CredProxy => {
+  const rulesPath = join(app.getPath('userData'), 'shellpilot-credproxy.json')
+  const auditPath = join(app.getPath('userData'), 'shellpilot-credproxy-audit.jsonl')
+  return new CredProxy(
+    {
+      now: () => Date.now(),
+      newId: () => randomUUID(),
+      read: () => readCredProxyFile(rulesPath),
+      write: (file) => writeCredProxyFile(rulesPath, file),
+      // Resolved through credentialResolver at request time, never cached, so
+      // nothing holds a copy of an API key after the vault re-locks. The two
+      // failures are kept apart on purpose: a locked vault is a state the user
+      // can fix, and an empty entry is a rule pointing at nothing.
+      resolveCredential: (ref) => {
+        try {
+          const value = resolveVaultField(ref)
+          return value === null
+            ? { ok: false, reason: 'credential-missing' }
+            : { ok: true, value }
+        } catch (err) {
+          if (isVaultLockedError(err)) return { ok: false, reason: 'vault-locked' }
+          return { ok: false, reason: 'credential-missing' }
+        }
+      },
+      clientToken: () => getSecret(CRED_PROXY_TOKEN_SECRET_ID),
+      recordCall: (call) => appendCredProxyAudit(auditPath, call)
+    },
+    DEFAULT_CRED_PROXY_PORT
+  )
+})()
+
+// Resumes a listener the user had switched on, the way the fleet sampler
+// resumes: a proxy that has to be re-enabled by hand after every restart is a
+// proxy whose scripts break every morning, and the failure would look like the
+// far end being down.
+if (credProxy.status().enabled) {
+  void credProxy.start().then((r) => {
+    if (!r.ok) console.error('[credproxy] could not resume the listener:', r.error)
+  })
+}
+
+ipcMain.handle('credproxy:status', (): CredProxyStatus => credProxy.status())
+ipcMain.handle('credproxy:rules', () => credProxy.rules())
+ipcMain.handle('credproxy:calls', (_e, limit?: number): CredProxyCall[] => credProxy.calls(limit))
+ipcMain.handle('credproxy:save-rule', (_e, draft: unknown) => credProxy.saveRule(draft))
+ipcMain.handle('credproxy:remove-rule', (_e, id: string) => credProxy.removeRule(String(id)))
+ipcMain.handle('credproxy:start', async (_e, port?: number) => {
+  const res = await credProxy.start(typeof port === 'number' ? port : undefined)
+  return { ...res, status: credProxy.status() }
+})
+ipcMain.handle('credproxy:stop', async () => {
+  await credProxy.disable()
+  return credProxy.status()
+})
+
+// The token DOES cross to the renderer, unlike the webhook URL, and that is a
+// deliberate difference rather than an oversight. The webhook URL is a
+// credential the user never has to see; this one is a credential the user has
+// to PASTE INTO THEIR OWN SCRIPT, so a proxy whose token never leaves main is
+// a proxy nobody can call. The panel states what holding it grants.
+ipcMain.handle('credproxy:token', (): { ok: boolean; token?: string; error?: string } => {
+  const existing = getSecret(CRED_PROXY_TOKEN_SECRET_ID)
+  if (existing !== null) return { ok: true, token: existing }
+  return mintCredProxyToken()
+})
+ipcMain.handle('credproxy:rotate-token', () => mintCredProxyToken())
+
+function mintCredProxyToken(): { ok: boolean; token?: string; error?: string } {
+  // 32 bytes of urandom. The token is the only thing standing between a rule
+  // and every other process running as this user, so it is not derived from
+  // anything and not shorter than the keys it stands in for.
+  const token = `cpx_${randomBytes(32).toString('hex')}`
+  if (!setSecret(CRED_PROXY_TOKEN_SECRET_ID, token)) {
+    return { ok: false, error: 'Could not store the token — OS encryption is unavailable.' }
+  }
+  return { ok: true, token }
+}
 
 // ---- The alert log ----
 //
@@ -1988,6 +2394,125 @@ ipcMain.handle('alerts:db-events', (_e, limit?: number): StoredDbAlertRow[] => {
   out.sort((a, b) => b.at - a.at)
   return out.slice(0, n)
 })
+
+// ---- Capacity trends — roadmap item 26 ----
+//
+// One named read and one pure function. No filter argument and no metric
+// argument, for exactly the reason `alerts:history` has none: the history
+// store's rule is named statements only, and "let the caller say which series
+// over which range with which aggregate" is the query surface that rule exists
+// to refuse.
+//
+// What crosses IPC is the ANSWER — a drawable line, and a forecast or the
+// reason there is not one — not the samples behind it. A 90-day window holds
+// about seven thousand points per metric; shipping twenty-one thousand of them
+// to the renderer to be averaged down into eight hundred pixels is how "a query
+// and a chart" turns into the metrics warehouse the roadmap says not to build.
+ipcMain.handle(
+  'capacity:trends',
+  (_e, hostId: unknown, windowDays: unknown): CapacityReport | null => {
+    if (!historyStore) return null
+    // Not a string is not a host. The renderer passes a server id; anything
+    // else is a caller bug and must not read the whole time range.
+    if (typeof hostId !== 'string' || hostId === '') return null
+    // Clamped to what the store actually retains. A window wider than the
+    // horizon would return a quarter of data under a label saying a year, and
+    // the forecast states the window it was drawn from — so the label matters.
+    const days =
+      typeof windowDays === 'number' && Number.isFinite(windowDays)
+        ? Math.max(1, Math.min(RETENTION_HOURLY_DAYS, Math.floor(windowDays)))
+        : 7
+    const now = Date.now()
+    const from = now - days * 86_400_000
+    return buildCapacityReport(hostId, historyStore.readTrends(hostId, from, now), {
+      now,
+      from,
+      to: now,
+      thresholds: CAPACITY_THRESHOLDS,
+      // Carried into the report rather than duplicated in the panel: the
+      // renderer cannot import a main-process constant, and a panel with "7
+      // days" typed into it goes on saying that after the policy changes.
+      fullResolutionDays: RETENTION_FULL_DAYS,
+      retainedDays: RETENTION_HOURLY_DAYS
+    })
+  }
+)
+
+// ---- The change log — roadmap item 14 ----
+//
+// A READ of four records that already exist, merged into one timeline. It
+// writes nothing, stores nothing and starts nothing in the background; every
+// row it returns was written by something else for its own reasons.
+//
+// THE MODULE FLAG IS CHECKED INSIDE readChangeLog, not around this handler, and
+// that is deliberate. A handler guarded from the outside would return an empty
+// page when the module is off, which is indistinguishable on screen from a
+// quiet week — the exact confusion this feature exists to prevent. Passing the
+// flag in means the page comes back saying "switched off, nothing was opened",
+// and the panel can say so.
+//
+// There is deliberately no MCP tool beside this, for the reason `fleet:posture`
+// has none: a merged account of everything a person did on every host is not
+// something an agent gets to ask for. It is also the one place in the app that
+// reads `shellpilot-ai-audit.jsonl`, and that file's value rests on its rows
+// being an agent's rather than about one.
+ipcMain.handle('changelog:read', (_e, filter: unknown): ChangeLogPage => {
+  // Not an object is not a filter. An unparseable argument must narrow the
+  // read rather than widen it, so it falls back to no filter and the page's own
+  // limit rather than to whatever the caller sent.
+  const f: ChangeLogFilter =
+    filter !== null && typeof filter === 'object' ? (filter as ChangeLogFilter) : {}
+  return readChangeLog(
+    {
+      enabled: () => changeLogModuleOn,
+      // The same store every other history read uses, or null before it opens
+      // and forever on a machine where history is switched off — in which case
+      // the page says the store is not there rather than showing three sources
+      // and calling it a timeline.
+      history: () => historyStore
+    },
+    f
+  )
+})
+
+// ---- Runbooks attached to alerts — roadmap item 28 ----
+//
+// Two handlers. `runbook:read` merges the note a person wrote with what was
+// actually run the last three times this alert fired on this host;
+// `runbook:save-note` writes the note.
+//
+// THERE IS NO THIRD HANDLER, and its absence is the feature. A
+// `runbook:run-remembered` would be a one-click repeat of what we did during a
+// different incident, with the approval reduced to a formality over command
+// text somebody else's outage produced. Showing the commands is the whole
+// item; running one is a job, planned and approved the ordinary way. The
+// refusal is written down in src/shared/runbooks.ts and asserted in
+// tests/runbooks.test.ts, in the shape docker.ts writes its refusal to ship
+// `prune`.
+//
+// The store is passed in rather than read inside, exactly as `changelog:read`
+// passes it: a runbook whose history half could not be read must come back
+// SAYING so, and a handler that returned an empty list for a closed store
+// would be indistinguishable from an incident nobody ran anything for.
+ipcMain.handle('runbook:read', (_e, kind: unknown, hostId: unknown): RunbookView | null => {
+  // Not one of the ten alert kinds is not a runbook. Narrowed here rather than
+  // trusted, for the reason sanitiseStoredAlert narrows a row on the way out:
+  // the renderer is the only caller today and that is not a guarantee.
+  if (!isRunbookKind(kind)) return null
+  const host = typeof hostId === 'string' && hostId !== '' ? hostId : null
+  return readRunbook({ history: () => historyStore }, kind, host)
+})
+
+ipcMain.handle(
+  'runbook:save-note',
+  (_e, kind: unknown, hostId: unknown, text: unknown): { ok: boolean; note: RunbookNote | null } => {
+    if (!isRunbookKind(kind)) return { ok: false, note: null }
+    const host = typeof hostId === 'string' && hostId !== '' ? hostId : null
+    // The text is sanitised and capped inside saveRunbookNote, which is also
+    // where an empty note is a REMOVAL rather than a stored blank.
+    return saveRunbookNote({ history: () => historyStore }, kind, host, text)
+  }
+)
 
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()
@@ -2131,6 +2656,77 @@ ipcMain.handle('backup:import', (_e, password: string, path: string) =>
 )
 ipcMain.handle('backup:deleteAll', () => deleteAllData(closeHistoryNow))
 ipcMain.handle('backup:relaunch', () => relaunchApp())
+
+// Destinations. The renderer never sees a credential for any of them: an SFTP
+// destination names a server whose secret credentialResolver reads in main, and
+// an S3 destination names a vault entry that backupTargets reads in main. What
+// crosses this boundary is an id.
+ipcMain.handle('backup:destinations', () => readTargets())
+ipcMain.handle('backup:saveDestinations', (_e, destinations: BackupDestination[]) =>
+  saveDestinations(destinations)
+)
+ipcMain.handle('backup:runDestination', async (_e, id: string, password: string) => {
+  const dest = readTargets().destinations.find((d) => d.id === id)
+  if (!dest) {
+    const stamp = new Date().toISOString()
+    return {
+      ok: false,
+      destinationId: id,
+      destinationName: id,
+      destinationKind: 'local',
+      startedAt: stamp,
+      finishedAt: stamp,
+      verified: false,
+      restoreTested: false,
+      removed: [],
+      failedStage: 'write',
+      error: 'That destination is no longer configured.'
+    }
+  }
+  const report = await runBackupToDestination(dest, password)
+  recordRun(dest.id, report)
+  return report
+})
+ipcMain.handle('backup:listRemote', async (_e, id: string) => {
+  const dest = readTargets().destinations.find((d) => d.id === id)
+  if (!dest) return { ok: false, error: 'That destination is no longer configured.' }
+  return listRemoteBackups(dest)
+})
+ipcMain.handle('backup:inspectRemote', async (_e, id: string, name: string, password: string) => {
+  const dest = readTargets().destinations.find((d) => d.id === id)
+  if (!dest) return { ok: false, error: 'That destination is no longer configured.' }
+  return inspectRemoteBackup(dest, name, password)
+})
+ipcMain.handle('backup:discardStaged', (_e, path: string) => discardStagedBackup(path))
+// A dump is a source, not a bundle: it is plaintext SQL and is named .sql, so
+// retention never counts it as a generation of an encrypted backup. The panel
+// says so where the button is.
+ipcMain.handle('backup:dumpableDatabases', () => dumpableDatabases())
+ipcMain.handle('backup:dumpDatabase', async (_e, destinationId: string, databaseId: string) => {
+  const stamp = new Date().toISOString()
+  const refuse = (error: string): DumpRunReport => ({
+    ok: false,
+    destinationId,
+    destinationName: destinationId,
+    verified: false,
+    error,
+    startedAt: stamp,
+    finishedAt: stamp
+  })
+  const dest = readTargets().destinations.find((d) => d.id === destinationId)
+  if (!dest) return refuse('That destination is no longer configured.')
+  const resolved = databaseDumpTarget(databaseId)
+  if ('error' in resolved) return refuse(resolved.error)
+  return dumpToDestination(dest, resolved.target, resolved.password)
+})
+ipcMain.handle('backup:chooseDirectory', async () => {
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+  const chosen = await dialog.showOpenDialog(win, {
+    title: 'Choose a folder for backups',
+    properties: ['openDirectory', 'createDirectory']
+  })
+  return chosen.canceled ? null : (chosen.filePaths[0] ?? null)
+})
 
 // ---- Updater ----
 ipcMain.handle('updater:check', () => checkForUpdates())
@@ -2592,6 +3188,11 @@ app.whenReady().then(() => {
   // whole reason the store is opened from inside whenReady rather than at
   // module scope. See startHistory.
   startHistory()
+  // After startHistory, so the first sweep has a store to read; before
+  // createWindow, so a rule does not wait on a window it never needs. The
+  // engine's first sweep sets its watermark to "now" and acts on nothing
+  // behind it, so starting it early cannot replay a backlog.
+  ruleEngine.start()
   createWindow()
   installMenu()
   // Primed once at launch so the MCP bridge can resolve server/workspace
@@ -2627,6 +3228,37 @@ app.whenReady().then(() => {
   // the stored prefs, so both live behind startAutoCheck rather than a bare
   // check here plus a timer somewhere else.
   startAutoCheck()
+  // Scheduled backups. Started here rather than at module scope for the same
+  // reason startHistory is: only the instance that won the single-instance
+  // lock should be writing to a destination, and two copies of this app
+  // uploading generations into the same bucket would fight over retention.
+  //
+  // The tick only looks at the clock. Nothing runs until a destination has an
+  // interval AND a vault entry holding its passphrase, and a tick that cannot
+  // find one records why rather than doing nothing.
+  startBackupSchedule({
+    onRun: (line) => console.log('[backup]', line),
+    // Raised outside the window, because the panel that shows the failure is
+    // three clicks into Settings and nobody goes there to check that a backup
+    // they set up months ago is still working. Only on the transition into
+    // failing: an hourly notification about the same broken destination is
+    // noise, and noise is how a failing backup becomes one nobody reads.
+    onNewFailure: (report) => {
+      if (!Notification.isSupported()) return
+      const n = new Notification({
+        title: `Backup to ${report.destinationName} failed`,
+        body: `${report.failedStage ? BACKUP_STAGE_LABEL[report.failedStage] : 'the run'}: ${report.error ?? 'no reason given'}`,
+        icon: appIcon()
+      })
+      n.on('click', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore()
+          mainWindow.focus()
+        }
+      })
+      n.show()
+    }
+  })
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

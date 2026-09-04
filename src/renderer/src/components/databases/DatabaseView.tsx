@@ -122,10 +122,12 @@ export function DatabaseView({ db }: { db: DatabaseConn }): React.JSX.Element {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [typed, setTyped] = useState(false)
   const [mode, setMode] = useState<'query' | 'shell' | 'ops'>('query')
-  // Operational reads exist for PostgreSQL and MySQL/MariaDB only. MongoDB and
-  // Redis answer completely different questions (replica-set state and oplog
-  // window; eviction policy and persistence) and get their own pass rather than
-  // a thin imitation of this one, so the tab is absent rather than empty.
+  // Operational reads exist for PostgreSQL, MySQL/MariaDB, MongoDB and Redis.
+  // The last two were held back from the first pass deliberately, because they
+  // answer completely different questions — replica-set state and oplog window;
+  // eviction policy, persistence and the link to a master — and a thin
+  // imitation of the SQL page would have been worse than no page. SQL Server
+  // still has no tab, and DB_OPS_UNSUPPORTED_NOTE says why.
   const hasOps = supportsDbOps(db.kind)
   /**
    * The worst verdict the last operational read produced.

@@ -53,6 +53,71 @@ const MODULE_FILES: Record<string, string[]> = {
   // accounts' authorized_keys with `sudo -n`, which is not a thing to discover
   // in a sudo log. See FleetSamplerDeps.accessEnabled.
   access: ['src/renderer/src/components/monitor/AccessPanel.tsx'],
+  // The collector (src/shared/posture.ts, src/main/services/posture.ts) is not
+  // listed, for the reason hostFacts is not listed under `inventory` and the
+  // access collector is not listed above: it lives in the sampler, not in the
+  // module. Worth writing down here as well as in modules.ts is that this
+  // module's toggle also gates the COLLECTION rather than merely the panel —
+  // and for a different reason from `access`. That probe is gated for what it
+  // does on the host; this one is gated for what it produces, which is a
+  // fleet-wide map of how to attack the estate. See
+  // FleetSamplerDeps.postureEnabled.
+  posture: ['src/renderer/src/components/monitor/PosturePanel.tsx'],
+  // Item 25. The collector (src/shared/drift.ts, src/main/services/drift.ts) IS
+  // listed, unlike the three collectors above, and the difference is worth
+  // stating: those run on every install whether or not their module is on, and
+  // this one does not. Nothing reads a watched file unless this module is
+  // enabled — the toggle gates FleetSamplerDeps.driftEnabled, not merely the
+  // tab — so the reader is the module's to own and its closure is the module's
+  // to answer for.
+  //
+  // The main half is also the one most worth walking. It is the only module
+  // file in the repo that handles the CONTENTS of a configuration file, and it
+  // passes because the only thing it reaches for is `services/secretRedaction`:
+  // no vault, no credential resolver, no secret store. Handing it known secret
+  // values to redact against would have improved the redaction and put the
+  // vault inside a background sweep, which is the trade this list exists to
+  // make visible.
+  drift: [
+    'src/shared/drift.ts',
+    'src/main/services/drift.ts',
+    'src/renderer/src/components/monitor/DriftPanel.tsx'
+  ],
+  // Item 26. `src/shared/capacity.ts` and `src/renderer/src/lib/capacity.ts`
+  // are listed alongside the panel, unlike the collectors above, because they
+  // are not the sampler's — nothing runs them unless this panel asks. The
+  // history store they read from IS shared, and it is reached through the
+  // preload bridge rather than imported, which is what the second assertion
+  // below covers.
+  capacity: [
+    'src/shared/capacity.ts',
+    'src/renderer/src/lib/capacity.ts',
+    'src/renderer/src/components/monitor/CapacityPanel.tsx'
+  ],
+  // Item 14. All three files are listed, unlike the collectors above, because
+  // none of them belongs to anything else: nothing reads the four records
+  // unless this panel asks, and the reader runs only from its own IPC handler.
+  // The records it reads ARE shared and are written whether or not this module
+  // is on, which is why they are not listed here.
+  changeLog: [
+    'src/shared/changelog.ts',
+    'src/main/services/changelog.ts',
+    'src/renderer/src/components/monitor/ChangeLogPanel.tsx'
+  ],
+  // Item 27. All three files are listed, unlike the collectors above: nothing
+  // here runs unless this module is on, and the main-process half is the one
+  // that most needs the closure walked — it is the only module file in the repo
+  // that can start a job. It passes because everything it acts with is
+  // injected: the job launcher, the webhook and the target resolver are handed
+  // to it by main, so it imports no executor, no credential resolver and no
+  // secret store of its own. Importing `services/webhookAlerts` to send its
+  // notification would have pulled `services/secrets` into a module's reach for
+  // the sake of one function call.
+  rules: [
+    'src/shared/rules.ts',
+    'src/main/services/rules.ts',
+    'src/renderer/src/components/monitor/RulesPanel.tsx'
+  ],
   broadcast: [
     'src/shared/broadcast.ts',
     'src/main/services/broadcast.ts',
@@ -308,6 +373,32 @@ describe('what a module may not reach', () => {
     // A module with no entry in MODULE_FILES would be silently unchecked,
     // which is the same as having no boundary at all.
     expect(Object.keys(MODULE_FILES).sort()).toEqual(MODULES.map((m) => m.id).sort())
+  })
+
+  it('has a tab for every module, so nothing ships that a user cannot reach', () => {
+    // The OTHER direction, and it is not hypothetical: item 26 landed complete
+    // — a panel, its library, its IPC channel and fourteen passing renderer
+    // tests — and was mounted nowhere for as long as the three files that
+    // mount a tab were scoped to a different agent. A tested feature no user
+    // can open is the same waste as an untested one, pointing the other way,
+    // and this repo's own pre-release review named the mirror image of it
+    // ("main-process work the renderer never calls").
+    //
+    // Read off the source rather than by rendering: FleetMonitor pulls in the
+    // whole app store, and a test that mounted it to discover a missing tab
+    // would be testing zustand. What decides whether a tab exists is the
+    // `moduleEnabled(modules, 'x')` guard around it, and that is a literal.
+    const src = readFileSync(join(ROOT, 'src/renderer/src/components/monitor/FleetMonitor.tsx'), 'utf8')
+    const mounted = new Set([...src.matchAll(/moduleEnabled\(modules,\s*'([^']+)'\)/g)].map((m) => m[1]))
+    // Anti-vacuity: a regex that stopped matching would make this pass for
+    // every module at once.
+    expect(mounted.size, 'no module guards found in FleetMonitor — this regex is broken').toBeGreaterThan(0)
+    const unreachable = MODULES.map((m) => m.id).filter((id) => !mounted.has(id))
+    expect(
+      unreachable,
+      `These modules are in the registry and have no tab in FleetMonitor, so enabling them does ` +
+        `nothing a user can see: ${unreachable.join(', ')}`
+    ).toEqual([])
   })
 })
 

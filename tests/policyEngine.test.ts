@@ -8,7 +8,7 @@ import {
   mostRestrictive,
   globToRegExp
 } from '../src/main/services/policyEngine'
-import type { AccessGroup, PolicyAssignment } from '../src/shared/mcp'
+import type { AccessGroup, AiCapabilityPolicy, PolicyAssignment } from '../src/shared/mcp'
 
 function group(overrides: Partial<AccessGroup['capabilities']> = {}, filePolicies: AccessGroup['filePolicies'] = []): AccessGroup {
   return {
@@ -26,6 +26,15 @@ function group(overrides: Partial<AccessGroup['capabilities']> = {}, filePolicie
       databaseAccess: 'allow',
       sudo: 'deny',
       serverMetrics: 'allow',
+      // The three capabilities added after this fixture was written. Omitted,
+      // every group built here fell through `evaluateCapability`'s
+      // `?? 'deny'`, so nothing in this file exercised them under a group that
+      // actually names them — and nothing exercised the fallback ON PURPOSE
+      // either. Both are covered now: these three, and the test at the foot of
+      // `evaluateCapability` for a group saved before a capability existed.
+      hostFacts: 'allow',
+      manageServers: 'deny',
+      vpnControl: 'deny',
       ...overrides
     },
     filePolicies
@@ -42,6 +51,20 @@ describe('evaluateCapability', () => {
     expect(evaluateCapability(g, 'terminal').decision).toBe('allow')
     expect(evaluateCapability(g, 'writeFiles').decision).toBe('ask')
     expect(evaluateCapability(g, 'sudo').decision).toBe('deny')
+  })
+
+  it('denies a capability a group saved before it existed has no entry for', () => {
+    // The upgrade path, and the reason `evaluateCapability` ends in `?? 'deny'`
+    // rather than falling through: `undefined` reads as neither 'deny' nor
+    // 'ask' at the call sites and would behave like ALLOW, so shipping a new
+    // capability would silently widen what every group already saved permits.
+    //
+    // Asserted deliberately here because the fixture above used to leave three
+    // real capabilities out, which meant this branch was reached by accident
+    // and would have stopped being reached the moment somebody filled them in.
+    const stale = group()
+    delete (stale.capabilities as Partial<AiCapabilityPolicy>).vpnControl
+    expect(evaluateCapability(stale, 'vpnControl').decision).toBe('deny')
   })
 })
 

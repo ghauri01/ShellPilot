@@ -3,7 +3,12 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { BroadcastRunner } from '../src/main/services/broadcast'
 import type { BroadcastProgress, BroadcastRequest } from '../src/shared/broadcast'
-import { BROADCAST_CONCURRENCY, BROADCAST_OUTPUT_CAP } from '../src/shared/broadcast'
+import {
+  BROADCAST_CONCURRENCY,
+  BROADCAST_OUTPUT_CAP,
+  approvalFor,
+  planBroadcast
+} from '../src/shared/broadcast'
 
 // The approval model is settled elsewhere. What this has to get right is not
 // undermining it: a cancel that does not actually stop the remaining hosts
@@ -13,7 +18,34 @@ import { BROADCAST_CONCURRENCY, BROADCAST_OUTPUT_CAP } from '../src/shared/broad
 const targets = (n: number): BroadcastRequest['targets'] =>
   Array.from({ length: n }, (_, i) => ({ serverId: `s${i}`, serverName: `host-${i}`, cfg: {} }))
 
-function harness(over: { exec?: Parameters<typeof makeRunner>[0]['exec'] } = {}) {
+/**
+ * A run request carrying the approval B3 made mandatory.
+ *
+ * Every call below used to build the request by hand without one, which is why
+ * this file did not type-check: `approval` has been required on
+ * `BroadcastRequest` since the record became the thing a resumed job is
+ * re-authorised from. The runner itself never reads it — `main` checks it
+ * against a fresh `planBroadcast` before calling in — so the omission changed
+ * no behaviour here, but a fixture that cannot be constructed is a fixture that
+ * stops describing the call. Minted from the same `planBroadcast` the check
+ * re-derives, so these requests are ones that check would accept.
+ */
+function req(o: Omit<BroadcastRequest, 'approval'>): BroadcastRequest {
+  const plan = planBroadcast(o.command, o.targets)
+  return {
+    ...o,
+    approval: approvalFor({
+      surface: 'broadcast',
+      commands: [o.command],
+      targets: o.targets,
+      plan,
+      phrase: plan.confirmation.kind === 'type-to-confirm' ? plan.confirmation.phrase : null,
+      confirmedAt: 1_700_000_000_000
+    })
+  }
+}
+
+function harness(over: { exec?: NonNullable<Parameters<typeof makeRunner>[0]>['exec'] } = {}) {
   return makeRunner(over)
 }
 
@@ -39,14 +71,14 @@ function makeRunner(over: {
 describe('running a command across hosts', () => {
   it('reports a result for every host', async () => {
     const h = harness()
-    const out = await h.runner.run({ runId: 'r', command: 'uptime', targets: targets(4) })
+    const out = await h.runner.run(req({ runId: 'r', command: 'uptime', targets: targets(4) }))
     expect(out).toHaveLength(4)
     expect(out.every((r) => r.state === 'ok')).toBe(true)
   })
 
   it('emits a running event before each host and a result after', async () => {
     const h = harness()
-    await h.runner.run({ runId: 'r', command: 'uptime', targets: targets(2) })
+    await h.runner.run(req({ runId: 'r', command: 'uptime', targets: targets(2) }))
     const states = h.events.filter((e) => !e.done).map((e) => e.host.state)
     expect(states.filter((s) => s === 'running')).toHaveLength(2)
     expect(states.filter((s) => s === 'ok')).toHaveLength(2)
@@ -55,7 +87,7 @@ describe('running a command across hosts', () => {
   it('always emits a terminal event, even with no targets', async () => {
     // Otherwise the renderer waits forever for a run that already stopped.
     const h = harness()
-    await h.runner.run({ runId: 'r', command: 'uptime', targets: [] })
+    await h.runner.run(req({ runId: 'r', command: 'uptime', targets: [] }))
     expect(h.events.filter((e) => e.done)).toHaveLength(1)
   })
 
@@ -63,7 +95,7 @@ describe('running a command across hosts', () => {
     // `grep` finding nothing exits 1. Calling that a failure would make half
     // the useful commands look broken.
     const h = makeRunner({ exec: async () => ({ ok: true, code: 1, stdout: '' }) })
-    const out = await h.runner.run({ runId: 'r', command: 'grep x f', targets: targets(1) })
+    const out = await h.runner.run(req({ runId: 'r', command: 'grep x f', targets: targets(1) }))
     expect(out[0]).toMatchObject({ state: 'ok', exitCode: 1 })
   })
 
@@ -76,7 +108,7 @@ describe('running a command across hosts', () => {
         return { ok: true, code: 0, stdout: 'fine' }
       }
     })
-    const out = await h.runner.run({ runId: 'r', command: 'uptime', targets: targets(3) })
+    const out = await h.runner.run(req({ runId: 'r', command: 'uptime', targets: targets(3) }))
     expect(out.filter((r) => r.state === 'failed')).toHaveLength(1)
     expect(out.filter((r) => r.state === 'ok')).toHaveLength(2)
     expect(out.find((r) => r.state === 'failed')?.error).toMatch(/ETIMEDOUT/)
@@ -86,7 +118,7 @@ describe('running a command across hosts', () => {
     const h = makeRunner({
       exec: async () => ({ ok: true, code: 0, stdout: 'x'.repeat(BROADCAST_OUTPUT_CAP + 500) })
     })
-    const out = await h.runner.run({ runId: 'r', command: 'cat big', targets: targets(1) })
+    const out = await h.runner.run(req({ runId: 'r', command: 'cat big', targets: targets(1) }))
     expect(out[0].stdout).toHaveLength(BROADCAST_OUTPUT_CAP)
     expect(out[0].truncated).toBe(true)
   })
@@ -105,7 +137,7 @@ describe('running a command across hosts', () => {
         return { ok: true, code: 0, stdout: '' }
       }
     })
-    await h.runner.run({ runId: 'r', command: 'uptime', targets: targets(10) })
+    await h.runner.run(req({ runId: 'r', command: 'uptime', targets: targets(10) }))
     expect(peak).toBeLessThanOrEqual(BROADCAST_CONCURRENCY)
   })
 })
@@ -125,7 +157,7 @@ describe('cancelling', () => {
       emit: () => {}
     })
     const runnerRef = runner
-    const out = await runner.run({ runId: 'r', command: 'uptime', targets: targets(8) })
+    const out = await runner.run(req({ runId: 'r', command: 'uptime', targets: targets(8) }))
     const ran = out.filter((r) => r.state === 'ok').length
     const skipped = out.filter((r) => r.state === 'skipped').length
     expect(skipped).toBeGreaterThan(0)
@@ -143,7 +175,7 @@ describe('cancelling', () => {
       },
       emit: (e) => events.push(e)
     })
-    await runner.run({ runId: 'r', command: 'uptime', targets: targets(3) })
+    await runner.run(req({ runId: 'r', command: 'uptime', targets: targets(3) }))
     expect(events.find((e) => e.done)?.cancelled).toBe(true)
   })
 
@@ -156,7 +188,7 @@ describe('cancelling', () => {
     // Two independent broadcasts; cancelling one must not silently kill
     // results the user is watching in the other.
     const runner = new BroadcastRunner({ exec: async () => ({ ok: true, code: 0, stdout: '' }), emit: () => {} })
-    const a = runner.run({ runId: 'a', command: 'uptime', targets: targets(3) })
+    const a = runner.run(req({ runId: 'a', command: 'uptime', targets: targets(3) }))
     runner.cancel('b')
     const out = await a
     expect(out.every((r) => r.state === 'ok')).toBe(true)
@@ -175,8 +207,8 @@ describe('two runs under one id', () => {
       },
       emit: () => {}
     })
-    const first = runner.run({ runId: 'r', command: 'uptime', targets: targets(2) })
-    await expect(runner.run({ runId: 'r', command: 'uptime', targets: targets(2) })).rejects.toThrow(/already running/)
+    const first = runner.run(req({ runId: 'r', command: 'uptime', targets: targets(2) }))
+    await expect(runner.run(req({ runId: 'r', command: 'uptime', targets: targets(2) }))).rejects.toThrow(/already running/)
     await first
     expect(runner.isRunning('r')).toBe(false)
   })
@@ -189,8 +221,8 @@ describe('two runs under one id', () => {
       },
       emit: () => {}
     })
-    const slow = runner.run({ runId: 'slow', command: 'uptime', targets: targets(4) })
-    await runner.run({ runId: 'quick', command: 'uptime', targets: [] })
+    const slow = runner.run(req({ runId: 'slow', command: 'uptime', targets: targets(4) }))
+    await runner.run(req({ runId: 'quick', command: 'uptime', targets: [] }))
     expect(runner.cancel('slow')).toBe(true)
     await slow
   })
@@ -209,7 +241,7 @@ describe('a host that never answers', () => {
       exec: async (_cfg, _cmd) => new Promise(() => {}),
       emit: (e) => events.push(e)
     })
-    const out = await runner.run({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(2) })
+    const out = await runner.run(req({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(2) }))
     expect(out).toHaveLength(2)
     expect(out.every((r) => r.state === 'failed')).toBe(true)
     expect(out[0].error).toMatch(/never answered/)
@@ -226,7 +258,7 @@ describe('a host that never answers', () => {
       },
       emit: () => {}
     })
-    const out = await runner.run({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(2) })
+    const out = await runner.run(req({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(2) }))
     expect(out.every((r) => r.state === 'ok')).toBe(true)
   })
 })
@@ -302,7 +334,7 @@ describe('telling the fan-out apart', () => {
     command = 'docker ps'
   ) => {
     const h = makeRunner({ exec: async () => r })
-    const out = await h.runner.run({ runId: 'r', command, targets: targets(1) })
+    const out = await h.runner.run(req({ runId: 'r', command, targets: targets(1) }))
     return out[0]
   }
 
@@ -388,7 +420,7 @@ describe('telling the fan-out apart', () => {
       exec: async () => new Promise(() => {}),
       emit: () => {}
     })
-    const out = await runner.run({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(1) })
+    const out = await runner.run(req({ runId: 'r', command: 'uptime', timeoutMs: 1, targets: targets(1) }))
     expect(out[0].state).toBe('failed')
     expect(out[0].outcome).toBe('timeout')
   })
@@ -412,7 +444,7 @@ describe('telling the fan-out apart', () => {
   it('marks a host that was never started', async () => {
     const h = makeRunner({ exec: async () => ({ ok: true, code: 0, stdout: '' }) })
     h.runner.cancel('r')
-    const started = h.runner.run({ runId: 'r', command: 'uptime', targets: targets(3) })
+    const started = h.runner.run(req({ runId: 'r', command: 'uptime', targets: targets(3) }))
     h.runner.cancel('r')
     const out = await started
     expect(out.every((r) => r.outcome === 'cancelled' || r.outcome === 'ok')).toBe(true)
@@ -433,7 +465,7 @@ describe('what the runner refuses to do about a refusal', () => {
         return { ok: true, code: 126, stdout: '', stderr: 'bash: /sbin/reboot: Permission denied' }
       }
     })
-    await h.runner.run({ runId: 'r', command: 'systemctl restart nginx', targets: targets(3) })
+    await h.runner.run(req({ runId: 'r', command: 'systemctl restart nginx', targets: targets(3) }))
     // Once per host, verbatim. Not twice, and never with a `sudo` we added.
     expect(seen).toEqual(['systemctl restart nginx', 'systemctl restart nginx', 'systemctl restart nginx'])
     expect(seen.some((c) => /\bsudo\b/.test(c))).toBe(false)

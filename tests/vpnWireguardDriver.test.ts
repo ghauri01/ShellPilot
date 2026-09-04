@@ -13,7 +13,13 @@ import { fileURLToPath } from 'node:url'
 import type { NetApplyContext, NetStateFile } from '../src/main/services/vpn/netstate'
 import type { RouteConflict } from '../src/main/services/vpn/routing/index'
 import type { Elevator } from '../src/main/services/vpn/elevation'
-import type { VpnEngineInfo, VpnProfile, VpnStatus, WireGuardSpec } from '../src/shared/vpn'
+import type {
+  VpnEngineInfo,
+  VpnErrorCode,
+  VpnProfile,
+  VpnStatus,
+  WireGuardSpec
+} from '../src/shared/vpn'
 import { isWireGuardKey, WG_HANDSHAKE_STALE_SEC } from '../src/shared/vpn'
 import { resetBinaryCache } from '../src/main/services/vpn/binaries'
 import type { ResolvedVpnSecrets, VpnDriverContext } from '../src/main/services/vpn/driver'
@@ -360,22 +366,30 @@ interface Ctx {
   ctx: VpnDriverContext
   patches: Partial<VpnStatus>[]
   logs: string[]
+  /** Every `ctx.dropped()` the driver made. See `makeCtx`. */
+  drops: { reason: string; errorCode?: VpnErrorCode }[]
 }
 
 function makeCtx(secrets = makeSecrets()): Ctx {
   const patches: Partial<VpnStatus>[] = []
   const logs: string[] = []
+  const drops: { reason: string; errorCode?: VpnErrorCode }[] = []
   return {
     ctx: {
       runDir,
       secrets,
       emit: (p) => patches.push(p),
       log: (line) => logs.push(line),
+      // The context had no `dropped`, so a driver calling it would have thrown
+      // rather than been observed — nothing below covers the drop path.
+      // Recorded so an assertion has something to reach for.
+      dropped: (reason, errorCode) => drops.push({ reason, errorCode }),
       askUser: async () => null,
       supervisor
     },
     patches,
-    logs
+    logs,
+    drops
   }
 }
 
@@ -827,6 +841,10 @@ describe('system mode', () => {
   function elevator(over: Partial<Elevator> = {}, calls: string[] = []): Elevator {
     return {
       method: 'pkexec',
+      // pkexec forks the command, so a pipe survives to it — which is what
+      // `createLinuxElevator` declares. Absent here, so `Partial<Elevator>`
+      // spread over it left the field `boolean | undefined`.
+      carriesStdin: true,
       probe: async () => ({ available: true, method: 'pkexec' }),
       run: async (req) => {
         calls.push(`${req.command} ${req.args.join(' ')}`)

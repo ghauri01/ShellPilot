@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { VpnDriver, VpnDriverContext } from '../src/main/services/vpn/driver'
-import type { VpnProfile, VpnStartResult } from '../src/shared/vpn'
+import type { VpnProfile, VpnStartResult, VpnValidation } from '../src/shared/vpn'
 
 // The manager is the part that is the same for every engine, so it is tested
 // against a fake one. What is under test here is the ordering and the failure
@@ -63,7 +63,10 @@ vi.mock('../src/main/services/vpn/supervisor', () => ({
 const behaviour = {
   start: async (_p: VpnProfile, _ctx: VpnDriverContext): Promise<VpnStartResult> => ({ ok: true }),
   stop: async (_id: string): Promise<void> => undefined,
-  validate: () => ({ ok: true, issues: [] })
+  // Annotated, so `issues` is `VpnValidationIssue[]` rather than the `never[]`
+  // inferred from an empty literal — which is what made every rewiring of this
+  // in a test below unassignable.
+  validate: (): VpnValidation => ({ ok: true, issues: [] })
 }
 const events: string[] = []
 let lastCtx: VpnDriverContext | null = null

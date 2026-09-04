@@ -58,6 +58,20 @@ export interface CronEntry {
   /** systemd timers only. */
   nextRun?: string
   lastRun?: string
+  /**
+   * The line this came from, `\r` stripped and trimmed, exactly as the parser
+   * saw it.
+   *
+   * Absent on a systemd timer, which is not a line in a file and has nothing to
+   * point at — and that absence is the edit half's answer to "can this be
+   * changed" as much as the source kind is.
+   *
+   * It exists because a job's IDENTITY has to survive a round trip through the
+   * renderer and back. An index into a list does not: the list on screen was
+   * read minutes ago and the file may have moved under it, and an index that
+   * still resolves against a changed file resolves to the wrong job silently.
+   */
+  line?: string
 }
 
 export interface CronParseResult {
@@ -418,6 +432,112 @@ function tokenize(line: string): { text: string; start: number }[] {
 }
 
 /**
+ * How a job line is laid out, in the bytes the file actually has.
+ *
+ * Every whitespace run is kept as its own field rather than collapsed, because
+ * the edit half rebuilds a line out of these and "our idea of tidy" is a diff
+ * nobody can review. Debian's /etc/crontab separates its fields with tabs; a
+ * hand-maintained crontab is usually aligned into columns. Both survive an edit
+ * to a neighbouring part of the same line.
+ */
+interface CronLineLayout {
+  /** cronie's syslog-suppressing `-`, present or not. */
+  dash: string
+  /** The schedule exactly as written, tabs and all. */
+  scheduleRaw: string
+  /** The whitespace between the schedule and whatever comes next. */
+  gap: string
+  /** The user column, on the files that have one. */
+  user: string | null
+  /** The whitespace after the user column. Empty when there is no user. */
+  userGap: string
+  /** Everything after that, byte for byte — command, percent rule and all. */
+  rest: string
+}
+
+/**
+ * Split one already-cleaned crontab line into its parts, or refuse.
+ *
+ * `null` means "this is not a job", which is the same judgement the read half
+ * has always made — it is now made in exactly one place, so that the write half
+ * cannot disagree with the read half about what a line is. A disagreement there
+ * is a file we would rewrite around a line we misread.
+ */
+function layoutJobLine(line: string, hasUserField: boolean): CronLineLayout | null {
+  // cronie lets a job be prefixed with `-` to suppress its syslog line. It is
+  // a logging flag, not part of the schedule, and cronie is the cron on every
+  // Red Hat derivative — so a `-` line is a real job, not a broken one.
+  const dash = line.startsWith('-') ? '-' : ''
+  const body = line.slice(dash.length)
+
+  let scheduleRaw: string
+  let gap: string
+  let rest: string
+  if (body.startsWith('@')) {
+    const m = body.match(/^(@\S+)(\s+)(.*)$/)
+    // An unknown `@word` is not a schedule any cron accepts — vixie and
+    // cronie implement exactly the eight in SPECIALS — so the job never runs.
+    // Listing `@every_minute` as scheduled is the same lie as dropping it.
+    if (!m || !(m[1].toLowerCase() in SPECIALS)) return null
+    scheduleRaw = m[1]
+    gap = m[2]
+    rest = m[3]
+  } else {
+    const tok = tokenize(body)
+    if (tok.length < (hasUserField ? 7 : 6) || !isCronFieldSet(tok.slice(0, 5).map((t) => t.text))) {
+      return null
+    }
+    const endOfFive = tok[4].start + tok[4].text.length
+    scheduleRaw = body.slice(0, endOfFive)
+    gap = body.slice(endOfFive, tok[5].start)
+    // Sliced, not joined. Debian's /etc/crontab separates its fields with
+    // tabs and real commands contain runs of whitespace — `run-parts` lines,
+    // quoted arguments, aligned `&&` chains. `f.slice(5).join(' ')` collapsed
+    // all of it and printed a command that is not the one on disk.
+    rest = body.slice(tok[5].start)
+  }
+
+  let user: string | null = null
+  let userGap = ''
+  if (hasUserField) {
+    const m = rest.match(/^(\S+)(\s+)(.*)$/)
+    if (!m) return null
+    user = m[1]
+    userGap = m[2]
+    rest = m[3]
+  }
+
+  // Note what is *not* done here: a trailing `# comment` is left in the
+  // command, because cron leaves it there too. `#` starts a comment only at
+  // the beginning of a line, so `0 3 * * * /x # nightly` runs a shell command
+  // ending in `# nightly` — stripping it would show a command that is not the
+  // one that runs.
+  if (splitCronCommand(rest).command.trim() === '') return null
+  return { dash, scheduleRaw, gap, user, userGap, rest }
+}
+
+/** The layout's schedule with runs of whitespace collapsed, as `CronEntry` wants it. */
+const collapse = (s: string): string => s.trim().split(/\s+/).join(' ')
+
+function entryFromLayout(
+  l: CronLineLayout,
+  origin: string,
+  kind: CronSourceKind
+): CronEntry {
+  const schedule = collapse(l.scheduleRaw)
+  const { command, input } = splitCronCommand(l.rest)
+  return {
+    kind,
+    origin,
+    schedule,
+    description: describeSchedule(schedule),
+    user: l.user,
+    command,
+    ...(input === undefined ? {} : { input })
+  }
+}
+
+/**
  * Parse a crontab file.
  *
  * `hasUserField` is the whole difficulty. /etc/crontab and /etc/cron.d put a
@@ -425,6 +545,10 @@ function tokenize(line: string): { text: string; start: number }[] {
  * Guessing wrong does not error — it silently reports the first word of the
  * command as the user and drops it from the command, which is a plausible
  * looking lie. The caller knows which file it read, so the caller says.
+ *
+ * A thin wrapper over `parseCrontabDocument` since the edit half arrived: two
+ * parsers over one format is two parsers to disagree, and the disagreement
+ * would be invisible until a write went out around a line one of them misread.
  */
 export function parseCrontab(
   text: string,
@@ -432,83 +556,7 @@ export function parseCrontab(
   kind: CronSourceKind,
   hasUserField: boolean
 ): CronParseResult {
-  const entries: CronEntry[] = []
-  const unparsed: { origin: string; line: string }[] = []
-
-  for (const raw of text.split('\n')) {
-    // `\r` is stripped explicitly rather than left to trim(), because the
-    // command is sliced out of this string afterwards and a carriage return
-    // sitting inside it would ride along into the reported command.
-    const line = raw.replace(/\r/g, '').trim()
-    if (line === '' || line.startsWith('#')) continue
-    if (isAssignment(line)) continue
-
-    // cronie lets a job be prefixed with `-` to suppress its syslog line. It is
-    // a logging flag, not part of the schedule, and cronie is the cron on every
-    // Red Hat derivative — so a `-` line is a real job, not a broken one.
-    const body = line.startsWith('-') ? line.slice(1) : line
-
-    let schedule: string
-    let rest: string
-    if (body.startsWith('@')) {
-      const m = body.match(/^(@\S+)\s+(.*)$/)
-      // An unknown `@word` is not a schedule any cron accepts — vixie and
-      // cronie implement exactly the eight in SPECIALS — so the job never runs.
-      // Listing `@every_minute` as scheduled is the same lie as dropping it.
-      if (!m || !(m[1].toLowerCase() in SPECIALS)) {
-        unparsed.push({ origin, line })
-        continue
-      }
-      schedule = m[1]
-      rest = m[2]
-    } else {
-      const tok = tokenize(body)
-      if (tok.length < (hasUserField ? 7 : 6) || !isCronFieldSet(tok.slice(0, 5).map((t) => t.text))) {
-        unparsed.push({ origin, line })
-        continue
-      }
-      schedule = tok
-        .slice(0, 5)
-        .map((t) => t.text)
-        .join(' ')
-      // Sliced, not joined. Debian's /etc/crontab separates its fields with
-      // tabs and real commands contain runs of whitespace — `run-parts` lines,
-      // quoted arguments, aligned `&&` chains. `f.slice(5).join(' ')` collapsed
-      // all of it and printed a command that is not the one on disk.
-      rest = body.slice(tok[5].start)
-    }
-
-    let user: string | null = null
-    if (hasUserField) {
-      const m = rest.match(/^(\S+)\s+(.*)$/)
-      if (!m) {
-        unparsed.push({ origin, line })
-        continue
-      }
-      user = m[1]
-      rest = m[2]
-    }
-
-    // Note what is *not* done here: a trailing `# comment` is left in the
-    // command, because cron leaves it there too. `#` starts a comment only at
-    // the beginning of a line, so `0 3 * * * /x # nightly` runs a shell command
-    // ending in `# nightly` — stripping it would show a command that is not the
-    // one that runs.
-    const { command, input } = splitCronCommand(rest)
-    if (command.trim() === '') {
-      unparsed.push({ origin, line })
-      continue
-    }
-    entries.push({
-      kind,
-      origin,
-      schedule,
-      description: describeSchedule(schedule),
-      user,
-      command,
-      ...(input === undefined ? {} : { input })
-    })
-  }
+  const { entries, unparsed } = parseCrontabDocument(text, origin, kind, hasUserField)
   return { entries, unparsed }
 }
 
@@ -986,4 +1034,843 @@ export function parseCronCollection(output: string): CronCollection {
 
   take(parseSystemdTimers(section('TIMERS')))
   return { entries, unparsed, sources }
+}
+
+// ===========================================================================
+// EDITING — roadmap item 6e
+// ===========================================================================
+//
+// Read-only shipped first so the parser could be proven before anything wrote,
+// and that sequencing paid: two silent misreads turned up in those tests — a
+// six-word English sentence parsed as a job, and a schedule described by the
+// fields it understood while skipping the one that decided when the job ran.
+//
+// What that leaves is a narrower problem than it looks, and a harder one.
+//
+// ROUND-TRIPPING A FILE WE DID NOT WRITE IS THE WHOLE PROBLEM. Comments, blank
+// lines, MAILTO=, PATH=, SHELL=, syntax this parser does not know, and the
+// operator's own column alignment all have to come out the other side byte for
+// byte. A crontab rewritten into our idea of tidy produces a diff nobody can
+// review, on a file that decides what runs unattended.
+//
+// So the model here is a DOCUMENT, not a list of jobs: every line of the file
+// is kept exactly as written, along with its own line terminator, and an edit
+// replaces one line and nothing else. `serialiseCrontabDocument` of an
+// untouched document is the input, byte for byte, including CRLF, including a
+// missing final newline.
+//
+// AND A BAD WRITE IS A SILENT OUTAGE. The job stops running and nothing says
+// so — no error, no log line, nothing to notice until the backup that did not
+// happen is needed. Which is why the rules below are refusals rather than
+// best-effort:
+//
+//   - never write a file we could not fully parse. One unparsed line and the
+//     whole file is off limits, because that line is the one we are most likely
+//     to be wrong about the position of.
+//   - never write a source the read half reported `partial`. Half a file is not
+//     a file.
+//   - never write a source we do not fully support. Named refusals only; a
+//     partial capability that looks total is worse than a narrow one that says
+//     so.
+//   - never write a line we cannot parse back into exactly what was asked for.
+
+/** What a line in a crontab is, as far as this parser is concerned. */
+export type CronDocLineKind = 'blank' | 'comment' | 'assignment' | 'job' | 'unparsed'
+
+export interface CronDocLine {
+  kind: CronDocLineKind
+  /** The line exactly as written, without its terminator. */
+  text: string
+  /**
+   * The terminator exactly as written: `\n`, `\r\n`, or `''` on a final line
+   * that has none. Carried per line rather than per file because a file with
+   * mixed endings is a real thing and normalising it would be a diff.
+   */
+  eol: string
+  /** The job this line produced, on `job` lines only. */
+  entry?: CronEntry
+}
+
+export interface CronDocument extends CronParseResult {
+  origin: string
+  kind: CronSourceKind
+  hasUserField: boolean
+  lines: CronDocLine[]
+}
+
+/**
+ * Split text into lines that remember their own terminator.
+ *
+ * `text.split('\n')` cannot be used for this and the difference is the point:
+ * it loses whether the file ended in a newline, and it turns every CRLF into a
+ * line with a stray `\r` on the end that a naive join then writes back in the
+ * wrong place. Here `join('')` of `text + eol` is the input exactly.
+ */
+function splitKeepingEol(text: string): { text: string; eol: string }[] {
+  const out: { text: string; eol: string }[] = []
+  let i = 0
+  while (i < text.length) {
+    const j = text.indexOf('\n', i)
+    if (j === -1) {
+      out.push({ text: text.slice(i), eol: '' })
+      break
+    }
+    const raw = text.slice(i, j)
+    if (raw.endsWith('\r')) out.push({ text: raw.slice(0, -1), eol: '\r\n' })
+    else out.push({ text: raw, eol: '\n' })
+    i = j + 1
+  }
+  return out
+}
+
+/**
+ * Parse a crontab into a document that can be written back unchanged.
+ *
+ * The classification is the read half's, unchanged and not re-implemented —
+ * `parseCrontab` is now a wrapper over this. Two parsers over one format is two
+ * parsers to disagree.
+ */
+export function parseCrontabDocument(
+  text: string,
+  origin: string,
+  kind: CronSourceKind,
+  hasUserField: boolean
+): CronDocument {
+  const lines: CronDocLine[] = []
+  const entries: CronEntry[] = []
+  const unparsed: { origin: string; line: string }[] = []
+
+  for (const { text: raw, eol } of splitKeepingEol(text)) {
+    // `\r` is stripped explicitly rather than left to trim(), because the
+    // command is sliced out of this string afterwards and a carriage return
+    // sitting inside it would ride along into the reported command.
+    const line = raw.replace(/\r/g, '').trim()
+    if (line === '') {
+      lines.push({ kind: 'blank', text: raw, eol })
+      continue
+    }
+    if (line.startsWith('#')) {
+      lines.push({ kind: 'comment', text: raw, eol })
+      continue
+    }
+    if (isAssignment(line)) {
+      lines.push({ kind: 'assignment', text: raw, eol })
+      continue
+    }
+    const layout = layoutJobLine(line, hasUserField)
+    if (!layout) {
+      unparsed.push({ origin, line })
+      lines.push({ kind: 'unparsed', text: raw, eol })
+      continue
+    }
+    const entry = { ...entryFromLayout(layout, origin, kind), line }
+    entries.push(entry)
+    lines.push({ kind: 'job', text: raw, eol, entry })
+  }
+  return { origin, kind, hasUserField, lines, entries, unparsed }
+}
+
+/** The document's bytes. Of an untouched document, the bytes it was parsed from. */
+export function serialiseCrontabDocument(doc: CronDocument): string {
+  return doc.lines.map((l) => `${l.text}${l.eol}`).join('')
+}
+
+// ---- Writing a command back out ----------------------------------------
+
+/**
+ * Turn a command (and its stdin, if any) back into the bytes a crontab holds.
+ *
+ * The exact inverse of `splitCronCommand`, and it has to be: an unescaped `%`
+ * in a crontab is NOT a percent sign — cron cuts the line there, runs the left
+ * half, and feeds the right half to it on stdin, with each further `%` becoming
+ * a newline. So a command the operator typed with a literal `%` in it must go
+ * to disk as `\%`, or the second half of their command silently stops being a
+ * command at all.
+ *
+ * `splitCronCommand(serialiseCronCommand(c, i))` is `{ command: c, input: i }`
+ * for every c and i, which is asserted as a property rather than on examples.
+ */
+export function serialiseCronCommand(command: string, input?: string): string {
+  const esc = (s: string): string => s.replace(/%/g, '\\%')
+  if (input === undefined) return esc(command)
+  return `${esc(command)}%${input.split('\n').map(esc).join('%')}`
+}
+
+/** Is this a schedule the read half would accept? The write half asks the same question. */
+export function isValidCronSchedule(schedule: string): boolean {
+  const s = schedule.trim()
+  if (s === '') return false
+  if (s.startsWith('@')) return s.toLowerCase() in SPECIALS
+  const f = s.split(/\s+/)
+  return isCronFieldSet(f)
+}
+
+// ---- Which sources we will write, and which we refuse by name ------------
+
+/**
+ * Why we will not edit each source, or `null` where we will.
+ *
+ * ONE source is supported, deliberately. The alternative — an edit button that
+ * works on user crontabs and quietly does something less complete everywhere
+ * else — is the failure the roadmap names: a partial capability that looks
+ * total. Each refusal below names the source and the actual reason, so the
+ * answer to "why can't I edit this one" is on screen rather than in a commit
+ * message.
+ */
+const CRON_EDIT_REFUSAL: Record<CronSourceKind, string | null> = {
+  'user-crontab': null,
+  'system-crontab':
+    '/etc/crontab is root-owned and is rewritten by the distribution’s own packages. ShellPilot does not edit it: a write here needs root, and a root-owned file that a package manager also writes is not a file to round-trip from a laptop.',
+  'cron.d':
+    '/etc/cron.d files are root-owned and mostly belong to packages, which replace them wholesale on upgrade. ShellPilot does not edit them.',
+  'systemd-timer':
+    'a systemd timer is two unit files and a systemctl daemon-reload, not a line in a file. ShellPilot reads timers and does not edit them — doing it properly is its own piece of work, and doing it improperly leaves a unit that no longer matches what systemd has loaded.',
+  'other-user-crontab':
+    'another account’s crontab can only be written as that account or as root. ShellPilot edits only the crontab of the account it is connected as.'
+}
+
+/** `null` when this source can be edited, or the sentence saying why not. */
+export function cronEditRefusal(kind: CronSourceKind): string | null {
+  return CRON_EDIT_REFUSAL[kind]
+}
+
+/** The kinds `cronEditRefusal` lets through, for a panel that wants to say so up front. */
+export const CRON_EDITABLE_KINDS: CronSourceKind[] = (
+  Object.keys(CRON_EDIT_REFUSAL) as CronSourceKind[]
+).filter((k) => CRON_EDIT_REFUSAL[k] === null)
+
+// ---- Planning one edit --------------------------------------------------
+
+/**
+ * One change to one line.
+ *
+ * `update` and `remove` carry BOTH the line's index and the line's exact text.
+ * The index alone is not an identity: the collection the operator is looking at
+ * was read seconds or minutes ago, and a crontab that has been edited on the
+ * host since then can have the same number of lines with a different job on the
+ * one being pointed at. The text is what makes "this is still the line you
+ * meant" answerable, and the answer is a refusal rather than a guess.
+ */
+export type CronEdit =
+  | { op: 'add'; schedule: string; command: string; input?: string }
+  | { op: 'update'; lineIndex: number; lineText: string; schedule: string; command: string; input?: string }
+  | { op: 'remove'; lineIndex: number; lineText: string }
+
+export type CronEditPlan =
+  | {
+      ok: true
+      /** The bytes we expect `crontab -l` to be returning right now. */
+      before: string
+      /** The bytes to install. */
+      after: string
+      /** One line for the confirmation dialog and the approval record. */
+      summary: string
+      /** True when a missing final newline had to be added to append a job. */
+      addedFinalNewline: boolean
+    }
+  | { ok: false; reason: string }
+
+/** The `\n` or `\r\n` this file mostly uses, for a line we are adding to it. */
+function dominantEol(lines: CronDocLine[]): string {
+  const crlf = lines.filter((l) => l.eol === '\r\n').length
+  const lf = lines.filter((l) => l.eol === '\n').length
+  return crlf > lf ? '\r\n' : '\n'
+}
+
+/**
+ * Rebuild one job line around a new schedule and a new command.
+ *
+ * Only the parts that actually changed are rebuilt. If the schedule is the same
+ * schedule, its original bytes are reused — tabs, column alignment and all —
+ * and the same for the command. That is not tidiness for its own sake: an edit
+ * to a job's command that also silently re-spaced its schedule is two changes
+ * in the diff, and the reviewer has to work out which one we meant.
+ */
+function rewriteJobLine(
+  layout: CronLineLayout,
+  scheduleRaw: string,
+  rest: string
+): string {
+  const schedule = collapse(layout.scheduleRaw) === collapse(scheduleRaw) ? layout.scheduleRaw : scheduleRaw
+  const body = layout.rest === rest ? layout.rest : rest
+  const user = layout.user === null ? '' : `${layout.user}${layout.userGap}`
+  return `${layout.dash}${schedule}${layout.gap}${user}${body}`
+}
+
+const refuse = (reason: string): CronEditPlan => ({ ok: false, reason })
+
+/**
+ * Work out the exact bytes an edit would install, or refuse and say why.
+ *
+ * Nothing here talks to a host. The plan is pure, so the refusals are testable
+ * without one and the same plan can be shown to the operator, recorded in the
+ * approval, and handed to the writer — three uses of one answer rather than
+ * three chances to compute it differently.
+ */
+export function planCronEdit(doc: CronDocument, edit: CronEdit): CronEditPlan {
+  const refusal = cronEditRefusal(doc.kind)
+  if (refusal !== null) return refuse(refusal)
+
+  // RULE: never write a file we could not fully parse. The unparsed line is
+  // precisely the line whose meaning we are least sure of, and an edit
+  // elsewhere in the file still rewrites the whole crontab through
+  // `crontab -` — so a line we misread is a line we could destroy without ever
+  // having pointed at it.
+  if (doc.unparsed.length > 0) {
+    const first = doc.unparsed[0].line
+    return refuse(
+      `this crontab has ${doc.unparsed.length} line${doc.unparsed.length === 1 ? '' : 's'} ShellPilot could not parse, starting with \`${first.length > 60 ? `${first.slice(0, 57)}…` : first}\`. Writing a whole file back around a line we did not understand is how a schedule quietly stops running, so nothing here can be edited until that line is dealt with by hand.`
+    )
+  }
+
+  const lines = doc.lines.map((l) => ({ ...l }))
+  let addedFinalNewline = false
+  let summary: string
+
+  if (edit.op === 'add') {
+    const built = buildJobLine(edit.schedule, edit.command, edit.input, doc.hasUserField)
+    if (!built.ok) return refuse(built.reason)
+    const eol = dominantEol(lines)
+    const last = lines[lines.length - 1]
+    // Appending to a file with no final newline glues the new job onto the end
+    // of the last one — the exact bug the key work hit with authorized_keys,
+    // where the result is one malformed line and the job that was already there
+    // silently stops. The newline is added deliberately and reported, rather
+    // than being a byte that appears in the diff with no explanation.
+    if (last !== undefined && last.eol === '') {
+      last.eol = eol
+      addedFinalNewline = true
+    }
+    lines.push({ kind: 'job', text: built.text, eol })
+    summary = `add \`${built.text}\``
+  } else {
+    const target = lines[edit.lineIndex]
+    if (target === undefined) {
+      return refuse(
+        `this crontab has ${lines.length} line${lines.length === 1 ? '' : 's'} and the job being changed was line ${edit.lineIndex + 1}. It has been edited on the host since it was read; read it again.`
+      )
+    }
+    if (target.kind !== 'job') {
+      return refuse(
+        `line ${edit.lineIndex + 1} of this crontab is not a job any more. It has been edited on the host since it was read; read it again.`
+      )
+    }
+    if (target.text !== edit.lineText) {
+      return refuse(
+        `line ${edit.lineIndex + 1} of this crontab now reads \`${target.text.trim()}\` and was \`${edit.lineText.trim()}\` when it was read. It has been edited on the host since; read it again.`
+      )
+    }
+    // A line carrying a bare `\r` in the middle cannot be rebuilt without
+    // deciding where the carriage return belongs, and there is no right answer
+    // to that. It round-trips untouched; it just cannot be the line we edit.
+    if (target.text.includes('\r')) {
+      return refuse(
+        `line ${edit.lineIndex + 1} contains a carriage return inside the line itself. ShellPilot will not rewrite it, because there is no way to put that character back where it was.`
+      )
+    }
+    if (edit.op === 'remove') {
+      lines.splice(edit.lineIndex, 1)
+      summary = `remove \`${target.text.trim()}\``
+    } else {
+      const clean = target.text.trim()
+      const layout = layoutJobLine(clean, doc.hasUserField)
+      // Cannot happen — the line was classified `job` by the same function —
+      // but a `!` here would be a claim rather than a check, on the path that
+      // rewrites a file.
+      if (!layout) return refuse(`line ${edit.lineIndex + 1} no longer parses as a job.`)
+      const built = buildJobLine(edit.schedule, edit.command, edit.input, doc.hasUserField)
+      if (!built.ok) return refuse(built.reason)
+      const lead = target.text.slice(0, target.text.length - target.text.trimStart().length)
+      const trail = target.text.slice(target.text.trimEnd().length)
+      const rewritten = rewriteJobLine(layout, edit.schedule.trim(), serialiseCronCommand(edit.command, edit.input))
+      target.text = `${lead}${rewritten}${trail}`
+      summary = `change \`${clean}\` to \`${rewritten}\``
+    }
+  }
+
+  const after = serialiseCrontabDocument({ ...doc, lines })
+
+  // THE LAST CHECK, and the one that makes the rest safe to believe: parse what
+  // we are about to write, and require that it says what we meant. A rebuilt
+  // line that parses as something else — or as nothing — never reaches a host.
+  const reparsed = parseCrontabDocument(after, doc.origin, doc.kind, doc.hasUserField)
+  if (reparsed.unparsed.length > 0) {
+    return refuse(
+      `the file this change would produce has a line ShellPilot cannot parse back (\`${reparsed.unparsed[0].line}\`), so it was not written.`
+    )
+  }
+  const expected = edit.op === 'remove' ? doc.entries.length - 1 : edit.op === 'add' ? doc.entries.length + 1 : doc.entries.length
+  if (reparsed.entries.length !== expected) {
+    return refuse(
+      `the file this change would produce has ${reparsed.entries.length} job(s) and ${expected} were expected, so it was not written.`
+    )
+  }
+  if (edit.op !== 'remove') {
+    const want = { schedule: collapse(edit.schedule), command: edit.command, input: edit.input }
+    const got = reparsed.lines.find(
+      (l, i) => l.kind === 'job' && (edit.op === 'add' ? i === lines.length - 1 : i === edit.lineIndex)
+    )?.entry
+    if (
+      !got ||
+      got.schedule !== want.schedule ||
+      got.command !== want.command ||
+      got.input !== want.input
+    ) {
+      return refuse(
+        'the line this change would produce does not read back as the job that was asked for, so it was not written.'
+      )
+    }
+  }
+
+  return { ok: true, before: serialiseCrontabDocument(doc), after, summary, addedFinalNewline }
+}
+
+/** Build one job line from scratch, or say why it is not a job. */
+function buildJobLine(
+  schedule: string,
+  command: string,
+  input: string | undefined,
+  hasUserField: boolean
+): { ok: true; text: string } | { ok: false; reason: string } {
+  const s = schedule.trim()
+  if (!isValidCronSchedule(s)) {
+    return {
+      ok: false,
+      reason: `\`${s}\` is not a schedule cron accepts. Five fields, or one of ${Object.keys(SPECIALS).join(', ')}.`
+    }
+  }
+  // A crontab is a line-oriented format with no continuation and no escape for
+  // a newline. A command containing one is not a command cron can run; it is
+  // two lines, the second of which is whatever the first half of the command
+  // happened to leave behind.
+  if (/[\r\n]/.test(command) || (input !== undefined && /\r/.test(input))) {
+    return { ok: false, reason: 'a crontab line cannot contain a newline or a carriage return.' }
+  }
+  if (command.trim() === '') return { ok: false, reason: 'a job needs a command to run.' }
+  const rest = serialiseCronCommand(command, input)
+  // The user column is not synthesised. A file that has one is a file we refuse
+  // to edit anyway; this is the check that keeps the two facts consistent
+  // rather than relying on them being consistent.
+  if (hasUserField) {
+    return { ok: false, reason: 'ShellPilot does not add jobs to files that carry a user column.' }
+  }
+  return { ok: true, text: `${s} ${rest}` }
+}
+
+// ---- Writing it to the host ---------------------------------------------
+
+/**
+ * Names the backup and the three staging files, on the host, in $HOME.
+ *
+ * Timestamped first so `ls` sorts them in the order they happened, and so an
+ * operator finding one in a shell six weeks later can tell when it was taken
+ * without reading its contents. Validated before it is interpolated into a
+ * command that replaces a crontab — the value comes from this process today,
+ * and a value that reaches a command like that is checked where it is used and
+ * not where it happens to be produced.
+ */
+export const CRON_TOKEN_RE = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$/
+
+/** Where the backup lands, relative to $HOME. The panel shows this path. */
+export function cronBackupName(token: string): string {
+  if (!CRON_TOKEN_RE.test(token)) throw new Error('refusing to name a crontab backup from an unvalidated token')
+  return `.shellpilot-crontab-${token}.bak`
+}
+
+/**
+ * A shell single-quoted literal holding exactly these bytes.
+ *
+ * `'\''` is the only escape a POSIX single-quoted string has, and with it the
+ * quoting is total: no expansion, no substitution, no backslash processing, and
+ * embedded newlines are themselves. A crontab is arbitrary text written by
+ * somebody else and it goes into a command line, so this is the one place the
+ * quoting has to be exactly right rather than nearly right.
+ */
+function shellLiteral(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`
+}
+
+export interface CronWriteRequest {
+  /** The bytes `crontab -l` must still be returning, or nothing is written. */
+  before: string
+  /** The bytes to install. */
+  after: string
+  token: string
+}
+
+/**
+ * The command that replaces a user crontab, and proves it did.
+ *
+ * `crontab -` replaces the WHOLE file — there is no line editing and no partial
+ * write — so the shape is read, compare, back up, install, read back:
+ *
+ *  1. Refuse if the host's crontab is not byte-for-byte the file this change
+ *     was planned against. Someone else's edit, or our own stale collection,
+ *     and the plan's line numbers are about a different file.
+ *  2. Back the crontab up to a timestamped file in $HOME, and STOP if that did
+ *     not land. The same rule the key work follows, for the same reason: a
+ *     backup an operator can find in a shell is worth more than any rollback
+ *     this process could promise, and it is the only thing that survives this
+ *     process dying mid-change.
+ *  3. Install.
+ *  4. Read it back with `crontab -l` and compare. A write that has not been
+ *     read back is a write that has not been made — a crontab is the one file
+ *     where being wrong produces no error at all, just a job that stops
+ *     running. On a mismatch the backup goes straight back in.
+ *
+ * As everywhere else in this file there is no `set -e`; unlike the read half,
+ * every step is chained so that a failure stops the next one. A read that fails
+ * can still leave a useful collection. A write whose backup failed must not
+ * reach the part that replaces the file.
+ *
+ * The outcome is accumulated in a shell variable and printed once, after a
+ * marker, at the end — the discipline the collector uses. Here it matters for a
+ * second reason: `crontab` prints the operator's own file back at them in some
+ * of its error messages, and a status line assembled from that output could
+ * otherwise be forged by a line inside their crontab.
+ */
+export function buildCronWriteCommand(o: CronWriteRequest): string {
+  if (!CRON_TOKEN_RE.test(o.token)) {
+    throw new Error('refusing to build a crontab write from an unvalidated token')
+  }
+  const bak = cronBackupName(o.token)
+  const stem = `.shellpilot-crontab-${o.token}`
+  return [
+    'LC_ALL=C',
+    'export LC_ALL',
+    // 077 so the staging copies of the crontab are not world-readable while
+    // they exist. A crontab routinely holds paths, hostnames and the odd token.
+    'umask 077',
+    'SP_OUT=""',
+    // Printed ONCE, at the end, from a variable — see the doc comment.
+    `sp_end() { printf '===SHELLPILOT-CRON-WRITE===\\n%s %s\\n%s\\n' "$1" "$2" "$SP_OUT"; exit "$3"; }`,
+    `sp_say() { SP_OUT="$(printf '%s' "$*" | tr '\\r\\n' '  ')"; }`,
+
+    resolveBinary('crontab'),
+    'SP_CRONTAB=""',
+    'command -v "$SP_BIN" >/dev/null 2>&1 && SP_CRONTAB="$SP_BIN"',
+    '[ -n "$SP_CRONTAB" ] || { sp_say "this host has no crontab command"; sp_end no-tool - 3; }',
+    // `cmp` is what proves both the backup and the read-back. Without it there
+    // is no verification, and a write with no verification is not one this
+    // command is willing to make.
+    'command -v cmp >/dev/null 2>&1 || { sp_say "this host has no cmp, so the write could not be verified"; sp_end no-cmp - 3; }',
+    '[ -n "$HOME" ] && [ -d "$HOME" ] && [ -w "$HOME" ] || { sp_say "this account has no writable home directory, so no backup could be kept"; sp_end no-home - 3; }',
+
+    `SP_B="$HOME/${bak}"`,
+    `SP_E="$HOME/${stem}.expected"`,
+    `SP_T="$HOME/${stem}.new"`,
+    `SP_V="$HOME/${stem}.verify"`,
+    'SP_LOCK="$HOME/.shellpilot-cron.lock"',
+    // One change at a time, for the reason the key work gives: two edits a
+    // second apart both read the same file, and the second one's "install"
+    // silently discards the first one's. `mkdir` is atomic everywhere.
+    // The two failures are not the same failure: the directory already existing
+    // is another change in flight, anything else is a home this account cannot
+    // write, and they have different fixes.
+    'mkdir "$SP_LOCK" 2>/dev/null || { [ -d "$SP_LOCK" ] && { sp_say "another crontab change is running on this host right now"; sp_end locked - 6; }; sp_say "a lock could not be created in the home directory"; sp_end locked - 3; }',
+    `trap 'rmdir "$SP_LOCK" 2>/dev/null' EXIT INT TERM HUP`,
+
+    // ---- 1. Is this still the file the change was planned against? --------
+    //
+    // The backup IS the comparison. `crontab -l` is run once, into the backup
+    // file, and that file is compared with what we expected — so the bytes we
+    // saved are the bytes we checked, with no second read in between for the
+    // file to change under.
+    `printf '%s' ${shellLiteral(o.before)} > "$SP_E" || { rm -f "$SP_E"; sp_say "the crontab this change was planned against could not be staged"; sp_end stage-failed - 3; }`,
+    // Not `|| true`. A `crontab -l` that fails on an account that HAS a crontab
+    // is a refusal, and treating it as an empty crontab would let the next step
+    // compare nothing against nothing on a file we never read.
+    '"$SP_CRONTAB" -l > "$SP_B" 2>/dev/null',
+    'SP_RC=$?',
+    // An account with no crontab at all: `crontab -l` exits non-zero and prints
+    // nothing, which IS the empty file. Distinguished from a real read failure
+    // by whether the plan expected an empty file — and if it did not, the
+    // comparison below refuses anyway.
+    '[ "$SP_RC" = 0 ] || [ ! -s "$SP_E" ] || { rm -f "$SP_E" "$SP_B"; sp_say "this account’s crontab could not be read back to be backed up"; sp_end backup-failed - 3; }',
+    'cmp -s "$SP_B" "$SP_E" || { rm -f "$SP_E" "$SP_B"; sp_say "the crontab on this host is not the one this change was planned against — it has been edited since it was read, so nothing was changed"; sp_end changed - 4; }',
+    // Belt and braces on the backup itself. `cmp` above proves it matches what
+    // we expected, which on a non-empty crontab already proves it landed; this
+    // catches the one case that does not — an empty expected file, where a
+    // failed `cp` and a correct empty backup are the same zero bytes.
+    `[ -f "$SP_B" ] || { rm -f "$SP_E"; sp_say "the backup did not land, so nothing was changed"; sp_end backup-failed - 3; }`,
+    'chmod 600 "$SP_B" 2>/dev/null || true',
+
+    // ---- 2. Install --------------------------------------------------------
+    `printf '%s' ${shellLiteral(o.after)} > "$SP_T" || { rm -f "$SP_E" "$SP_T"; sp_say "the new crontab could not be staged, so nothing was changed"; sp_end stage-failed - 3; }`,
+    // From here on the backup STAYS, whatever happens. Past this line the
+    // crontab may have been replaced, and a backup deleted on the way out of a
+    // failure is the one an operator needs.
+    'rm -f "$SP_E"',
+    // `crontab -` and not `crontab "$SP_T"`: `-` is the spelling every cron
+    // implementation supports for "read the new crontab from stdin", and it
+    // does not depend on the file being readable by whatever the crontab binary
+    // drops privileges to.
+    'if SP_MSG=$("$SP_CRONTAB" - < "$SP_T" 2>&1); then',
+    ':',
+    'else',
+    'rm -f "$SP_T"',
+    'sp_say "the host’s crontab command refused the new file: $SP_MSG"',
+    'sp_end rejected "$SP_B" 4',
+    'fi',
+
+    // ---- 3. Read it back ---------------------------------------------------
+    //
+    // The whole reason this command exists in this shape. cron reports nothing
+    // when a job stops existing, so the only evidence a write worked is the
+    // file coming back the way it went in.
+    '"$SP_CRONTAB" -l > "$SP_V" 2>/dev/null',
+    'if cmp -s "$SP_V" "$SP_T"; then',
+    'rm -f "$SP_T" "$SP_V"',
+    'sp_say "the crontab was replaced and read back identical"',
+    'sp_end written "$SP_B" 0',
+    'fi',
+    // It did not come back the way it went in. Put the backup back, and say
+    // whether that worked — "we tried to undo it" and "it is undone" are two
+    // different facts and only one of them is a reason to stop worrying.
+    'if "$SP_CRONTAB" - < "$SP_B" >/dev/null 2>&1; then',
+    'rm -f "$SP_T" "$SP_V"',
+    'sp_say "the crontab did not read back as what was written, so the backup was put back"',
+    'sp_end verify-failed-restored "$SP_B" 5',
+    'fi',
+    'rm -f "$SP_T" "$SP_V"',
+    'sp_say "the crontab did not read back as what was written AND the backup could not be put back. The previous crontab is in the backup file; restore it by hand"',
+    'sp_end verify-failed-unrestored "$SP_B" 5'
+  ].join('\n')
+}
+
+/** Every way `buildCronWriteCommand` can end. `written` is the only one that changed anything as asked. */
+export type CronWriteOutcome =
+  | 'written'
+  | 'no-tool'
+  | 'no-cmp'
+  | 'no-home'
+  | 'locked'
+  | 'stage-failed'
+  | 'backup-failed'
+  | 'changed'
+  | 'rejected'
+  | 'verify-failed-restored'
+  | 'verify-failed-unrestored'
+  /** The command did not reach its own last line: killed, timed out, cut off. */
+  | 'no-answer'
+
+export interface CronWriteResult {
+  outcome: CronWriteOutcome
+  /** Full path of the backup on the host, when one was taken. */
+  backupPath?: string
+  detail: string
+}
+
+const CRON_WRITE_OUTCOMES: CronWriteOutcome[] = [
+  'written',
+  'no-tool',
+  'no-cmp',
+  'no-home',
+  'locked',
+  'stage-failed',
+  'backup-failed',
+  'changed',
+  'rejected',
+  'verify-failed-restored',
+  'verify-failed-unrestored'
+]
+
+/**
+ * Read the writer's one status line.
+ *
+ * Output with no marker in it is `no-answer` rather than anything hopeful. A
+ * command that was killed between installing and reporting has left a host in
+ * an unknown state, and the only honest thing to say is that we do not know —
+ * "assume it failed" and "assume it worked" are both guesses, and one of them
+ * tells an operator their job is running when it is not.
+ */
+export function parseCronWriteResult(stdout: string): CronWriteResult {
+  const m = stdout.match(/===SHELLPILOT-CRON-WRITE===\r?\n([^\n]*)\r?\n([\s\S]*)$/)
+  if (!m) {
+    return {
+      outcome: 'no-answer',
+      detail:
+        'the host did not report what happened to this change. It may or may not have been applied — read the crontab again before doing anything else.'
+    }
+  }
+  const [outcome, backup] = m[1].trim().split(/\s+/)
+  const detail = m[2].trim()
+  return {
+    outcome: CRON_WRITE_OUTCOMES.includes(outcome as CronWriteOutcome) ? (outcome as CronWriteOutcome) : 'no-answer',
+    ...(backup === undefined || backup === '-' ? {} : { backupPath: backup }),
+    detail
+  }
+}
+
+// ---- Reading the one file we are willing to write -----------------------
+
+/**
+ * `crontab -l`, byte for byte, plus what happened.
+ *
+ * A separate command from the collector, deliberately, and the difference is
+ * the point. The collector reads five sources into one blob and its sections
+ * are re-printed through `printf '%s\n'`, which is fine for a list of jobs and
+ * useless here: it appends a newline a file may not have had, and an edit
+ * planned against bytes that are not the file's bytes is an edit the host will
+ * refuse — or worse, one it will accept while writing back a file that gained a
+ * byte nobody asked for.
+ *
+ * THE STATUS COMES FIRST and the body last, which is the opposite of the
+ * collector and is required rather than stylistic. The body has to be the last
+ * thing on stdout for its trailing bytes to survive; and a status printed after
+ * it could be forged by a line inside the operator's own crontab. Putting the
+ * status first gets both: nothing that comes out of the file is ever read as
+ * status, and the file's last byte is the command's last byte.
+ */
+export function buildCronReadCommand(): string {
+  return [
+    'LC_ALL=C',
+    'export LC_ALL',
+    resolveBinary('crontab'),
+    'SP_CRONTAB=""',
+    'command -v "$SP_BIN" >/dev/null 2>&1 && SP_CRONTAB="$SP_BIN"',
+    `printf '===SHELLPILOT-CRON-READ===\\n'`,
+    'if [ -z "$SP_CRONTAB" ]; then',
+    `printf 'no-tool\\n'`,
+    'elif "$SP_CRONTAB" -l >/dev/null 2>&1; then',
+    `printf 'ok\\n'`,
+    'else',
+    // Non-zero from `crontab -l` is overwhelmingly "no crontab for <user>",
+    // which is an EMPTY crontab and completely normal — it is what an account
+    // that has never scheduled anything looks like, and the first job anybody
+    // adds is added to it. Anything else is a refusal and must not be planned
+    // against as though the file were empty.
+    'SP_ERR=$("$SP_CRONTAB" -l 2>&1 >/dev/null || true)',
+    'case "$SP_ERR" in',
+    `*"no crontab for"*) printf 'absent\\n' ;;`,
+    `*) printf 'unknown %s\\n' "$(printf '%s' "$SP_ERR" | tr '\\r\\n' '  ')" ;;`,
+    'esac',
+    'fi',
+    `printf '===SHELLPILOT-CRON-BODY===\\n'`,
+    // Last, and unquoted by any printf, so the file's own trailing bytes are
+    // the command's trailing bytes.
+    '[ -n "$SP_CRONTAB" ] && "$SP_CRONTAB" -l 2>/dev/null',
+    'exit 0'
+  ].join('\n')
+}
+
+export interface CronReadResult {
+  status: 'ok' | 'absent' | 'no-tool' | 'unknown'
+  /** The crontab, byte for byte. Empty on `absent`, which IS an empty crontab. */
+  text: string
+  detail?: string
+}
+
+/** Split `buildCronReadCommand`'s output. Anything unrecognised is `unknown`. */
+export function parseCronRead(output: string): CronReadResult {
+  const m = output.match(/===SHELLPILOT-CRON-READ===\n([^\n]*)\n===SHELLPILOT-CRON-BODY===\n([\s\S]*)$/)
+  if (!m) {
+    return {
+      status: 'unknown',
+      text: '',
+      detail: 'the host did not answer with a crontab at all, so nothing was read.'
+    }
+  }
+  const [word, ...rest] = m[1].trim().split(/\s+/)
+  const detail = rest.join(' ').trim()
+  const status =
+    word === 'ok' || word === 'absent' || word === 'no-tool' ? word : ('unknown' as const)
+  return {
+    status,
+    text: status === 'ok' ? m[2] : '',
+    ...(detail === '' ? {} : { detail })
+  }
+}
+
+// ---- What crosses the wire ----------------------------------------------
+
+/**
+ * An edit as the PANEL asks for it: by the line's own text, never by position.
+ *
+ * The panel's list was read minutes ago. An index into it still resolves
+ * against a file that has since changed — to the wrong job, silently — whereas
+ * a line that is no longer in the file is a question with an obvious answer.
+ * `resolveCronEdit` turns one of these into the positional form the planner
+ * takes, against the document that was just read from the host, or refuses.
+ */
+export type CronEditRequest =
+  | { op: 'add'; schedule: string; command: string; input?: string }
+  | { op: 'update'; line: string; schedule: string; command: string; input?: string }
+  | { op: 'remove'; line: string }
+
+/** Find the line the panel meant in the file the host just handed over. */
+export function resolveCronEdit(
+  doc: CronDocument,
+  req: CronEditRequest
+): { ok: true; edit: CronEdit } | { ok: false; reason: string } {
+  if (req.op === 'add') return { ok: true, edit: req }
+  const index = doc.lines.findIndex(
+    (l) => l.kind === 'job' && l.text.replace(/\r/g, '').trim() === req.line
+  )
+  if (index === -1) {
+    return {
+      ok: false,
+      reason: `\`${req.line}\` is not in this crontab any more. It has been edited on the host since it was read; read it again.`
+    }
+  }
+  const lineText = doc.lines[index].text
+  return {
+    ok: true,
+    edit:
+      req.op === 'remove'
+        ? { op: 'remove', lineIndex: index, lineText }
+        : {
+            op: 'update',
+            lineIndex: index,
+            lineText,
+            schedule: req.schedule,
+            command: req.command,
+            ...(req.input === undefined ? {} : { input: req.input })
+          }
+  }
+}
+
+export interface CronEditTargetRef {
+  serverId: string
+  serverName: string
+  cfg: unknown
+}
+
+/** What `cron:plan-edit` answers with. Every field but `ok` is absent on a refusal. */
+export interface CronEditPlanReply {
+  ok: boolean
+  reason?: string
+  before?: string
+  after?: string
+  summary?: string
+  addedFinalNewline?: boolean
+  token?: string
+  command?: string
+}
+
+export interface CronWriteReply extends CronWriteResult {
+  ok: boolean
+  serverId: string
+  serverName: string
+}
+
+/**
+ * The two channels an edit needs, named so the panel, the preload and main all
+ * agree on one shape — the way the compose module's bridge already does.
+ *
+ * The panel checks for these at runtime rather than assuming them, for the same
+ * reason it treats `sources` as optional: a main process that has not been
+ * taught the channels answers nothing, and an edit button that does nothing is
+ * worse than no edit button.
+ */
+export interface CronEditBridge {
+  planEdit: (
+    target: CronEditTargetRef,
+    edit: CronEditRequest,
+    opts?: { sources?: CronSourceReport[] }
+  ) => Promise<CronEditPlanReply>
+  write: (
+    target: CronEditTargetRef,
+    req: { before: string; after: string; token: string; runId: string; approval?: unknown }
+  ) => Promise<CronWriteReply>
 }

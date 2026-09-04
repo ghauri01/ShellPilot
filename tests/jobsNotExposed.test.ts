@@ -99,7 +99,38 @@ const ALLOWED_TOOLS = [
 // A hint, not the gate — the whitelist above has already failed by the time
 // this matches. It exists to put the word "job" in the failure message so
 // whoever trips it understands what they tripped over.
-const JOB_TOOL = /job|batch|broadcast|fan_?out|schedule/i
+//
+// `rule` is in the alternation for roadmap item 27, and it belongs in THIS
+// list rather than in one of its own because the argument is this file's
+// argument raised one further. A job an agent started is unrevocable while it
+// runs; a RULE an agent created is unrevocable while it sits there doing
+// nothing, because `denyAllPending()` resolves requests that are PENDING and a
+// rule between firings has none. Revoking every session, denying every
+// outstanding approval and stopping the bridge entirely leaves a rule exactly
+// where it was, holding a year-old human approval, and it fires at 3am on a
+// disk alert nobody connected to the agent that wrote it.
+//
+// `credential` and `proxy` are in the alternation for roadmap item 7, the API
+// credential proxy, and they are here for BOTH of the powers that feature
+// holds — which are different from each other and both worse than a job:
+//
+//   * A tool that could DEFINE A PROXY RULE would let an agent choose a
+//     destination for one of the user's API keys. This file's argument applies
+//     unchanged and then some: a rule is a row in a JSON file, it has nothing
+//     pending at any moment, and `denyAllPending()` leaves it exactly where it
+//     is — pointed wherever it was pointed, with a credential attached. A rule
+//     outlives the session that made it, which is the same sentence as
+//     DURABILITY DEFEATS REVOCATION with the object changed from "work" to
+//     "where a secret goes".
+//
+//   * A tool that could CALL THE PROXY would let an agent spend the user's API
+//     budget under a credential it never held. That is not covered by any
+//     approval this app can mint, because the far end's meter is not something
+//     `denyAllPending()` can reach into either.
+//
+// There is no value of such a capability — not even ASK — that fixes either,
+// for the reason stated below at the capability list.
+const JOB_TOOL = /job|batch|broadcast|fan_?out|schedule|rule|credential|proxy/i
 
 describe('the MCP bridge exposes no job surface', () => {
   let token: string
@@ -226,8 +257,32 @@ function scanJobModules(): string[] {
 const REVIEWED_JOB_FILES = ['jobDetached', 'jobExec', 'jobRunner']
 
 /** Job-adjacent modules outside `src/main/services`, named because that
- *  directory cannot be scanned wholesale. */
-const SHARED_JOB_MODULES = ['jobs', 'patch', 'topology', 'broadcast', 'approvalLog']
+ *  directory cannot be scanned wholesale.
+ *
+ *  `rules` is roadmap item 27 and covers BOTH halves — `src/shared/rules.ts`
+ *  and `src/main/services/rules.ts` — because the match below is on a basename.
+ *  It is not caught by the `job*.ts` scan above, and it is the module that most
+ *  needs catching: a rule is a job that has been given a year-long standing
+ *  authorisation, so everything this file says about the engine is true of it
+ *  and then some. See the note at JOB_TOOL. */
+/** `credProxy` covers BOTH halves of roadmap item 7 —
+ *  `src/shared/credproxy.ts` and `src/main/services/credProxy.ts` — because
+ *  the match below is on a basename and is case-insensitive.
+ *
+ *  It is not caught by the `job*.ts` scan above, and it is the module in this
+ *  list with the shortest path to real money. `rules` is a standing
+ *  authorisation to run a command; this is a standing authorisation to send a
+ *  named API KEY to a named host, held in a file, surviving every session that
+ *  could have been revoked. See the note at JOB_TOOL. */
+const SHARED_JOB_MODULES = [
+  'jobs',
+  'patch',
+  'topology',
+  'broadcast',
+  'approvalLog',
+  'rules',
+  'credProxy'
+]
 
 const JOB_MODULE_NAMES = [...new Set([...scanJobModules(), ...SHARED_JOB_MODULES])]
 
@@ -275,17 +330,59 @@ describe('the job engine is enumerated by scanning, not by memory', () => {
     // The specific miss this replaced: jobDetached — the executor that
     // deliberately OUTLIVES the link, which is the exact property that makes a
     // job unrevocable — was not in the hand-written alternation at all.
-    for (const name of ['jobRunner', 'jobExec', 'jobDetached', 'jobs', 'patch', 'topology']) {
+    for (const name of [
+      'jobRunner',
+      'jobExec',
+      'jobDetached',
+      'jobs',
+      'patch',
+      'topology',
+      'rules',
+      // Both spellings of item 7, because the two halves of it are named
+      // differently on disk and only a case-insensitive match covers both.
+      'credProxy',
+      'credproxy'
+    ]) {
       expect(JOB_MODULE.test(name), name).toBe(true)
     }
     // And the walker's specifier form of the same names.
-    for (const spec of ['./jobDetached', '../services/jobDetached.js', '../../shared/patch']) {
+    for (const spec of [
+      './jobDetached',
+      '../services/jobDetached.js',
+      '../../shared/patch',
+      '../../shared/rules',
+      './rules',
+      './credProxy',
+      '../../shared/credproxy',
+      '../services/credProxy.js'
+    ]) {
       expect(isForbiddenSpecifier(spec), spec).toBe(true)
     }
     // Not everything beginning with "job" out in the world: the match is on a
     // basename, so an unrelated module is not swept up by accident.
     expect(isForbiddenSpecifier('./jobsite')).toBe(false)
     expect(isForbiddenSpecifier('node:path')).toBe(false)
+  })
+
+  it('reads a credential-proxy tool name as a surface of the same kind', () => {
+    // The tool whitelist has already failed by the time JOB_TOOL matches — its
+    // job is to put the right word in the failure message. These are the names
+    // someone implementing "let the agent call the API through us" would
+    // actually reach for.
+    for (const name of [
+      'use_api_credential',
+      'proxy_request',
+      'create_proxy_rule',
+      'add_credential_rule',
+      'call_api_via_proxy'
+    ]) {
+      expect(JOB_TOOL.test(name), name).toBe(true)
+    }
+    // And the reviewed list still reads as clean, so the widened alternation
+    // did not turn this into a check that fails on everything.
+    for (const name of ALLOWED_TOOLS) {
+      expect(JOB_TOOL.test(name), name).toBe(false)
+    }
   })
 })
 
@@ -537,6 +634,45 @@ describe('what must NOT be able to reach this', () => {
       // for work it was never granted.
       'approvalLog',
       'recordJobApproval',
+      // The rule engine — roadmap item 27, and the sharpest case this file
+      // covers.
+      //
+      // DURABILITY DEFEATS REVOCATION is the argument at the top of this file,
+      // and a rule is what happens when you take it one step further than a
+      // running job. The switch this codebase advertises, `denyAllPending()`,
+      // works by resolving requests that are PENDING. A job on fifteen hosts
+      // has nothing pending WHILE IT RUNS, which is bad enough. A rule has
+      // nothing pending AT ANY MOMENT: it is a row in a JSON file carrying a
+      // human's approval record, and the whole of its behaviour is to wait.
+      // Denying every outstanding approval, revoking every session and stopping
+      // the bridge leaves it untouched, and it fires that night on an alert
+      // nobody would connect back to the agent that wrote it. There is no
+      // pending state for the kill switch to find, ever — not "not while it is
+      // running", not at all.
+      //
+      // It is also a LAUNDERING primitive in a way a job is not. A job needs an
+      // approval minted now; a rule holds one minted once and re-used forever,
+      // so an agent that could create one would be creating a durable consent
+      // record for work no human will be asked about again. That is the same
+      // objection as `approvalLog` above, with a longer fuse.
+      //
+      // Not gated, not asked-for, NOT THERE. See tests/rulesNotExposed.test.ts
+      // for the import-closure half.
+      'RuleEngine',
+      'ruleEngine',
+      'shared/rules',
+      'services/rules',
+      'sanitiseRule',
+      'ruleMatches',
+      'verifyRuleAction',
+      'checkRuleLimit',
+      'ruleCreationConfirmation',
+      'RULE_UNATTENDED_PHRASE',
+      'rules:list',
+      'rules:create',
+      'rules:enable',
+      'rules:remove',
+      'rules:sweep',
       // The access write half — roadmap item 23. It edits authorized_keys, it
       // is the one write in this app that can lock the operator out of the
       // host they would use to undo it, and it is currently GATED OFF pending
@@ -549,7 +685,114 @@ describe('what must NOT be able to reach this', () => {
       'planAccessChange',
       'buildRevokeKeyCommand',
       'buildAddKeyCommand',
-      'accessDisarmCommand'
+      'accessDisarmCommand',
+      // Security posture — roadmap item 24. It reads which firewall is active
+      // and the shape of its rules, whether SELinux is enforcing, and how sshd
+      // is configured. That is a MAP OF HOW TO ATTACK THE HOST, assembled and
+      // kept fresh across the whole estate, and an agent that could ask for it
+      // per server could ask for it for all of them.
+      //
+      // The item is read-only, which is what makes the temptation real: there
+      // is no write to refuse, so "it only reads" sounds like an argument. It
+      // is not one. `execute_command` gated per server against an access group
+      // is a consent story about ONE host and one command a human can read;
+      // "tell me which of these forty machines has PasswordAuthentication on
+      // and no firewall" is a different question with a different answer, and
+      // the answer is no — not "not yet".
+      //
+      // The property holds today only by construction: nothing under
+      // src/main/services/mcpServer.ts names any of these. This is what makes
+      // that checkable in a diff rather than by remembering.
+      'buildPostureCommand',
+      'parsePosture',
+      'POSTURE_COMMAND',
+      'PostureReader',
+      'shared/posture',
+      'fleet:posture',
+      'postureFor',
+      'get_host_posture',
+      // Configuration drift — roadmap item 25. The posture argument, one step
+      // sharper.
+      //
+      // Posture is a map of how to attack a host. This is a map of which hosts
+      // are BEHIND: "these three still have PasswordAuthentication where the
+      // other twelve do not" is not a description of an estate, it is a ranked
+      // target list, kept fresh, with the divergent hosts already picked out.
+      // The panel's whole purpose is to sort the estate into "the same as
+      // everybody else" and "not", which is precisely the sorting an attacker
+      // would otherwise have to do by hand.
+      //
+      // Read-only is not the argument it sounds like here, for the reason it is
+      // not one for posture: there is no write to refuse, so "it only reads"
+      // has a comfortable ring to it. `execute_command` gated per server
+      // against an access group is a consent story about ONE host and one
+      // command a human can read. "Which of these forty machines has an
+      // nginx.conf that does not match the other thirty-seven" is a different
+      // question with a different answer, and the answer is no — not "not yet".
+      //
+      // The property holds today only by construction: nothing under
+      // src/main/services/mcpServer.ts names any of these. This is what makes
+      // that checkable in a diff rather than by remembering.
+      'buildDriftCommand',
+      'parseDriftCollection',
+      'DRIFT_WATCHES',
+      'DriftReader',
+      'driftToFacts',
+      'readingFromContent',
+      'compareDrift',
+      'normaliseForWatch',
+      'shared/drift',
+      'services/drift',
+      'fleet:drift',
+      'driftFor',
+      'get_config_drift',
+      // The API credential proxy — roadmap item 7. Two powers, and this file's
+      // argument covers both, one turn past where `rules` leaves it.
+      //
+      // DEFINING A RULE. A proxy rule says "this vault credential goes to this
+      // origin, in this header". It is a row in a JSON file holding a standing
+      // authorisation, so it has nothing pending AT ANY MOMENT — the same
+      // property that puts `rules` on this list, except that what outlives the
+      // revocation here is not "a command will run" but "a named API key will
+      // be sent to a named host". Denying every outstanding approval, revoking
+      // every session and stopping the bridge leaves the rule untouched and
+      // still pointed wherever it was pointed. An agent that could write one
+      // would be choosing an exfiltration destination for a secret it is not
+      // allowed to read — which is a strictly better position than being
+      // allowed to read it, because the audit shows a rule the user appears to
+      // have made.
+      //
+      // CALLING THE PROXY. The other direction, and it is not the same
+      // objection. An agent holding the client token spends the user's API
+      // budget on a third party's meter, under a credential it never held. No
+      // approval this app can mint covers that, and no kill switch reaches the
+      // far end to undo it.
+      //
+      // "It only sends what a rule already allows" is the comfortable-sounding
+      // argument here, the way "it only reads" is for posture and drift. It is
+      // not one: the whole point of the feature is that the caller does not
+      // hold the credential, so an agent that can call it is exercising a
+      // secret it could never otherwise have used, and the audit row cannot
+      // say who asked — on loopback there is no caller identity beyond the
+      // token.
+      //
+      // Not gated, not asked-for, NOT THERE. The import-closure half is
+      // SHARED_JOB_MODULES above; these are the words.
+      'CredProxy',
+      'credProxy',
+      'shared/credproxy',
+      'services/credProxy',
+      'sanitiseRule',
+      'matchRule',
+      'parseProxyTarget',
+      'normaliseOrigin',
+      'resolveCredential',
+      'CRED_PROXY_TOKEN_HEADER',
+      'credproxy:rules',
+      'credproxy:save-rule',
+      'credproxy:remove-rule',
+      'credproxy:token',
+      'credproxy:calls'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }

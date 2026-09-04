@@ -32,7 +32,9 @@ export const ALERT_KINDS = [
   'job-failed',
   'tunnel-down',
   'db-alarm',
-  'db-watch'
+  'db-watch',
+  'oom-kill',
+  'cert-expiry'
 ] as const
 export type AlertKind = (typeof ALERT_KINDS)[number]
 
@@ -155,9 +157,20 @@ export function validateWebhookUrl(raw: string): { ok: true; url: string } | { o
 // their concatenation and stays the single list every whitelist consumes.
 // ---------------------------------------------------------------------------
 
-/** Kinds that are a number against a line. Hysteresis, escalation and a
- *  recovery margin all mean something for these and nothing for the rest. */
-export const NUMERIC_ALERT_KINDS = ['cpu', 'ram', 'disk', 'inode', 'load'] as const
+/**
+ * Kinds that are a number against a line. Hysteresis, escalation and a
+ * recovery margin all mean something for these and nothing for the rest.
+ *
+ * `cert-expiry` is one of them and is the first whose number runs the OTHER
+ * WAY: days remaining, where smaller is worse. It belongs here rather than
+ * among the states because every one of the numeric path's ideas is real for
+ * it — a renewal takes a certificate from 3 days back to 89, which is exactly
+ * what a recovery margin is for, and 30 → 14 → 7 → 1 is monotone movement,
+ * which is exactly what escalation is for. store/alerts.ts carries the
+ * direction per kind so the arithmetic is inverted in one place instead of the
+ * comparison being written down twice.
+ */
+export const NUMERIC_ALERT_KINDS = ['cpu', 'ram', 'disk', 'inode', 'load', 'cert-expiry'] as const
 export type NumericAlertKind = (typeof NUMERIC_ALERT_KINDS)[number]
 
 /**
@@ -169,7 +182,27 @@ export type NumericAlertKind = (typeof NUMERIC_ALERT_KINDS)[number]
  * answer for a question the kind does not ask, and "1 per core" is not an
  * answer, it is a placeholder that reads as a measurement.
  */
-export const STATE_ALERT_KINDS = ['host-unreachable', 'job-failed', 'tunnel-down'] as const
+/**
+ * ... and `oom-kill` is one of these rather than an event, which is the other
+ * half of the same judgement.
+ *
+ * It holds a CONDITION — "this host has killed a process for memory inside the
+ * probe's window" — and that condition can be observed to become false, which
+ * is what an event kind can never do and why the database verdicts carry no
+ * chip. Twenty-four hours after the last kill the journal's count returns to
+ * zero and the all-clear is a real observation rather than an assumption.
+ *
+ * An event kind was the alternative and it does not fit: an occurrence needs a
+ * stable identity to be deduplicated on, and a probe that reports a COUNT
+ * cannot supply one. Two kills of the same process an hour apart and one kill
+ * read twice by two collections are the same three numbers.
+ */
+export const STATE_ALERT_KINDS = [
+  'host-unreachable',
+  'job-failed',
+  'tunnel-down',
+  'oom-kill'
+] as const
 export type StateAlertKind = (typeof STATE_ALERT_KINDS)[number]
 
 /**

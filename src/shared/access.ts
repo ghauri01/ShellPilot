@@ -498,6 +498,32 @@ export interface HostAccess {
    */
   keyFileIsDefault: boolean | null
   /**
+   * Whether sshd reads THE FILE THIS COLLECTION READ — `.ssh/authorized_keys`.
+   *
+   * A DIFFERENT QUESTION from `keyFileIsDefault`, and the difference is a
+   * whole class of silently-ineffective write. Setting `AuthorizedKeysFile`
+   * REPLACES OpenSSH's default list rather than adding to it, so a host
+   * configured `AuthorizedKeysFile .ssh/authorized_keys2` reads only keys2 —
+   * every path it names is still a member of the default list, so "is this the
+   * default set?" answered yes while "does it read the file we are about to
+   * edit?" answered no. The write half asked the first question and acted on
+   * the answer to the second.
+   *
+   * `null` for the same three reasons `keyFileIsDefault` is null: the config
+   * could not be read, part of it could not be read, or it disagrees with
+   * itself. The write gate treats null as a refusal.
+   */
+  readsTheFileWeRead: boolean | null
+  /**
+   * Whether sshd also reads `.ssh/authorized_keys2`, which this collection
+   * probes for but never reads the contents of.
+   *
+   * Its own field because it decides whether a revocation from
+   * `authorized_keys` can be reported as a revocation at all: a key written
+   * into both files is still trusted after one of them is edited.
+   */
+  readsLegacyKeyFile: boolean | null
+  /**
    * sshd is configured with an `AuthorizedKeysCommand`.
    *
    * When true, keys can come from a directory service and the files on disk are
@@ -509,15 +535,40 @@ export interface HostAccess {
    *  can be identified without a second round trip. */
   collectedAs: string | null
   /**
-   * The fingerprint of the key THIS session authenticated with, from sshd's own
+   * EVERY key THIS session authenticated with, from sshd's own
    * `SSH_AUTH_INFO_0`.
    *
-   * null when the host would not say — `ExposeAuthInfo` is off by default, and
-   * on most hosts this will be null. That is not a gap to paper over: it is the
-   * difference between "this revoke provably does not remove the key I am on"
-   * and "nobody can tell", and `planAccessChange` treats the two differently.
+   * A LIST, not one value, and that is the finding rather than a generalisation
+   * for its own sake. `AuthenticationMethods publickey,publickey` is a real and
+   * increasingly common configuration, and sshd reports it as one factor PER
+   * LINE in the same variable. Reading only the first line protects only the
+   * first key, and the second one holds the connection open just as hard.
+   *
+   * Empty when the host would not say — `ExposeAuthInfo` is off by default, so
+   * on most hosts this will be empty. See `sessionKeysCertain`, which is what
+   * separates "there is provably no key here to protect" from "nobody can
+   * tell".
    */
-  sessionKeyFingerprint: string | null
+  sessionKeyFingerprints: string[]
+  /**
+   * Whether `sessionKeyFingerprints` may be relied on as THE set of keys
+   * holding this connection open.
+   *
+   * True only when the host named at least one public key for this session and
+   * every one of them was fingerprinted exactly. False when the host said
+   * nothing, and false when it said something this could not turn into a
+   * fingerprint — a blob cut by the collector's own line cap, a key type this
+   * build does not know, a factor in a shape it does not recognise.
+   *
+   * THE TRUNCATION CASE IS WHY THIS IS A SEPARATE FLAG AND NOT `length > 0`.
+   * A fingerprint computed over a cut blob is not a missing answer, it is a
+   * confident wrong one: it matches nothing, so the exact check in
+   * `planAccessChange` silently does not fire — and an empty list that looked
+   * like "the host said nothing" would at least have taken the conservative
+   * branch. So a factor that could not be fingerprinted clears this flag, and
+   * the conservative branch is taken instead.
+   */
+  sessionKeysCertain: boolean
   /** Epoch milliseconds by OUR clock. */
   collectedAt: number
   /** The host's own clock at collection, epoch ms, when it said. Kept because a
@@ -664,7 +715,31 @@ export function buildAccessCommand(opts: AccessCollectOptions = {}): string {
     // which is not the default. So it is asked for, used when it is there, and
     // its ABSENCE is a first-class state that changes what a revoke is allowed
     // to do. See planAccessChange.
-    `sp_val authinfo "$SSH_AUTH_INFO_0"`,
+    // ONE RECORD PER FACTOR, WITH ITS PRE-TRUNCATION LENGTH. Both halves of
+    // that are fixes for a silent bypass, and both are worth naming.
+    //
+    // THE LENGTH. `sp_val` cuts at VALUE_CAP (512), which is generous for a
+    // hostname and not generous at all for a key: `publickey ssh-rsa <blob>` is
+    // 390 characters for RSA-2048 and 562 for RSA-3072. Cut there, the blob
+    // still decodes — it just decodes to a DIFFERENT key — so the fingerprint
+    // came out clean, matched nothing in the file, and rule 1's exact check did
+    // not fire, on the one configuration (`ExposeAuthInfo yes`) where rule 1 is
+    // supposed to be exact. The cap here is KEY_LINE_CAP, the same one an
+    // authorized_keys line gets, so no key anyone actually uses is cut at all;
+    // and the length is carried anyway, because a cap is a cliff and the flag
+    // is what makes going over it safe rather than merely unlikely.
+    //
+    // THE SPLIT. `sp_clean` DELETES control characters, newline included, so
+    // `AuthenticationMethods publickey,publickey` — two factors, one per line
+    // in this variable — flattened into a single corrupt record that parsed as
+    // nothing. Splitting first protects every key the session presented instead
+    // of, at best, the first.
+    'sp_auth() {',
+    `SP_A=$(printf '%s' "$1" | tr '\\011' ' ' | tr -d '\\000-\\037\\177')`,
+    'SP_AN=${#SP_A}',
+    `[ "$SP_AN" -gt 0 ] && printf 'A %s %s\\n' "$SP_AN" "$(printf '%s' "$SP_A" | cut -c1-${KEY_LINE_CAP})"`,
+    '}',
+    `printf '%s\\n' "$SSH_AUTH_INFO_0" | while IFS= read -r SP_AL; do sp_auth "$SP_AL"; done`,
 
     // ---- sshd: where does it actually look for keys? ---------------------
     // First, because it decides whether everything below is the whole story.
@@ -1415,7 +1490,7 @@ export function parseAuthorizedKeyLine(
 
 // ---- The whole collection --------------------------------------------------
 
-const SCALAR_KEYS = ['now', 'tz', 'self', 'keyfile', 'keycmd', 'lltool', 'authinfo'] as const
+const SCALAR_KEYS = ['now', 'tz', 'self', 'keyfile', 'keycmd', 'lltool'] as const
 type ScalarKey = (typeof SCALAR_KEYS)[number]
 
 const USER_FIELDS = ['name', 'uid', 'shell', 'home', 'path', 'keys', 'keys2', 'groups', 'expires'] as const
@@ -1546,6 +1621,9 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
   const keyLines = new Map<number, { line: number; len: number; text: string }[]>()
   const lockStates = new Map<string, string>()
   const loginRows: string[] = []
+  /** One per line of SSH_AUTH_INFO_0, with the length it had before the
+   *  collector's cap. */
+  const authFactors: { len: number; text: string }[] = []
 
   for (const rawLine of body) {
     const line = rawLine.replace(/\r$/, '')
@@ -1582,6 +1660,16 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
       const bucket = keyLines.get(idx) ?? []
       bucket.push({ line: Number(m[2]), len: Number(m[3]), text: m[4] })
       keyLines.set(idx, bucket)
+      continue
+    }
+
+    if (tag === 'A ') {
+      // `A <length-before-truncation> <factor>`, shaped like `K` and for the
+      // same reason: without the length there is no way to tell a factor that
+      // fitted from one that was cut.
+      const m = /^A (\d{1,9}) (.*)$/.exec(line)
+      if (!m) continue
+      authFactors.push({ len: Number(m[1]), text: m[2] })
       continue
     }
 
@@ -1628,16 +1716,44 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
   const selfRaw = (last('self') ?? '').trim()
   const collectedAs = USER_RE.test(selfRaw) ? selfRaw : null
 
-  // `SSH_AUTH_INFO_0` is `<method> [<keytype> <blob>]`, one line per factor.
-  // Fingerprinted through exactly the same path an authorized_keys line takes,
-  // so a match against one is a match on identical terms rather than on two
-  // implementations that agree today.
-  const authInfo = last('authinfo')
-  let sessionKeyFingerprint: string | null = null
-  if (authInfo !== undefined) {
-    const m = /^publickey\s+(\S+\s+\S+)/.exec(authInfo.trim())
-    if (m) sessionKeyFingerprint = parseAuthorizedKeyLine(m[1], 0, deps.sha256)?.fingerprint ?? null
+  // `SSH_AUTH_INFO_0` is `<method> [<keytype> <blob>]`, ONE LINE PER FACTOR.
+  // Fingerprinted through exactly the same path an authorized_keys line takes —
+  // the same parser, the same truncation flag — so a match against one is a
+  // match on identical terms rather than on two implementations that agree
+  // today.
+  //
+  // EVERY FAILURE HERE CLEARS `certain` RATHER THAN BEING SKIPPED. A factor
+  // this cannot read is a key that might be holding the connection open and
+  // cannot be named, which is precisely the state the conservative half of rule
+  // 1 exists for. Dropping it quietly would leave a list that looks complete.
+  const sessionKeyFingerprints: string[] = []
+  let sessionKeysCertain = authFactors.length > 0
+  for (const f of authFactors) {
+    const text = f.text.trim()
+    if (!/^publickey\b/.test(text)) {
+      // A `password` or `keyboard-interactive` factor names no key. It is not a
+      // failure to read one — but it is not a key this can protect either, so
+      // it neither adds to the list nor clears the flag on its own.
+      continue
+    }
+    const m = /^publickey\s+(\S+\s+\S+)\s*$/.exec(text)
+    if (!m) {
+      sessionKeysCertain = false
+      continue
+    }
+    // `f.len > KEY_LINE_CAP` is the flag the authorized_keys path already
+    // passes 60 lines below, and its absence here was the bypass: a cut blob
+    // decodes to a different key rather than to nothing, so the fingerprint
+    // came out looking like an answer.
+    const fp =
+      parseAuthorizedKeyLine(m[1], 0, deps.sha256, f.len > KEY_LINE_CAP)?.fingerprint ?? null
+    if (fp === null) sessionKeysCertain = false
+    else sessionKeyFingerprints.push(fp)
   }
+  // A session the host says used no key at all leaves nothing to compare
+  // against, and the account ShellPilot connects as is not where this build
+  // spends a maybe. Treated as "cannot tell", which is the conservative branch.
+  if (sessionKeyFingerprints.length === 0) sessionKeysCertain = false
 
   // Every directive line seen, in file order, with the directive word stripped.
   const directiveValues = (k: 'keyfile' | 'keycmd'): string[] => {
@@ -1665,15 +1781,34 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
   // collection read some of, which is the finding this whole block exists to
   // stop.
   let keyFileIsDefault: boolean | null = null
+  // The question the WRITE half needs answered, which is not the one above.
+  // See `readsTheFileWeRead` on HostAccess for why they came apart.
+  let readsTheFileWeRead: boolean | null = null
+  let readsLegacyKeyFile: boolean | null = null
+  const onTheCompiledInDefault = (): void => {
+    keyFileIsDefault = true
+    readsTheFileWeRead = true
+    readsLegacyKeyFile = true
+  }
   if (source('sshd-config').status === 'absent') {
     // No sshd_config at all means sshd, if it is running, is on its
     // compiled-in defaults — which is exactly where this looked.
-    keyFileIsDefault = true
+    onTheCompiledInDefault()
   } else if (source('sshd-config').status === 'ok') {
-    if (authorizedKeysFile.length === 0) keyFileIsDefault = true
+    if (authorizedKeysFile.length === 0) onTheCompiledInDefault()
     else if (authorizedKeysFile.length === 1) {
       const paths = authorizedKeysFile[0].split(/\s+/).filter((p) => p !== '')
-      keyFileIsDefault = paths.every((p) => DEFAULT_KEY_FILES.includes(p.replace(/^%h\//, '')))
+      // `paths.length > 0` is not a formality. `.every()` over an EMPTY list is
+      // true, so an `AuthorizedKeysFile` directive whose value did not survive
+      // sanitising answered "yes, the default is in force" — the same trap one
+      // level down from the one this block exists to fix.
+      const named = paths.map((p) => p.replace(/^%h\//, ''))
+      keyFileIsDefault = named.length > 0 && named.every((p) => DEFAULT_KEY_FILES.includes(p))
+      // CONTAINS, not is-a-subset-of. This is the fix: a directive naming only
+      // `.ssh/authorized_keys2` is a subset of the default list and is not the
+      // file this collection read.
+      readsTheFileWeRead = named.includes('.ssh/authorized_keys')
+      readsLegacyKeyFile = named.includes('.ssh/authorized_keys2')
     }
   }
 
@@ -1841,9 +1976,12 @@ export function parseAccessCollection(output: string, deps: ParseAccessDeps): Ho
     accounts,
     authorizedKeysFile,
     keyFileIsDefault,
+    readsTheFileWeRead,
+    readsLegacyKeyFile,
     authorizedKeysCommand,
     collectedAs,
-    sessionKeyFingerprint,
+    sessionKeyFingerprints,
+    sessionKeysCertain,
     collectedAt: now,
     hostNow,
     sources: [
@@ -1941,6 +2079,15 @@ export function summariseAccess(access: HostAccess): AccessSummary {
   } else if (access.keyFileIsDefault === null) {
     uncertainty.push(
       'sshd’s AuthorizedKeysFile setting could not be determined, so it is not known whether this is where it looks'
+    )
+  }
+  // The narrower fact, and the one a reader most needs. `AuthorizedKeysFile
+  // .ssh/authorized_keys2` names nothing outside the compiled-in default list,
+  // so the clause above stays quiet — and every key on this screen is still a
+  // key sshd does not look at.
+  if (access.readsTheFileWeRead === false) {
+    uncertainty.push(
+      'sshd does not read .ssh/authorized_keys on this host, which is the file this collection read, so the keys listed here are not the keys it accepts'
     )
   }
   const legacy = access.accounts.filter((a) => a.hasLegacyKeyFile === true).map((a) => a.user)
@@ -2109,7 +2256,7 @@ export function accessToFacts(access: HostAccess): Record<string, string> {
 //  1. NEVER REMOVE THE KEY THE CURRENT SESSION IS AUTHENTICATED WITH.
 //     Enforced as a hard block on the plan, not a dialog. Where sshd will say
 //     which key that is (`ExposeAuthInfo`, collected as
-//     `sessionKeyFingerprint`), the check is exact. Where it will not — the
+//     `sessionKeyFingerprints`), the check is exact. Where it will not — the
 //     default on most hosts — the plan says so, and a revoke against the
 //     account this session is running as is blocked outright rather than
 //     attempted on a guess. Revoking a DIFFERENT account's key cannot lock this
@@ -2310,41 +2457,32 @@ export interface AccessBlock {
 }
 
 /**
- * A `JobSpec` and a `JobTargetRef`, declared structurally rather than imported.
+ * WHAT RUNS ON EVERY HOST IN THIS PLAN, AND IT IS NOT A JOB.
  *
- * NOT a style choice. tests/jobsNotExposed.test.ts walks the import closure of
- * everything the MCP bridge and the CLI can reach and fails if any of it
- * imports the job engine — because `denyAllPending()`, the stop-all-AI-access
- * switch, works by resolving PENDING requests, and a job already running on
- * fifteen hosts has nothing pending. This file is reached from the fleet
- * sampler, which the bridge reads, so importing `./jobs` for two type aliases
- * would put the job vocabulary inside that closure for the sake of a compiler
- * convenience.
+ * This used to be an `AccessJobSpec` carrying `kind: 'access'`, `steps` and
+ * `concurrency`, declared structurally so this file would not have to import
+ * the job engine — and NOTHING EVER CREATED ONE. `access:run` issues the staged
+ * write itself, in a hand-rolled serial loop, and it has to: the protocol needs
+ * a session that authenticated AFTER each host's write, between that write and
+ * its confirmation, and the job engine cannot provide one. Its steps share a
+ * pooled transport, and a detached job's whole point is that it outlives the
+ * process — which is the opposite of what a change held open by a 300-second
+ * dead-man's switch needs.
  *
- * The shapes are still checked against the real ones: tests/accessWrite.test.ts
- * assigns a produced spec to a `JobSpec` and a produced target list to
- * `JobTargetRef[]`, so a drift between the two is a compile error in a place
- * that is allowed to import both.
+ * So the kind is gone from `JOB_KINDS` too. A kind in the vocabulary that
+ * nothing produces is a filter that never matches and an audit trail that never
+ * fills, and it read as a promise that key changes appear in the job list. They
+ * do not. They appear as `AccessCommitReport`s, which say something a job row
+ * cannot: which of the three outcomes each host reached.
  */
-export interface AccessJobSpec {
-  /**
-   * `access`, not `command`, and the difference is what a job list is FOR.
-   *
-   * A key change staged by this planner is a change record — this host stopped
-   * trusting that key on the 14th — and a row that could not be told apart
-   * from somebody's ad-hoc `systemctl restart nginx` would make the audit
-   * trail this whole item exists to produce unfilterable. The kind is declared
-   * on the jobs side (`JobKind` in src/shared/jobs.ts) because this file may
-   * not import that one; see the note on this interface.
-   *
-   * It changes nothing about how the job runs, and it does NOT mean the change
-   * is permanent: an `access` job stages, and only a confirmation over an
-   * independent session commits.
-   */
-  kind: 'access'
+export interface AccessStagedWrite {
+  /** Exactly what runs, on every host in this plan. ONE command for the whole
+   *  selection, so what the operator agreed to can be compared against what
+   *  main derives — which is why the path is resolved from `$HOME` on the host
+   *  rather than interpolated per host. */
+  command: string
+  /** What to call it in front of a person. Never parsed. */
   title: string
-  steps: { command: string }[]
-  concurrency?: number
 }
 
 export interface AccessJobTarget {
@@ -2353,8 +2491,8 @@ export interface AccessJobTarget {
 }
 
 export interface AccessChangePlan {
-  /** The job, or null when every target was blocked. */
-  spec: AccessJobSpec | null
+  /** What will run, or null when every target was blocked. */
+  write: AccessStagedWrite | null
   targets: AccessJobTarget[]
   blocks: AccessBlock[]
   /** Per host, what the disarm would be. Returned separately from the job on
@@ -2397,7 +2535,7 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
   const key = req.kind === 'revoke' ? (req.fingerprint ?? '') : ''
   // Blobs, per host: the same key can be written with different comments on
   // different hosts, and the removal matches the BLOB.
-  const perHost: { t: AccessChangeTarget; blob: string; path: string; count: number }[] = []
+  const perHost: { t: AccessChangeTarget; blob: string; path: string }[] = []
 
   for (const t of req.targets) {
     const account = t.access.accounts.find((a) => a.user === t.user)
@@ -2416,7 +2554,21 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
     // sshd reading from somewhere else makes this edit possibly irrelevant —
     // and an irrelevant revocation is worse than no revocation, because it is
     // reported as done.
-    if (t.access.keyFileIsDefault !== true || t.access.authorizedKeysCommand !== null) {
+    //
+    // `readsTheFileWeRead`, NOT `keyFileIsDefault`. Setting AuthorizedKeysFile
+    // replaces OpenSSH's default list rather than adding to it, so a host
+    // configured `AuthorizedKeysFile .ssh/authorized_keys2` names nothing
+    // outside the default list — `keyFileIsDefault` was true — and reads only
+    // keys2. The staged write then edited `~/.ssh/authorized_keys`, and the
+    // revocation was staged, verified, committed and reported done with the key
+    // still trusted. Which is, verbatim, what the sentence below calls worse
+    // than none.
+    //
+    // `!== true` and not `=== false`, so `null` refuses too. Null is what a
+    // config that could not be read, a config only PARTLY read, and a config
+    // that disagrees with itself all produce, and none of the three is a
+    // licence to edit a file on a guess.
+    if (t.access.readsTheFileWeRead !== true || t.access.authorizedKeysCommand !== null) {
       block(
         'not-the-file-sshd-reads',
         `sshd on ${t.serverName} is not known to read ${account.keyPath}. Editing it may not change who can log in, and a revocation that is reported as done and did nothing is worse than none.`
@@ -2424,9 +2576,31 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
       continue
     }
 
+    // The same failure from the other side, and the reason it is checked
+    // separately: on a host that IS on the compiled-in default, sshd reads
+    // `.ssh/authorized_keys2` as well. A key written into both files is still
+    // trusted after this edits one of them — a revocation reported as done that
+    // changed nothing about who can log in.
+    //
+    // `!== false`, so an account whose keys2 could not be checked refuses too.
+    // "Nobody could look" is not "it is not there".
+    if (
+      req.kind === 'revoke' &&
+      t.access.readsLegacyKeyFile !== false &&
+      account.hasLegacyKeyFile !== false
+    ) {
+      block(
+        'not-the-file-sshd-reads',
+        account.hasLegacyKeyFile === null
+          ? `${t.user}@${t.serverName} could not be checked for a legacy .ssh/authorized_keys2, which sshd also reads and this collection does not. A key in that file would survive this change and be reported as revoked.`
+          : `${t.user}@${t.serverName} has a legacy .ssh/authorized_keys2, which sshd also reads and this collection does not. The same key may be in it, in which case this change would remove nothing and be reported as done.`
+      )
+      continue
+    }
+
     if (req.kind === 'revoke') {
       const protect = new Set([...(req.protect ?? [])])
-      if (t.access.sessionKeyFingerprint !== null) protect.add(t.access.sessionKeyFingerprint)
+      for (const fp of t.access.sessionKeyFingerprints) protect.add(fp)
 
       // RULE 1, exactly.
       if (protect.has(key)) {
@@ -2439,10 +2613,10 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
       // RULE 1, conservatively. `collectedAs` is the account this session runs
       // as; another account's keys cannot lock this session out, so the refusal
       // is scoped to the one that can.
-      if (t.access.sessionKeyFingerprint === null && t.access.collectedAs === t.user) {
+      if (!t.access.sessionKeysCertain && t.access.collectedAs === t.user) {
         block(
           'session-key-unknown',
-          `${t.serverName} does not report which key this session authenticated with (sshd's ExposeAuthInfo is off), and this would edit the keys of the very account ShellPilot connects as. Without that fact nothing can prove the key being removed is not the one holding this connection open.`
+          `${t.serverName} did not name every key this session authenticated with — either sshd's ExposeAuthInfo is off, or what it said could not be turned into a fingerprint exactly — and this would edit the keys of the very account ShellPilot connects as. Without that fact nothing can prove the key being removed is not the one holding this connection open.`
         )
         continue
       }
@@ -2455,18 +2629,31 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
         )
         continue
       }
-      // The blob is recovered from the line the read half kept. Validated
-      // before it goes anywhere near a command; the character class is why no
-      // quoting question arises.
-      const blob = blobOf(account, key)
-      if (blob === null || !BLOB_RE.test(blob)) {
+      // The body to match on, recovered from the line the read half kept.
+      // EVERY line carrying the fingerprint is looked at, not the first, and
+      // the reasons a removal cannot be built from them are told apart — the
+      // block is the only thing the operator will read, and "not in a form this
+      // can match" is the wrong sentence for a key that is trusted twice.
+      const certified = matches.some((k) => k.certificate)
+      const bodies = matches.map(blobOfLine).filter((b): b is string => b !== null)
+      if (matches.length > 1 || bodies.length !== 1) {
+        block(
+          'not-read',
+          certified
+            ? `that key is trusted on ${t.user}@${t.serverName} both as a plain key and through a certificate, which is ${matches.length} lines for one fingerprint. A certificate carries no body this can match on, so removing the plain line would leave the key trusted and the change would be reported as a revocation.`
+            : `that key is on ${matches.length} line${matches.length === 1 ? '' : 's'} of ${t.user}@${t.serverName}'s authorized_keys and ${bodies.length} of them can be matched exactly, so the removal could not be made precise. Nothing approximate is run against an authorized_keys file.`
+        )
+        continue
+      }
+      const blob = bodies[0]
+      if (!BLOB_RE.test(blob)) {
         block(
           'not-read',
           `the stored copy of that key on ${t.serverName} is not in a form this can match exactly, so the removal could not be made precise. Nothing approximate is run against an authorized_keys file.`
         )
         continue
       }
-      perHost.push({ t, blob, path: account.keyPath, count: matches.length })
+      perHost.push({ t, blob, path: account.keyPath })
     } else {
       const line = (req.keyLine ?? '').trim()
       // A constant hash, because only the SHAPE of the line is being checked
@@ -2493,7 +2680,7 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
         )
         continue
       }
-      perHost.push({ t, blob: line, path: account.keyPath, count: 0 })
+      perHost.push({ t, blob: line, path: account.keyPath })
     }
   }
 
@@ -2511,7 +2698,7 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
   // step resolves `$HOME` on the host instead. A selection spanning accounts
   // with different home directories is still one command, and a selection
   // spanning different ACCOUNTS is refused by construction — see the caller.
-  let spec: AccessJobSpec | null = null
+  let write: AccessStagedWrite | null = null
   if (perHost.length > 0) {
     const first = perHost[0]
     const command =
@@ -2520,53 +2707,36 @@ export function planAccessChange(req: AccessChangeRequest): AccessChangePlan {
             path: first.path,
             blob: first.blob,
             token,
-            expectRemoved: first.count,
             rollbackSeconds: req.rollbackSeconds
           })
         : buildAddKeyCommand({ path: first.path, line: first.blob, token, rollbackSeconds: req.rollbackSeconds })
     commands.push(command)
-    spec = {
-      kind: 'access',
+    write = {
+      command,
       title:
         req.kind === 'revoke'
           ? `Stage revocation of ${key.slice(0, 22)}… from ${first.t.user}`
-          : `Stage a new key for ${first.t.user}`,
-      steps: [{ command }],
-      // One host at a time. A key change rolled across a selection in parallel
-      // is the case where a mistake reaches every machine before the first
-      // failure is visible; serialised, the second host is still reachable
-      // while the first is being looked at.
-      concurrency: 1
+          : `Stage a new key for ${first.t.user}`
     }
   }
 
-  return { spec, targets, blocks, disarm, token, rollbackSeconds: ACCESS_ROLLBACK_SECONDS }
+  // The window this plan ACTUALLY armed. Returning the module default while
+  // the command said something else would make every deadline judgement wrong
+  // by whatever the caller passed — and the deadline is what decides whether a
+  // change may be confirmed at all.
+  return {
+    write,
+    targets,
+    blocks,
+    disarm,
+    token,
+    rollbackSeconds: req.rollbackSeconds ?? ACCESS_ROLLBACK_SECONDS
+  }
 }
 
 /** The base64 body of one stored key, for an exact-match removal. */
 function blobOfLine(k: AuthorizedKey): string | null {
   return k.blob
-}
-
-/**
- * The body to match on for one fingerprint, or null when there is not exactly
- * one.
- *
- * EVERY line carrying the fingerprint is checked, not the first. A certificate
- * line fingerprints to the key inside it and deliberately keeps no body — so an
- * account trusting a key both plainly and through a certificate has two lines
- * for one fingerprint and only one body, and taking the first one would build a
- * removal that deletes one line while the plan's count expects two. The host
- * would catch it and roll back, which is safe and reads as a mystery. Refusing
- * here makes it a block with a sentence instead.
- */
-function blobOf(account: AccessAccount, fingerprint: string): string | null {
-  const bodies: (string | null)[] = []
-  for (const k of account.keys ?? []) {
-    if (k.fingerprint === fingerprint) bodies.push(blobOfLine(k))
-  }
-  if (bodies.length !== 1) return null
-  return bodies[0]
 }
 
 /**
@@ -2584,7 +2754,6 @@ export function buildRevokeKeyCommand(o: {
   path: string
   blob: string
   token: string
-  expectRemoved: number
   rollbackSeconds?: number
 }): string {
   if (!BLOB_RE.test(o.blob)) throw new Error('refusing to build a removal from an unvalidated key body')
@@ -2602,10 +2771,23 @@ export function buildRevokeKeyCommand(o: {
     // not be built", and the count check that would have caught a real problem
     // never runs. Exit 2 is a real error and still stops the change.
     produce: `{ grep -v -F -- '${o.blob}' "$SP_F" > "$SP_T" || [ $? = 1 ]; }`,
-    // The count is checked, not assumed. A filter that removed the wrong number
-    // of lines is a filter that did something nobody asked for, and the answer
-    // is to put the backup back rather than to report success.
-    expect: `SP_WANT=$((SP_BEFORE-${o.expectRemoved}))`
+    // EACH HOST COUNTS FOR ITSELF. This used to be `SP_BEFORE-${expectRemoved}`
+    // with `expectRemoved` taken from the FIRST target in the selection and
+    // then baked into the one command every host runs — so the order the
+    // operator happened to select hosts in decided what ran on all of them, and
+    // a host holding the key on a different number of lines failed a count
+    // check about a different machine.
+    //
+    // Counting on the host also buys a check the plan could not make: a
+    // collection that has gone stale, where the key is already gone. That used
+    // to surface as "the new file has 4 lines and 3 were expected", which is
+    // the truth about the wrong thing.
+    expect: [
+      `SP_HIT=$(grep -c -F -- '${o.blob}' "$SP_F" 2>/dev/null || true)`,
+      `case "$SP_HIT" in ''|*[!0-9]*) SP_HIT=0 ;; esac`,
+      '[ "$SP_HIT" -gt 0 ] || { rm -f "$SP_B"; echo "that key is not in this account\u2019s authorized_keys on this host; nothing was changed" >&2; exit 4; }',
+      'SP_WANT=$((SP_BEFORE-SP_HIT))'
+    ].join('\n')
   })
 }
 
@@ -2646,6 +2828,15 @@ function buildStagedWrite(o: {
   expect: string
   rollbackSeconds?: number
 }): string {
+  // THE TOKEN IS VALIDATED HERE, where it is interpolated into four paths in a
+  // command that replaces `authorized_keys`. It was enforced in the two
+  // READ-ONLY commands and not in the two that write, which is exactly
+  // backwards: the doc comment on TOKEN_RE argues for validating it precisely
+  // because the value reaches a command that touches that file, and then it was
+  // applied to the harmless pair.
+  if (!TOKEN_RE.test(o.token)) {
+    throw new Error('refusing to build a staged write from an unvalidated token')
+  }
   const marker = accessCommitMarker(o.token)
   const wait = o.rollbackSeconds ?? ACCESS_ROLLBACK_SECONDS
   return [
@@ -2658,14 +2849,78 @@ function buildStagedWrite(o: {
     `SP_B="$SP_F.shellpilot-${o.token}.bak"`,
     `SP_T="$SP_F.shellpilot-${o.token}.new"`,
     `SP_M="$HOME/.ssh/${marker}"`,
+    'SP_LOCK="$HOME/.ssh/.shellpilot-access.lock"',
+
+    // ---- ONE STAGED CHANGE AT A TIME -------------------------------------
+    //
+    // Every stage arms an INDEPENDENT watchdog holding its own copy of whatever
+    // the file was at ITS start, and the disarm marker is named per change — so
+    // confirming change 2 says nothing whatsoever to change 1's watchdog. Two
+    // revokes a second apart, the second verified and committed: the file was
+    // right after the commit, and eleven seconds later the first watchdog put
+    // BOTH revoked keys back, including the one the audit trail said was gone.
+    //
+    // The likely path is not two operators racing. It is one operator: a revoke
+    // reports verification-failed, they fix the plan and restage inside the
+    // 300-second window.
+    //
+    // THE ANSWER IS A REFUSAL, and it is chosen over making the watchdogs aware
+    // of each other on purpose. The alternative in front of it was a lock
+    // holding the live watchdog's pid, killed and replaced before arming — and
+    // killing change 1's watchdog while change 1 is still unconfirmed is
+    // exactly "silently make change 1 permanent", which is the same class of
+    // failure pointing the other way. There is no version of overlapping
+    // changes that is safe with one backup per host, and a host is only ever
+    // blocked for as long as its own rollback window: the watchdog removes the
+    // backup whichever way it goes, so the refusal clears itself.
+    //
+    // TWO MECHANISMS, because they cover different things. The `.bak` glob is
+    // the durable one — it survives this process dying and is what actually
+    // stops the restage-inside-the-window case. `mkdir` is atomic and covers
+    // the sliver the glob cannot: two runs reaching the check between each
+    // other's check and `cp`.
+    // The two reasons `mkdir` fails are not the same reason and must not read
+    // as one: the lock already being there is another change in flight, and
+    // anything else is a `~/.ssh` this account cannot write — which is a
+    // different problem with a different fix.
+    'mkdir "$SP_LOCK" 2>/dev/null || { [ -d "$SP_LOCK" ] && { echo "another key change is starting on this host right now; nothing was changed" >&2; exit 6; }; echo "a lock could not be created in ~/.ssh, so nothing was changed" >&2; exit 3; }',
+    'trap \'rmdir "$SP_LOCK" 2>/dev/null\' EXIT INT TERM HUP',
+    // THE MESSAGE NAMES THE FILE AND THE REMEDY, because there is one case
+    // where this does not clear itself: a host whose watchdog was killed after
+    // it armed — the case the launcher preference above exists to make rare and
+    // cannot make impossible. There the change is live, unprotected, and the
+    // backup stays. Refusing further automated changes on that host is the
+    // right answer and a person should look at it, so the sentence says which
+    // file and what checking it means.
+    'for SP_OLD in "$HOME"/.ssh/*.shellpilot-*.bak; do [ -e "$SP_OLD" ] || continue; echo "a key change staged earlier is still waiting for its rollback window to close ($SP_OLD); nothing was changed. If that window has already passed, its rollback did not run on this host: compare that file against the live authorized_keys and remove it by hand once you are satisfied." >&2; exit 6; done',
+
     // Refuse before touching anything. A file this account cannot write is a
     // file the change cannot make, and finding that out after the backup is
     // written leaves litter for no reason.
+    // BEFORE `-f`, which follows the link. `~/.ssh/authorized_keys ->
+    // /etc/ssh/authorized_keys.d/$USER` is a common config-managed pattern, and
+    // the `mv` at the end replaces the LINK with a regular file — permanently
+    // destroying the indirection while the real file keeps the key. There is no
+    // safe way to edit through it from here, so it is a refusal.
+    '[ -h "$SP_F" ] && { echo "authorized_keys is a symbolic link on this host; replacing it would destroy the link and leave the real file untouched, so nothing was changed" >&2; exit 3; }',
     '[ -f "$SP_F" ] || { echo "no authorized_keys to change" >&2; exit 3; }',
     '[ -w "$SP_F" ] || { echo "authorized_keys is not writable by this account" >&2; exit 3; }',
     // RULE 3. Before anything else, and the run stops if it did not land.
-    'cp -p "$SP_F" "$SP_B" || { echo "could not write a backup; nothing was changed" >&2; exit 3; }',
-    '[ -s "$SP_B" ] || { echo "the backup is empty; nothing was changed" >&2; exit 3; }',
+    'cp -p "$SP_F" "$SP_B" || { rm -f "$SP_B"; echo "could not write a backup; nothing was changed" >&2; exit 3; }',
+    // `cmp`, not `[ -s ]`. Two failures at once.
+    //
+    // A NON-EMPTY BACKUP IS NOT A COMPLETE ONE. `cp -p` on a full filesystem
+    // writes what it can and leaves a truncated file behind, which `[ -s ]`
+    // accepts — and the watchdog then restores that mutilated version over the
+    // live file at its deadline, losing keys that were never part of the
+    // change. Deleting that guard passed all 141 of this item's tests, which is
+    // to say it had no coverage at all.
+    //
+    // AND AN EMPTY authorized_keys IS A REAL FILE. A freshly provisioned
+    // account has one, and adding the first key to it is the first thing
+    // anybody will try; `[ -s ]` refused that with the wrong reason entirely.
+    'command -v cmp >/dev/null 2>&1 || { rm -f "$SP_B"; echo "this host has no cmp, so the backup could not be checked against the file it came from; nothing was changed" >&2; exit 3; }',
+    'cmp -s "$SP_F" "$SP_B" || { rm -f "$SP_B"; echo "the backup is not a faithful copy of authorized_keys; nothing was changed" >&2; exit 3; }',
     // `|| echo 0` would be a bug here, and it is worth naming because it is
     // the obvious way to write it: `grep -c` PRINTS its count and then exits 1
     // when the count is zero, so `$(grep -c . f || echo 0)` yields the two-line
@@ -2675,22 +2930,98 @@ function buildStagedWrite(o: {
     'SP_BEFORE=$(grep -c . "$SP_F" 2>/dev/null || true)',
     "case \"$SP_BEFORE\" in ''|*[!0-9]*) SP_BEFORE=0 ;; esac",
     o.expect,
-    `${o.produce} || { rm -f "$SP_T"; echo "the new file could not be built; nothing was changed" >&2; exit 3; }`,
+    `${o.produce} || { rm -f "$SP_T" "$SP_B"; echo "the new file could not be built; nothing was changed" >&2; exit 3; }`,
     'SP_AFTER=$(grep -c . "$SP_T" 2>/dev/null || true)',
     "case \"$SP_AFTER\" in ''|*[!0-9]*) SP_AFTER=0 ;; esac",
     // The count check, before the replacement rather than after it. A file that
     // came out the wrong size never becomes the live file at all.
-    '[ "$SP_AFTER" = "$SP_WANT" ] || { rm -f "$SP_T"; echo "the new file has $SP_AFTER lines and $SP_WANT were expected; nothing was changed" >&2; exit 4; }',
-    'chmod 600 "$SP_T" 2>/dev/null || true',
-    // RULE 2, armed BEFORE the replacement. If the mv succeeds and this session
-    // dies in the same instant, the watchdog is already running and the host
-    // puts the old file back on its own.
-    'rm -f "$SP_M"',
-    `nohup sh -c 'sleep ${wait}; [ -f "$0" ] || cp -p "$1" "$2"; rm -f "$0" "$1"' "$SP_M" "$SP_B" "$SP_F" >/dev/null 2>&1 &`,
+    // The backup goes with it. A backup left behind by a change that did not
+    // happen would refuse every future change on this host under the
+    // one-at-a-time rule above, for ever.
+    '[ "$SP_AFTER" = "$SP_WANT" ] || { rm -f "$SP_T" "$SP_B"; echo "the new file has $SP_AFTER lines and $SP_WANT were expected; nothing was changed" >&2; exit 4; }',
+    // NOT `2>/dev/null || true`. This is the one permission-critical step in
+    // the command, and sshd's StrictModes rejects a group- or world-writable
+    // authorized_keys OUTRIGHT — locking out every key on the account, not only
+    // the one being changed. Under `umask 002`, which is what a host with
+    // per-user groups actually has, the file `grep` just created is 0664. The
+    // add path gets this right by copying the original with `cp -p`; the revoke
+    // path has to do it deliberately, and has to stop if it cannot.
+    'chmod 600 "$SP_T" || { rm -f "$SP_T" "$SP_B"; echo "the new authorized_keys could not be made private; sshd would refuse it, so nothing was changed" >&2; exit 3; }',
+
+    // ---- RULE 2: arm the host's own rollback, and PROVE it armed ----------
+    //
+    // Armed BEFORE the replacement, so that if the mv succeeds and this session
+    // dies in the same instant the watchdog is already running. That ordering
+    // was always right. What was missing is that NOTHING CHECKED. The launch
+    // was a bare line in a `\n`-joined script with no `set -e` and no `&&`, so
+    // its failure was discarded and the mv ran anyway: the key went, the
+    // STAGED line promised a rollback that did not exist, and
+    // `describeAccessOutcome` later told the operator their previous file was
+    // back.
+    //
+    // AND THE REALISTIC TRIGGER IS NOT A MISSING `nohup`. It is systemd-logind
+    // with `KillUserProcesses=yes` — the upstream default, shipped by RHEL 8/9,
+    // CentOS Stream and Fedora — which SIGKILLs the whole user slice when the
+    // exec channel closes. `nohup` sets SIGHUP to ignore in one process and
+    // does nothing whatsoever about that. On those hosts the dead-man's switch
+    // died with the session EVERY TIME.
+    //
+    // So three things, in order:
+    //
+    //  1. CHOOSE A LAUNCHER THAT CAN ACTUALLY SURVIVE, preferring the one that
+    //     survives the case above. `systemd-run --user --scope` puts the
+    //     watchdog in a transient scope of its own, OUTSIDE the logind session
+    //     scope that KillUserProcesses kills — which `setsid` does not do, for
+    //     all that it is the stronger POSIX answer: a new session escapes the
+    //     terminal, not the cgroup. `nohup` is last and weakest. The choice is
+    //     probed on the host rather than assumed, and `systemd-run` is probed
+    //     by RUNNING it, because it is present and non-functional on any host
+    //     whose session has no user bus.
+    //
+    //     `disown` is not among them for the reason the detached job engine
+    //     dropped it: it is a bashism, and this command has to run under the
+    //     `/bin/sh` that is actually there.
+    //
+    //  2. REFUSE IF THERE IS NONE. A host that cannot leave a process running
+    //     after the session ends is a host this must not write to at all — the
+    //     rollback is not a nicety on top of the change, it is the reason the
+    //     change is allowed to be attempted.
+    //
+    //  3. PROVE IT ARMED. The watchdog's FIRST action is to create its arming
+    //     sentinel, so the sentinel existing means a process is running that
+    //     holds the backup path and the deadline. Polled for a few seconds, and
+    //     the mv is gated on it. A watchdog that was launched into a slice
+    //     about to be killed does not get that far, and nothing is replaced.
+    `SP_ARM="$SP_F.shellpilot-${o.token}.armed"`,
+    'rm -f "$SP_M" "$SP_ARM"',
+    'SP_L=',
+    // `--quiet` so the scope name does not land in the job output; `--collect`
+    // so a scope whose process died is not left behind as a failed unit.
+    'if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect true >/dev/null 2>&1; then SP_L="systemd-run --user --scope --quiet --collect"; elif command -v setsid >/dev/null 2>&1; then SP_L=setsid; elif command -v nohup >/dev/null 2>&1; then SP_L=nohup; fi',
+    '[ -n "$SP_L" ] || { rm -f "$SP_T" "$SP_B"; echo "this host has no way to leave a process running after the session ends, so the rollback could not be armed and nothing was changed" >&2; exit 5; }',
+    // Unquoted on purpose: `$SP_L` is one of three literals this file wrote,
+    // and the systemd one is four words.
+    `$SP_L sh -c ': > "$3"; sleep ${wait}; [ -f "$0" ] || cp -p "$1" "$2"; rm -f "$0" "$1" "$3"' "$SP_M" "$SP_B" "$SP_F" "$SP_ARM" </dev/null >/dev/null 2>&1 &`,
+    'SP_WPID=$!',
+    // A fractional sleep is not POSIX and a host without one must not spend
+    // thirty seconds here, so the tick is probed and the try count follows it.
+    // Either way this waits about three seconds and no longer.
+    'if sleep 0.1 2>/dev/null; then SP_TICK=0.1; SP_TRIES=30; else SP_TICK=1; SP_TRIES=3; fi',
+    'SP_N=0',
+    'while [ ! -f "$SP_ARM" ] && [ "$SP_N" -lt "$SP_TRIES" ]; do sleep "$SP_TICK"; SP_N=$((SP_N+1)); done',
+    // `kill` is best effort: with `nohup` and `setsid` the recorded pid IS the
+    // watchdog, and with a systemd scope it is the launcher and the scope may
+    // outlive it. Either way the file was never replaced, so the worst a
+    // survivor can do at its deadline is copy the backup over an identical
+    // file and tidy up after itself.
+    '[ -f "$SP_ARM" ] || { kill "$SP_WPID" 2>/dev/null; rm -f "$SP_T" "$SP_B" "$SP_ARM"; echo "the rollback did not start on this host, so nothing was changed" >&2; exit 5; }',
+
     'mv "$SP_T" "$SP_F" || { echo "the file could not be replaced" >&2; exit 3; }',
     // Said out loud, in the job output, so the operator reading the pane knows
-    // the change is NOT permanent and knows how long they have.
-    `echo "STAGED: $SP_F changed from $SP_BEFORE to $SP_AFTER lines. The previous file is at $SP_B and will be put back automatically in ${wait}s unless a new session confirms this change."`
+    // the change is NOT permanent, knows how long they have, and knows how
+    // strong the thing holding the deadline is. A `nohup` watchdog and a
+    // systemd scope are not the same promise and are not reported as one.
+    `echo "STAGED: $SP_F changed from $SP_BEFORE to $SP_AFTER lines. The previous file is at $SP_B and will be put back automatically in ${wait}s unless a new session confirms this change. The rollback is running under $SP_L."`
   ].join('\n')
 }
 
@@ -2961,9 +3292,20 @@ export function describeAccessOutcome(o: {
 }): string {
   switch (o.outcome) {
     case 'committed':
-      return `Committed on ${o.serverName}. A second session authenticated after the change and called off the host's rollback, so ${o.user}'s authorized_keys is now permanent. The previous file is still on the host at ${o.backupPath}.`
+      // The window, not "still on the host", because the watchdog removes the
+      // backup when it wakes and finds itself called off — which it has to, or
+      // the next change on this host would be refused for ever by the
+      // one-staged-change-at-a-time rule. An operator who wants that file wants
+      // it now, and telling them it will be there indefinitely is how they find
+      // out otherwise at the worst moment.
+      return `Committed on ${o.serverName}. A second session authenticated after the change and called off the host's rollback, so ${o.user}'s authorized_keys is now permanent. The previous file is at ${o.backupPath} until the ${o.rollbackSeconds}-second window closes, after which the host removes it.`
     case 'reverted-verification-failed':
-      return `Reverted on ${o.serverName}: the check failed. ${o.reason} The host's rollback was left armed, so ${o.user}'s previous authorized_keys is back and nothing was committed.`
+      // NOT "the previous file is back", which is a claim about something this
+      // process cannot see. The staged write proves the watchdog armed before
+      // it replaces anything, so what can honestly be said is that it was
+      // running and holding the deadline — and then where to look, because the
+      // operator reading this may be the one who has just been locked out.
+      return `Reverted on ${o.serverName}: the check failed. ${o.reason} The host's rollback was armed and confirmed running before anything was replaced, and was left armed, so ${o.user}'s previous authorized_keys should be back within ${o.rollbackSeconds}s of the change. It is restored from ${o.backupPath}; if you can still reach the host, that is where to look.`
     case 'reverted-unconfirmed':
       return `Reverted on ${o.serverName}: nothing confirmed it in time. ${o.reason} That is the dead-man's switch doing its job rather than the change failing — ${o.user}'s previous authorized_keys is back, the host is exactly as it was, and it can be staged again.`
   }

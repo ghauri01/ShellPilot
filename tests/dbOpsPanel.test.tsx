@@ -4,12 +4,24 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { stubBridge } from './setup/renderer'
 import { DbOpsPanel } from '../src/renderer/src/components/databases/DbOpsPanel'
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import {
+  judgeMongoOplog,
+  judgeMongoReplication,
   judgeMysqlReplication,
   judgePgStatements,
+  judgeRedisMemory,
+  judgeRedisReplication,
+  parseMongoOplog,
+  parseMongoReplication,
   parseMysqlReplication,
   parsePgStatements,
+  parseRedisInfo,
+  parseRedisMemory,
+  parseRedisReplication,
   type DbAnswer,
+  type DbOpsEngine,
   type DbOpsReport
 } from '../src/shared/dbOps'
 import type { DbConnectConfig } from '../src/shared/db'
@@ -36,8 +48,16 @@ const CFG: DbConnectConfig = {
   username: 'ops'
 }
 
-function report(engine: 'postgres' | 'mysql', answers: DbAnswer<unknown>[]): DbOpsReport {
+function report(engine: DbOpsEngine, answers: DbAnswer<unknown>[]): DbOpsReport {
   return { ok: true, engine, connectionId: 'db-1', at: 0, elapsedMs: 12, answers }
+}
+
+const FIXTURES = resolve(__dirname, 'fixtures/dbops')
+function fixture(engine: 'mongodb' | 'redis', file: string): Record<string, { ok: boolean; result?: Record<string, unknown>; reply?: unknown }> {
+  return JSON.parse(readFileSync(join(FIXTURES, engine, `${file}.json`), 'utf8'))
+}
+function redisInfo(cap: { reply?: unknown } | undefined): ReturnType<typeof parseRedisInfo> {
+  return parseRedisInfo(typeof cap?.reply === 'string' ? cap.reply : '')
 }
 
 /** The real answer the collector builds when the extension is not installed. */
@@ -296,5 +316,169 @@ describe('DbOpsPanel — reporting the worst verdict upward', () => {
     await user.click(readButton())
     await screen.findByText(/pg_stat_statements is not installed/)
     expect(levels).toEqual(['unknown'])
+  })
+})
+
+// ===========================================================================
+// MongoDB and Redis, where the number that looks fine is a different number
+// ===========================================================================
+
+describe('DbOpsPanel — a MongoDB member that is down', () => {
+  /** Built by the real parser and judge, from the real capture. */
+  function downMembers(): DbAnswer<unknown> {
+    const value = parseMongoReplication(fixture('mongodb', 'secondary-down').replSetGetStatus.result)
+    return { id: 'replication', status: 'ok', value, verdict: judgeMongoReplication(value) }
+  }
+
+  /** The rendered cells of one member's row, so a healthy member's genuine
+   *  zero is not mistaken for the dead one's. */
+  async function rowFor(name: string): Promise<string[]> {
+    const cell = await screen.findByText(name)
+    const tr = cell.closest('tr')
+    if (!tr) throw new Error(`no row for ${name}`)
+    return [...tr.querySelectorAll('td')].map((td) => td.textContent ?? '')
+  }
+
+  it('writes "did not report" in the lag cell rather than 1970, a dash, or a zero', async () => {
+    // The cell this test exists for. The server sent optimeDate
+    // 1970-01-01T00:00:00.000Z; a blank cell is one a reader fills in as zero,
+    // and a rendered 1970 is a date nobody reads as "no measurement".
+    //
+    // FAILS FIRST, with the epoch guard removed from the parser, as:
+    //   expected [ 'sp-mongo2:27017', …(4) ] to include 'did not report'
+    // and the cell it renders instead is a lag computed from 1970. The sibling
+    // rows in the same table are legitimately at 0s, which is why only THIS row
+    // may be asked and why the assertion below checks that one keeps its zero.
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('mongodb', [downMembers()]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'mongodb' }} kind="mongodb" />)
+    await user.click(readButton())
+    const row = await rowFor('sp-mongo2:27017')
+    expect(row).toContain('did not report')
+    expect(row).not.toContain('0s')
+    expect(row.join(' ')).not.toContain('1970')
+
+    // And the healthy member beside it keeps its real zero.
+    expect(await rowFor('sp-mongo1:27017')).toContain('0s')
+  })
+
+  it('shows the member as DOWN and does not show a zero-millisecond ping for it', async () => {
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('mongodb', [downMembers()]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'mongodb' }} kind="mongodb" />)
+    await user.click(readButton())
+    // FAILS FIRST, with `pingMs: num(r.pingMs)` unconditional, as:
+    //   expected [ 'sp-mongo2:27017', …(4) ] to not include '0 ms'
+    const row = await rowFor('sp-mongo2:27017')
+    expect(row).toContain('DOWN')
+    // pingMs is literally 0 in the capture, and 0 ms reads as a perfect round
+    // trip. The healthy member three rows down really is at 0 ms.
+    expect(row).not.toContain('0 ms')
+    expect(await rowFor('sp-mongo3:27017')).toContain('0 ms')
+  })
+
+  it('leads with the judgement, not with the table', async () => {
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('mongodb', [downMembers()]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'mongodb' }} kind="mongodb" />)
+    await user.click(readButton())
+    await waitFor(() => expect(screen.getByText(/not carrying the set/)).toBeTruthy())
+  })
+})
+
+describe('DbOpsPanel — an oplog window', () => {
+  function oplog(file: string, uptime: number): DbAnswer<unknown> {
+    const fx = fixture('mongodb', file)
+    const b = (cap: { result?: Record<string, unknown> }): Record<string, unknown>[] =>
+      ((cap.result?.cursor as { firstBatch?: Record<string, unknown>[] })?.firstBatch ?? [])
+    const value = parseMongoOplog(b(fx.oplogFirst), b(fx.oplogLast), b(fx.oplogStats)[0], uptime)
+    return { id: 'oplog', status: 'ok', value, verdict: judgeMongoOplog(value) }
+  }
+
+  it('says on screen whether the window has rolled, because the number alone cannot', async () => {
+    // FAILS FIRST, with the cell rendered as the raw boolean, as:
+    //   Unable to find an element with the text:
+    //   /not yet — the window is still growing/
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('mongodb', [oplog('replica-set-primary', 493)]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'mongodb' }} kind="mongodb" />)
+    await user.click(readButton())
+    await waitFor(() => expect(screen.getByText(/not yet — the window is still growing/)).toBeTruthy())
+  })
+
+  it('says the opposite for the same small number when the oplog is rolling', async () => {
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('mongodb', [oplog('oplog-saturated', 478)]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'mongodb' }} kind="mongodb" />)
+    await user.click(readButton())
+    await waitFor(() => expect(screen.getByText(/yes — this is the real window/)).toBeTruthy())
+  })
+})
+
+describe('DbOpsPanel — Redis maxmemory', () => {
+  function memory(file: string): DbAnswer<unknown> {
+    const value = parseRedisMemory(redisInfo(fixture('redis', file).infoMemory))
+    return { id: 'memory', status: 'ok', value, verdict: judgeRedisMemory(value) }
+  }
+
+  it('renders maxmemory 0 as "none — unlimited", never as 0 B and never as blank', async () => {
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('redis', [memory('replica')]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'redis' }} kind="redis" />)
+    await user.click(readButton())
+    await waitFor(() => expect(screen.getByText('none — unlimited')).toBeTruthy())
+    expect(screen.queryByText('0 B')).toBeNull()
+  })
+
+  it('renders an ABSENT maxmemory as "not reported", which is a different cell', async () => {
+    // FAILS FIRST, with the two cases collapsed into one cell, as:
+    //   Unable to find an element with the text: not reported.
+    const value = parseRedisMemory(parseRedisInfo('# Memory\r\nused_memory:2384024\r\n'))
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('redis', [{ id: 'memory', status: 'unsupported', value, verdict: judgeRedisMemory(value) }]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'redis' }} kind="redis" />)
+    await user.click(readButton())
+    await waitFor(() => expect(screen.getByText('not reported')).toBeTruthy())
+    expect(screen.queryByText('none — unlimited')).toBeNull()
+  })
+})
+
+describe('DbOpsPanel — a Redis replica that has lost its master', () => {
+  it('writes "no measurement" where Redis sent -1', async () => {
+    // FAILS FIRST, with the sentinel rendered as a duration, as:
+    //   Unable to find an element with the text: no measurement.
+    const value = parseRedisReplication(redisInfo(fixture('redis', 'replica-link-down').infoReplication))
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('redis', [{ id: 'replication', status: 'ok', value, verdict: judgeRedisReplication(value) }]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'redis' }} kind="redis" />)
+    await user.click(readButton())
+    await waitFor(() => expect(screen.getByText('no measurement')).toBeTruthy())
+    // Neither the sentinel nor the zero it clamps to.
+    expect(screen.queryByText('-1s ago')).toBeNull()
+    expect(screen.queryByText('0s ago')).toBeNull()
+  })
+})
+
+describe('DbOpsPanel — the engine the tables are drawn for', () => {
+  it('comes from the report, so a MongoDB report is never drawn with MySQL columns', async () => {
+    // The panel used to derive it from `kind`, which is the connection's kind
+    // and not the report's. They agree today; they would stop agreeing the
+    // first time a report was rendered while the selection had already moved.
+    // FAILS FIRST, with the derivation put back, as:
+    //   Unable to find an element with the text: behind primary.
+    const value = parseMongoReplication(fixture('mongodb', 'replica-set-primary').replSetGetStatus.result)
+    const user = userEvent.setup()
+    opsImpl = () => Promise.resolve(report('mongodb', [{ id: 'replication', status: 'ok', value, verdict: judgeMongoReplication(value) }]))
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'postgres' }} kind="postgres" />)
+    await user.click(readButton())
+    await waitFor(() => expect(screen.getByText('behind primary')).toBeTruthy())
+    // MySQL's replication table header, which must not appear.
+    expect(screen.queryByText('channel')).toBeNull()
+  })
+
+  it('names the questions it is about to ask before anything has been read', () => {
+    render(<DbOpsPanel cfg={{ ...CFG, kind: 'redis' }} kind="redis" />)
+    expect(screen.getByText(/9 questions will be asked/)).toBeTruthy()
+    expect(screen.getByText(/memory and eviction/)).toBeTruthy()
   })
 })

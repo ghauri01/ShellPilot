@@ -70,9 +70,33 @@ export function alertCoverageText(running: boolean | undefined, enabled: boolean
 //                   reads it. Nothing produces them in the background at all.
 //                   This is the one that must never be described as "alerts
 //                   fire wherever you are in the app".
+//   posture-sweep   oom-kill and cert-expiry. Item 19b's two deferred kinds
+//                   come off the hourly security posture probe, which is a
+//                   FOURTH answer and not a variant of the three above.
+//
+// Why posture-sweep is its own row rather than being filed under one of the
+// existing three, given that this file exists to stop coverage rows claiming
+// more than they can:
+//
+//   * `sampler` is wrong in its two non-running branches, which both say "a
+//     host is only sampled while its monitor is on screen". No monitor card
+//     collects posture — nothing does, until somebody presses Check now on the
+//     Security posture panel — so filing these here would promise a fallback
+//     that does not exist.
+//   * `app-root` is wrong in its opening clause, "whether or not background
+//     checks are on". The posture probe rides the sweep, so background checks
+//     being off stops it dead.
+//   * `read-on-demand` is wrong because something DOES produce these in the
+//     background. Understating coverage is a smaller sin than overstating it
+//     and it is still a false sentence on a screen whose whole job is to be
+//     true.
+//
+// So there is a fourth sentence, and it names the second gate the other three
+// do not have: the Security posture module has to be switched on for the
+// workspace as well.
 // ---------------------------------------------------------------------------
 
-export type AlertCoverageSource = 'sampler' | 'app-root' | 'read-on-demand'
+export type AlertCoverageSource = 'sampler' | 'app-root' | 'read-on-demand' | 'posture-sweep'
 
 /** A Record rather than a lookup with a default, so a kind added to
  *  StoreAlertKind is a type error here instead of silently inheriting whatever
@@ -87,7 +111,9 @@ export const COVERAGE_SOURCE: Record<StoreAlertKind, AlertCoverageSource> = {
   'job-failed': 'app-root',
   'tunnel-down': 'app-root',
   'db-alarm': 'read-on-demand',
-  'db-watch': 'read-on-demand'
+  'db-watch': 'read-on-demand',
+  'oom-kill': 'posture-sweep',
+  'cert-expiry': 'posture-sweep'
 }
 
 const KINDS_BY_SOURCE = (src: AlertCoverageSource): StoreAlertKind[] =>
@@ -101,7 +127,14 @@ const NON_SAMPLER_COPY: Record<Exclude<AlertCoverageSource, 'sampler'>, string> 
   'read-on-demand':
     'Database verdicts are the exception, and it is not a small one: they exist only because ' +
     'somebody opened the Databases page and read it. Nothing produces them in the background, ' +
-    'so a database that goes into alarm overnight is not noticed until it is next read.'
+    'so a database that goes into alarm overnight is not noticed until it is next read.',
+  'posture-sweep':
+    'OOM kills and certificate expiry are read by the security posture probe, about once an ' +
+    'hour. It has TWO switches, not one: it runs on the background sweep above, and only while ' +
+    'the Security posture module is on for this workspace. With either of those off nothing ' +
+    'reads them at all — not even while a monitor is on screen — until somebody presses Check ' +
+    'now on the Security posture panel. With both on they are read about once an hour and raise ' +
+    'with no screen open.'
 }
 
 /** The sentences a screen listing every kind has to show, in the order they
@@ -118,6 +151,11 @@ export function alertCoverageLines(
       source: 'read-on-demand',
       kinds: KINDS_BY_SOURCE('read-on-demand'),
       text: NON_SAMPLER_COPY['read-on-demand']
+    },
+    {
+      source: 'posture-sweep',
+      kinds: KINDS_BY_SOURCE('posture-sweep'),
+      text: NON_SAMPLER_COPY['posture-sweep']
     }
   ]
 }

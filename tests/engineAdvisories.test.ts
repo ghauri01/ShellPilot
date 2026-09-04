@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-// @ts-expect-error -- plain ESM script, no types, deliberately not part of tsconfig
+// The script is plain ESM with no types of its own. It used to carry a
+// `@ts-expect-error`; under `tsconfig.tests.json`'s `allowJs` TypeScript infers
+// its exports instead, so the directive was reported unused.
 import { cpeFor, evaluate, readPins, summarise } from '../scripts/check-engine-advisories.mjs'
 
 // Bundling OpenVPN and OpenSSL made their CVEs ours to patch. This suite covers

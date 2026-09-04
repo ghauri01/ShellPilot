@@ -16,7 +16,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import type { FrpProxy, FrpSpec, FrpVisitor, VpnProfile, VpnStatus } from '../src/shared/vpn'
+import type {
+  FrpProxy,
+  FrpSpec,
+  FrpVisitor,
+  VpnErrorCode,
+  VpnProfile,
+  VpnState,
+  VpnStatus
+} from '../src/shared/vpn'
 import { resetBinaryCache } from '../src/main/services/vpn/binaries'
 import type { ResolvedVpnSecrets, VpnDriverContext } from '../src/main/services/vpn/driver'
 import {
@@ -97,24 +105,37 @@ interface Ctx {
   ctx: VpnDriverContext
   patches: Partial<VpnStatus>[]
   logs: string[]
-  states: () => string[]
+  /** Every `ctx.dropped()` the driver made. See `makeCtx`. */
+  drops: { reason: string; errorCode?: VpnErrorCode }[]
+  states: () => VpnState[]
 }
 
 function makeCtx(secrets = makeSecrets()): Ctx {
   const patches: Partial<VpnStatus>[] = []
   const logs: string[] = []
+  const drops: { reason: string; errorCode?: VpnErrorCode }[] = []
   return {
     ctx: {
       runDir,
       secrets,
       emit: (p) => patches.push(p),
       log: (line) => logs.push(line),
+      // `dropped` is how a driver tells the manager the engine went down on its
+      // own; the interface comment on it says every driver used to assume
+      // `emit({state:'error'})` was enough and that emitting alone leaves the
+      // manager holding the run directory, the plaintext secrets and every
+      // session registration. This context had no `dropped` at all, so a driver
+      // that called it here would have thrown rather than been observed — which
+      // is to say NOTHING BELOW COVERS THE DROP PATH. Recorded rather than
+      // ignored so an assertion has something to reach for.
+      dropped: (reason, errorCode) => drops.push({ reason, errorCode }),
       askUser: async () => null,
       supervisor
     },
     patches,
     logs,
-    states: () => patches.map((p) => p.state).filter((s): s is string => typeof s === 'string')
+    drops,
+    states: () => patches.map((p) => p.state).filter((s): s is VpnState => s !== undefined)
   }
 }
 

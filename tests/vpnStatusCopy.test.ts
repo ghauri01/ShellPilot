@@ -26,7 +26,12 @@ const proxy = (name: string): FrpSpec['proxies'][number] => ({
   name,
   type: 'tcp',
   localIp: '127.0.0.1',
-  localPort: 8080
+  localPort: 8080,
+  // Required, and a gate rather than a preference: `start()` refuses a proxy
+  // the user has not ticked "this makes localhost:<port> reachable from
+  // <serverAddr>" for. Omitted here it was `undefined`, so these fixtures were
+  // modelling a proxy that could never have been started.
+  acknowledgedExposure: true
 })
 
 const status = (over: Partial<VpnStatus> = {}): VpnStatus => ({
@@ -80,7 +85,11 @@ describe('explaining an amber profile', () => {
   it('still explains a WireGuard tunnel with a stale handshake', () => {
     const reason = degradedReason(
       'wireguard',
-      status({ kind: 'wireguard', state: 'connected', stats: { rxBytes: 0, txBytes: 0 } })
+      status({
+        kind: 'wireguard',
+        state: 'connected',
+        stats: { rxBytes: 0, txBytes: 0, sampledAt: 1_700_000_000_000 }
+      })
     )
     expect(reason).toContain('nothing is crossing it')
   })

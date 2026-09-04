@@ -8,7 +8,13 @@ import {
   resetHistoryModuleForTests,
   type HistoryStore
 } from '../src/main/services/history'
-import { JobRunner, type JobExecResult, type JobExecutor } from '../src/main/services/jobRunner'
+import {
+  JobRunner,
+  type JobExecRequest,
+  type JobExecResult,
+  type JobExecUpdate,
+  type JobExecutor
+} from '../src/main/services/jobRunner'
 import { detachedJobExecutor, type JobRunResult } from '../src/main/services/jobDetached'
 import { assessCommand } from '../src/shared/broadcast'
 import type {
@@ -492,9 +498,13 @@ function harness(host: FakeHost, over: Partial<Parameters<typeof detachedJobExec
   }
 }
 
-function request(over: Record<string, unknown> = {}) {
+function request(over: Partial<JobExecRequest> = {}) {
   const output: string[] = []
-  const states: { state?: string; degraded?: string; detached?: unknown; error?: string }[] = []
+  // `JobExecUpdate` itself, not a hand-copied shadow of it. The shadow typed
+  // `state` as a bare string, so a rename of any JobHostState would have left
+  // every assertion below comparing against a value the executor can no longer
+  // emit — and passing, because nothing checked.
+  const states: JobExecUpdate[] = []
   let alive = true
   return {
     output,
@@ -511,7 +521,7 @@ function request(over: Record<string, unknown> = {}) {
       serverName: 'web-1',
       step: 1,
       alive: () => alive,
-      onState: (u: never) => states.push(u),
+      onState: (u: JobExecUpdate) => states.push(u),
       onOutput: (_s: 'out' | 'err', t: string) => output.push(t),
       ...over
     }

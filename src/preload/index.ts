@@ -17,6 +17,7 @@ import type {
   HostAccess
 } from '../shared/access'
 import type { HostFacts } from '../shared/hostFacts'
+import type { HostPosture } from '../shared/posture'
 import type { FleetSampleEvent, FleetSamplerConfig, FleetSamplerStatus } from '../shared/fleet'
 import type { BroadcastHostResult, BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import type {
@@ -30,6 +31,12 @@ import type {
 } from '../shared/jobs'
 import type { LogLine, LogSource, LogTailState, UnitChoice } from '../shared/logtail'
 import type { CronEntry, CronSourceReport } from '../shared/cron'
+import type { CapacityBridge, CapacityReport } from '../shared/capacity'
+import type { HostDrift } from '../shared/drift'
+import type { RuleDraftWire, RuleView, RulesBridge } from '../shared/rules'
+import type { ChangeLogBridge, ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
+import type { RunbookNote, RunbookView, RunbooksBridge } from '../shared/runbooks'
+import type { StoreAlertKind } from '../shared/webhook'
 import type {
   DockerAction,
   DockerActionResult,
@@ -67,6 +74,7 @@ import type {
   WebhookDeliveryStatus,
   WebhookTestResult
 } from '../shared/webhook'
+import type { CredProxyCall, CredProxyRule, CredProxyStatus } from '../shared/credproxy'
 import type {
   LocalCloseInfo,
   LocalConnectConfig,
@@ -107,7 +115,15 @@ import type {
 } from '../shared/vpn'
 import type { KnownHost } from '../main/services/knownhosts'
 import type { SshConfigHost } from '../shared/sshconfig'
-import type { BackupResult } from '../shared/backup'
+import type {
+  BackupDestination,
+  BackupResult,
+  BackupRunReport,
+  BackupTargetsFile,
+  DumpEngine,
+  DumpRunReport,
+  RemoteListResult
+} from '../shared/backup'
 import type { UpdatePrefs, UpdaterCapabilities, UpdaterStatus } from '../shared/updater'
 import type {
   AccessGroup,
@@ -328,6 +344,37 @@ const api = {
     test: (): Promise<WebhookTestResult> => ipcRenderer.invoke('webhook:test'),
     notify: (payload: AlertPayload): Promise<void> => ipcRenderer.invoke('webhook:notify', payload)
   },
+  // The API credential proxy — roadmap item 7.
+  //
+  // The one credential in this bridge that deliberately travels TOWARDS the
+  // renderer is `token()`. Every other secret in this app stays in main, and
+  // the webhook URL a few lines above is the model: there is no getter for it
+  // because the user never needs to see it. This one is different in kind —
+  // it is the string the user pastes into their own script, so a token that
+  // never leaves main is a proxy nobody can call. It is not an API key; it is
+  // what a caller presents INSTEAD of one, and the panel says so out loud.
+  //
+  // The API keys themselves never appear here, in either direction. A rule
+  // carries a vault entry id, and the value behind it is read in main at
+  // request time and injected onto the wire.
+  credproxy: {
+    status: (): Promise<CredProxyStatus> => ipcRenderer.invoke('credproxy:status'),
+    rules: (): Promise<CredProxyRule[]> => ipcRenderer.invoke('credproxy:rules'),
+    calls: (limit?: number): Promise<CredProxyCall[]> => ipcRenderer.invoke('credproxy:calls', limit),
+    saveRule: (
+      draft: unknown
+    ): Promise<{ ok: true; rule: CredProxyRule } | { ok: false; error: string }> =>
+      ipcRenderer.invoke('credproxy:save-rule', draft),
+    removeRule: (id: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('credproxy:remove-rule', id),
+    start: (port?: number): Promise<{ ok: boolean; error?: string; status: CredProxyStatus }> =>
+      ipcRenderer.invoke('credproxy:start', port),
+    stop: (): Promise<CredProxyStatus> => ipcRenderer.invoke('credproxy:stop'),
+    token: (): Promise<{ ok: boolean; token?: string; error?: string }> =>
+      ipcRenderer.invoke('credproxy:token'),
+    rotateToken: (): Promise<{ ok: boolean; token?: string; error?: string }> =>
+      ipcRenderer.invoke('credproxy:rotate-token')
+  },
   // The durable side of alerting — roadmap item 19b.
   //
   // Two methods, both named. `record` writes one raise or resolve; `history`
@@ -346,6 +393,72 @@ const api = {
     dbEvents: (limit?: number): Promise<StoredDbAlertRow[]> =>
       ipcRenderer.invoke('alerts:db-events', limit)
   },
+  // Roadmap item 26. One method, taking a host and a window and nothing else,
+  // for the same reason `alerts` above has no filter argument: a general read
+  // surface here is the first step to losing the history store's rule that no
+  // SQL crosses its boundary. `satisfies CapacityBridge` so a channel added to
+  // the contract and forgotten here is a compile error rather than a method the
+  // panel calls at runtime and finds undefined.
+  capacity: {
+    trends: (hostId: string, windowDays: number): Promise<CapacityReport | null> =>
+      ipcRenderer.invoke('capacity:trends', hostId, windowDays)
+  } satisfies CapacityBridge,
+  // Roadmap item 27. Four channels and deliberately no fifth: there is no
+  // `run` and no `test`, because a button that fired a rule on demand would be
+  // a way to run a pinned job without the dialog that pins it.
+  //
+  // `create` carries a `CommandApproval` the panel minted with
+  // `jobApprovalFor`, exactly as `jobs.run` does, and the preload does not
+  // check it for the same reason: main re-derives `planJob` over that very spec
+  // and target list — at creation AND at every firing — so a caller that forges
+  // or omits one gets a refusal rather than a rule. Verifying here as well
+  // would be a second copy of the rule in the one place with no more
+  // information than the sender.
+  //
+  // `satisfies RulesBridge` so a channel added to the contract and forgotten
+  // here is a compile error rather than a method the panel calls at runtime and
+  // finds undefined.
+  rules: {
+    list: (): Promise<RuleView[]> => ipcRenderer.invoke('rules:list'),
+    create: (draft: RuleDraftWire): Promise<RuleView | null> =>
+      ipcRenderer.invoke('rules:create', draft),
+    setEnabled: (id: string, enabled: boolean): Promise<boolean> =>
+      ipcRenderer.invoke('rules:enable', id, enabled),
+    remove: (id: string): Promise<boolean> => ipcRenderer.invoke('rules:remove', id)
+  } satisfies RulesBridge,
+  // Roadmap item 14. One method, taking a filter and returning a page, for the
+  // reason `capacity` above has one: the merge, the ordering, the redaction and
+  // the per-source budget all live in main, and what crosses is the ANSWER.
+  //
+  // There is no write beside it and there will not be one: this is a reader
+  // over four append-only records, and a change log that can be edited is not
+  // a change log. `satisfies ChangeLogBridge` so a method added to the contract
+  // and forgotten here is a compile error rather than something the panel finds
+  // undefined at runtime.
+  changelog: {
+    read: (filter?: ChangeLogFilter): Promise<ChangeLogPage> =>
+      ipcRenderer.invoke('changelog:read', filter)
+  } satisfies ChangeLogBridge,
+  // Roadmap item 28. Two channels, and the third one people ask for is the
+  // point of the item: there is no `run`, because a button that repeats what
+  // we did last time is how an outage gets repeated deliberately. The commands
+  // this returns were the right answer to a DIFFERENT incident; running one is
+  // a job, with a plan and an approval, started the ordinary way.
+  //
+  // `read` takes a kind and a host and nothing else — no filter, no range, no
+  // ordering — for the reason `alerts` and `capacity` above take none: the
+  // history store's rule is named statements only, and "let the caller narrow
+  // it" is the first step of the query surface that rule exists to refuse.
+  runbooks: {
+    read: (kind: StoreAlertKind, hostId: string | null): Promise<RunbookView> =>
+      ipcRenderer.invoke('runbook:read', kind, hostId),
+    saveNote: (
+      kind: StoreAlertKind,
+      hostId: string | null,
+      text: string
+    ): Promise<{ ok: boolean; note: RunbookNote | null }> =>
+      ipcRenderer.invoke('runbook:save-note', kind, hostId, text)
+  } satisfies RunbooksBridge,
   k8s: {
     read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>
       ipcRenderer.invoke('k8s:read', cfg, context, namespace),
@@ -466,7 +579,20 @@ const api = {
         sources?: CronSourceReport[]
         error?: string
       }[]
-    > => ipcRenderer.invoke('cron:collect', targets)
+    > => ipcRenderer.invoke('cron:collect', targets),
+    // Kept beside `collect` rather than in a namespace of its own, because the
+    // panel checks for these at runtime: a main process that has not been
+    // taught the channels answers nothing, and an edit button that does nothing
+    // is worse than no edit button.
+    planEdit: (
+      target: { serverId: string; serverName: string; cfg: unknown },
+      edit: unknown,
+      opts?: unknown
+    ): Promise<unknown> => ipcRenderer.invoke('cron:plan-edit', target, edit, opts),
+    write: (
+      target: { serverId: string; serverName: string; cfg: unknown },
+      req: { before: string; after: string; token: string; runId: string; approval?: unknown }
+    ): Promise<unknown> => ipcRenderer.invoke('cron:write-edit', target, req)
   },
   logtail: {
     start: (
@@ -541,6 +667,41 @@ const api = {
       serverId: string
     ): Promise<{ access?: HostAccess; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
       ipcRenderer.invoke('fleet:access', serverId),
+    // A server's security posture, as the sampler last collected it — roadmap
+    // item 24. Read-only and never a trigger, exactly like `facts` and
+    // `access`, and with the same third state: `posture` absent with no `error`
+    // means the probe has not run for this server yet. A host nobody has looked
+    // at is not a host with no firewall, and the panel keeps the two apart.
+    //
+    // There is no write beside this and there is not going to be one casually.
+    // src/shared/posture.ts states the refusal in full: every button this
+    // panel could grow — `ufw enable`, `setenforce`, an sshd_config edit — can
+    // lock the operator out of the host they would use to undo it, with none
+    // of the dead-man's switch that earns `accessRun` its place above.
+    posture: (
+      serverId: string
+    ): Promise<{ posture?: HostPosture; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
+      ipcRenderer.invoke('fleet:posture', serverId),
+    // A server's watched configuration files, as the sampler last collected
+    // them — roadmap item 25. Read-only and never a trigger, exactly like
+    // `facts`, `access` and `posture`, and with the same third state: `drift`
+    // absent with no `error` means the probe has not run for this server yet.
+    // A host nobody has looked at is not a host whose configuration matches
+    // everybody else's, and the comparison keeps the two apart.
+    //
+    // Each reading carries two hashes and a BOUNDED, ALREADY-REDACTED preview.
+    // The preview lives in the sampler's memory and nowhere else — it is not in
+    // the durable store and does not survive a restart.
+    //
+    // There is no write beside this and there is not going to be one.
+    // src/shared/drift.ts states the refusal in full: bringing a host into line
+    // is a job, and it goes through the plan and the approval a job carries.
+    // This panel could not decide which side is right in any case — a host that
+    // was fixed first and a host that drifted look identical from here.
+    drift: (
+      serverId: string
+    ): Promise<{ drift?: HostDrift; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
+      ipcRenderer.invoke('fleet:drift', serverId),
     // Changing who can get in — roadmap item 23, the write half.
     //
     // TWO CALLS AND NOT ONE, on purpose. `accessPlan` asks main what a change
@@ -589,7 +750,25 @@ const api = {
     import: (password: string, path: string): Promise<BackupResult> =>
       ipcRenderer.invoke('backup:import', password, path),
     deleteAll: (): Promise<BackupResult> => ipcRenderer.invoke('backup:deleteAll'),
-    relaunch: (): Promise<void> => ipcRenderer.invoke('backup:relaunch')
+    relaunch: (): Promise<void> => ipcRenderer.invoke('backup:relaunch'),
+    // Destinations. Note what is NOT here: no credential, in either direction.
+    // An SFTP destination names a saved server and an S3 one names a vault
+    // entry, and main resolves both — so the renderer can configure where the
+    // vault gets uploaded without ever holding the key to the place it lands.
+    destinations: (): Promise<BackupTargetsFile> => ipcRenderer.invoke('backup:destinations'),
+    saveDestinations: (destinations: BackupDestination[]): Promise<BackupTargetsFile> =>
+      ipcRenderer.invoke('backup:saveDestinations', destinations),
+    runDestination: (id: string, password: string): Promise<BackupRunReport> =>
+      ipcRenderer.invoke('backup:runDestination', id, password),
+    listRemote: (id: string): Promise<RemoteListResult> => ipcRenderer.invoke('backup:listRemote', id),
+    inspectRemote: (id: string, name: string, password: string): Promise<BackupResult> =>
+      ipcRenderer.invoke('backup:inspectRemote', id, name, password),
+    discardStaged: (path: string): Promise<void> => ipcRenderer.invoke('backup:discardStaged', path),
+    chooseDirectory: (): Promise<string | null> => ipcRenderer.invoke('backup:chooseDirectory'),
+    dumpableDatabases: (): Promise<{ id: string; name: string; engine: DumpEngine }[]> =>
+      ipcRenderer.invoke('backup:dumpableDatabases'),
+    dumpDatabase: (destinationId: string, databaseId: string): Promise<DumpRunReport> =>
+      ipcRenderer.invoke('backup:dumpDatabase', destinationId, databaseId)
   },
   updater: {
     check: (): Promise<void> => ipcRenderer.invoke('updater:check'),

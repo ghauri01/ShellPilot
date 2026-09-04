@@ -1,8 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import net from 'node:net'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import type { VpnPrompt, VpnStatus } from '../src/shared/vpn'
@@ -202,7 +200,6 @@ interface Harness {
   child: ChildProcessWithoutNullStreams | null
 }
 
-const openDirs: string[] = []
 const openMgmt: OpenVpnManagement[] = []
 const openChildren: ChildProcessWithoutNullStreams[] = []
 const openSockets: net.Socket[] = []
@@ -211,14 +208,7 @@ afterEach(() => {
   for (const c of openChildren.splice(0)) c.kill('SIGKILL')
   for (const s of openSockets.splice(0)) s.destroy()
   for (const m of openMgmt.splice(0)) m.close()
-  for (const d of openDirs.splice(0)) rmSync(d, { recursive: true, force: true })
 })
-
-function makeRunDir(): string {
-  const dir = mkdtempSync(`${tmpdir()}/ovpn-`)
-  openDirs.push(dir)
-  return dir
-}
 
 function makeManagement(opts: {
   credentials?: OpenVpnCredentials
@@ -242,7 +232,11 @@ function makeManagement(opts: {
         credentials: () => opts.credentials ?? {},
         onEvent: (e) => events.push(e)
       },
-      { runDir: makeRunDir(), platform: opts.platform, maxLineBytes: opts.maxLineBytes }
+      // No `runDir`: `OpenVpnManagementOptions` stopped carrying one — the
+      // management channel picks its own socket path — and this went on passing
+      // a property nothing read. The temp directory that fed it, and the
+      // afterEach that swept it up, went with it.
+      { platform: opts.platform, maxLineBytes: opts.maxLineBytes }
     ),
     patches,
     logs,

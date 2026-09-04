@@ -8,7 +8,12 @@ import {
   resetHistoryModuleForTests,
   type HistoryStore
 } from '../src/main/services/history'
-import { JobRunner, splitAtBytes, type JobExecResult } from '../src/main/services/jobRunner'
+import {
+  JobRunner,
+  splitAtBytes,
+  type JobExecRequest,
+  type JobExecResult
+} from '../src/main/services/jobRunner'
 import { attachedJobExecutor, type ExecStreamHandlers } from '../src/main/services/jobExec'
 import type {
   JobOutput,
@@ -180,6 +185,30 @@ function approved(
  * not a sleep hoping the work has finished by then. Nothing in the runner uses
  * a timer on the success path, so this is exact rather than probabilistic.
  */
+/**
+ * A `JobExecRequest` for the attached executor, with the four identity fields
+ * that are required on the interface.
+ *
+ * `jobId`, `serverId`, `serverName` and `step` name the marker directory a
+ * DETACHED run leaves behind, which is why they are not optional. The attached
+ * executor destructures only `cfg`, `command`, `timeoutMs` and `onOutput` and
+ * ignores the rest, so supplying them changes nothing here — but a request
+ * that cannot be constructed is one that has stopped describing the call, and
+ * the three below could not be.
+ */
+function execReq(over: Partial<JobExecRequest> & { command: string }): JobExecRequest {
+  return {
+    cfg: {},
+    timeoutMs: 60_000,
+    jobId: 'job1',
+    serverId: 'a',
+    serverName: 'web-1',
+    step: 1,
+    onOutput: () => {},
+    ...over
+  }
+}
+
 function settle(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0))
 }
@@ -1052,12 +1081,13 @@ describe('the attached executor', () => {
       }
     })
     const seen: string[] = []
-    const p = exec({
-      cfg: {},
-      command: 'apt full-upgrade -y',
-      timeoutMs: 60_000,
-      onOutput: (stream, text) => seen.push(`${stream}:${text.length}`)
-    })
+    const p = exec(
+      execReq({
+        command: 'apt full-upgrade -y',
+        timeoutMs: 60_000,
+        onOutput: (stream, text) => seen.push(`${stream}:${text.length}`)
+      })
+    )
     await settle()
     handlers!.onStdout('X'.repeat(300_000))
     handlers!.onStderr('E: dpkg returned an error code\n')
@@ -1079,7 +1109,7 @@ describe('the attached executor', () => {
         stopped++
       }
     })
-    const r = await exec({ cfg: {}, command: 'sleep 999', timeoutMs: 5, onOutput: () => {} })
+    const r = await exec(execReq({ command: 'sleep 999', timeoutMs: 5 }))
     expect(r.ok).toBe(false)
     expect(r.error).toMatch(/timed out/i)
     // Abandoning the channel without signalling is how a remote command is
@@ -1093,7 +1123,7 @@ describe('the attached executor', () => {
         throw new Error('connect ECONNREFUSED 10.0.0.4:22')
       }
     })
-    const r = await exec({ cfg: {}, command: 'uptime', timeoutMs: 1000, onOutput: () => {} })
+    const r = await exec(execReq({ command: 'uptime', timeoutMs: 1000 }))
     expect(r).toMatchObject({ ok: false, error: 'connect ECONNREFUSED 10.0.0.4:22' })
   })
 })

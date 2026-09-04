@@ -42,6 +42,38 @@
  *    `FLUSH STATUS`. They are writes, they are shared, and a reset erases the
  *    history a colleague is mid-way through reading.
  *
+ * The same list for MongoDB and Redis, because the temptations are different:
+ *
+ *  * `killOp`. The running-operations panel names the operation that has been
+ *    blocking a collection for eleven minutes, and the obvious next control is
+ *    a button. It is not going here for the reason `pg_terminate_backend` is
+ *    not: the panel deliberately does NOT read the operation's `command`
+ *    document — see mongoCurrentOpCommand — so it cannot show what it would be
+ *    killing. Offering to kill a thing you have chosen not to display is worse
+ *    than not offering.
+ *  * `createIndex` / `dropIndex` / `compact`. The index panel is the one place
+ *    a "drop this unused index" button is most tempting and most dangerous. A
+ *    `$indexStats` counter is not a query plan: an index that serves one
+ *    quarterly report reads identically to one nothing has ever used, and the
+ *    counters reset on every restart.
+ *  * `replSetStepDown` / `replSetReconfig` / `fsync`. Failing over is a
+ *    decision with an audience, not a dashboard control.
+ *  * `CONFIG SET`. The memory panel says an instance is at 99% under
+ *    `noeviction`, and one `CONFIG SET maxmemory-policy allkeys-lru` away is
+ *    "fixing" it by silently deleting the operator's data. `CONFIG GET` IS
+ *    sent, once, for `slowlog-*`, because without the threshold the slow log
+ *    cannot be interpreted at all; `CONFIG SET` is never built.
+ *  * `FLUSHDB` / `FLUSHALL` / `DEBUG` / `SHUTDOWN` / `CLIENT KILL`.
+ *  * `SLOWLOG RESET`, `CONFIG RESETSTAT`, `BGSAVE`, `BGREWRITEAOF`. The first
+ *    two erase the history a colleague is reading; the second two are IO on a
+ *    live server, started by a page whose contract is that it changes nothing.
+ *  * `REPLICAOF` / `SLAVEOF` / `FAILOVER` / `CLUSTER FAILOVER` / `FORGET` /
+ *    `RESET`.
+ *  * `KEYS` and `SCAN`, which are reads and are still refused. `KEYS *` blocks
+ *    Redis's single command thread for a full keyspace scan — an outage caused
+ *    by a monitoring page. `DBSIZE` answers the same question in O(1) and is
+ *    what is sent.
+ *
  * ---------------------------------------------------------------------------
  * NOTHING IS INTERPOLATED
  * ---------------------------------------------------------------------------
@@ -55,6 +87,14 @@
  * `SET statement_timeout` and `SET SESSION MAX_EXECUTION_TIME` take a literal,
  * not a parameter — so they are built by pgStatementTimeout/mysqlMaxExecutionTime
  * below, which validate an integer and throw on anything else.
+ *
+ * MongoDB and Redis have no text to interpolate into at all: a Mongo command is
+ * a document and a Redis command is an argv array, so there is no place a value
+ * could stop being a value. What replaces the hazard is the four builders that
+ * take a parameter — a collection name, a row limit — and each of them
+ * validates and THROWS rather than sanitising, for the same reason `safeMs`
+ * does. They are enumerated in MONGO_COMMAND_BUILDERS and REDIS_COMMAND_BUILDERS
+ * so the read-only assertion can see the commands the frozen maps do not hold.
  */
 
 // ---------------------------------------------------------------------------
@@ -186,9 +226,56 @@ export const MYSQL_QUESTIONS = [
   'sizes'
 ] as const
 
+/**
+ * MongoDB. Eight, chosen by the same rule, and the reason `oplog` is measured
+ * in HOURS rather than bytes is that the number an operator needs is "how long
+ * may a secondary be down before it needs a full resync". A megabyte figure
+ * cannot be turned into that without knowing the write rate, and nobody does
+ * that arithmetic at 3am.
+ *
+ * Cut, for the same reason the Postgres list cut cache ratios: `dbStats`
+ * averages (a report, not an alarm), profiler settings (a tuning question),
+ * WiredTiger cache internals (unactionable without knowing the workload).
+ */
+export const MONGO_QUESTIONS = [
+  'overview',
+  'replication',
+  'oplog',
+  'indexes',
+  'connections',
+  'currentop',
+  'sizes',
+  'asserts'
+] as const
+
+/**
+ * Redis. NINE, and the extra one is deliberate rather than sloppy.
+ *
+ * `cluster` cannot fold into `replication`: a cluster whose state is `fail`
+ * refuses a third of the keyspace while `INFO replication` on every node
+ * reports a healthy master with healthy replicas, so no other question here can
+ * see it. And `overview` cannot fold away either, because the VERSION decides
+ * which of the other eight can be answered at all — `maxclients` does not exist
+ * before Redis 6, and without knowing that, "no ceiling reported" is
+ * indistinguishable from "no ceiling".
+ */
+export const REDIS_QUESTIONS = [
+  'overview',
+  'memory',
+  'persistence',
+  'replication',
+  'slowlog',
+  'clients',
+  'keyspace',
+  'stats',
+  'cluster'
+] as const
+
 export type PgQuestionId = (typeof PG_QUESTIONS)[number]
 export type MysqlQuestionId = (typeof MYSQL_QUESTIONS)[number]
-export type DbQuestionId = PgQuestionId | MysqlQuestionId
+export type MongoQuestionId = (typeof MONGO_QUESTIONS)[number]
+export type RedisQuestionId = (typeof REDIS_QUESTIONS)[number]
+export type DbQuestionId = PgQuestionId | MysqlQuestionId | MongoQuestionId | RedisQuestionId
 
 export const DB_QUESTION_LABEL: Record<DbQuestionId, string> = {
   overview: 'Server',
@@ -202,7 +289,17 @@ export const DB_QUESTION_LABEL: Record<DbQuestionId, string> = {
   binlogs: 'Binary logs',
   slowlog: 'Slow query log',
   processlist: 'Running queries',
-  bufferpool: 'InnoDB buffer pool'
+  bufferpool: 'InnoDB buffer pool',
+  oplog: 'Oplog window',
+  indexes: 'Index usage',
+  currentop: 'Running operations',
+  asserts: 'Assertions and page faults',
+  memory: 'Memory and eviction',
+  persistence: 'Persistence',
+  clients: 'Clients',
+  keyspace: 'Keyspace',
+  stats: 'Refusals and evictions',
+  cluster: 'Cluster state'
 }
 
 /** Why this one is on the page. Shown in the UI, so the editorial choice is
@@ -222,7 +319,25 @@ export const DB_QUESTION_WHY: Record<DbQuestionId, string> = {
   binlogs: 'Binary logs are point-in-time recovery and the only thing a lagging replica can catch up from. They are also a disk that fills.',
   slowlog: 'Whether the server is even recording slow queries. If it is off, the absence of slow queries means nothing.',
   processlist: 'What is running right now, and what has been running far too long.',
-  bufferpool: 'A buffer pool that stopped holding the working set turns every read into disk IO.'
+  bufferpool: 'A buffer pool that stopped holding the working set turns every read into disk IO.',
+  oplog:
+    'The oplog window is how long a secondary may be down before it needs a full initial sync instead of a catch-up. It is the number that decides whether a maintenance window is safe, and it shrinks as writes speed up without anyone changing anything.',
+  indexes:
+    'An index nothing reads is written on every insert and update to its collection and pays for itself never. The counters reset on restart, so the question is only answerable on a server that has been up a while.',
+  currentop:
+    'What is running right now, and what has been running far too long — with the server’s own replication and journal threads excluded, because they run forever by design.',
+  asserts:
+    'Internal assertions are the server catching itself in a state it did not expect: a corrupt index, a storage error, a bug. They are not failed client commands.',
+  memory:
+    'An instance near its maxmemory under noeviction is a write outage waiting: Redis refuses the write rather than freeing anything, and reads carry on looking healthy while every writer fails.',
+  persistence:
+    'Whether anything on disk would survive a restart, and how much would be lost. A failed background save leaves no current snapshot and says nothing until you need it.',
+  clients:
+    'Running out of client slots refuses every new connection at once, including the one you would use to fix it.',
+  keyspace: 'How many keys there are and how many will ever go away on their own.',
+  stats:
+    'Two counters nothing else on this page records: connections Redis refused outright, and keys it threw away to stay under its memory limit.',
+  cluster: 'A cluster that is not in state ok refuses commands for the slots it cannot serve, which from a client looks like part of the keyspace vanishing.'
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +384,51 @@ export const DB_THRESHOLDS = {
   bufferPoolMinUptimeSeconds: 3600,
   bufferPoolMinReadRequests: 1_000_000,
   /** A slow log whose threshold is this high records almost nothing. */
-  slowLogUselessThresholdSeconds: 10
+  slowLogUselessThresholdSeconds: 10,
+  /**
+   * MongoDB oplog window. An hour is not enough room to restart a member and
+   * let it catch up; a day is the smallest window most maintenance fits in, and
+   * is what MongoDB's own guidance asks for.
+   */
+  oplogWindowAlarmSeconds: 3600,
+  oplogWindowWatchSeconds: 86_400,
+  /**
+   * How much of a member's uptime the oplog must cover before its window counts
+   * as "everything since start" rather than a measurement.
+   *
+   * Measured against UPTIME and not against the oplog's storage numbers,
+   * because the storage numbers do not work: a genuinely rolling oplog reports
+   * storageSize 225353728 against maxSize 1048576, since WiredTiger never
+   * shrinks a file it has allocated. Captured, not reasoned about — see
+   * tests/fixtures/dbops/mongodb/oplog-saturated.json.
+   */
+  oplogNeverRolledFraction: 0.9,
+  /**
+   * How long $indexStats counters must have been running before zero accesses
+   * is allowed to mean "unused".
+   *
+   * They reset when the server restarts, so on a freshly restarted server every
+   * index looks unused. A week is the shortest span that survives a report
+   * which only runs on Sundays.
+   */
+  indexUnusedMinCounterAgeSeconds: 604_800,
+  /** Fraction of Redis maxmemory. */
+  redisMemoryWatchFraction: 0.9,
+  redisMemoryAlarmFraction: 0.95,
+  /** A Redis process holding this much more than it uses is fragmented enough
+   *  to be worth saying out loud. */
+  redisFragmentationWatchRatio: 1.5,
+  /** How stale an RDB snapshot may get, with unsaved changes behind it, before
+   *  the amount a restart would lose is worth a sentence. */
+  redisRdbStaleWatchSeconds: 3600,
+  redisRdbStaleAlarmSeconds: 86_400,
+  /** A single Redis command. Redis runs them one at a time, so these are much
+   *  tighter than the SQL equivalents: every other client waited for it. */
+  redisSlowCommandWatchMicroseconds: 100_000,
+  redisSlowCommandAlarmMicroseconds: 1_000_000,
+  /** Below this share of keys carrying a TTL, under noeviction, the keyspace
+   *  only ever grows. */
+  redisNoTtlWatchFraction: 0.5
 } as const
 
 /**
@@ -2162,6 +2321,2009 @@ export function judgeMysqlSizes(v: MysqlSizesValue): DbVerdict {
 }
 
 // ===========================================================================
+// MongoDB
+// ===========================================================================
+//
+// Nothing here is a string. A MongoDB command is a document, so the injection
+// surface the SQL half of this file spends four paragraphs closing does not
+// exist: there is no text to concatenate into. What replaces it is a different
+// hazard — three of these commands name a COLLECTION, and a collection name is
+// the one value that comes from outside a frozen constant. It comes from the
+// server's own listCollections rather than from anything a user typed, and it
+// is validated anyway by the builders below, which throw rather than sanitise.
+
+/** A member state, by the number `replSetGetStatus` reports.
+ *
+ *  `stateStr` is also in the row and is what the panel shows, but the NUMBER is
+ *  what is judged, because the string is localised prose — the down member in
+ *  tests/fixtures/dbops/mongodb/secondary-down.json calls itself
+ *  "(not reachable/healthy)", with the parentheses and the slash, and matching
+ *  that text is matching a sentence. */
+export const MONGO_MEMBER_STATES: Record<number, string> = {
+  0: 'STARTUP',
+  1: 'PRIMARY',
+  2: 'SECONDARY',
+  3: 'RECOVERING',
+  5: 'STARTUP2',
+  6: 'UNKNOWN',
+  7: 'ARBITER',
+  8: 'DOWN',
+  9: 'ROLLBACK',
+  10: 'REMOVED'
+}
+
+/** States in which a member is carrying its share of the set. Everything else
+ *  is either transitional or broken, and neither is "fine". */
+const MONGO_HEALTHY_STATES = new Set([1, 2, 7])
+
+export type MongoRole = 'primary' | 'secondary' | 'arbiter' | 'standalone' | 'router' | 'unknown'
+
+export interface MongoOverview {
+  version: string
+  process: string | null
+  host: string | null
+  uptimeSeconds: number | null
+  /** `hello().setName`. Absent on a standalone, which is how a standalone is
+   *  told from a replica-set member that has not been reached yet. */
+  setName: string | null
+  role: MongoRole
+  /** `hello().msg === 'isdbgrid'`. A mongos answers every command here with a
+   *  cluster-wide aggregate or refuses it, and none of the eight questions
+   *  below mean what they say against one. */
+  isRouter: boolean
+  readOnly: boolean | null
+  /** How many members `hello()` lists. Null on a standalone. */
+  memberCount: number | null
+}
+
+export interface MongoMember {
+  id: number | null
+  name: string
+  state: number | null
+  stateStr: string
+  /**
+   * 1 or 0, and the field that is read FIRST.
+   *
+   * See tests/fixtures/dbops/mongodb/secondary-down.json: eighteen seconds
+   * after the member was paused it reports `health: 0` alongside `pingMs: 0`
+   * and `uptime: 0`, two numbers that read as excellent to anything that has
+   * not looked at this one.
+   */
+  health: number | null
+  self: boolean
+  uptimeSeconds: number | null
+  /**
+   * The member's optime as milliseconds, or null.
+   *
+   * NULL when the member reported the UNIX EPOCH, which is what an unreachable
+   * member reports — not its last known position, and not null. Subtracting it
+   * from the primary's optime gives fifty-six years, and clamping that at zero
+   * gives the MySQL `Seconds_Behind_Source: 0` bug in different field names.
+   */
+  optimeMs: number | null
+  /** Whether optimeDate was the epoch, so the UI can say "did not report"
+   *  rather than showing 1970. */
+  optimeIsEpoch: boolean
+  lastHeartbeatMs: number | null
+  /** `lastHeartbeatMessage`, redacted: the raw text embeds the source and
+   *  target host names and the whole internal heartbeat command. */
+  heartbeatMessage: string | null
+  /** Null on an unhealthy member. A round trip that was never made is not a
+   *  round trip of zero milliseconds. */
+  pingMs: number | null
+  syncSourceHost: string | null
+  /** Seconds behind the set's primary, or null when either side did not say. */
+  lagSeconds: number | null
+}
+
+export interface MongoReplicationValue {
+  setName: string | null
+  /** `myState` — the state of the member that answered. */
+  myState: number | null
+  members: MongoMember[]
+  /** How many votes a majority needs. Below it, the set cannot elect and
+   *  cannot acknowledge a majority write. */
+  majorityVoteCount: number | null
+  healthyCount: number
+}
+
+export interface MongoOplogValue {
+  /** False on a standalone, where `local.oplog.rs` does not exist. */
+  present: boolean
+  firstMs: number | null
+  lastMs: number | null
+  /** THE answer, in seconds. How long a secondary may be down before it needs
+   *  a full resync. Never expressed in bytes, which tell an operator nothing. */
+  windowSeconds: number | null
+  /** `serverStatus().uptime`, and the only reliable discriminator below. */
+  uptimeSeconds: number | null
+  /**
+   * True when the oplog still holds everything since this member started, so
+   * it has never had to discard an entry and the window is a FLOOR that will
+   * keep growing — not a measurement.
+   *
+   * Measured against uptime and not against the storage numbers, because the
+   * storage numbers lie: tests/fixtures/dbops/mongodb/oplog-saturated.json is
+   * a genuinely rolling oplog whose `$collStats` reports `storageSize`
+   * 225353728 against a `maxSize` of 1048576. WiredTiger does not shrink the
+   * file it has already allocated, so "used against configured" reads as
+   * 21000% on a healthy server.
+   */
+  neverRolled: boolean | null
+  sizeBytes: number | null
+  maxSizeBytes: number | null
+  storageBytes: number | null
+  count: number | null
+}
+
+export interface MongoIndexUse {
+  collection: string
+  name: string
+  /** `accesses.ops`. Zero is a real zero and still proves nothing on its own —
+   *  see `sinceMs`. */
+  ops: number | null
+  /**
+   * `accesses.since` — when these counters started, which is when the server
+   * last restarted. An index with zero accesses since eight minutes ago is not
+   * an unused index; it is an index nobody has needed for eight minutes.
+   */
+  sinceMs: number | null
+  sizeBytes: number | null
+}
+
+export interface MongoIndexesValue {
+  indexes: MongoIndexUse[]
+  /** Collections whose `$indexStats` could not be read. A `read` role is
+   *  granted `$collStats` and refused `$indexStats` on the same collection —
+   *  captured, see tests/fixtures/dbops/mongodb/unauthorized.json. */
+  unreadable: string[]
+  /** The shortest counter age across every collection read, in seconds. The
+   *  whole "unused" judgement is gated on this. */
+  counterAgeSeconds: number | null
+}
+
+export interface MongoConnectionsValue {
+  current: number | null
+  available: number | null
+  totalCreated: number | null
+  rejected: number | null
+  active: number | null
+  /**
+   * `current + available`.
+   *
+   * `serverStatus` never states the ceiling directly, and `net.maxIncomingConnections`
+   * is a config file this app does not read. The sum is what the server itself
+   * uses, and it is null rather than a guess when either half is missing.
+   */
+  ceiling: number | null
+}
+
+export interface MongoOperation {
+  opid: number | string | null
+  type: string | null
+  desc: string | null
+  appName: string | null
+  op: string | null
+  ns: string | null
+  secondsRunning: number | null
+  planSummary: string | null
+  waitingForLock: boolean | null
+  /** A server thread rather than somebody's query. See isMongoClientOp. */
+  internal: boolean
+}
+
+export interface MongoCurrentOpValue {
+  operations: MongoOperation[]
+  /**
+   * True when `$currentOp` was asked with `allUsers: false` because
+   * `allUsers: true` was refused.
+   *
+   * The MySQL `information_schema.PROCESSLIST` trap, exactly: the fallback
+   * succeeds, returns only this connection's own operations, and reports "1
+   * operation running" on a server running two hundred. Captured in
+   * tests/fixtures/dbops/mongodb/unauthorized.json, where `allUsers: true`
+   * raises code 13 and `allUsers: false` returns `ok: 1`.
+   */
+  ownOpsOnly: boolean
+}
+
+export interface MongoDatabaseSize {
+  name: string
+  sizeOnDiskBytes: number | null
+  empty: boolean | null
+}
+
+export interface MongoCollectionSize {
+  name: string
+  documents: number | null
+  dataBytes: number | null
+  storageBytes: number | null
+  indexBytes: number | null
+  indexes: number | null
+}
+
+export interface MongoSizesValue {
+  databases: MongoDatabaseSize[]
+  collections: MongoCollectionSize[]
+  totalBytes: number | null
+  /**
+   * True when `listDatabases` answered with a list that has no `admin` and no
+   * `local`.
+   *
+   * Every mongod has both. Their absence means the server silently returned
+   * only the databases this user is authorized on — `ok: 1`, no error, no
+   * flag — and the total underneath is a floor. `information_schema` shrinking
+   * without saying so, in a different engine: see
+   * tests/fixtures/dbops/mongodb/unauthorized.json, where a four-database
+   * cluster reports one database and `totalSize: 40960`.
+   */
+  databasesFiltered: boolean
+}
+
+export interface MongoAssertsValue {
+  regular: number | null
+  warning: number | null
+  msg: number | null
+  user: number | null
+  rollovers: number | null
+  /**
+   * `extra_info.page_faults`, or null.
+   *
+   * serverStatus states the hazard itself: `extra_info` carries
+   * `note: "fields vary by platform"`, and on the Linux container these
+   * fixtures came from `page_faults` is present and 0. Somewhere else it is
+   * absent entirely. Those are different facts and are not collapsed.
+   */
+  pageFaults: number | null
+  pageFaultsReported: boolean
+  uptimeSeconds: number | null
+}
+
+// ---- Commands -------------------------------------------------------------
+
+/**
+ * Every command this feature sends to MongoDB, frozen, with the database each
+ * one runs against.
+ *
+ * `serverStatus` names thirty-four sections it does NOT want rather than the
+ * handful it does, because there is no include form. It is worth the length:
+ * the full document is 9.4 KB of which 7.5 KB is WiredTiger counters no
+ * operator reads, and every one of those bytes would also be in six fixtures.
+ */
+export const MONGO_COMMANDS = Object.freeze({
+  hello: { db: 'admin', command: { hello: 1 } },
+  buildInfo: { db: 'admin', command: { buildInfo: 1 } },
+  serverStatus: {
+    db: 'admin',
+    command: {
+      serverStatus: 1,
+      wiredTiger: 0,
+      tcmalloc: 0,
+      metrics: 0,
+      locks: 0,
+      indexStats: 0,
+      transactions: 0,
+      opLatencies: 0,
+      electionMetrics: 0,
+      logicalSessionRecordCache: 0,
+      catalogStats: 0,
+      collectionCatalog: 0,
+      queryAnalyzers: 0,
+      internalTransactions: 0,
+      twoPhaseCommitCoordinator: 0,
+      shardSplits: 0,
+      tenantMigrations: 0,
+      trafficRecording: 0,
+      flowControl: 0,
+      indexBuilds: 0,
+      indexBulkBuilder: 0,
+      oplogTruncation: 0,
+      readConcernCounters: 0,
+      readPreferenceCounters: 0,
+      scramCache: 0,
+      queues: 0,
+      batchedDeletes: 0,
+      defaultRWConcern: 0,
+      profiler: 0,
+      globalLock: 0,
+      storageEngine: 0,
+      network: 0,
+      security: 0,
+      transportSecurity: 0,
+      opcountersRepl: 0
+    }
+  },
+  replSetGetStatus: { db: 'admin', command: { replSetGetStatus: 1 } },
+  // Sorted by $natural, which on a capped collection is insertion order and is
+  // the only ordering the oplog has. There is no index on ts to sort by.
+  oplogFirst: { db: 'local', command: { find: 'oplog.rs', filter: {}, sort: { $natural: 1 }, limit: 1, projection: { ts: 1 } } },
+  oplogLast: { db: 'local', command: { find: 'oplog.rs', filter: {}, sort: { $natural: -1 }, limit: 1, projection: { ts: 1 } } },
+  oplogStats: {
+    db: 'local',
+    command: {
+      aggregate: 'oplog.rs',
+      pipeline: [{ $collStats: { storageStats: { scale: 1 } } }, { $project: MONGO_STORAGE_PROJECTION() }],
+      cursor: {}
+    }
+  },
+  listDatabases: { db: 'admin', command: { listDatabases: 1 } },
+  // `db: null` means "the database the operator is pointed at", which the
+  // collector fills in. It is the only entry that is not fixed to admin/local.
+  listCollections: { db: null, command: { listCollections: 1, nameOnly: true, authorizedCollections: true } }
+})
+
+/**
+ * The fields kept from `$collStats`.
+ *
+ * Without it the stage returns the entire WiredTiger statistics block: 82 KB
+ * for one collection, none of it read by anything here, all of it destined for
+ * a fixture. A function rather than a constant only so MONGO_COMMANDS above can
+ * be a single frozen literal without a forward reference.
+ */
+function MONGO_STORAGE_PROJECTION(): Record<string, number> {
+  return {
+    ns: 1,
+    'storageStats.size': 1,
+    'storageStats.count': 1,
+    'storageStats.avgObjSize': 1,
+    'storageStats.storageSize': 1,
+    'storageStats.freeStorageSize': 1,
+    'storageStats.totalIndexSize': 1,
+    'storageStats.indexSizes': 1,
+    'storageStats.nindexes': 1,
+    'storageStats.capped': 1,
+    'storageStats.max': 1,
+    'storageStats.maxSize': 1,
+    'storageStats.totalSize': 1
+  }
+}
+
+/**
+ * A collection name that came from the server, checked anyway.
+ *
+ * The three per-collection commands take a name out of `listCollections`, so
+ * nothing a user typed reaches them. This throws rather than escaping, for the
+ * reason `safeMs` does: a caller passing something else has a bug, and quietly
+ * repairing it hides the bug while leaving the shape an attack takes.
+ */
+function safeCollectionName(name: unknown): string {
+  if (typeof name !== 'string' || name.length === 0 || name.length > 200 || name.includes('$') || name.includes('\0')) {
+    throw new Error(`Refusing to build a command for the collection ${JSON.stringify(name)}: expected a plain collection name from listCollections.`)
+  }
+  return name
+}
+
+function safeLimit(n: unknown): number {
+  if (typeof n !== 'number' || !Number.isInteger(n) || n <= 0 || n > 1000) {
+    throw new Error(`Refusing to build a command with a limit of ${JSON.stringify(n)}: expected a positive integer no greater than 1000.`)
+  }
+  return n
+}
+
+export function mongoCollStatsCommand(collection: string): Record<string, unknown> {
+  return {
+    aggregate: safeCollectionName(collection),
+    pipeline: [{ $collStats: { storageStats: { scale: 1 } } }, { $project: MONGO_STORAGE_PROJECTION() }],
+    cursor: {}
+  }
+}
+
+export function mongoIndexStatsCommand(collection: string): Record<string, unknown> {
+  return { aggregate: safeCollectionName(collection), pipeline: [{ $indexStats: {} }], cursor: {} }
+}
+
+/**
+ * `$currentOp`, projected.
+ *
+ * The projection is not tidying. Unprojected, every row carries `command` in
+ * full — which on a real server is somebody's query, with their filter values
+ * in it — plus the originating command of every tailing cursor and a
+ * `clientMetadata` block. None of it is needed to answer "what has been running
+ * too long", so none of it is asked for, and none of it can end up on screen or
+ * in the durable event store.
+ *
+ * `allUsers` is a parameter and not a constant because refusal is a real
+ * answer here: see MongoCurrentOpValue.ownOpsOnly.
+ */
+export function mongoCurrentOpCommand(limit: number, allUsers: boolean): Record<string, unknown> {
+  return {
+    aggregate: 1,
+    pipeline: [
+      { $currentOp: { allUsers, idleConnections: false, localOps: true } },
+      {
+        $project: {
+          opid: 1,
+          type: 1,
+          desc: 1,
+          appName: 1,
+          active: 1,
+          op: 1,
+          ns: 1,
+          secs_running: 1,
+          microsecs_running: 1,
+          planSummary: 1,
+          waitingForLock: 1,
+          currentOpTime: 1,
+          effectiveUsers: 1,
+          killPending: 1
+        }
+      },
+      { $sort: { secs_running: -1 } },
+      { $limit: safeLimit(limit) }
+    ],
+    cursor: {}
+  }
+}
+
+/** Every MongoDB command builder, enumerated so the read-only assertion in
+ *  tests/dbOpsRegressions.test.ts can reach the ones MONGO_COMMANDS does not
+ *  contain. The same hole the timeout builders were. */
+export const MONGO_COMMAND_BUILDERS: (() => Record<string, unknown>)[] = [
+  () => mongoCollStatsCommand('placeholder'),
+  () => mongoIndexStatsCommand('placeholder'),
+  () => mongoCurrentOpCommand(20, true)
+]
+
+// ---- Coercion -------------------------------------------------------------
+
+/**
+ * A BSON timestamp to whole seconds, or null.
+ *
+ * Four shapes reach this, and the fourth is the reason it exists rather than a
+ * `.high` on the call site:
+ *
+ *  * a `Timestamp` from the driver, which extends Long and carries `high`
+ *    (seconds) and `low` (the per-second ordinal);
+ *  * `{ t, i }`, the same thing spelled by name;
+ *  * `{ $timestamp: { t, i } }`, canonical Extended JSON;
+ *  * `{ $timestamp: "7681494973912449025" }`, which is what `JSON.stringify`
+ *    of a driver Timestamp produces — a DECIMAL STRING of the whole 64-bit
+ *    value, whose seconds are the top 32 bits. Every captured fixture is in
+ *    this form, so a parser that handled only the live shapes would pass every
+ *    test against real data and be tested against nothing.
+ *
+ * `>>> 0` rather than `>>`: the seconds are unsigned, and a signed shift turns
+ * every timestamp after 2038 into a negative number.
+ */
+export function mongoTimestampSeconds(v: unknown): number | null {
+  if (v === null || v === undefined) return null
+  if (typeof v === 'number') return Number.isFinite(v) ? Math.trunc(v) : null
+  if (typeof v !== 'object') return null
+  const o = v as Record<string, unknown>
+  if ('$timestamp' in o) {
+    const inner = o.$timestamp
+    if (typeof inner === 'string') {
+      try {
+        return Number(BigInt(inner) >> 32n)
+      } catch {
+        return null
+      }
+    }
+    return mongoTimestampSeconds(inner)
+  }
+  const t = num(o.t)
+  if (t !== null && 'i' in o) return t
+  const high = num(o.high)
+  if (high !== null && 'low' in o) return high >>> 0
+  return t
+}
+
+/** A driver Date, an ISO string, or `{ $date }`, to epoch milliseconds. */
+export function mongoDateMs(v: unknown): number | null {
+  if (v === null || v === undefined) return null
+  if (v instanceof Date) return Number.isFinite(v.getTime()) ? v.getTime() : null
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string') {
+    const n = Date.parse(v)
+    return Number.isFinite(n) ? n : null
+  }
+  if (typeof v === 'object') {
+    const d = (v as Record<string, unknown>).$date
+    if (d !== undefined) return mongoDateMs(d)
+  }
+  return null
+}
+
+/**
+ * The epoch, to the second.
+ *
+ * An unreachable member reports `optimeDate: "1970-01-01T00:00:00.000Z"`. That
+ * is not a time, and the window is generous because a member whose clock has
+ * never been set reports something near it rather than exactly it. No real
+ * MongoDB optime is within a day of 1970.
+ */
+const MONGO_EPOCH_WINDOW_MS = 86_400_000
+
+export function isMongoEpoch(ms: number | null): boolean {
+  return ms !== null && Math.abs(ms) < MONGO_EPOCH_WINDOW_MS
+}
+
+// ---- Failure classification -----------------------------------------------
+
+/**
+ * A MongoDB error to a status. Every code below came off a real server and is
+ * in tests/fixtures/dbops/mongodb/:
+ *
+ *  * 13 Unauthorized — what a `read`-on-one-database user gets for
+ *    `serverStatus`, `replSetGetStatus`, `$currentOp` with `allUsers: true`,
+ *    anything on `local`, and `$indexStats`. `denied`.
+ *  * 76 NoReplicationEnabled — `replSetGetStatus` on a mongod started without
+ *    `--replSet`. It ERRORS rather than returning an empty status, and the
+ *    error means the question does not apply, so it is `not-applicable`. A
+ *    standalone with no replication is not an unhealthy replica set and is not
+ *    a healthy one either.
+ *  * 26 NamespaceNotFound — `$collStats` on `local.oplog.rs` where there is no
+ *    oplog. `absent`.
+ *  * 59 CommandNotFound and 40324 "Unrecognized pipeline stage name" — the
+ *    server is too old for the stage. `unsupported`.
+ *  * 18 AuthenticationFailed — `denied`.
+ */
+export function classifyMongoFailure(code: number | null | undefined, codeName: string | null | undefined, message: string): DbFailure {
+  const detail = redactMongoCommandEcho((message || '').trim()) || 'The command failed and the server said nothing.'
+  const name = (codeName || '').trim()
+  switch (code) {
+    case 13:
+    case 18:
+      return { status: 'denied', detail }
+    case 76:
+      return { status: 'not-applicable', detail }
+    case 26:
+      return { status: 'absent', detail }
+    case 59:
+    case 40324:
+      return { status: 'unsupported', detail }
+    default:
+      break
+  }
+  if (name === 'Unauthorized' || name === 'AuthenticationFailed') return { status: 'denied', detail }
+  if (name === 'NoReplicationEnabled') return { status: 'not-applicable', detail }
+  if (name === 'NamespaceNotFound') return { status: 'absent', detail }
+  if (name === 'CommandNotFound') return { status: 'unsupported', detail }
+  const m = detail.toLowerCase()
+  if (/not authorized|unauthorized|requires authentication/.test(m)) return { status: 'denied', detail }
+  if (/unrecognized pipeline stage|no such command|command .* not found/.test(m)) return { status: 'unsupported', detail }
+  return { status: 'error', detail }
+}
+
+/**
+ * Cut the command MongoDB echoes back at us out of its own error text.
+ *
+ * An Unauthorized message reads, verbatim: `not authorized on admin to execute
+ * command { replSetGetStatus: 1, lsid: { id: UUID("4fbac30f-…") }, $db:
+ * "admin" }`. The first eight words are the answer; the rest is the statement
+ * we sent, which the panel already knows, plus a session identifier that has no
+ * business in the durable event store. The engine's own words are kept — this
+ * removes only the echo of ours.
+ */
+export function redactMongoCommandEcho(text: string): string {
+  const i = text.indexOf(' command { ')
+  if (i === -1) return text
+  const head = text.slice(0, i + ' command'.length)
+  const first = /\{\s*([A-Za-z_$][\w$]*)\s*:/.exec(text.slice(i))
+  return first ? `${head} { ${first[1]}: … }` : head
+}
+
+// ---- Parsers --------------------------------------------------------------
+
+export function parseMongoOverview(hello: Row | undefined, buildInfo: Row | undefined, serverStatus: Row | undefined): MongoOverview | null {
+  if (!hello && !buildInfo && !serverStatus) return null
+  const setName = str(hello?.setName)
+  const isRouter = str(hello?.msg) === 'isdbgrid'
+  const primary = bool(hello?.isWritablePrimary) ?? bool(hello?.ismaster)
+  const secondary = bool(hello?.secondary)
+  const arbiter = bool(hello?.arbiterOnly)
+  let role: MongoRole = 'unknown'
+  if (isRouter) role = 'router'
+  else if (!setName) role = primary === true ? 'standalone' : 'unknown'
+  else if (arbiter === true) role = 'arbiter'
+  else if (primary === true) role = 'primary'
+  else if (secondary === true) role = 'secondary'
+  const hosts = Array.isArray(hello?.hosts) ? (hello?.hosts as unknown[]) : null
+  return {
+    version: str(serverStatus?.version) ?? str(buildInfo?.version) ?? 'unknown',
+    process: str(serverStatus?.process),
+    host: str(serverStatus?.host),
+    uptimeSeconds: num(serverStatus?.uptime),
+    setName,
+    role,
+    isRouter,
+    readOnly: bool(hello?.readOnly),
+    memberCount: hosts ? hosts.length : null
+  }
+}
+
+export function parseMongoReplication(status: Row | undefined): MongoReplicationValue {
+  const rows = Array.isArray(status?.members) ? (status?.members as Row[]) : []
+  // The primary's optime is the reference every lag below is measured against.
+  // Taken from the member row with state 1 rather than from the top-level
+  // `optimes`, because on a set with no primary there IS no reference and the
+  // lag has to come back null rather than measured against a secondary.
+  const primaryRow = rows.find((r) => num(r.state) === 1)
+  const primaryOptime = primaryRow ? optimeOf(primaryRow).ms : null
+  const members = rows.map((r) => {
+    const { ms, epoch } = optimeOf(r)
+    const health = num(r.health)
+    const healthy = health === 1
+    return {
+      id: num(r._id),
+      name: str(r.name) ?? 'unknown',
+      state: num(r.state),
+      stateStr: str(r.stateStr) ?? MONGO_MEMBER_STATES[num(r.state) ?? -1] ?? 'unknown',
+      health,
+      self: bool(r.self) === true,
+      // A member that is not reachable reports uptime 0. That is not "started
+      // this instant", so it is not carried as a measurement.
+      uptimeSeconds: healthy ? num(r.uptime) : null,
+      optimeMs: ms,
+      optimeIsEpoch: epoch,
+      lastHeartbeatMs: mongoDateMs(r.lastHeartbeat),
+      heartbeatMessage: cleanHeartbeatMessage(str(r.lastHeartbeatMessage)),
+      // pingMs 0 on a member that did not answer is not a round trip.
+      pingMs: healthy ? num(r.pingMs) : null,
+      syncSourceHost: str(r.syncSourceHost) || null,
+      lagSeconds: ms !== null && primaryOptime !== null && !epoch ? Math.max(0, Math.round((primaryOptime - ms) / 1000)) : null
+    }
+  })
+  return {
+    setName: str(status?.set),
+    myState: num(status?.myState),
+    members,
+    majorityVoteCount: num(status?.majorityVoteCount),
+    healthyCount: members.filter((m) => m.health === 1 && MONGO_HEALTHY_STATES.has(m.state ?? -1)).length
+  }
+}
+
+function optimeOf(r: Row): { ms: number | null; epoch: boolean } {
+  const ms = mongoDateMs(r.optimeDate)
+  if (ms === null) {
+    // Some members report only the raw timestamp. Seconds, so × 1000.
+    const ts = mongoTimestampSeconds((r.optime as Row | undefined)?.ts ?? r.optime)
+    if (ts === null) return { ms: null, epoch: false }
+    const fromTs = ts * 1000
+    return isMongoEpoch(fromTs) ? { ms: null, epoch: true } : { ms: fromTs, epoch: false }
+  }
+  return isMongoEpoch(ms) ? { ms: null, epoch: true } : { ms, epoch: false }
+}
+
+function cleanHeartbeatMessage(text: string | null): string | null {
+  if (!text) return null
+  const trimmed = text.trim()
+  if (!trimmed) return null
+  // The timeout message carries the whole internal heartbeat command, with the
+  // source and target host names in it, and it is 300 characters long.
+  const cut = redactMongoCommandEcho(redactDbIdentifiers(trimmed).replace(/\btarget:\[[^\]]*\]/g, 'target:[<redacted>]'))
+  return cut.length > 240 ? `${cut.slice(0, 240)}…` : cut
+}
+
+export function parseMongoOplog(
+  first: Row[] | null,
+  last: Row[] | null,
+  stats: Row | undefined,
+  uptimeSeconds: number | null
+): MongoOplogValue {
+  const firstSec = first && first.length > 0 ? mongoTimestampSeconds(first[0].ts) : null
+  const lastSec = last && last.length > 0 ? mongoTimestampSeconds(last[0].ts) : null
+  const storage = (stats?.storageStats ?? {}) as Row
+  const windowSeconds = firstSec !== null && lastSec !== null ? Math.max(0, lastSec - firstSec) : null
+  // An oplog with no entries and no stats is a server that keeps no oplog. An
+  // empty `find` alone is not enough: a replica-set member that has genuinely
+  // written nothing would also answer with an empty batch, and that is a
+  // different fact from local.oplog.rs not existing.
+  const present = (first !== null && first.length > 0) || stats !== undefined
+  return {
+    present,
+    firstMs: firstSec === null ? null : firstSec * 1000,
+    lastMs: lastSec === null ? null : lastSec * 1000,
+    windowSeconds,
+    uptimeSeconds,
+    neverRolled:
+      windowSeconds === null || uptimeSeconds === null || uptimeSeconds <= 0
+        ? null
+        : windowSeconds >= uptimeSeconds * T.oplogNeverRolledFraction,
+    sizeBytes: num(storage.size),
+    maxSizeBytes: num(storage.maxSize),
+    storageBytes: num(storage.storageSize),
+    count: num(storage.count)
+  }
+}
+
+export function parseMongoIndexes(
+  perCollection: { collection: string; rows: Row[] | null; sizes?: Record<string, unknown> }[],
+  nowMs: number
+): MongoIndexesValue {
+  const indexes: MongoIndexUse[] = []
+  const unreadable: string[] = []
+  let counterAgeSeconds: number | null = null
+  for (const entry of perCollection) {
+    if (entry.rows === null) {
+      unreadable.push(entry.collection)
+      continue
+    }
+    for (const r of entry.rows) {
+      const accesses = (r.accesses ?? {}) as Row
+      const sinceMs = mongoDateMs(accesses.since)
+      if (sinceMs !== null) {
+        const age = Math.max(0, Math.round((nowMs - sinceMs) / 1000))
+        counterAgeSeconds = counterAgeSeconds === null ? age : Math.min(counterAgeSeconds, age)
+      }
+      indexes.push({
+        collection: entry.collection,
+        name: str(r.name) ?? 'unknown',
+        ops: num(accesses.ops),
+        sinceMs,
+        sizeBytes: num(entry.sizes?.[str(r.name) ?? ''])
+      })
+    }
+  }
+  indexes.sort((a, b) => (a.ops ?? 0) - (b.ops ?? 0))
+  return { indexes, unreadable, counterAgeSeconds }
+}
+
+export function parseMongoConnections(serverStatus: Row | undefined): MongoConnectionsValue {
+  const c = (serverStatus?.connections ?? {}) as Row
+  const current = num(c.current)
+  const available = num(c.available)
+  return {
+    current,
+    available,
+    totalCreated: num(c.totalCreated),
+    rejected: num(c.rejected),
+    active: num(c.active),
+    ceiling: current !== null && available !== null ? current + available : null
+  }
+}
+
+/**
+ * Whether an operation is somebody's query rather than the server's own
+ * machinery.
+ *
+ * All four rules below are captured, not reasoned about, in
+ * tests/fixtures/dbops/mongodb/replica-set-primary.json:
+ *
+ *  * `op: "none"` with an empty `ns` — JournalFlusher, NoopWriter,
+ *    Checkpointer. Permanently "running" on every healthy server.
+ *  * a namespace under `local.` — the OplogFetcher's `getmore` on
+ *    `local.oplog.rs`. It is a TAILING cursor, so on a healthy secondary it has
+ *    been running for the member's entire uptime, and a long-running-operation
+ *    alarm that does not exclude it fires on every replica set forever. This is
+ *    the MySQL applier-thread false positive with a different name.
+ *  * an `appName` the server gave itself.
+ *  * this panel's own read, which is an `aggregate` against `admin.$cmd`.
+ */
+const MONGO_INTERNAL_APP_NAMES = new Set(['OplogFetcher', 'MongoDB Internal Client', 'NetworkInterfaceTL'])
+
+export function isMongoClientOp(o: MongoOperation): boolean {
+  return !o.internal
+}
+
+export function parseMongoCurrentOp(rows: Row[], ownOpsOnly: boolean): MongoCurrentOpValue {
+  const operations = rows.map((r) => {
+    const ns = str(r.ns)
+    const op = str(r.op)
+    const appName = str(r.appName)
+    const desc = str(r.desc)
+    const internal =
+      op === 'none' ||
+      !ns ||
+      ns.startsWith('local.') ||
+      ns.startsWith('admin.$cmd') ||
+      (appName !== null && MONGO_INTERNAL_APP_NAMES.has(appName)) ||
+      (desc !== null && !desc.startsWith('conn'))
+    return {
+      opid: typeof r.opid === 'number' || typeof r.opid === 'string' ? r.opid : num(r.opid),
+      type: str(r.type),
+      desc,
+      appName,
+      op,
+      ns,
+      secondsRunning: num(r.secs_running),
+      planSummary: str(r.planSummary),
+      waitingForLock: bool(r.waitingForLock),
+      internal
+    }
+  })
+  return { operations, ownOpsOnly }
+}
+
+export function parseMongoSizes(listDatabases: Row | undefined, collections: { name: string; stats: Row | null }[]): MongoSizesValue {
+  const rows = Array.isArray(listDatabases?.databases) ? (listDatabases?.databases as Row[]) : []
+  const databases = rows.map((r) => ({
+    name: str(r.name) ?? 'unknown',
+    sizeOnDiskBytes: num(r.sizeOnDisk),
+    empty: bool(r.empty)
+  }))
+  const names = new Set(databases.map((d) => d.name))
+  return {
+    databases,
+    collections: collections
+      .filter((c) => c.stats !== null)
+      .map((c) => {
+        const s = (c.stats?.storageStats ?? {}) as Row
+        return {
+          name: c.name,
+          documents: num(s.count),
+          dataBytes: num(s.size),
+          storageBytes: num(s.storageSize),
+          indexBytes: num(s.totalIndexSize),
+          indexes: num(s.nindexes)
+        }
+      })
+      .sort((a, b) => (b.storageBytes ?? 0) - (a.storageBytes ?? 0)),
+    totalBytes: num(listDatabases?.totalSize),
+    databasesFiltered: rows.length > 0 && !names.has('admin') && !names.has('local')
+  }
+}
+
+export function parseMongoAsserts(serverStatus: Row | undefined): MongoAssertsValue {
+  const a = (serverStatus?.asserts ?? {}) as Row
+  const extra = (serverStatus?.extra_info ?? {}) as Row
+  return {
+    regular: num(a.regular),
+    warning: num(a.warning),
+    msg: num(a.msg),
+    user: num(a.user),
+    rollovers: num(a.rollovers),
+    pageFaults: num(extra.page_faults),
+    pageFaultsReported: 'page_faults' in extra,
+    uptimeSeconds: num(serverStatus?.uptime)
+  }
+}
+
+// ---- Judgements -----------------------------------------------------------
+
+export function judgeMongoReplication(v: MongoReplicationValue): DbVerdict {
+  if (v.members.length === 0) {
+    return {
+      level: 'unknown',
+      headline: 'This server reported no replica-set members.',
+      because: 'replSetGetStatus answered without a members array. That is not a healthy set and it is not a standalone — a standalone raises code 76 instead.'
+    }
+  }
+
+  const broken = v.members.filter((m) => m.health !== 1 || !MONGO_HEALTHY_STATES.has(m.state ?? -1))
+  if (broken.length > 0) {
+    const worst = broken[0]
+    const stale = broken.filter((m) => m.optimeIsEpoch)
+    return {
+      level: 'alarm',
+      headline: `${broken.length === 1 ? worst.name : `${broken.length} members`} ${broken.length === 1 ? 'is' : 'are'} not carrying the set — ${broken.map((m) => `${m.name} is ${m.stateStr}`).join(', ')}.`,
+      because:
+        (worst.heartbeatMessage ? `${worst.heartbeatMessage} ` : '') +
+        (stale.length > 0
+          ? 'The optime reported for it is the Unix epoch, which is what a member that cannot be reached reports — it is not a position and any lag computed from it is arithmetic on a placeholder.'
+          : 'Nothing is being replicated to it, and it does not count toward a majority.')
+    }
+  }
+
+  if (!v.members.some((m) => m.state === 1)) {
+    return {
+      level: 'alarm',
+      headline: 'This replica set has no PRIMARY.',
+      because: 'Every member is reachable and none of them is accepting writes, so every write to this set is being refused right now. A set in this state is usually mid-election, and one that stays in it has lost its majority.'
+    }
+  }
+
+  const voting = v.majorityVoteCount
+  if (voting !== null && v.healthyCount < voting) {
+    return {
+      level: 'alarm',
+      headline: `Only ${v.healthyCount} of the ${voting} members a majority needs are healthy.`,
+      because: 'The set cannot acknowledge a majority write or elect a new primary. One more failure and it is read-only.'
+    }
+  }
+
+  const lags = v.members.filter((m) => !m.self && m.lagSeconds !== null)
+  const worst = lags.reduce<MongoMember | null>((a, b) => (a === null || (b.lagSeconds ?? 0) > (a.lagSeconds ?? 0) ? b : a), null)
+  const behind = worst?.lagSeconds ?? 0
+  if (worst && behind >= T.replicaLagAlarmSeconds) {
+    return {
+      level: 'alarm',
+      headline: `${worst.name} is ${formatSeconds(behind)} behind the primary.`,
+      because: 'Reads from it return rows from that far in the past, and an election that promoted it would lose everything since.'
+    }
+  }
+  if (worst && behind >= T.replicaLagWatchSeconds) {
+    return { level: 'watch', headline: `${worst.name} is ${formatSeconds(behind)} behind the primary.` }
+  }
+  return {
+    level: 'ok',
+    headline: `${v.setName ? `Set ${v.setName}: ` : ''}${v.members.length} members, all healthy${worst ? `, worst lag ${formatSeconds(behind)}` : ''}.`,
+    because: v.members.map((m) => `${m.name} ${m.stateStr}`).join(', ')
+  }
+}
+
+export function judgeMongoOplog(v: MongoOplogValue): DbVerdict {
+  if (!v.present) {
+    return {
+      level: 'unknown',
+      headline: 'This server keeps no oplog.',
+      because: 'local.oplog.rs does not exist, which is what a mongod started without --replSet looks like. There is nothing for a secondary to catch up from and nothing to measure — this is not a window of zero.'
+    }
+  }
+  if (v.windowSeconds === null) {
+    return {
+      level: 'unknown',
+      headline: 'The oplog window could not be measured.',
+      because: 'The first or last oplog entry did not come back, so there is no interval to report. An unmeasured window is not a short one.'
+    }
+  }
+
+  const window = formatSeconds(v.windowSeconds)
+  const fill = v.maxSizeBytes && v.sizeBytes !== null ? ` It holds ${formatCount(v.count)} entries in ${formatBytes(v.sizeBytes)}, against a configured maximum of ${formatBytes(v.maxSizeBytes)}.` : ''
+
+  // The distinction the whole question exists for. Both fixtures report a small
+  // number; only one of them is a small window.
+  if (v.neverRolled === true) {
+    return {
+      level: 'unknown',
+      headline: `The oplog covers ${window}, which is everything since this member started ${formatSeconds(v.uptimeSeconds)} ago.`,
+      because:
+        'It has not yet had to discard an entry, so this is a FLOOR and not a measurement — the window will keep growing until the oplog fills for the first time. Ask again once the member has been up longer than the window you need to survive.' +
+        fill
+    }
+  }
+
+  if (v.windowSeconds < T.oplogWindowAlarmSeconds) {
+    return {
+      level: 'alarm',
+      headline: `The oplog covers only ${window}.`,
+      because:
+        `A secondary that falls further behind than that needs a full initial sync, not a catch-up, and so does one that is stopped for maintenance for longer. The oplog is rolling: this member has been up ${formatSeconds(v.uptimeSeconds)} and the oldest entry is ${window} old, so entries are being discarded.` +
+        fill
+    }
+  }
+  if (v.windowSeconds < T.oplogWindowWatchSeconds) {
+    return {
+      level: 'watch',
+      headline: `The oplog covers ${window}.`,
+      because: `Below a day is less room than most maintenance needs. This is a real measurement — the oplog is rolling, so it is not going to grow.${fill}`
+    }
+  }
+  return { level: 'ok', headline: `The oplog covers ${window}.`, because: `A secondary may be down for that long and still catch up.${fill}` }
+}
+
+export function judgeMongoIndexes(v: MongoIndexesValue): DbVerdict {
+  if (v.indexes.length === 0) {
+    return {
+      level: 'unknown',
+      headline: v.unreadable.length > 0 ? `Index usage could not be read for ${v.unreadable.length} collection(s).` : 'No index statistics were returned.',
+      because:
+        v.unreadable.length > 0
+          ? `$indexStats was refused on ${v.unreadable.join(', ')}. A role with read on a database is granted $collStats and refused $indexStats on the same collection, so sizes working here is not evidence that this would.`
+          : 'There were no collections to ask about.'
+    }
+  }
+
+  // _id_ is out of BOTH sides of the ratio. It cannot be dropped, so counting
+  // it as an index that might be is a sentence the operator cannot act on.
+  const droppable = v.indexes.filter((i) => i.name !== '_id_')
+  const unused = droppable.filter((i) => i.ops === 0)
+  const age = v.counterAgeSeconds
+
+  // The counters reset when the server restarts, so "zero accesses" is only a
+  // claim about the time since then. Below the threshold the honest answer is
+  // that the question has not been answered yet.
+  if (age !== null && age < T.indexUnusedMinCounterAgeSeconds) {
+    return {
+      level: 'unknown',
+      headline: `${unused.length} of the ${droppable.length} droppable indexes have not been used, but the counters are only ${formatSeconds(age)} old.`,
+      because: `$indexStats counts accesses since the server last started, so on a freshly restarted server every index looks unused. Nothing here can be called an unused index until the counters have been running longer than ${formatSeconds(T.indexUnusedMinCounterAgeSeconds)} — including a weekly report that only touches them on Sundays.`
+    }
+  }
+
+  if (unused.length === 0) {
+    return {
+      level: 'ok',
+      headline: `All ${droppable.length} droppable indexes have been used${age !== null ? ` in the ${formatSeconds(age)} the counters have been running` : ''}.`
+    }
+  }
+  const bytes = unused.reduce((a, i) => a + (i.sizeBytes ?? 0), 0)
+  return {
+    level: 'watch',
+    headline: `${unused.length} of the ${droppable.length} droppable indexes have had no reads${age !== null ? ` in ${formatSeconds(age)}` : ''}${bytes > 0 ? `, holding ${formatBytes(bytes)}` : ''}.`,
+    because: `${unused
+      .slice(0, 6)
+      .map((i) => `${i.collection}.${i.name}`)
+      .join(', ')}. Each one is written on every insert and update to its collection and read by nothing. Confirm against the application before dropping any of them — a counter is not a query plan, and an index that serves one nightly report reads exactly like this.`
+  }
+}
+
+export function judgeMongoConnections(v: MongoConnectionsValue): DbVerdict {
+  if (v.rejected !== null && v.rejected > 0) {
+    return {
+      level: 'alarm',
+      headline: `${formatCount(v.rejected)} connections have already been refused.`,
+      because: 'The server hit its ceiling and turned clients away. That number only ever goes up, so it may be from an incident that is over — but it did happen.'
+    }
+  }
+  if (v.current === null || v.ceiling === null || v.ceiling <= 0) {
+    return {
+      level: 'unknown',
+      headline: 'The connection ceiling could not be read.',
+      because: 'serverStatus does not state a maximum directly; it is current + available, and one of those did not come back. A count with no ceiling cannot be judged.'
+    }
+  }
+  const used = v.current / v.ceiling
+  const sentence = `${formatCount(v.current)} of ${formatCount(v.ceiling)} connections in use.`
+  if (used >= T.connectionsAlarmFraction) {
+    return { level: 'alarm', headline: sentence, because: 'The next client to connect will very likely be refused, including whichever one you would use to fix this.' }
+  }
+  if (used >= T.connectionsWatchFraction) return { level: 'watch', headline: sentence }
+  return { level: 'ok', headline: sentence, because: v.active !== null ? `${formatCount(v.active)} of them are running an operation.` : undefined }
+}
+
+export function judgeMongoCurrentOp(v: MongoCurrentOpValue): DbVerdict {
+  const client = v.operations.filter(isMongoClientOp)
+  const partial = v.ownOpsOnly
+    ? ' This account may not read other users’ operations, so this is only what THIS connection is doing — never treat it as the whole server.'
+    : ''
+  const longest = client.reduce<MongoOperation | null>((a, b) => (a === null || (b.secondsRunning ?? 0) > (a.secondsRunning ?? 0) ? b : a), null)
+  const seconds = longest?.secondsRunning ?? 0
+
+  if (v.ownOpsOnly) {
+    return {
+      level: 'unknown',
+      headline: `${client.length} operation(s) visible, and only this connection's.`,
+      because: `$currentOp was refused with allUsers: true and answered with allUsers: false.${partial}`
+    }
+  }
+  if (client.length === 0) {
+    return {
+      level: 'ok',
+      headline: 'Nothing is running but the server’s own threads.',
+      because: `${v.operations.length - client.length} internal operations were excluded — the journal flusher, the checkpointer and the replication oplog tail, which is a cursor that runs for the member's entire uptime by design.`
+    }
+  }
+  if (seconds >= T.longQueryAlarmSeconds) {
+    return {
+      level: 'alarm',
+      headline: `An operation has been running for ${formatSeconds(seconds)} on ${longest?.ns ?? 'an unknown namespace'}.`,
+      because: `${longest?.op ?? 'op'}${longest?.planSummary ? `, ${longest.planSummary}` : ''}. There is no control here to kill it: see the refusal at the top of this file.${partial}`
+    }
+  }
+  if (seconds >= T.longQueryWatchSeconds) {
+    return { level: 'watch', headline: `An operation has been running for ${formatSeconds(seconds)} on ${longest?.ns ?? 'an unknown namespace'}.` }
+  }
+  return { level: 'ok', headline: `${client.length} client operation(s) running, longest ${formatSeconds(seconds)}.` }
+}
+
+export function judgeMongoSizes(v: MongoSizesValue): DbVerdict {
+  const total = v.totalBytes
+  const biggest = v.collections[0]
+  const tail = biggest ? ` Largest collection: ${biggest.name} at ${formatBytes(biggest.storageBytes)}.` : ''
+  if (v.databasesFiltered) {
+    return {
+      level: 'unknown',
+      headline: `${formatBytes(total)} across ${v.databases.length} database(s) — and that is a floor, not a total.`,
+      because:
+        'listDatabases came back without admin and without local, which every mongod has. The server silently answered with only the databases this account is authorized on, with ok: 1 and no warning. A more privileged account would see more.' + tail
+    }
+  }
+  return {
+    level: 'ok',
+    headline: `${formatBytes(total)} across ${v.databases.length} database(s).`,
+    because: tail || undefined
+  }
+}
+
+export function judgeMongoAsserts(v: MongoAssertsValue): DbVerdict {
+  const rate = (n: number | null): string =>
+    n !== null && v.uptimeSeconds ? ` (${(n / (v.uptimeSeconds / 3600)).toFixed(1)}/hour)` : ''
+  if ((v.regular ?? 0) > 0 || (v.msg ?? 0) > 0) {
+    return {
+      level: 'alarm',
+      headline: `${formatCount((v.regular ?? 0) + (v.msg ?? 0))} internal assertions have fired${rate((v.regular ?? 0) + (v.msg ?? 0))}.`,
+      because:
+        'Regular and msg assertions are the server catching itself in a state it did not expect — a corrupt index, a storage-engine error, a bug. They are not failed client commands; those are counted separately as user assertions and are normal.'
+    }
+  }
+  if ((v.rollovers ?? 0) > 0) {
+    return {
+      level: 'watch',
+      headline: `The assertion counters have rolled over ${formatCount(v.rollovers)} time(s).`,
+      because: 'They roll at 2^30, so the numbers beside them have restarted from zero and the totals below are not totals.'
+    }
+  }
+  const faults = v.pageFaultsReported
+    ? ` Page faults: ${formatCount(v.pageFaults)}${rate(v.pageFaults)}.`
+    : ' Page faults are not reported on this platform — serverStatus says so itself, in extra_info.note, and that is different from a count of zero.'
+  return {
+    level: 'ok',
+    headline: `No internal assertions${v.user !== null ? `, ${formatCount(v.user)} user assertions` : ''}.`,
+    because:
+      (v.user !== null && v.user > 0
+        ? 'User assertions are failed client commands — a duplicate key, a bad query — and a healthy server has plenty.'
+        : '') + faults
+  }
+}
+
+// ===========================================================================
+// Redis
+// ===========================================================================
+//
+// Redis answers almost everything with ONE BLOB. `INFO memory` is a hundred
+// lines of `key:value` under a `# Memory` header, and the single most important
+// thing about it is what a missing line means, which is not zero.
+//
+//   maxmemory:0         the field is there and the answer is "no limit"
+//   (no maxclients)     the field is not there because this is Redis 5
+//
+// Those are as different as an answer and a refusal, and every reader below
+// goes through infoNum(), which returns null for absent and the number for
+// present — never `Number(x) || 0`. tests/fixtures/dbops/redis/redis-5.json is
+// the evidence: `maxclients` is genuinely missing from `INFO clients` on
+// 5.0.14, and thirty-seven `INFO stats` fields do not exist there either.
+//
+// Redis errors carry no numeric code at all, so classifyRedisFailure below
+// matches the leading token of the message. That is not a shortcut — the token
+// IS the protocol: `NOPERM`, `WRONGPASS`, `NOAUTH`, `ERR`.
+
+export interface RedisInfo {
+  /** Every `key:value` line that was present, in the order Redis emitted them.
+   *  A key that is NOT here was not in the reply — the distinction the whole
+   *  section is built on. */
+  fields: Record<string, string>
+  /** The `# Name` headers, so the collector can tell "this section was empty"
+   *  from "this section was never requested". */
+  sections: string[]
+}
+
+export interface RedisOverview {
+  version: string
+  mode: string | null
+  role: string | null
+  uptimeSeconds: number | null
+  os: string | null
+  /** `INFO cluster`'s `cluster_enabled`. Null when the field was absent. */
+  clusterEnabled: boolean | null
+}
+
+export interface RedisMemoryValue {
+  usedBytes: number | null
+  rssBytes: number | null
+  peakBytes: number | null
+  /**
+   * `maxmemory`. ZERO IS A REAL ANSWER and means unlimited; null means the
+   * field was not in the reply. Collapsing the two turns "this instance will
+   * grow until the machine dies" and "this server is too old to say" into the
+   * same green tick.
+   */
+  maxmemoryBytes: number | null
+  maxmemoryReported: boolean
+  policy: string | null
+  fragmentationRatio: number | null
+  /** used/maxmemory, or null when there is no limit to be a fraction of. */
+  usedFraction: number | null
+}
+
+export interface RedisPersistenceValue {
+  rdbLastSaveMs: number | null
+  rdbLastSaveAgeSeconds: number | null
+  rdbChangesSinceLastSave: number | null
+  rdbLastBgsaveStatus: string | null
+  rdbBgsaveInProgress: boolean | null
+  aofEnabled: boolean | null
+  aofLastWriteStatus: string | null
+  aofLastBgrewriteStatus: string | null
+  aofRewriteFailures: number | null
+  loading: boolean | null
+}
+
+export interface RedisReplicaLink {
+  ip: string | null
+  port: number | null
+  state: string | null
+  offsetBytes: number | null
+  lagSeconds: number | null
+}
+
+export interface RedisReplicationValue {
+  role: string | null
+  connectedReplicas: number | null
+  replicas: RedisReplicaLink[]
+  masterHost: string | null
+  masterLinkStatus: string | null
+  /**
+   * Seconds since this replica last heard from its master, or null.
+   *
+   * NULL when Redis reported -1, which is its sentinel for "there is no
+   * measurement" and is what a replica with a down link reports. Carried
+   * through as a number it is either a negative duration on screen or, after
+   * the Math.max(0, …) somebody will eventually add, "last heard from 0 seconds
+   * ago" on a replica that has heard nothing at all. Captured:
+   * tests/fixtures/dbops/redis/replica-link-down.json.
+   */
+  masterLastIoSeconds: number | null
+  masterLastIoSentinel: boolean
+  linkDownSeconds: number | null
+  masterReplOffset: number | null
+  replicaReplOffset: number | null
+  syncInProgress: boolean | null
+}
+
+export interface RedisSlowEntry {
+  id: number | null
+  atMs: number | null
+  microseconds: number | null
+  /** The command name and how many arguments followed it. The argument VALUES
+   *  are not kept: a slowlog entry is `SET session:… <the session token>`, and
+   *  this panel writes its output into a durable event store. */
+  command: string
+  argumentCount: number
+  clientAddr: string | null
+}
+
+export interface RedisSlowlogValue {
+  entries: RedisSlowEntry[]
+  length: number | null
+  /** `slowlog-log-slower-than`. Negative disables the log; zero logs
+   *  everything, including this panel's own reads. */
+  thresholdMicroseconds: number | null
+  maxLength: number | null
+}
+
+export interface RedisClientsValue {
+  connected: number | null
+  blocked: number | null
+  tracking: number | null
+  /** Absent on Redis 5 and earlier. See RedisMemoryValue.maxmemoryReported. */
+  maxclients: number | null
+  maxclientsReported: boolean
+  usedFraction: number | null
+}
+
+export interface RedisKeyspaceDb {
+  name: string
+  keys: number | null
+  expires: number | null
+  avgTtlMs: number | null
+}
+
+export interface RedisKeyspaceValue {
+  databases: RedisKeyspaceDb[]
+  totalKeys: number | null
+  totalExpires: number | null
+  /** `DBSIZE`, which is the database this connection is actually pointed at
+   *  and is O(1). `KEYS` is not sent here and will not be. */
+  selectedDbKeys: number | null
+}
+
+export interface RedisStatsValue {
+  rejectedConnections: number | null
+  evictedKeys: number | null
+  expiredKeys: number | null
+  keyspaceHits: number | null
+  keyspaceMisses: number | null
+  hitRate: number | null
+  totalConnectionsReceived: number | null
+  uptimeSeconds: number | null
+}
+
+export interface RedisClusterValue {
+  enabled: boolean | null
+  state: string | null
+  slotsAssigned: number | null
+  slotsOk: number | null
+  slotsPfail: number | null
+  slotsFail: number | null
+  knownNodes: number | null
+  size: number | null
+}
+
+// ---- Commands -------------------------------------------------------------
+
+/**
+ * Every command this feature sends to Redis, frozen, as argv.
+ *
+ * Twelve reads and one of them is a `CONFIG GET`, which deserves its own
+ * sentence because `CONFIG` is one word away from the most destructive thing on
+ * this list. `CONFIG GET slowlog-*` is here because without it the slow log
+ * cannot be interpreted at all: an empty log means "nothing was slow" if the
+ * threshold is 10 ms and means nothing whatsoever if it is 10 seconds or
+ * negative. `CONFIG SET` is not sent, is not built, and is asserted absent in
+ * tests/dbOpsRegressions.test.ts.
+ *
+ * `DBSIZE` and not `KEYS`. `KEYS *` on a production Redis blocks the single
+ * command thread for the length of a full keyspace scan, which is an outage
+ * caused by a monitoring page. `SCAN` is not here either: a cursor loop over
+ * millions of keys is the same cost paid in instalments.
+ */
+export const REDIS_COMMANDS = Object.freeze({
+  infoServer: ['INFO', 'server'],
+  infoMemory: ['INFO', 'memory'],
+  infoPersistence: ['INFO', 'persistence'],
+  infoReplication: ['INFO', 'replication'],
+  infoClients: ['INFO', 'clients'],
+  infoStats: ['INFO', 'stats'],
+  infoKeyspace: ['INFO', 'keyspace'],
+  infoCluster: ['INFO', 'cluster'],
+  clusterInfo: ['CLUSTER', 'INFO'],
+  configSlowlog: ['CONFIG', 'GET', 'slowlog-*'],
+  slowlogLen: ['SLOWLOG', 'LEN'],
+  dbsize: ['DBSIZE']
+})
+
+/** `SLOWLOG GET <n>`, built rather than frozen because n is the row limit the
+ *  collector chooses. Validated for the same reason the timeout builders are. */
+export function redisSlowlogGetCommand(limit: number): string[] {
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0 || limit > 1000) {
+    throw new Error(`Refusing to build SLOWLOG GET with a count of ${JSON.stringify(limit)}: expected a positive integer no greater than 1000.`)
+  }
+  return ['SLOWLOG', 'GET', String(limit)]
+}
+
+export const REDIS_COMMAND_BUILDERS: (() => string[])[] = [() => redisSlowlogGetCommand(20)]
+
+// ---- The INFO parser ------------------------------------------------------
+
+/**
+ * One `INFO` reply to fields and section names.
+ *
+ * CRLF, because Redis uses `\r\n` and a `split('\n')` leaves a carriage return
+ * on the end of every value — which makes `maxmemory_policy` compare unequal to
+ * `'noeviction'` while looking identical in a log.
+ *
+ * The value is split on the FIRST colon only. `slave0` and the keyspace lines
+ * carry structured values with colons and equals signs inside them, and
+ * `master_replid` is a hex string; splitting on every colon corrupts all three.
+ */
+export function parseRedisInfo(text: string | null | undefined): RedisInfo {
+  const fields: Record<string, string> = {}
+  const sections: string[] = []
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    const line = raw.trim()
+    if (line === '') continue
+    if (line.startsWith('#')) {
+      const name = line.slice(1).trim()
+      if (name) sections.push(name)
+      continue
+    }
+    const i = line.indexOf(':')
+    if (i <= 0) continue
+    fields[line.slice(0, i)] = line.slice(i + 1)
+  }
+  return { fields, sections }
+}
+
+/** Several INFO replies as one. Later replies win, which never matters because
+ *  the sections do not overlap — except `connected_slaves`, which `INFO
+ *  replication` is the only source of. */
+export function mergeRedisInfo(...infos: (RedisInfo | null | undefined)[]): RedisInfo {
+  const fields: Record<string, string> = {}
+  const sections: string[] = []
+  for (const info of infos) {
+    if (!info) continue
+    Object.assign(fields, info.fields)
+    for (const s of info.sections) if (!sections.includes(s)) sections.push(s)
+  }
+  return { fields, sections }
+}
+
+export function infoHas(info: RedisInfo, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(info.fields, key)
+}
+
+export function infoStr(info: RedisInfo, key: string): string | null {
+  return infoHas(info, key) ? info.fields[key] : null
+}
+
+/** The number, or null. Null for absent AND for a value that is not a number —
+ *  never zero for either. */
+export function infoNum(info: RedisInfo, key: string): number | null {
+  return infoHas(info, key) ? num(info.fields[key]) : null
+}
+
+export function infoBool(info: RedisInfo, key: string): boolean | null {
+  return infoHas(info, key) ? bool(info.fields[key]) : null
+}
+
+/**
+ * `slave0:ip=172.23.0.6,port=6379,state=online,offset=226642,lag=0` to a record.
+ *
+ * Also what the keyspace lines are — `db0:keys=5800,expires=800,avg_ttl=…` —
+ * so it is used for both.
+ */
+export function parseRedisPairs(value: string | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const part of String(value ?? '').split(',')) {
+    const i = part.indexOf('=')
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim()
+  }
+  return out
+}
+
+/**
+ * A `CONFIG GET` reply to a map.
+ *
+ * Read as a flat pair list and never by index, because the order is not
+ * stable: `CONFIG GET slowlog-*` answers `[slowlog-max-len, 128,
+ * slowlog-log-slower-than, 10000]` on Redis 7 and
+ * `[slowlog-log-slower-than, 10000, slowlog-max-len, 128]` on Redis 5. Both
+ * captured, in the same directory.
+ */
+export function parseRedisConfig(reply: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!Array.isArray(reply)) return out
+  for (let i = 0; i + 1 < reply.length; i += 2) {
+    const k = str(reply[i])
+    const v = str(reply[i + 1])
+    if (k !== null && v !== null) out[k] = v
+  }
+  return out
+}
+
+// ---- Failure classification -----------------------------------------------
+
+/**
+ * A Redis error to a status. There is no numeric code — the leading token of
+ * the message is the protocol, and every string below came off a real server:
+ *
+ *  * `NOPERM User app has no permissions to run the 'info' command` — an ACL
+ *    user. THIRTEEN of thirteen commands fail this way in
+ *    tests/fixtures/dbops/redis/acl-denied.json, with no partial data and no
+ *    empty reply. `denied`, never absent.
+ *  * `WRONGPASS invalid username-password pair or user is disabled` and
+ *    `NOAUTH Authentication required` — `denied`.
+ *  * `ERR This instance has cluster support disabled` — `CLUSTER INFO` on a
+ *    non-cluster instance, identical on 5.0.14 and 7.4.7. `absent`: the feature
+ *    is off, which is a first-class answer.
+ *  * `ERR unknown command` — a command this server version does not have.
+ *    `unsupported`.
+ *  * `LOADING Redis is loading the dataset in memory` — a real, temporary
+ *    state, and reporting it as an error with the server's own words is
+ *    correct: nothing here can be answered yet.
+ */
+export function classifyRedisFailure(message: string): DbFailure {
+  const detail = (message || '').trim() || 'The command failed and the server said nothing.'
+  if (/^NOPERM\b/.test(detail)) return { status: 'denied', detail }
+  if (/^(NOAUTH|WRONGPASS)\b/.test(detail)) return { status: 'denied', detail }
+  if (/cluster support disabled/i.test(detail)) return { status: 'absent', detail }
+  if (/^ERR unknown command/i.test(detail) || /unknown subcommand/i.test(detail)) return { status: 'unsupported', detail }
+  if (/^ERR unknown parameter/i.test(detail)) return { status: 'unsupported', detail }
+  return { status: 'error', detail }
+}
+
+// ---- Parsers --------------------------------------------------------------
+
+export function parseRedisOverview(info: RedisInfo): RedisOverview {
+  return {
+    version: infoStr(info, 'redis_version') ?? 'unknown',
+    mode: infoStr(info, 'redis_mode'),
+    role: infoStr(info, 'role'),
+    uptimeSeconds: infoNum(info, 'uptime_in_seconds'),
+    os: infoStr(info, 'os'),
+    clusterEnabled: infoBool(info, 'cluster_enabled')
+  }
+}
+
+export function parseRedisMemory(info: RedisInfo): RedisMemoryValue {
+  const used = infoNum(info, 'used_memory')
+  const max = infoNum(info, 'maxmemory')
+  return {
+    usedBytes: used,
+    rssBytes: infoNum(info, 'used_memory_rss'),
+    peakBytes: infoNum(info, 'used_memory_peak'),
+    maxmemoryBytes: max,
+    maxmemoryReported: infoHas(info, 'maxmemory'),
+    policy: infoStr(info, 'maxmemory_policy'),
+    fragmentationRatio: infoNum(info, 'mem_fragmentation_ratio'),
+    // Not a fraction of zero. Zero means unlimited, so there is nothing to be a
+    // fraction OF, and 0/0 is the shape that renders as NaN% on a dashboard.
+    usedFraction: used !== null && max !== null && max > 0 ? used / max : null
+  }
+}
+
+export function parseRedisPersistence(info: RedisInfo, nowMs: number): RedisPersistenceValue {
+  const saveSeconds = infoNum(info, 'rdb_last_save_time')
+  const saveMs = saveSeconds === null ? null : saveSeconds * 1000
+  return {
+    rdbLastSaveMs: saveMs,
+    rdbLastSaveAgeSeconds: saveMs === null ? null : Math.max(0, Math.round((nowMs - saveMs) / 1000)),
+    rdbChangesSinceLastSave: infoNum(info, 'rdb_changes_since_last_save'),
+    rdbLastBgsaveStatus: infoStr(info, 'rdb_last_bgsave_status'),
+    rdbBgsaveInProgress: infoBool(info, 'rdb_bgsave_in_progress'),
+    aofEnabled: infoBool(info, 'aof_enabled'),
+    aofLastWriteStatus: infoStr(info, 'aof_last_write_status'),
+    aofLastBgrewriteStatus: infoStr(info, 'aof_last_bgrewrite_status'),
+    aofRewriteFailures: infoNum(info, 'aof_rewrites_consecutive_failures'),
+    loading: infoBool(info, 'loading')
+  }
+}
+
+export function parseRedisReplication(info: RedisInfo): RedisReplicationValue {
+  const replicas: RedisReplicaLink[] = []
+  for (const [key, value] of Object.entries(info.fields)) {
+    if (!/^slave\d+$/.test(key)) continue
+    const p = parseRedisPairs(value)
+    replicas.push({
+      ip: p.ip ?? null,
+      port: num(p.port),
+      state: p.state ?? null,
+      offsetBytes: num(p.offset),
+      lagSeconds: num(p.lag)
+    })
+  }
+  const lastIo = infoNum(info, 'master_last_io_seconds_ago')
+  const sentinel = lastIo !== null && lastIo < 0
+  return {
+    role: infoStr(info, 'role'),
+    connectedReplicas: infoNum(info, 'connected_slaves'),
+    replicas,
+    masterHost: infoStr(info, 'master_host'),
+    masterLinkStatus: infoStr(info, 'master_link_status'),
+    masterLastIoSeconds: sentinel ? null : lastIo,
+    masterLastIoSentinel: sentinel,
+    linkDownSeconds: infoNum(info, 'master_link_down_since_seconds'),
+    masterReplOffset: infoNum(info, 'master_repl_offset'),
+    replicaReplOffset: infoNum(info, 'slave_repl_offset'),
+    syncInProgress: infoBool(info, 'master_sync_in_progress')
+  }
+}
+
+/**
+ * `SLOWLOG GET` rows to entries.
+ *
+ * Each row is a positional array — `[id, unixSeconds, microseconds, argv,
+ * clientAddr, clientName]` — so it is read by index, which is safe here and not
+ * in `CONFIG GET` because this shape is part of the protocol rather than a
+ * hash rendered as a list.
+ *
+ * `argv` is dropped after the command NAME. A real entry reads
+ * `["SET", "session:8f2…", "<the token>"]`, and this panel's output is shown on
+ * screen AND written into the durable event store. The command name and the
+ * argument COUNT answer "which command is slow"; the values only answer "whose
+ * data was it".
+ *
+ * The name is two tokens for the container commands, because that is what Redis
+ * itself calls them — its own ACL error names `'slowlog|get'`, not `'slowlog'`.
+ * Everywhere else argv[1] is data: keeping it turned the captured `EVAL` entry
+ * into eighty characters of somebody's Lua script.
+ */
+export function parseRedisSlowlog(rows: unknown, config: Record<string, string>, length: number | null): RedisSlowlogValue {
+  const entries: RedisSlowEntry[] = []
+  if (Array.isArray(rows)) {
+    for (const row of rows) {
+      if (!Array.isArray(row)) continue
+      const argv = Array.isArray(row[3]) ? (row[3] as unknown[]) : []
+      const at = num(row[1])
+      entries.push({
+        id: num(row[0]),
+        atMs: at === null ? null : at * 1000,
+        microseconds: num(row[2]),
+        command: redisCommandName(argv),
+        argumentCount: Math.max(0, argv.length - 1),
+        clientAddr: redactDbIdentifiers(str(row[4]) ?? '') || null
+      })
+    }
+  }
+  entries.sort((a, b) => (b.microseconds ?? 0) - (a.microseconds ?? 0))
+  return {
+    entries,
+    length,
+    thresholdMicroseconds: 'slowlog-log-slower-than' in config ? num(config['slowlog-log-slower-than']) : null,
+    maxLength: 'slowlog-max-len' in config ? num(config['slowlog-max-len']) : null
+  }
+}
+
+/**
+ * Redis's own name for a command, from its argv.
+ *
+ * Two tokens for a container command and one for everything else. Uppercased
+ * because a client may send either case and `SET` and `set` are the same
+ * command; truncated because a name is a name.
+ */
+const REDIS_CONTAINER_COMMANDS = new Set([
+  'ACL',
+  'CLIENT',
+  'CLUSTER',
+  'COMMAND',
+  'CONFIG',
+  'FUNCTION',
+  'LATENCY',
+  'MEMORY',
+  'OBJECT',
+  'PUBSUB',
+  'SCRIPT',
+  'SLOWLOG',
+  'XGROUP',
+  'XINFO'
+])
+
+export function redisCommandName(argv: unknown[]): string {
+  const head = (str(argv[0]) ?? '').trim().slice(0, 24).toUpperCase()
+  if (!REDIS_CONTAINER_COMMANDS.has(head)) return head
+  const sub = (str(argv[1]) ?? '').trim().slice(0, 24).toUpperCase()
+  return sub ? `${head} ${sub}` : head
+}
+
+export function parseRedisClients(info: RedisInfo): RedisClientsValue {
+  const connected = infoNum(info, 'connected_clients')
+  const max = infoNum(info, 'maxclients')
+  return {
+    connected,
+    blocked: infoNum(info, 'blocked_clients'),
+    tracking: infoNum(info, 'tracking_clients'),
+    maxclients: max,
+    maxclientsReported: infoHas(info, 'maxclients'),
+    usedFraction: connected !== null && max !== null && max > 0 ? connected / max : null
+  }
+}
+
+export function parseRedisKeyspace(info: RedisInfo, selectedDbKeys: number | null): RedisKeyspaceValue {
+  const databases: RedisKeyspaceDb[] = []
+  for (const [key, value] of Object.entries(info.fields)) {
+    if (!/^db\d+$/.test(key)) continue
+    const p = parseRedisPairs(value)
+    databases.push({ name: key, keys: num(p.keys), expires: num(p.expires), avgTtlMs: num(p.avg_ttl) })
+  }
+  databases.sort((a, b) => a.name.localeCompare(b.name, 'en'))
+  // Absence here genuinely IS zero: Redis omits a database from INFO keyspace
+  // when it holds no keys, and an empty instance answers with the bare
+  // `# Keyspace` header. Captured on redis:5. That is the one place in this
+  // file where a missing line is a zero, and it is missing for a reason the
+  // protocol states rather than because the server is too old to say.
+  const known = databases.length > 0 || info.sections.includes('Keyspace')
+  return {
+    databases,
+    totalKeys: known ? databases.reduce((a, d) => a + (d.keys ?? 0), 0) : null,
+    totalExpires: known ? databases.reduce((a, d) => a + (d.expires ?? 0), 0) : null,
+    selectedDbKeys
+  }
+}
+
+export function parseRedisStats(info: RedisInfo): RedisStatsValue {
+  const hits = infoNum(info, 'keyspace_hits')
+  const misses = infoNum(info, 'keyspace_misses')
+  return {
+    rejectedConnections: infoNum(info, 'rejected_connections'),
+    evictedKeys: infoNum(info, 'evicted_keys'),
+    expiredKeys: infoNum(info, 'expired_keys'),
+    keyspaceHits: hits,
+    keyspaceMisses: misses,
+    hitRate: hits !== null && misses !== null && hits + misses > 0 ? hits / (hits + misses) : null,
+    totalConnectionsReceived: infoNum(info, 'total_connections_received'),
+    uptimeSeconds: infoNum(info, 'uptime_in_seconds')
+  }
+}
+
+export function parseRedisCluster(info: RedisInfo, clusterInfo: RedisInfo | null): RedisClusterValue {
+  const c = clusterInfo ?? { fields: {}, sections: [] }
+  return {
+    enabled: infoBool(info, 'cluster_enabled'),
+    state: infoStr(c, 'cluster_state'),
+    slotsAssigned: infoNum(c, 'cluster_slots_assigned'),
+    slotsOk: infoNum(c, 'cluster_slots_ok'),
+    slotsPfail: infoNum(c, 'cluster_slots_pfail'),
+    slotsFail: infoNum(c, 'cluster_slots_fail'),
+    knownNodes: infoNum(c, 'cluster_known_nodes'),
+    size: infoNum(c, 'cluster_size')
+  }
+}
+
+// ---- Judgements -----------------------------------------------------------
+
+export function judgeRedisMemory(v: RedisMemoryValue): DbVerdict {
+  if (!v.maxmemoryReported) {
+    return {
+      level: 'unknown',
+      headline: `Using ${formatBytes(v.usedBytes)}, against a limit this server did not report.`,
+      because:
+        'There was no maxmemory line in INFO memory at all. That is NOT the same as maxmemory being zero — an absent field means this build or version does not say, and the usage above cannot be judged against anything.'
+    }
+  }
+  if (v.maxmemoryBytes === 0) {
+    return {
+      level: 'watch',
+      headline: `Using ${formatBytes(v.usedBytes)} with NO memory limit set.`,
+      because:
+        'maxmemory is 0, which Redis means as unlimited — this is a real answer and not a missing one. Nothing stops this instance growing until the machine runs out and the kernel picks a process to kill, and the kernel usually picks the largest one. On a replica of a bounded master it may be deliberate; on a master it is the outage that has not happened yet.'
+    }
+  }
+  if (v.usedFraction === null) {
+    return { level: 'unknown', headline: 'Memory usage could not be measured.', because: 'used_memory did not come back, so there is nothing to compare with the limit.' }
+  }
+
+  const pct = `${(v.usedFraction * 100).toFixed(1)}%`
+  const sentence = `${formatBytes(v.usedBytes)} of ${formatBytes(v.maxmemoryBytes)} — ${pct} — under ${v.policy ?? 'an unreported'} policy.`
+  const noEviction = v.policy === 'noeviction'
+
+  if (noEviction && v.usedFraction >= T.redisMemoryAlarmFraction) {
+    return {
+      level: 'alarm',
+      headline: sentence,
+      because:
+        'With noeviction, Redis does not free anything to make room — it refuses the write. At this fill level the next write that needs memory comes back as OOM command not allowed, and every writing client fails at once while reads carry on looking healthy.'
+    }
+  }
+  if (v.usedFraction >= 1) {
+    return { level: 'alarm', headline: sentence, because: 'It is over its own limit. Redis permits this when a single command allocates past the line, which is why the number can exceed 100%.' }
+  }
+  if (v.usedFraction >= T.redisMemoryAlarmFraction) {
+    return { level: 'alarm', headline: sentence, because: `Keys are being evicted under ${v.policy} to stay under the limit, so data is being dropped to make room.` }
+  }
+  if (v.usedFraction >= T.redisMemoryWatchFraction) {
+    return { level: 'watch', headline: sentence, because: noEviction ? 'With noeviction, reaching the limit refuses writes rather than freeing anything.' : undefined }
+  }
+  return {
+    level: 'ok',
+    headline: sentence,
+    because: v.fragmentationRatio !== null && v.fragmentationRatio > T.redisFragmentationWatchRatio
+      ? `Fragmentation ratio ${v.fragmentationRatio.toFixed(2)}: the process holds that much more from the OS than it is using.`
+      : undefined
+  }
+}
+
+export function judgeRedisPersistence(v: RedisPersistenceValue): DbVerdict {
+  if (v.loading === true) {
+    return { level: 'unknown', headline: 'This instance is still loading its dataset.', because: 'Nothing else on this page is a steady-state measurement until it has finished.' }
+  }
+  if (v.rdbLastBgsaveStatus !== null && v.rdbLastBgsaveStatus !== 'ok') {
+    return {
+      level: 'alarm',
+      headline: `The last RDB save FAILED (rdb_last_bgsave_status: ${v.rdbLastBgsaveStatus}).`,
+      because: 'There is no current snapshot on disk. A restart from here loses everything written since the last save that did work, and the usual cause is that the fork could not get memory.'
+    }
+  }
+  if (v.aofEnabled === true && v.aofLastWriteStatus !== null && v.aofLastWriteStatus !== 'ok') {
+    return {
+      level: 'alarm',
+      headline: `The append-only file is not being written (aof_last_write_status: ${v.aofLastWriteStatus}).`,
+      because: 'AOF is on and the last write to it failed, so the durability this instance is configured for is not happening. Usually a full disk.'
+    }
+  }
+  if (v.aofEnabled === false && v.rdbLastSaveAgeSeconds === null) {
+    return { level: 'unknown', headline: 'Persistence state could not be read.', because: 'Neither an AOF nor an RDB save time came back.' }
+  }
+  if (v.aofEnabled === false) {
+    const age = v.rdbLastSaveAgeSeconds ?? 0
+    const pending = v.rdbChangesSinceLastSave ?? 0
+    const sentence = `AOF is off; the last RDB save was ${formatSeconds(age)} ago with ${formatCount(pending)} changes since.`
+    if (pending > 0 && age >= T.redisRdbStaleAlarmSeconds) {
+      return { level: 'alarm', headline: sentence, because: 'Everything written in that window exists only in memory. A restart, an OOM kill or a crash loses all of it.' }
+    }
+    if (pending > 0 && age >= T.redisRdbStaleWatchSeconds) {
+      return { level: 'watch', headline: sentence, because: 'That is how much data a restart would lose.' }
+    }
+    return { level: 'ok', headline: sentence }
+  }
+  if (v.aofRewriteFailures !== null && v.aofRewriteFailures > 0) {
+    return {
+      level: 'watch',
+      headline: `${formatCount(v.aofRewriteFailures)} consecutive AOF rewrites have failed.`,
+      because: 'The file is still being written, so nothing is lost yet, but it is not being compacted and it will keep growing.'
+    }
+  }
+  return {
+    level: 'ok',
+    headline: `AOF is on and its last write was ${v.aofLastWriteStatus ?? 'not reported'}.`,
+    because: v.rdbLastSaveAgeSeconds !== null ? `The last RDB save was ${formatSeconds(v.rdbLastSaveAgeSeconds)} ago.` : undefined
+  }
+}
+
+export function judgeRedisReplication(v: RedisReplicationValue): DbVerdict {
+  if (v.role === 'slave' || v.role === 'replica') {
+    if (v.masterLinkStatus !== 'up') {
+      return {
+        level: 'alarm',
+        headline: `This replica has LOST its master${v.linkDownSeconds !== null ? `, ${formatSeconds(v.linkDownSeconds)} ago` : ''} (master_link_status: ${v.masterLinkStatus ?? 'not reported'}).`,
+        because: v.masterLastIoSentinel
+          ? 'It is serving whatever it had when the link dropped, and every write since then is missing. Redis reports master_last_io_seconds_ago as -1 here, which is its way of saying it has no measurement at all — it is not "zero seconds ago".'
+          : 'It is serving whatever it had when the link dropped, and every write since then is missing.'
+      }
+    }
+    if (v.syncInProgress === true) {
+      return { level: 'watch', headline: 'This replica is mid-resynchronisation with its master.', because: 'Its dataset is incomplete until the sync finishes, so reads from it are not trustworthy yet.' }
+    }
+    const io = v.masterLastIoSeconds
+    const sentence = `Replicating from ${v.masterHost ?? 'its master'}, last heard from ${io === null ? 'an unreported time' : formatSeconds(io)} ago.`
+    if (io !== null && io >= T.replicaLagAlarmSeconds) return { level: 'alarm', headline: sentence, because: 'A link that is nominally up and silent for that long is a link that is about to be declared down.' }
+    if (io !== null && io >= T.replicaLagWatchSeconds) return { level: 'watch', headline: sentence }
+    return {
+      level: 'ok',
+      headline: sentence,
+      because: v.replicaReplOffset !== null ? `At offset ${formatCount(v.replicaReplOffset)}. Whether that is level with the master cannot be told from here — this instance only reports its own offset.` : undefined
+    }
+  }
+
+  const count = v.connectedReplicas
+  if (count === null) {
+    return { level: 'unknown', headline: 'The replication role could not be read.', because: 'INFO replication did not report connected_slaves.' }
+  }
+  if (count === 0) {
+    // The trap this question is written around. It cannot be resolved from INFO
+    // and is therefore not guessed at.
+    return {
+      level: 'unknown',
+      headline: 'This is a master with no replicas connected.',
+      because:
+        'Whether that is correct cannot be answered from INFO. A standalone Redis reports exactly this line and is completely healthy; so does a master whose only replica died a minute ago, and the two are identical strings. ShellPilot does not read a Sentinel or a cluster configuration, so it does not know which this is — and calling it healthy would be a guess in the hour it matters.'
+    }
+  }
+  const offline = v.replicas.filter((r) => r.state !== 'online')
+  if (offline.length > 0) {
+    return {
+      level: 'alarm',
+      headline: `${offline.length} of ${count} replicas are not online (${offline.map((r) => r.state ?? 'no state').join(', ')}).`,
+      because: 'A replica in any state other than online is not receiving the stream, whatever its offset says.'
+    }
+  }
+  const laggiest = v.replicas.reduce<RedisReplicaLink | null>((a, b) => (a === null || (b.lagSeconds ?? 0) > (a.lagSeconds ?? 0) ? b : a), null)
+  const lag = laggiest?.lagSeconds ?? 0
+  if (lag >= T.replicaLagWatchSeconds) {
+    return { level: 'watch', headline: `${count} replicas connected, worst ${formatSeconds(lag)} behind.` }
+  }
+  const gaps = v.replicas
+    .map((r) => (v.masterReplOffset !== null && r.offsetBytes !== null ? v.masterReplOffset - r.offsetBytes : null))
+    .filter((n): n is number => n !== null)
+  return {
+    level: 'ok',
+    headline: `${count} replica(s) connected and online.`,
+    because: gaps.length > 0 ? `Furthest behind by ${formatBytes(Math.max(...gaps))} of replication stream.` : undefined
+  }
+}
+
+export function judgeRedisSlowlog(v: RedisSlowlogValue): DbVerdict {
+  const threshold = v.thresholdMicroseconds
+  if (threshold === null) {
+    return {
+      level: 'unknown',
+      headline: `${formatCount(v.length)} entries in the slow log, recorded above a threshold this account could not read.`,
+      because: 'Without slowlog-log-slower-than the log cannot be interpreted: an empty log means "nothing was slow" at 10 ms and means nothing at all at 10 seconds.'
+    }
+  }
+  if (threshold < 0) {
+    return {
+      level: 'unknown',
+      headline: 'The slow log is switched OFF (slowlog-log-slower-than is negative).',
+      because: 'Nothing is being recorded, so the log being empty says nothing about whether this server has slow commands. Redis has no other record of them.'
+    }
+  }
+  if (threshold === 0) {
+    return {
+      level: 'unknown',
+      headline: 'The slow log records EVERY command (slowlog-log-slower-than is 0).',
+      because:
+        'A log of everything cannot tell you what is slow, and it costs memory and time on every command. It also fills with this panel’s own reads: the entries below will largely be the INFO calls that produced this page.'
+    }
+  }
+
+  const slowest = v.entries[0]
+  const full = v.maxLength !== null && v.length !== null && v.length >= v.maxLength
+  const rolled = full ? ` The log is at its maximum of ${formatCount(v.maxLength)} entries, so older ones have already been discarded.` : ''
+  const thresholdMs = threshold / 1000
+
+  if (v.entries.length === 0) {
+    return {
+      level: 'ok',
+      headline: `Nothing has taken longer than ${thresholdMs.toFixed(0)} ms since the log was last reset.`,
+      because: `${formatCount(v.length)} entries are held.${rolled}`
+    }
+  }
+  const micros = slowest.microseconds ?? 0
+  const sentence = `Slowest recorded command: ${slowest.command || 'unknown'} at ${(micros / 1000).toFixed(0)} ms, against a ${thresholdMs.toFixed(0)} ms threshold.`
+  if (micros >= T.redisSlowCommandAlarmMicroseconds) {
+    return {
+      level: 'alarm',
+      headline: sentence,
+      because: `Redis runs commands one at a time, so every other client on this instance waited for that. ${formatCount(v.length)} entries are held.${rolled}`
+    }
+  }
+  if (micros >= T.redisSlowCommandWatchMicroseconds) {
+    return { level: 'watch', headline: sentence, because: `${formatCount(v.length)} entries are held.${rolled}` }
+  }
+  return { level: 'ok', headline: sentence, because: `${formatCount(v.length)} entries are held.${rolled}` }
+}
+
+export function judgeRedisClients(v: RedisClientsValue): DbVerdict {
+  const blocked = v.blocked !== null && v.blocked > 0 ? ` ${formatCount(v.blocked)} of them are blocked on a command like BLPOP, which is normal for a queue consumer and not a stall.` : ''
+  if (!v.maxclientsReported) {
+    return {
+      level: 'unknown',
+      headline: `${formatCount(v.connected)} clients connected, against a ceiling this server did not report.`,
+      because:
+        `INFO clients has no maxclients line at all here — Redis did not add it until 6.0, and this is the field the whole question compares against. An absent ceiling is not an unlimited one and it is not zero.${blocked}`
+    }
+  }
+  if (v.usedFraction === null) {
+    return { level: 'unknown', headline: 'The client count could not be read.', because: 'connected_clients did not come back.' }
+  }
+  const sentence = `${formatCount(v.connected)} of ${formatCount(v.maxclients)} clients connected.`
+  if (v.usedFraction >= T.connectionsAlarmFraction) {
+    return { level: 'alarm', headline: sentence, because: `At the ceiling Redis refuses new connections outright, and the refusals are counted in INFO stats as rejected_connections.${blocked}` }
+  }
+  if (v.usedFraction >= T.connectionsWatchFraction) return { level: 'watch', headline: sentence, because: blocked || undefined }
+  return { level: 'ok', headline: sentence, because: blocked || undefined }
+}
+
+export function judgeRedisKeyspace(v: RedisKeyspaceValue, policy: string | null): DbVerdict {
+  if (v.totalKeys === null) {
+    return { level: 'unknown', headline: 'The keyspace could not be read.', because: 'INFO keyspace did not come back at all.' }
+  }
+  if (v.totalKeys === 0) {
+    return {
+      level: 'ok',
+      headline: 'This instance holds no keys.',
+      because: 'INFO keyspace omits a database entirely when it is empty, so a bare section here genuinely does mean zero — unlike an absent field anywhere else on this page.'
+    }
+  }
+  const withoutTtl = v.totalKeys - (v.totalExpires ?? 0)
+  const sentence = `${formatCount(v.totalKeys)} keys across ${v.databases.length} database(s), ${formatCount(v.totalExpires)} of them with an expiry.`
+  // The combination that fills an instance: keys that never expire under a
+  // policy that never evicts.
+  if (policy === 'noeviction' && withoutTtl > 0 && (v.totalExpires ?? 0) / v.totalKeys < T.redisNoTtlWatchFraction) {
+    return {
+      level: 'watch',
+      headline: sentence,
+      because: `${formatCount(withoutTtl)} keys have no TTL and the policy is noeviction, so nothing will ever remove them. That combination is what takes an instance to its memory limit and then refuses every write.`
+    }
+  }
+  return {
+    level: 'ok',
+    headline: sentence,
+    because: v.selectedDbKeys !== null ? `The database this connection is pointed at holds ${formatCount(v.selectedDbKeys)}.` : undefined
+  }
+}
+
+export function judgeRedisStats(v: RedisStatsValue): DbVerdict {
+  if (v.rejectedConnections !== null && v.rejectedConnections > 0) {
+    return {
+      level: 'alarm',
+      headline: `${formatCount(v.rejectedConnections)} connections have been REFUSED because maxclients was reached.`,
+      because: 'Every one of those was a client that could not talk to Redis at all. The counter only rises, so it may be from an incident that has passed — but it did happen, and nothing else on this page records it.'
+    }
+  }
+  if (v.evictedKeys !== null && v.evictedKeys > 0) {
+    return {
+      level: 'watch',
+      headline: `${formatCount(v.evictedKeys)} keys have been evicted to stay under the memory limit.`,
+      because: 'Data that was written was thrown away to make room. For a cache that is the design; for anything treated as a store it is silent data loss.'
+    }
+  }
+  if (v.rejectedConnections === null && v.evictedKeys === null) {
+    return { level: 'unknown', headline: 'Neither the rejected-connection nor the eviction counter was reported.', because: 'INFO stats did not carry them, so nothing here can be said about either.' }
+  }
+  return {
+    level: 'ok',
+    headline: 'No connections refused and no keys evicted.',
+    because:
+      (v.hitRate !== null ? `Keyspace hit rate ${(v.hitRate * 100).toFixed(1)}%. ` : '') +
+      (v.expiredKeys !== null ? `${formatCount(v.expiredKeys)} keys have expired normally, which is not eviction.` : '')
+  }
+}
+
+export function judgeRedisCluster(v: RedisClusterValue): DbVerdict {
+  if (v.enabled === null) {
+    return { level: 'unknown', headline: 'Whether this instance is in a cluster could not be read.', because: 'INFO cluster did not report cluster_enabled.' }
+  }
+  if (v.enabled === false) {
+    return {
+      level: 'ok',
+      headline: 'Cluster mode is off.',
+      because: 'CLUSTER INFO on this instance answers "ERR This instance has cluster support disabled", which is a fact rather than a failure. Nothing about slots or cluster state applies.'
+    }
+  }
+  if (v.state !== null && v.state !== 'ok') {
+    return {
+      level: 'alarm',
+      headline: `The cluster state is ${v.state}.`,
+      because: 'While the state is not ok the cluster refuses commands for the slots it cannot serve, which from a client looks like part of the keyspace disappearing.'
+    }
+  }
+  if (v.slotsAssigned !== null && v.slotsAssigned < 16384) {
+    return {
+      level: 'alarm',
+      headline: `Only ${formatCount(v.slotsAssigned)} of 16384 hash slots are assigned.`,
+      because: 'Every key that hashes into an unassigned slot is unreachable. The cluster is incomplete, whatever cluster_state says.'
+    }
+  }
+  return {
+    level: 'ok',
+    headline: `Cluster state ok across ${formatCount(v.knownNodes)} known nodes.`,
+    because: v.slotsFail !== null || v.slotsPfail !== null ? `${formatCount(v.slotsFail)} slots failed, ${formatCount(v.slotsPfail)} possibly failed.` : undefined
+  }
+}
+
+// ===========================================================================
 // The report
 // ===========================================================================
 
@@ -2178,16 +4340,31 @@ export interface DbOpsReport {
   answers: DbAnswer<unknown>[]
 }
 
-export type DbOpsEngine = 'postgres' | 'mysql'
+export type DbOpsEngine = 'postgres' | 'mysql' | 'mongodb' | 'redis'
 
-/** Which engines this feature covers. MongoDB and Redis are a later roadmap
- *  item and are deliberately not half-built here. */
+/**
+ * Which engines this feature covers.
+ *
+ * MongoDB and Redis were held back from the first pass rather than half-built,
+ * because they answer completely different questions and a thin imitation of
+ * the SQL page would have been worse than no page. They have their own
+ * questions now — replica-set state and oplog window; eviction policy,
+ * persistence and the link to a master. SQL Server is still out.
+ */
 export function supportsDbOps(kind: string): kind is DbOpsEngine {
-  return kind === 'postgres' || kind === 'mysql'
+  return kind === 'postgres' || kind === 'mysql' || kind === 'mongodb' || kind === 'redis'
 }
 
 export const DB_OPS_UNSUPPORTED_NOTE =
-  'Operational reads are available for PostgreSQL and MySQL/MariaDB. MongoDB and Redis answer completely different questions — replica-set state and oplog window, eviction policy and persistence — and get their own pass rather than a thin imitation of this one.'
+  'Operational reads are available for PostgreSQL, MySQL/MariaDB, MongoDB and Redis. SQL Server is not covered: nothing here has been run against one, and a page of questions written from documentation would agree with whatever its author assumed rather than with the server.'
+
+/** The questions asked of each engine, in the order they should be read. */
+export const DB_QUESTIONS_BY_ENGINE: Record<DbOpsEngine, readonly DbQuestionId[]> = {
+  postgres: PG_QUESTIONS,
+  mysql: MYSQL_QUESTIONS,
+  mongodb: MONGO_QUESTIONS,
+  redis: REDIS_QUESTIONS
+}
 
 /** The worst verdict on the page, which is the one the tab badge shows. */
 export function worstVerdict(answers: DbAnswer<unknown>[]): DbVerdictLevel {
@@ -2270,6 +4447,24 @@ export function dbEventMetrics(a: DbAnswer<unknown>): Record<string, number> {
         const st = v as unknown as PgReplicationStandby
         put('secondsBehind', st.replayAgeSeconds)
         put('applyLagBytes', st.applyLagBytes)
+      } else if (v && 'members' in v) {
+        // MongoDB: the set, and the member furthest behind.
+        const rs = v as unknown as MongoReplicationValue
+        put('members', rs.members.length)
+        put('healthyMembers', rs.healthyCount)
+        put('membersDown', rs.members.filter((m) => m.health !== 1).length)
+        const lags = rs.members.map((m) => m.lagSeconds).filter((n): n is number => n !== null)
+        if (lags.length > 0) put('secondsBehind', Math.max(...lags))
+      } else if (v && 'masterLinkStatus' in v) {
+        // Redis. `linkUp` and not `secondsBehind`: a replica cannot measure how
+        // far behind it is from INFO, and inventing the number for a rule to
+        // read would be the same lie the panel refuses to tell.
+        const rr = v as unknown as RedisReplicationValue
+        put('connectedReplicas', rr.connectedReplicas)
+        put('replicas', rr.replicas.length)
+        put('linkUp', rr.masterLinkStatus === null ? 0 : rr.masterLinkStatus === 'up' ? 1 : 0)
+        put('masterLastIoSeconds', rr.masterLastIoSeconds)
+        put('linkDownSeconds', rr.linkDownSeconds)
       } else if (v && (v as unknown as PgReplicationValue).role === 'primary') {
         const replicas = (v as unknown as PgReplicationPrimary).replicas
         put('replicas', replicas.length)
@@ -2298,7 +4493,13 @@ export function dbEventMetrics(a: DbAnswer<unknown>): Record<string, number> {
       break
     }
     case 'connections': {
-      if (v && 'usableConnections' in v) {
+      if (v && 'ceiling' in v) {
+        const c = v as unknown as MongoConnectionsValue
+        put('used', c.current)
+        put('maxConnections', c.ceiling)
+        put('refused', c.rejected)
+        if (c.current !== null && c.ceiling !== null && c.ceiling > 0) put('usedFraction', c.current / c.ceiling)
+      } else if (v && 'usableConnections' in v) {
         const c = v as unknown as PgConnectionsValue
         put('used', c.used)
         put('maxConnections', c.maxConnections)
@@ -2324,7 +4525,14 @@ export function dbEventMetrics(a: DbAnswer<unknown>): Record<string, number> {
       break
     }
     case 'sizes': {
-      if (v && 'databases' in v) {
+      if (v && 'collections' in v) {
+        const sz = v as unknown as MongoSizesValue
+        put('totalBytes', sz.totalBytes)
+        put('databases', sz.databases.length)
+        put('collections', sz.collections.length)
+        put('largestCollectionBytes', sz.collections[0]?.storageBytes)
+        put('databasesFiltered', sz.databasesFiltered ? 1 : 0)
+      } else if (v && 'databases' in v) {
         const sz = v as unknown as PgSizesValue
         put('totalBytes', sz.databases.reduce((acc, d) => acc + (d.totalBytes ?? 0), 0))
         put('largestTableBytes', sz.tables[0]?.totalBytes)
@@ -2350,6 +4558,13 @@ export function dbEventMetrics(a: DbAnswer<unknown>): Record<string, number> {
       break
     }
     case 'slowlog': {
+      if (v && 'entries' in v) {
+        const rs = v as unknown as RedisSlowlogValue
+        put('entries', rs.length)
+        put('thresholdMicroseconds', rs.thresholdMicroseconds)
+        put('slowestMicroseconds', rs.entries[0]?.microseconds)
+        break
+      }
       const sl = v as unknown as MysqlSlowLogValue | undefined
       put('slowQueries', sl?.slowQueries)
       put('longQueryTimeSeconds', sl?.longQueryTimeSeconds)
@@ -2372,6 +4587,93 @@ export function dbEventMetrics(a: DbAnswer<unknown>): Record<string, number> {
       put('readRequests', bp?.readRequests)
       put('reads', bp?.reads)
       put('sizeBytes', bp?.sizeBytes)
+      break
+    }
+    case 'oplog': {
+      const op = v as unknown as MongoOplogValue | undefined
+      put('windowSeconds', op?.windowSeconds)
+      put('uptimeSeconds', op?.uptimeSeconds)
+      put('maxSizeBytes', op?.maxSizeBytes)
+      // A boolean matters to a rule as much as a number does — "alert when the
+      // window is under an hour AND it is a real window" is unwriteable without
+      // it — so it is carried as 1/0 rather than left out for being a flag.
+      if (op?.neverRolled !== null && op?.neverRolled !== undefined) put('neverRolled', op.neverRolled ? 1 : 0)
+      break
+    }
+    case 'indexes': {
+      const ix = v as unknown as MongoIndexesValue | undefined
+      put('indexes', ix?.indexes.length)
+      put('droppable', ix?.indexes.filter((i) => i.name !== '_id_').length)
+      put('unused', ix?.indexes.filter((i) => i.ops === 0 && i.name !== '_id_').length)
+      put('unreadableCollections', ix?.unreadable.length)
+      put('counterAgeSeconds', ix?.counterAgeSeconds)
+      break
+    }
+    case 'currentop': {
+      const co = v as unknown as MongoCurrentOpValue | undefined
+      const client = (co?.operations ?? []).filter(isMongoClientOp)
+      put('running', client.length)
+      put('internal', (co?.operations.length ?? 0) - client.length)
+      const secs = client.map((o) => o.secondsRunning).filter((n): n is number => n !== null)
+      if (secs.length > 0) put('longestSeconds', Math.max(...secs))
+      if (co) put('ownOpsOnly', co.ownOpsOnly ? 1 : 0)
+      break
+    }
+    case 'asserts': {
+      const as = v as unknown as MongoAssertsValue | undefined
+      put('regular', as?.regular)
+      put('msg', as?.msg)
+      put('user', as?.user)
+      put('rollovers', as?.rollovers)
+      // Omitted rather than zeroed when the platform does not report it.
+      put('pageFaults', as?.pageFaultsReported ? as.pageFaults : null)
+      break
+    }
+    case 'memory': {
+      const mem = v as unknown as RedisMemoryValue | undefined
+      put('usedBytes', mem?.usedBytes)
+      // Only when it was actually reported. A rule of the shape "alert when
+      // maxmemory is 0" must not fire on a server that never said.
+      put('maxmemoryBytes', mem?.maxmemoryReported ? mem.maxmemoryBytes : null)
+      put('usedFraction', mem?.usedFraction)
+      break
+    }
+    case 'persistence': {
+      const pe = v as unknown as RedisPersistenceValue | undefined
+      put('rdbLastSaveAgeSeconds', pe?.rdbLastSaveAgeSeconds)
+      put('rdbChangesSinceLastSave', pe?.rdbChangesSinceLastSave)
+      put('aofRewriteFailures', pe?.aofRewriteFailures)
+      break
+    }
+    case 'clients': {
+      const cl = v as unknown as RedisClientsValue | undefined
+      put('connected', cl?.connected)
+      put('blocked', cl?.blocked)
+      put('maxclients', cl?.maxclientsReported ? cl.maxclients : null)
+      put('usedFraction', cl?.usedFraction)
+      break
+    }
+    case 'keyspace': {
+      const ks = v as unknown as RedisKeyspaceValue | undefined
+      put('keys', ks?.totalKeys)
+      put('expires', ks?.totalExpires)
+      put('databases', ks?.databases.length)
+      break
+    }
+    case 'stats': {
+      const st = v as unknown as RedisStatsValue | undefined
+      put('rejectedConnections', st?.rejectedConnections)
+      put('evictedKeys', st?.evictedKeys)
+      put('expiredKeys', st?.expiredKeys)
+      put('hitRate', st?.hitRate)
+      break
+    }
+    case 'cluster': {
+      const cu = v as unknown as RedisClusterValue | undefined
+      put('slotsAssigned', cu?.slotsAssigned)
+      put('slotsFail', cu?.slotsFail)
+      put('slotsPfail', cu?.slotsPfail)
+      put('knownNodes', cu?.knownNodes)
       break
     }
     default:

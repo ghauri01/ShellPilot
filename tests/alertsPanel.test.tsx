@@ -88,11 +88,20 @@ describe('the history the chip cannot show', () => {
       }
     })
     render(<AlertsPanel />)
-    await waitFor(() => expect(screen.getByText('Unreachable')).toBeTruthy())
+    await waitFor(() => expect(screen.getAllByText('Unreachable').length).toBeGreaterThan(0))
     // Scoped to the row, not to the page: the thresholds section below names
     // percentages of its own, and a body-wide assertion would be passing on
     // whatever text happened to be absent rather than on this row's contents.
-    const row = screen.getByText('Unreachable').closest('tr')?.textContent ?? ''
+    //
+    // Found by BEING a row rather than by being the only 'Unreachable' on the
+    // page: item 28's runbook picker names every alert kind in an <option>, so
+    // the label is no longer unique and a getByText would throw on the
+    // ambiguity rather than assert anything about this row.
+    const row =
+      screen
+        .getAllByText('Unreachable')
+        .map((el) => el.closest('tr'))
+        .find((tr): tr is HTMLTableRowElement => tr !== null)?.textContent ?? ''
     expect(row).toContain('web-1')
     expect(row).toContain('since 30 min ago')
     // A state kind has no reading. A "0" here would be a measurement nobody

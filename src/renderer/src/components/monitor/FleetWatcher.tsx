@@ -3,12 +3,14 @@ import { useApp, useWorkspaceServers } from '../../store/app'
 import { useFleet } from '../../store/fleet'
 import { useFleetStatus } from '../../store/fleetStatus'
 import {
+  checkCertificateAlert,
   checkResourceAlerts,
   checkStateAlert,
   checkUnitAlerts,
   hydrateAlerts,
   noteAlertEvent
 } from '../../store/alerts'
+import { postureAlertReadings } from '../../../../shared/posture'
 import { bridgeHas, bridgeOn } from '../../lib/bridge'
 import { sshHopsFor } from '../../lib/ssh'
 import type { FleetTarget } from '../../../../shared/fleet'
@@ -286,6 +288,63 @@ export function FleetWatcher(): null {
       clearInterval(timer)
     }
   }, [])
+
+
+  // Item 19b's two deferred kinds: OOM kills and certificate expiry.
+  //
+  // Read from the posture the background sweep ALREADY HOLDS, exactly as the
+  // database poll below reads verdicts item 18 already wrote. `fleet.posture()`
+  // is documented as a read of main's cache and never triggers a probe: there
+  // is one thing deciding how often a host is asked for its firewall ruleset,
+  // and it is the sampler.
+  //
+  // FIVE MINUTES, not the tunnel poll's ten seconds. The probe behind these
+  // runs hourly and the numbers move by one a day, so anything faster is an
+  // IPC round trip per host per interval for an answer that cannot have
+  // changed. It is still far more often than the probe, so a fresh collection
+  // is noticed within a few minutes of landing.
+  //
+  // What this does NOT do is claim the sampler's coverage. Both kinds are
+  // filed under `posture-sweep` in alertCoverage.ts, which says out loud that
+  // they need background checking AND the Security posture module, and that
+  // with either off nothing reads them — not even while a monitor is on
+  // screen. This effect is what makes the rest of that sentence true: with
+  // both on, they raise with no screen open.
+  useEffect(() => {
+    if (!bridgeHas(window.shellpilot?.fleet as Record<string, unknown> | undefined, 'posture')) {
+      return
+    }
+    let live = true
+    const read = (): void => {
+      for (const t of targets) {
+        void window.shellpilot?.fleet?.posture(t.serverId).then((r) => {
+          if (!live || !r) return
+          const name = serversRef.current.find((s) => s.id === t.serverId)?.name ?? t.serverId
+          // `r.posture` absent is "never collected", and postureAlertReadings
+          // turns that into two nulls rather than into two clean bills of
+          // health. Every other honesty rule in this pair — a ring-buffer zero,
+          // a refused /etc/letsencrypt, a certificate that would not parse —
+          // is decided in shared/posture.ts for the same reason isDiskCritical
+          // lives in hostHealth: the panel and the alert must not hold two
+          // opinions.
+          const reading = postureAlertReadings(r.posture ?? null)
+          checkStateAlert(t.serverId, name, 'oom-kill', reading.oomKills, reading.oomDetail)
+          checkCertificateAlert(t.serverId, name, reading.certDays)
+        })
+      }
+    }
+    // Waits for hydration like the two polls below, so nothing speaks before
+    // the durable log is back — a certificate that has been inside thirty days
+    // for a fortnight must not re-announce itself at every launch.
+    void hydrateAlerts().then(() => {
+      if (live) read()
+    })
+    const timer = setInterval(read, 5 * 60_000)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [targets])
 
   // Item 18's database verdicts.
   //

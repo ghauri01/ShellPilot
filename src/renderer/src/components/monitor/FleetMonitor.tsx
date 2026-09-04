@@ -22,10 +22,15 @@ import { FleetHealth } from './FleetHealth'
 import { FleetSearch } from './FleetSearch'
 import { InventoryPanel } from './InventoryPanel'
 import { AccessPanel } from './AccessPanel'
+import { PosturePanel } from './PosturePanel'
+import { DriftPanel } from './DriftPanel'
+import { CapacityPanel } from './CapacityPanel'
 import { BroadcastPanel } from './BroadcastPanel'
 import { PatchPanel } from './PatchPanel'
 import { LogTailPanel } from './LogTailPanel'
 import { CronPanel } from './CronPanel'
+import { RulesPanel } from './RulesPanel'
+import { ChangeLogPanel } from './ChangeLogPanel'
 import { MODULES, moduleEnabled, type ModuleDef, type ModuleId } from '../../../../shared/modules'
 import { openSettings, useNav } from '../../store/nav'
 import { DockerPanel } from '../docker/DockerPanel'
@@ -403,6 +408,21 @@ export function FleetMonitor(): React.JSX.Element {
           <AccessPanel servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
         </div>
       )}
+      {moduleEnabled(modules, 'capacity') && (
+        <div style={show('capacity')}>
+          <CapacityPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'posture') && (
+        <div style={show('posture')}>
+          <PosturePanel servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'drift') && (
+        <div style={show('drift')}>
+          <DriftPanel servers={servers} />
+        </div>
+      )}
       {moduleEnabled(modules, 'patch') && (
         <div style={show('patch')}>
           <PatchPanel servers={servers} />
@@ -422,6 +442,16 @@ export function FleetMonitor(): React.JSX.Element {
       {moduleEnabled(modules, 'cron') && (
         <div style={show('cron')}>
           <CronPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'rules') && (
+        <div style={show('rules')}>
+          <RulesPanel servers={servers} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'changeLog') && (
+        <div style={show('changeLog')}>
+          <ChangeLogPanel servers={servers} />
         </div>
       )}
       {moduleEnabled(modules, 'docker') && (

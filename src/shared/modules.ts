@@ -27,6 +27,11 @@ export type ModuleId =
   | 'inventory'
   | 'patch'
   | 'access'
+  | 'posture'
+  | 'capacity'
+  | 'rules'
+  | 'changeLog'
+  | 'drift'
 
 export interface ModuleDef {
   id: ModuleId
@@ -105,6 +110,97 @@ export const MODULES: ModuleDef[] = [
     // Every one of those reads is a read a person could do by hand, none of
     // them mutates anything, and no private key is touched anywhere. It is
     // still not something to discover after the fact.
+    defaultEnabled: false
+  },
+  {
+    id: 'capacity',
+    label: 'Capacity trends',
+    detail:
+      'How full a host is getting and when it runs out — "this disk fills in eleven days" — drawn from the samples the monitor already writes. It stores nothing of its own, schedules nothing and evaluates nothing in the background: every line is derived on demand from history that exists whether or not this is on. A forecast is never stated without the window it was drawn from, and a gap where a host was unreachable is left as a hole in the line rather than drawn across.',
+    // OFF for a fresh install too, and this one is the cheapest module in the
+    // list — it reads the local history store and opens no connection at all.
+    //
+    // Off anyway, for the reason `backfillModules` exists: an upgrade is not
+    // consent, and a fresh install that arrived with nine tabs already open
+    // would be the bloat this registry was built to avoid. Nothing here argues
+    // that a module has to be dangerous to be optional.
+    defaultEnabled: false
+  },
+  {
+    id: 'changeLog',
+    label: 'Change log',
+    detail:
+      '"What did I change on Tuesday" — one timeline over four records that already exist: shells run on this machine, what you confirmed before a job or a broadcast ran, what an agent did through the MCP bridge, and the alerts, jobs and store events the durable history keeps. Metadata only: commands and targets, never output. It reads; it stores nothing of its own and writes nothing.',
+    // OFF by default, and this one's toggle gates the READ rather than the tab
+    // — see the `changelog:read` handler in main/index.ts, which returns a page
+    // saying "switched off" without opening a file.
+    //
+    // Gated because recording a person's work is a different consent question
+    // from recording an agent's, which is the roadmap's own words for item 14.
+    // The four records are written whether or not this is on, each for its own
+    // reasons and each relied on by something else; what a person consents to
+    // here is having them ASSEMBLED into one account of their week. That
+    // assembled thing is more useful than any of its parts, which is exactly
+    // why it is also the part to ask about.
+    defaultEnabled: false
+  },
+  {
+    id: 'rules',
+    label: 'Rules',
+    detail:
+      'When an alert fires, run a job or post to the webhook \u2014 with a ceiling on how often it may act. A rule runs the job it was confirmed with, on the hosts it was confirmed for, and refuses if either has changed. It is not a workflow language: one trigger, one filter, one action, one rate limit.',
+    // OFF by default, and this is the module the default matters most for.
+    //
+    // Every other module here is something a person presses. This one acts on
+    // its own, on hosts, while nobody is watching. `backfillModules` already
+    // guarantees an upgrade never switches a module on for an existing install;
+    // `defaultEnabled: false` extends that to a new one, so no install has ever
+    // had an unattended execution path appear without somebody choosing it.
+    //
+    // What the toggle gates is the PANEL and the sweep, not the rules
+    // themselves \u2014 a rule that exists stays on disk with its approval record
+    // intact, so switching the module off and on again does not silently
+    // re-arm anything. Disarming is per rule, on the rule.
+    defaultEnabled: false
+  },
+  {
+    id: 'drift',
+    label: 'Configuration drift',
+    detail:
+      'Compare a watched configuration file across the estate and say where it diverges \u2014 "all twelve web servers have this nginx.conf, three do not". Every file is compared under normalisation rules that are named on screen, so two files that differ and are called the same say which rule ate the difference. A host that could not be read is never reported as a host that matches. Read-only: it never writes a file back to bring a host into line.',
+    // OFF by default, and this one's toggle gates the COLLECTION rather than
+    // just the panel \u2014 see FleetSamplerDeps.driftEnabled.
+    //
+    // Not for what the probe DOES on the host: it reads seven world-readable
+    // files with no sudo anywhere, which is less than the inventory probe does
+    // and far less than the access one. It is gated for what it PRODUCES, which
+    // is the posture module's argument rather than the access module's.
+    //
+    // A table of which hosts differ from a known-good configuration is a table
+    // of which hosts are behind. "These three still have PasswordAuthentication
+    // where the other twelve do not" is a target list, kept fresh, across the
+    // whole estate. That is worth having \u2014 it is why the item exists \u2014 and it
+    // is not worth having without somebody deciding to have it.
+    defaultEnabled: false
+  },
+  {
+    id: 'posture',
+    label: 'Security posture',
+    detail:
+      'What every host already knows about its own exposure: which firewall is active and the shape of its rules, whether SELinux or AppArmor is enforcing, how sshd compares with a hardening baseline, and how many logins have failed. Read-only, and emphatically not a vulnerability scanner — the pending security update count comes from the Inventory probe, which asks the host\'s own package manager, rather than from a CVE feed. A check that could not run is shown as unread, never as passed.',
+    // OFF by default, and this one's toggle gates the COLLECTION rather than
+    // just the panel — see FleetSamplerDeps.postureEnabled.
+    //
+    // The access module beside it is gated for what its probe DOES on the host.
+    // This one is gated for what it PRODUCES. Every individual read here is one
+    // an operator could do by hand and none of them changes anything; the
+    // assembled result is a fleet-wide table of which host has no firewall,
+    // which still takes passwords over ssh, and which has SELinux switched off
+    // — a map of how to attack the estate, kept fresh in one process's memory
+    // and written into the durable store.
+    //
+    // That is worth having, which is why it exists. It is not worth having
+    // without somebody deciding to have it.
     defaultEnabled: false
   },
   {
