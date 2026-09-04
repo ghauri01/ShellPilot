@@ -427,6 +427,25 @@ export interface VpnKeygenResult {
   vaultEntryId?: string
 }
 
+/**
+ * Where an frp server token ended up in the vault.
+ *
+ * Named beside `VpnKeygenResult` because it is the same shape of operation —
+ * a secret the renderer holds for a moment goes into the vault and only a ref
+ * comes back — and deliberately NOT the same type. A keygen result carries the
+ * private key back out so the user can copy the half they have to authorise
+ * somewhere else; a token has no such half. Sharing the type would put an
+ * optional `privateKey` on a result that must never have one.
+ */
+export interface FrpTokenResult {
+  ok: boolean
+  error?: string
+  errorCode?: VpnErrorCode
+  /** Copy this onto `FrpSpec.auth.tokenRef`. */
+  tokenRef?: VpnSecretRef
+  vaultEntryId?: string
+}
+
 export interface VpnPublicKeyResult {
   ok: boolean
   error?: string
