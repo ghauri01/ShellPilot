@@ -3,6 +3,7 @@ import { useApp } from './app'
 import { onServerForgotten } from './serverCleanup'
 import { DISK_DANGER, isDiskCritical } from '../components/monitor/hostHealth'
 import { EVENT_ALERT_KINDS } from '../../../shared/webhook'
+import type { RunbookNote, RunbookView, RunbooksBridge } from '../../../shared/runbooks'
 import type {
   AlertKind as WebhookAlertKind,
   EventAlertKind,
@@ -1633,4 +1634,82 @@ export function resetAlertsForTests(): void {
   hydrated = true
   hydrating = null
   useAlerts.setState({ active: {} })
+}
+
+// ---------------------------------------------------------------------------
+// Runbooks — roadmap item 28
+// ---------------------------------------------------------------------------
+//
+// Two thin wrappers over the two bridge channels, here rather than in the panel
+// so the "we could not ask" case is decided once. Everything a runbook says is
+// computed in main; nothing about it is state this store holds, and there is
+// deliberately no cache — a runbook read is what was run, and a stale one is
+// the wrong incident.
+
+/**
+ * Said when the preload bridge has no `runbooks` at all.
+ *
+ * A FOURTH thing, distinct from every answer the read itself can give: the
+ * store was not consulted, the notes file was not opened, and nothing is known
+ * either way. Under `electron-vite dev` the renderer hot-reloads while the
+ * process still holds the preload bundle it booted with, so this is a real
+ * state and not a theoretical one.
+ */
+export const RUNBOOK_BRIDGE_MISSING =
+  'This build cannot reach the runbook — the preload bridge has no runbooks channel. Nothing ' +
+  'was read, so this is not a claim that there is nothing to read. Restart the app.'
+
+/**
+ * The runbooks half of the preload bridge.
+ *
+ * Reached through a cast, and this is the ONE place in the renderer that does
+ * it. `ShellPilotApi` is `typeof api` in src/preload/index.ts, and that file is
+ * not this change's to edit — the hunk that adds the `runbooks` namespace to it
+ * is written out as a patch instead (main-index-runbooks.patch). The moment it
+ * lands, `ShellPilotApi` carries the namespace, this body becomes
+ * `window.shellpilot?.runbooks`, and the cast is deleted. A function rather
+ * than an inline cast at each call site so that deletion is one line rather
+ * than a search.
+ *
+ * `Partial` because the two halves ship together in a packaged build but not
+ * under `electron-vite dev`, where the renderer hot-reloads against the preload
+ * bundle the process booted with — src/renderer/src/lib/bridge.ts explains why
+ * a missing METHOD is a real state and not a theoretical one.
+ */
+function runbooksBridge(): Partial<RunbooksBridge> | undefined {
+  return (window.shellpilot as unknown as { runbooks?: Partial<RunbooksBridge> } | undefined)
+    ?.runbooks
+}
+
+/** The runbook for one alert kind on one host, or `null` when the bridge could
+ *  not be asked at all. A rejected read is `null` for the same reason: an
+ *  exception is not an empty runbook. */
+export async function readRunbook(
+  kind: AlertKind,
+  hostId: string | null
+): Promise<RunbookView | null> {
+  const read = runbooksBridge()?.read
+  if (typeof read !== 'function') return null
+  try {
+    const view = await read(kind, hostId)
+    return view ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Write, replace or (with an empty string) remove the operator's note.
+ *  `ok: false` means it did not land — never shown back as if it had. */
+export async function saveRunbookNote(
+  kind: AlertKind,
+  hostId: string | null,
+  text: string
+): Promise<{ ok: boolean; note: RunbookNote | null }> {
+  const save = runbooksBridge()?.saveNote
+  if (typeof save !== 'function') return { ok: false, note: null }
+  try {
+    return await save(kind, hostId, text)
+  } catch {
+    return { ok: false, note: null }
+  }
 }
