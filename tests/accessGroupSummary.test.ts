@@ -78,7 +78,7 @@ describe('summariseAccessGroup — built-in groups', () => {
     )
     expect(s.sentence).toBe(
       'Can see server details, run commands, read files, download files, query databases, and read server metrics without asking. ' +
-        'Cannot use sudo, add servers to the workspace, control VPNs and reverse proxies, write files, upload files, open SSH tunnels, read the host inventory and its pending security updates, or collect this host’s firewall rule list.'
+        'Cannot use sudo, add servers to the workspace, start and stop VPNs, and list reverse proxies, write files, upload files, open SSH tunnels, read the host inventory and its pending security updates, or collect this host’s firewall rule list.'
     )
     expect(s.counts).toEqual({ allow: 6, ask: 0, deny: 8 })
     expect(s.elevated).toEqual([])
@@ -101,7 +101,7 @@ describe('summariseAccessGroup — built-in groups', () => {
       'Can see server details, run commands, read files, download files, query databases, and read server metrics without asking.'
     )
     expect(s.clauses[1]).toBe(
-      'Asks you first before adding servers to the workspace, controlling VPNs and reverse proxies, writing files, uploading files, and opening SSH tunnels.'
+      'Asks you first before adding servers to the workspace, starting and stopping VPNs, and listing reverse proxies, writing files, uploading files, and opening SSH tunnels.'
     )
     expect(s.clauses[2]).toBe(
       'Cannot use sudo, read the host inventory and its pending security updates, or collect this host’s firewall rule list.'
@@ -143,7 +143,7 @@ describe('summariseAccessGroup — built-in groups', () => {
       'Can see server details, run commands, read files, write files, download files, upload files, open SSH tunnels, query databases, and read server metrics without asking.'
     )
     expect(s.clauses[1]).toBe(
-      'Asks you first before using sudo, adding servers to the workspace, and controlling VPNs and reverse proxies.'
+      'Asks you first before using sudo, adding servers to the workspace, and starting and stopping VPNs, and listing reverse proxies.'
     )
     expect(s.elevated).toEqual([])
   })
@@ -180,7 +180,7 @@ describe('summariseAccessGroup — edge cases', () => {
   it('names the dangerous capabilities when everything is allowed', () => {
     const s = summariseAccessGroup(group(everything('allow')))
     expect(s.sentence).toBe(
-      'Can do everything without asking — including using sudo, adding servers to the workspace, and controlling VPNs and reverse proxies.'
+      'Can do everything without asking — including using sudo, adding servers to the workspace, and starting and stopping VPNs, and listing reverse proxies.'
     )
     expect(s.elevated).toEqual(ELEVATED_CAPABILITIES)
   })
@@ -207,7 +207,7 @@ describe('summariseAccessGroup — edge cases', () => {
       group(allowAll({ manageServers: 'allow', vpnControl: 'allow', writeFiles: 'ask' }))
     )
     expect(
-      s.clauses[0].startsWith('Can use sudo, add servers to the workspace, control VPNs and reverse proxies,')
+      s.clauses[0].startsWith('Can use sudo, add servers to the workspace, start and stop VPNs, and list reverse proxies,')
     ).toBe(true)
     expect(s.elevated).toEqual(ELEVATED_CAPABILITIES)
   })
@@ -317,7 +317,7 @@ describe('summariseAccessGroup — path rules outrank the capability', () => {
     expect(s.overriddenByPath).toEqual(['readFiles'])
     // and it is not left sitting in the flat "Cannot" list as an absolute
     expect(s.clauses).toContain(
-      `Cannot add servers to the workspace, control VPNs and reverse proxies, ${HF}, or ${FW}.`
+      `Cannot add servers to the workspace, start and stop VPNs, and list reverse proxies, ${HF}, or ${FW}.`
     )
   })
 
@@ -384,7 +384,7 @@ describe('summariseAccessGroup — path rules outrank the capability', () => {
     )
     expect(s.clauses).toEqual([
       'Can see server details, run commands, download files, query databases, and read server metrics without asking.',
-      `Cannot use sudo, add servers to the workspace, control VPNs and reverse proxies, upload files, open SSH tunnels, ${HF}, or ${FW}.`,
+      `Cannot use sudo, add servers to the workspace, start and stop VPNs, and list reverse proxies, upload files, open SSH tunnels, ${HF}, or ${FW}.`,
       'Can read files without asking — except 19 path rules that block it.',
       'Cannot write files — except 2 path rules that ask you first.'
     ])
@@ -408,7 +408,7 @@ describe('summariseAccessGroup — path rules outrank the capability', () => {
       group(everything('allow'), [{ id: '1', pattern: '/etc/shadow', read: 'deny', write: 'deny' }])
     )
     expect(s.clauses[0]).toBe(
-      'Can do everything without asking except the file paths below — including using sudo, adding servers to the workspace, and controlling VPNs and reverse proxies.'
+      'Can do everything without asking except the file paths below — including using sudo, adding servers to the workspace, and starting and stopping VPNs, and listing reverse proxies.'
     )
     expect(s.elevated).toEqual(ELEVATED_CAPABILITIES)
   })

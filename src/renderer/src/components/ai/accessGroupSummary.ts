@@ -54,7 +54,17 @@ const PHRASING: Record<AiCapability, Phrasing> = {
     gerund: 'collecting this host’s firewall rule list'
   },
   manageServers: { verb: 'add servers to the workspace', gerund: 'adding servers to the workspace' },
-  vpnControl: { verb: 'control VPNs and reverse proxies', gerund: 'controlling VPNs and reverse proxies' }
+  // Says what it grants and what it does not, matching the capability's own
+  // detail. "Control VPNs and reverse proxies" reads as a power over both, and
+  // no value of this setting grants the second: an frp proxy makes a port on
+  // the operator's own machine reachable from the internet, so `set_vpn`
+  // refuses one at any setting and no access group can permit it. A summary
+  // that names a power the code refuses is how somebody ends up believing they
+  // granted less than they did — or more.
+  vpnControl: {
+    verb: 'start and stop VPNs, and list reverse proxies',
+    gerund: 'starting and stopping VPNs, and listing reverse proxies'
+  }
 }
 
 // The three that do not merely act on a server the user already trusts: sudo is
