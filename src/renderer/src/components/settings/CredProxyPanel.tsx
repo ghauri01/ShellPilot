@@ -71,7 +71,15 @@ const emptyDraft = (): Draft => ({
 
 export function CredProxyPanel(): React.JSX.Element {
   const [status, setStatus] = useState<CredProxyStatus | null>(null)
-  const [rules, setRules] = useState<CredProxyRule[]>([])
+  // `null` until read. The sentence this guards is REASSURING -- "the proxy
+  // will refuse everything, that is the safe state" -- and a false reassurance
+  // is worse than a false alarm: it tells an operator the credential proxy is
+  // locked down at a moment when it may hold permissive rules nobody has
+  // fetched yet.
+  const [rules, setRules] = useState<CredProxyRule[] | null>(null)
+  // And the case that would otherwise wait forever: no channel means no rules
+  // are coming, which is a definite answer rather than a pending one.
+  const [unavailable, setUnavailable] = useState(false)
   const [calls, setCalls] = useState<CredProxyCall[]>([])
   const [entries, setEntries] = useState<VaultEntry[]>([])
   const [token, setToken] = useState<string | null>(null)
@@ -81,7 +89,11 @@ export function CredProxyPanel(): React.JSX.Element {
 
   const refresh = useCallback(async (): Promise<void> => {
     const api = window.shellpilot?.credproxy
-    if (!api) return
+    if (!api) {
+      setUnavailable(true)
+      return
+    }
+    setUnavailable(false)
     const [s, r, c] = await Promise.all([api.status(), api.rules(), api.calls(50)])
     if (s) {
       setStatus(s)
@@ -282,7 +294,18 @@ export function CredProxyPanel(): React.JSX.Element {
         </button>
       </div>
 
-      {rules.length === 0 && !draft && (
+      {unavailable && (
+        <div className="s-note state-unknown">
+          This build does not expose the credential proxy, so what it would allow cannot be read
+          here.
+        </div>
+      )}
+
+      {!unavailable && rules === null && !draft && (
+        <div className="s-note state-unknown">Reading the rules…</div>
+      )}
+
+      {rules?.length === 0 && !draft && (
         <div className="s-note">
           No rules yet, so the proxy will refuse everything. That is the safe state, not a broken
           one.
@@ -290,7 +313,7 @@ export function CredProxyPanel(): React.JSX.Element {
       )}
 
       <ul className="credproxy-rules">
-        {rules.map((r) => (
+        {(rules ?? []).map((r) => (
           <li key={r.id} className="credproxy-rule">
             <div>
               <div className="rule-name">{r.name}</div>

@@ -228,7 +228,17 @@ export function BackupDestinations(): React.JSX.Element {
         </div>
       )}
 
-      {destinations.length === 0 && !editing && (
+      {file === null && !editing && (
+        // `destinations` is `file?.destinations ?? []`, so before the read it
+        // is empty for the same reason it is empty when there are none. Saying
+        // "no destinations yet" then is a claim about where the backups are
+        // going, made before anyone looked.
+        <p className="s-desc state-unknown" style={{ marginBottom: 10 }}>
+          Reading your backup destinations…
+        </p>
+      )}
+
+      {file !== null && destinations.length === 0 && !editing && (
         <p className="s-desc" style={{ marginBottom: 10 }}>
           No destinations yet. Backups still work through the file you download above.
         </p>

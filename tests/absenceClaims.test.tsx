@@ -4,6 +4,7 @@ import { render, screen } from '@testing-library/react'
 import { stubBridge } from './setup/renderer'
 import { AiApprovals } from '../src/renderer/src/components/ai/AiApprovals'
 import { ProcessesPanel } from '../src/renderer/src/components/processes/ProcessesPanel'
+import { CredProxyPanel } from '../src/renderer/src/components/settings/CredProxyPanel'
 
 // Screens that tell an operator nothing is there.
 //
@@ -90,5 +91,47 @@ describe('the supervised process list', () => {
     } as never)
     render(<ProcessesPanel />)
     expect(await screen.findByText(/No processes yet/)).toBeTruthy()
+  })
+})
+
+describe('the credential proxy rules, where the claim is reassuring', () => {
+  const proxy = (over: Record<string, unknown>) => ({
+    credproxy: {
+      status: async () => ({ enabled: false, listening: false, port: 8787, rules: 0 }),
+      calls: async () => [],
+      saveRule: async () => ({ ok: true }),
+      removeRule: async () => ({ ok: true }),
+      start: async () => ({ ok: true }),
+      stop: async () => ({}),
+      ...over
+    }
+  })
+
+  it('does not promise the proxy refuses everything before reading the rules', async () => {
+    // "No rules yet, so the proxy will refuse everything. That is the safe
+    // state" is a REASSURANCE, and a false reassurance is worse than a false
+    // alarm: it tells someone the proxy is shut when it may be holding
+    // permissive rules nobody has fetched.
+    stubBridge(proxy({ rules: () => new Promise(() => {}) }) as never)
+    render(<CredProxyPanel />)
+
+    expect(await screen.findByText(/Reading the rules/)).toBeTruthy()
+    expect(screen.queryByText(/refuse everything/)).toBeNull()
+  })
+
+  it('gives the reassurance once it has actually read them', async () => {
+    stubBridge(proxy({ rules: async () => [] }) as never)
+    render(<CredProxyPanel />)
+    expect(await screen.findByText(/refuse everything/)).toBeTruthy()
+  })
+
+  it('says the channel is missing rather than waiting on it forever', async () => {
+    // No credproxy bridge at all. Nothing is coming, so "reading…" would be a
+    // spinner with no end -- the same defect pointed the other way.
+    stubBridge({})
+    render(<CredProxyPanel />)
+
+    expect(await screen.findByText(/does not expose the credential proxy/)).toBeTruthy()
+    expect(screen.queryByText(/refuse everything/)).toBeNull()
   })
 })
