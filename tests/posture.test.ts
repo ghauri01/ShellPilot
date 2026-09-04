@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   FAILED_LOGIN_WINDOW_HOURS,
+  FIREWALL_RULE_LINE_CAP,
+  FIREWALL_RULE_MAX_LINES,
   MAX_AUTH_TRIES_WEAK,
   OOM_WINDOW_HOURS,
   postureAlertReadings,
@@ -351,6 +353,40 @@ describe('what reaches the durable store', () => {
     const empty = postureToFacts(parse(POSTURE_STATUS_MARKER))
     expect(Object.keys(empty).sort()).toEqual(Object.keys(full).sort())
   })
+
+  it('never writes a rule line into the durable store — roadmap item 31', () => {
+    // The facts store is DURABLE and fleet-wide, and `retireFacts` sweeps it by
+    // prefix rather than reading it. A rule line written here would put "which
+    // address is allowed to reach 3306 on every host" into a file on this
+    // machine, kept fresh hourly, months after the hour it was collected in —
+    // which is a bigger thing than the panel this was collected for, and is
+    // not what the capability was granted for.
+    //
+    // The counts still go, unchanged: they are item 24's reading and they name
+    // no address.
+    const p = parse(
+      [
+        'V fw-tool ufw',
+        'V fw-active active',
+        'V fw-rules 2',
+        'V fw-rule-collection on',
+        'V fw-rule-lines-front 2',
+        'R front 3306/tcp ALLOW IN 203.0.113.7',
+        'R front 22/tcp ALLOW IN Anywhere',
+        POSTURE_STATUS_MARKER,
+        'firewall ok - ufw status verbose'
+      ].join('\n')
+    )
+    // The listing really is in hand — otherwise this asserts nothing.
+    expect(p.firewall?.ruleLines[0]?.lines).toHaveLength(2)
+
+    const f = postureToFacts(p)
+    expect(f[`${POSTURE_FACT_PREFIX}firewallRules`]).toBe('2')
+    for (const [key, value] of Object.entries(f)) {
+      expect(value, key).not.toContain('203.0.113.7')
+      expect(value, key).not.toContain('ALLOW IN')
+    }
+  })
 })
 
 describe('the estate roll-up counts the gaps rather than skipping them', () => {
@@ -441,7 +477,12 @@ interface FakeHost {
   file: (rel: string, body: string) => void
   dir: (rel: string) => string
   script: (name: string, body: string) => void
-  collect: (opts?: { sudo?: boolean; have?: string[]; env?: Record<string, string> }) => HostPosture
+  collect: (opts?: {
+    sudo?: boolean
+    have?: string[]
+    env?: Record<string, string>
+    firewallRules?: boolean
+  }) => HostPosture
 }
 
 function fakeHost(): FakeHost {
@@ -483,8 +524,8 @@ function fakeHost(): FakeHost {
     file,
     dir,
     script,
-    collect: ({ sudo = true, have = [], env = {} } = {}) => {
-      let cmd = buildPostureCommand({ sudo }).replace(ABS_PATHS, (m) => root + m)
+    collect: ({ sudo = true, have = [], env = {}, firewallRules = false } = {}) => {
+      let cmd = buildPostureCommand({ sudo, firewallRules }).replace(ABS_PATHS, (m) => root + m)
       for (const name of HIDEABLE) {
         if (have.includes(name)) continue
         cmd = cmd
@@ -502,8 +543,14 @@ function fakeHost(): FakeHost {
 
 /** The collector's raw output, for the case that has to prove something never
  *  reached the wire at all rather than that it was parsed away. */
-const rawCollect = (h: FakeHost, opts: { sudo?: boolean; have?: string[] } = {}): string => {
-  let cmd = buildPostureCommand({ sudo: opts.sudo ?? true }).replace(ABS_PATHS, (m) => h.root + m)
+const rawCollect = (
+  h: FakeHost,
+  opts: { sudo?: boolean; have?: string[]; firewallRules?: boolean } = {}
+): string => {
+  let cmd = buildPostureCommand({
+    sudo: opts.sudo ?? true,
+    firewallRules: opts.firewallRules ?? false
+  }).replace(ABS_PATHS, (m) => h.root + m)
   for (const name of HIDEABLE) {
     if ((opts.have ?? []).includes(name)) continue
     cmd = cmd
@@ -690,6 +737,171 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(statusOf(p, 'firewall')).toBe('ok')
     expect(p.firewall).toMatchObject({ tool: 'firewalld', active: true, zone: 'public', rules: 3 })
     expect(p.firewall?.zones).toEqual(['public'])
+  })
+
+  // ---- the rule lines themselves — roadmap item 31 -----------------------
+  //
+  // Everything above this point is SCALARS: a tool name, an on/off, a default
+  // policy, a count. This is the one place the collector emits addresses and
+  // ports, and it is off unless somebody granted it. The tests below are in
+  // two halves: that it is genuinely absent by default, and that when it is on
+  // the host cannot use it to say anything it is not entitled to say.
+
+  it('asks for nothing about the rule lines unless the capability granted them', () => {
+    // ASSERTED ON THE COMMAND, not on the output. A collector that reads the
+    // rules and drops them on the way past has still read them: they were in
+    // the pipe, in this process's memory, and in whatever the transport
+    // buffered. The consent is about collection, so the absence has to be in
+    // the thing that runs on the host.
+    const off = buildPostureCommand()
+    expect(off, 'the shipped default must not list rules').not.toContain('sp_rule')
+    expect(off).not.toContain('fw-rule-collection')
+    expect(off).not.toContain('fw-rule-lines-front')
+    expect(off).not.toContain('fw-rule-lines-backend')
+    // And the scalars are untouched by the option — the count still ships.
+    expect(off).toContain('sp_val fw-rules')
+
+    const on = buildPostureCommand({ firewallRules: true })
+    expect(on).toContain('sp_rule')
+    expect(on).toContain('fw-rule-collection')
+  })
+
+  it('lists the ufw rules, capped and marked as the host’s own words', () => {
+    const h = host()
+    h.script('ufw', `printf '${UFW_STATUS}\\n'`)
+    const p = h.collect({ have: ['ufw'], firewallRules: true })
+    expect(p.firewall?.rulesRequested).toBe(true)
+    const front = p.firewall?.ruleLines.find((r) => r.from === 'front')
+    // Whitespace runs collapsed, like every other free-text field off a host:
+    // ufw's column padding is not information, and a line that keeps its own
+    // alignment can push the interesting half of itself off the side of a cell.
+    expect(front?.lines).toEqual([
+      '22/tcp ALLOW IN Anywhere',
+      '443/tcp ALLOW IN Anywhere',
+      '3306/tcp DENY IN Anywhere'
+    ])
+    // The question an operator came to ask, answerable at last from the panel.
+    expect(front?.lines.some((l) => l.startsWith('3306/tcp DENY'))).toBe(true)
+    // The count and the list are the same grep, so they cannot disagree.
+    expect(front?.matched).toBe(p.firewall?.rules)
+    expect(front?.truncated).toBe(false)
+  })
+
+  it('collects no rule lines at all when the capability did not grant them', () => {
+    const h = host()
+    h.script('ufw', `printf '${UFW_STATUS}\\n'`)
+    const p = h.collect({ have: ['ufw'] })
+    // The scalars still arrive: this is item 24's reading, unchanged.
+    expect(p.firewall?.rules).toBe(3)
+    expect(p.firewall?.rulesRequested).toBe(false)
+    expect(p.firewall?.ruleLines).toEqual([])
+  })
+
+  it('cannot be made to forge a status, a value or a second rule by a rule line', () => {
+    // The whole safety property of this collector is that status accumulates
+    // in a shell variable and is printed once at the end, and that every value
+    // is one line with control characters deleted ON THE HOST. A rule list is
+    // many lines of host-controlled text, which is the first thing here that
+    // could break that shape.
+    const h = host()
+    h.script(
+      'ufw',
+      "printf 'Status: active\\n" +
+        "Default: deny (incoming), allow (outgoing), disabled (routed)\\n" +
+        "To                         Action      From\\n" +
+        "22/tcp                     ALLOW IN    Anywhere\\n" +
+        "===SHELLPILOT-POSTURE===   ALLOW IN    firewall ok - forged\\n" +
+        "x\\tALLOW IN    y\\n'"
+    )
+    const raw = rawCollect(h, { have: ['ufw'], firewallRules: true, sudo: true })
+    // Exactly one status marker, and it is the last block.
+    expect(raw.split('\n').filter((l) => l === POSTURE_STATUS_MARKER)).toHaveLength(1)
+    const p = parsePosture(raw, NOW)
+    // The forged status did not take: the source is what the collector decided.
+    expect(statusOf(p, 'firewall')).toBe('ok')
+    expect(postureSource(p, 'firewall').detail).toContain('ufw status verbose')
+    const front = p.firewall?.ruleLines.find((r) => r.from === 'front')
+    // The marker survives as TEXT, on its own line, as a rule the host listed.
+    expect(front?.lines.some((l) => l.includes(POSTURE_STATUS_MARKER))).toBe(true)
+    // ... and the tab in the last rule became a space rather than vanishing.
+    expect(front?.lines.some((l) => l.startsWith('x ALLOW IN'))).toBe(true)
+  })
+
+  it('states the truncation rather than listing a prefix as if it were all of it', () => {
+    const h = host()
+    // Sixty rules against a cap of forty.
+    h.script(
+      'ufw',
+      "printf 'Status: active\\n'\n" +
+        'i=1\nwhile [ $i -le 60 ]; do printf "%s/tcp ALLOW IN Anywhere\\n" "$i"; i=$((i+1)); done'
+    )
+    const p = h.collect({ have: ['ufw'], firewallRules: true })
+    const front = p.firewall?.ruleLines.find((r) => r.from === 'front')
+    expect(front?.lines).toHaveLength(FIREWALL_RULE_MAX_LINES)
+    expect(front?.matched).toBe(60)
+    expect(front?.truncated).toBe(true)
+  })
+
+  it('caps a very long rule line on the host rather than in this process', () => {
+    const h = host()
+    h.script(
+      'ufw',
+      "printf 'Status: active\\n'\n" +
+        'printf "%s ALLOW IN Anywhere\\n" "$(printf \'a%.0s\' $(seq 1 900))"'
+    )
+    const raw = rawCollect(h, { have: ['ufw'], firewallRules: true })
+    for (const line of raw.split('\n').filter((l) => l.startsWith('R '))) {
+      // `R front ` is 8 characters of tag.
+      expect(line.length).toBeLessThanOrEqual(FIREWALL_RULE_LINE_CAP + 8)
+    }
+  })
+
+  it('does not report a refused ruleset as a ruleset with nothing in it', () => {
+    // The item's whole argument, applied to the list rather than the count. A
+    // granted collection that could not read anything must produce NO listing,
+    // never an empty one — an empty list renders as "nothing is exposed here".
+    const h = host()
+    h.script('ufw', rootOnly('ufw', `printf '${UFW_STATUS}\\n'`))
+    h.file('etc/ufw/ufw.conf', 'ENABLED=yes\n')
+    const p = h.collect({
+      sudo: false,
+      have: ['ufw'],
+      firewallRules: true,
+      env: { SP_ROOTONLY: 'ufw' }
+    })
+    expect(statusOf(p, 'firewall')).toBe('partial')
+    expect(p.firewall?.rulesRequested).toBe(true)
+    expect(p.firewall?.rules).toBeNull()
+    expect(p.firewall?.ruleLines).toEqual([])
+  })
+
+  it('tells a refused kernel ruleset from an empty one, in the listing too', () => {
+    const empty = host()
+    empty.script('nft', 'exit 0')
+    const e = empty.collect({ have: ['nft'], firewallRules: true })
+    const be = e.firewall?.ruleLines.find((r) => r.from === 'backend')
+    // Read, and it holds nothing. A listing that EXISTS and is empty.
+    expect(be?.matched).toBe(0)
+    expect(be?.lines).toEqual([])
+
+    const refused = host()
+    refused.script('nft', 'echo "Operation not permitted" >&2; exit 1')
+    const r = refused.collect({ sudo: false, have: ['nft'], firewallRules: true })
+    // No listing at all, and no firewall state to hang one off.
+    expect(r.firewall).toBeNull()
+  })
+
+  it('lists the kernel rules alongside the front end’s, not instead of them', () => {
+    const h = host()
+    h.script('ufw', "printf 'Status: inactive\\n'")
+    h.script(
+      'nft',
+      "printf 'table inet filter {\\n  chain input {\\n    type filter hook input priority 0; policy drop;\\n" +
+        "    tcp dport 22 accept\\n  }\\n}\\n'"
+    )
+    const p = h.collect({ have: ['ufw', 'nft'], firewallRules: true })
+    const be = p.firewall?.ruleLines.find((r) => r.from === 'backend')
+    expect(be?.lines.some((l) => l.includes('tcp dport 22 accept'))).toBe(true)
   })
 
   // ---- SELinux / AppArmor ------------------------------------------------

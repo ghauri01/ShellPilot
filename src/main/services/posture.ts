@@ -85,6 +85,22 @@ export const POSTURE_TIMEOUT_MS = 45_000
 export class PostureReader {
   constructor(private readonly deps: PostureDeps) {}
 
+  /**
+   * One collection.
+   *
+   * `opts` is the whole of the consent surface this class has, and the default
+   * matters: an empty options object collects the SCALARS ONLY — item 24's
+   * reading — and no firewall rule lines. The caller has to say
+   * `firewallRules: true`, which main does per server from the `firewallRules`
+   * capability on the access group governing it, and only for `allow`.
+   *
+   * Gating here rather than in the panel is item 31's decision and not a
+   * detail: the rules are omitted from the COMMAND, so an ungranted host is
+   * never asked for them, they never reach the wire, and they are never in
+   * this process at all. A reader that collected them and declined to display
+   * them would have had them in memory and in the transport's buffers, which
+   * outlives the decision not to draw them.
+   */
   async read(cfg: unknown, opts: PostureCollectOptions = {}): Promise<PostureProbe> {
     const command = buildPostureCommand(opts)
     try {

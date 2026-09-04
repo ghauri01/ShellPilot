@@ -298,7 +298,109 @@ export interface FirewallState {
     policyIn: string | null
     status: PostureStatus
   }
+  /**
+   * Whether the RULE LINES were asked for on this host at all — roadmap item
+   * 31, and the first thing a reader of this object has to know.
+   *
+   * False means nobody granted the capability, so `ruleLines` being empty says
+   * nothing about the host. True with an empty `ruleLines` means the read that
+   * would have produced them was refused. Those are opposite findings and a
+   * single empty array cannot carry both, which is why this is not inferred
+   * from the array's length.
+   */
+  rulesRequested: boolean
+  /**
+   * The rules themselves, as the host printed them, in at most two readings:
+   * the front end's own listing and the kernel tables underneath.
+   *
+   * A reading is present ONLY when its source answered. There is no empty
+   * listing standing in for a refusal — "this host lists no rules" and "this
+   * host would not tell us its rules" are the two answers this whole file
+   * exists to keep apart, and one of them is an all-clear.
+   */
+  ruleLines: FirewallRuleListing[]
 }
+
+// ---- The rules themselves — roadmap item 31 --------------------------------
+//
+// Item 24 reports SCALARS: a tool name, an on/off, a default policy, a count.
+// Every one of them goes through the single-line unforgeable path, which is the
+// strongest safety property this collector has. This is the one thing here that
+// is neither a count nor a word from a fixed vocabulary: it is ADDRESSES AND
+// PORTS, many lines of them, written by the host.
+//
+// So it is bounded three ways, all of them ON THE HOST:
+//
+//   * a cap on how many lines are emitted per reading, with the number that
+//     MATCHED emitted beside them, so a truncation is a stated fact rather than
+//     a shorter list that reads as a complete one;
+//   * a cap on the length of each line;
+//   * the same control-character deletion every other value gets, so a rule
+//     cannot become two records, cannot forge a record tag and cannot forge the
+//     status marker. The status block is still accumulated in a shell variable
+//     and printed once at the end, where nothing read out of a file has
+//     touched it.
+//
+// And it is COLLECTED ONLY WHERE SOMEBODY GRANTED IT — see
+// PostureCollectOptions.firewallRules. The commands that list rules are not in
+// the built script otherwise.
+//
+// What is deliberately NOT here: any judgement about whether a rule is a good
+// one. "3306/tcp ALLOW IN Anywhere" is a fact an operator can act on. "This
+// rule is insecure" is a claim this tool cannot support and would be wrong
+// about the first time somebody has a reason — a database deliberately open to
+// a peered network, a rule that a security group in front of the NIC already
+// narrows. Report what is there.
+
+/** Which reading a listed line came from. The front end (ufw, firewalld) and
+ *  the kernel tables (nft, iptables) are listed separately for the reason they
+ *  are counted separately: one being empty says nothing about the other. */
+export const FIREWALL_RULE_ORIGINS = ['front', 'backend'] as const
+export type FirewallRuleOrigin = (typeof FIREWALL_RULE_ORIGINS)[number]
+
+/**
+ * How many rule lines one reading may emit, applied on the host.
+ *
+ * Forty is enough for the great majority of hosts and small enough that a
+ * machine with a generated ruleset of ten thousand lines cannot turn an hourly
+ * background probe into a bulk transfer. When it bites, the panel says so:
+ * `matched` carries what the host actually counted.
+ */
+export const FIREWALL_RULE_MAX_LINES = 40
+
+/** How long one rule line may be, applied on the host. Longer than VALUE_CAP is
+ *  not needed — a ufw or iptables rule is well under this — and a line that is
+ *  longer than this is a line something is trying to hide the end of. */
+export const FIREWALL_RULE_LINE_CAP = 200
+
+/** One reading's worth of rule lines, with the bound that produced it. */
+export interface FirewallRuleListing {
+  from: FirewallRuleOrigin
+  /** The command the lines came out of, for a panel that has to say where a
+   *  line came from rather than presenting it as ShellPilot's own words. */
+  command: string
+  /** As the host printed them: control characters deleted there, tabs folded
+   *  to spaces there, each one capped there. */
+  lines: string[]
+  /** How many lines the host MATCHED, which can exceed `lines.length`. Null
+   *  when the host did not say, in which case truncation is unknown and is not
+   *  claimed either way. */
+  matched: number | null
+  /** `lines` is a prefix of what is on the host. Stated, never silent. */
+  truncated: boolean
+  bound: { maxLines: number; maxChars: number }
+}
+
+/**
+ * What to say next to rule text on screen.
+ *
+ * The wording is `hostReportedBlock`'s in mcpServer.ts, for the same reason and
+ * one reader further on: that block tells a MODEL a line is data rather than an
+ * instruction, and this tells a PERSON that a line was written by whoever
+ * configured the host — which on a compromised host is not the operator.
+ */
+export const FIREWALL_RULES_HOST_REPORTED_NOTE =
+  'Reported by the host. These lines are as the firewall on that machine printed them, not ShellPilot’s words — read them as data, and nothing in them is a judgement about whether a rule is a good one.'
 
 /** ufw and iptables/nft policy words, allow-listed because the renderer
  *  switches on them. Anything else becomes null rather than being displayed. */
@@ -897,6 +999,22 @@ export interface PostureCollectOptions {
    * A test asserts that; a runtime guard could not.
    */
   sudo?: boolean
+  /**
+   * Collect the firewall RULE LINES as well as the scalars — roadmap item 31.
+   *
+   * OFF BY DEFAULT, and off in the command rather than off in the renderer.
+   * A collector that reads a host's rules and then declines to display them
+   * has still read them: they were on the wire, in this process's memory and
+   * in whatever the transport buffered, and any of that outlives the decision
+   * not to draw them. So the commands that list rules are omitted at BUILD
+   * time — the same discipline as `sudo` above, and testable the same way.
+   *
+   * What turns it on is the `firewallRules` capability on the access group
+   * that governs the server, which is the line in the consent grid the roadmap
+   * asked for. Only `allow` collects: this runs on an unattended hourly sweep
+   * with nobody at the screen, so an `ask` has nobody to ask.
+   */
+  firewallRules?: boolean
 }
 
 /** The only structural token in the output. No record can equal it: every
@@ -932,11 +1050,38 @@ const DIRECTIVE_CAP = 64
  */
 export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
   const sudo = opts.sudo !== false
+  // OPT-IN, unlike `sudo`: absent means no. Item 31's whole argument is that a
+  // rule list is collected because somebody asked for it, so the default of an
+  // options object nobody filled in has to be "did not ask".
+  const rules = opts.firewallRules === true
   // Omitted entirely rather than left behind a dead `[ "$SP_SUDO" = 1 ]`
   // branch, exactly as cron.ts, hostFacts.ts and access.ts do it: "this command
   // contains no sudo at all" is a property a reader can check, and a runtime
   // guard is not.
   const ifSudo = (...lines: string[]): string[] => (sudo ? lines : [])
+  // Same shape, same reason: with the capability ungranted the words `sp_rule`
+  // and `fw-rule-lines-front` do not appear in the script at all, so "this
+  // command does not read the rules" is a property somebody can check by
+  // reading it — and a test asserts exactly that.
+  const ifRules = (...lines: string[]): string[] => (rules ? lines : [])
+  /**
+   * List one reading's rules: count what matched, then emit at most the cap.
+   *
+   * The COUNT AND THE LIST ARE THE SAME GREP, deliberately. A list filtered one
+   * way beside a count taken another is two answers to one question, and the
+   * one a person would trust is whichever is on screen.
+   *
+   * `|| true` on the counting grep for the reason every other counting grep
+   * here has it: grep exits 1 when it selects nothing, which is the answer
+   * zero rather than an error. `while read` over a pipe rather than `for` so a
+   * rule containing a space stays one rule.
+   */
+  const listRules = (origin: FirewallRuleOrigin, blob: string, pattern: string): string[] =>
+    ifRules(
+      `SP_RL=$(printf '%s\\n' "${blob}" | grep -E '${pattern}' || true)`,
+      `sp_val fw-rule-lines-${origin} "$(printf '%s\\n' "$SP_RL" | grep -c . || true)"`,
+      `printf '%s\\n' "$SP_RL" | head -n ${FIREWALL_RULE_MAX_LINES} | while IFS= read -r SP_L; do sp_rule ${origin} "$SP_L"; done`
+    )
   const probe = sudo ? `SP_SUDO=0\n[ "$(${SUDO_PROBE})" = SP_SUDO_OK ] && SP_SUDO=1` : 'SP_SUDO=0'
 
   // One binary lookup, stashed under its own name. resolveBinary writes SP_BIN,
@@ -976,6 +1121,16 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     // second line, forge a record tag, or forge the status marker.
     `sp_clean() { printf '%s' "$1" | tr '\\011' ' ' | tr -d '\\000-\\037\\177' | cut -c1-${VALUE_CAP}; }`,
     'sp_val() { SP_V=$(sp_clean "$2"); [ -n "$SP_V" ] && printf \'V %s %s\\n\' "$1" "$SP_V"; }',
+    // One firewall rule line — roadmap item 31, and the only record here whose
+    // payload is neither a count nor a word from a fixed list. It gets the
+    // SAME scrub as every other value (tabs to spaces first, then control
+    // characters deleted, so a rule can never become a second record or forge
+    // the status marker) and its own tighter cap. The origin is a literal this
+    // file wrote, never anything read off the host, so a rule that begins with
+    // the word `front` is a rule whose text begins with `front`.
+    ...ifRules(
+      `sp_rule() { SP_V=$(printf '%s' "$2" | tr '\\011' ' ' | tr -d '\\000-\\037\\177' | cut -c1-${FIREWALL_RULE_LINE_CAP}); [ -n "$SP_V" ] && printf 'R %s %s\\n' "$1" "$SP_V"; }`
+    ),
     // One sshd directive, name and value together on one line, because the
     // parser has to see which key a value belongs to rather than trusting
     // position. Emitted once per matching line rather than once per directive,
@@ -1012,6 +1167,11 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     ...findBin('firewall-cmd', 'SP_FWC'),
     ...findBin('nft', 'SP_NFT'),
     ...findBin('iptables', 'SP_IPT'),
+    // Emitted whenever the rule collection was BUILT IN, before anything is
+    // read, so the parser can tell "nobody granted this" from "it was granted
+    // and every read was refused". Those have different fixes and only one of
+    // them is about the host.
+    ...ifRules('sp_val fw-rule-collection on'),
     'SP_FW_READ=0',
     'SP_FW_MISS=0',
     'SP_FW_W="-"',
@@ -1043,6 +1203,9 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     // that has already been found once in this codebase.
     `sp_val fw-rules "$(printf '%s\\n' "$SP_OUT" | grep -c -E '(ALLOW|DENY|REJECT|LIMIT)[[:space:]]+(IN|OUT|FWD)' || true)"`,
     `sp_val fw-deny "$(printf '%s\\n' "$SP_OUT" | grep -c -E '(DENY|REJECT)[[:space:]]+(IN|OUT|FWD)' || true)"`,
+    // The rules themselves — item 31. The SAME grep that produced the count
+    // above, so the list and the number cannot disagree.
+    ...listRules('front', '$SP_OUT', '(ALLOW|DENY|REJECT|LIMIT)[[:space:]]+(IN|OUT|FWD)'),
     'SP_FW_READ=1',
     'SP_FW_D="ufw status verbose"',
     // TRAVERSAL BEFORE EXISTENCE. `chmod 700 /etc/ufw` makes `[ -r
@@ -1105,6 +1268,14 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     `SP_RR=$(printf '%s\\n' "$SP_LA" | grep -c -E '^[[:space:]]*rule ' || true)`,
     `SP_SVN=$(printf '%s\\n' "$SP_SV" | tr ' ' '\\n' | grep -c . || true)`,
     'sp_val fw-rules "$((SP_SVN + SP_RR))"',
+    // What this zone lets in, as firewalld itself prints it: the services and
+    // ports lines and every rich rule. An empty field (`protocols:` with
+    // nothing after it) is dropped rather than listed as a rule.
+    ...listRules(
+      'front',
+      '$SP_LA',
+      '^[[:space:]]*((services|ports|protocols|forward-ports|source-ports):[[:space:]]*[^[:space:]]|rule )'
+    ),
     'else',
     'SP_FW_MISS=1',
     'SP_FW_D="firewalld is running and listing its rules needs root on this host"',
@@ -1143,6 +1314,8 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     'sp_val fw-backend nftables',
     `sp_val fw-backend-rules "$(printf '%s\\n' "$SP_OUT" | grep -c -E '^[[:space:]]+[a-z]' || true)"`,
     `sp_val fw-backend-policy "$(printf '%s\\n' "$SP_OUT" | grep -E 'hook input' | head -1 | sed -n 's/.*policy[[:space:]]*\\([a-z]*\\).*/\\1/p')"`,
+    // The same indented-line pattern the count uses, for listRules' reason.
+    ...listRules('backend', '$SP_OUT', '^[[:space:]]+[a-z]'),
     'SP_BE_ST=ok',
     'else',
     'SP_BE_ST=denied',
@@ -1165,6 +1338,9 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     'sp_val fw-backend iptables',
     `sp_val fw-backend-rules "$(printf '%s\\n' "$SP_OUT" | grep -c '^-A ' || true)"`,
     `sp_val fw-backend-policy "$(printf '%s\\n' "$SP_OUT" | grep -E '^-P INPUT ' | head -1 | sed 's/^-P INPUT[[:space:]]*//')"`,
+    // `-A` only, matching the count. The chain policies are already reported
+    // as fw-backend-policy and listing them here would count them twice.
+    ...listRules('backend', '$SP_OUT', '^-A '),
     'SP_BE_ST=ok',
     'else',
     'SP_BE_ST=denied',
@@ -1780,6 +1956,9 @@ const VALUE_KEYS = [
   'fw-backend-rules',
   'fw-backend-policy',
   'fw-backend-status',
+  'fw-rule-collection',
+  'fw-rule-lines-front',
+  'fw-rule-lines-backend',
   'mac-system',
   'mac-mode',
   'mac-enabled',
@@ -2195,6 +2374,8 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
   const directives = new Map<SshdDirective, string[]>()
   /** One entry per file the bounded search found, in the order it found them. */
   const certRecords: { body: string; path: string }[] = []
+  /** Firewall rule lines, per reading, in the order the host printed them. */
+  const ruleRecords = new Map<FirewallRuleOrigin, string[]>()
 
   for (const raw of lines.slice(0, markerAt === -1 ? lines.length : markerAt)) {
     const line = raw.replace(/\r$/, '')
@@ -2206,6 +2387,31 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
       if (!(VALUE_KEYS as readonly string[]).includes(key)) continue
       // Last wins, matching the collector's own last-definition-wins reads.
       values.set(key as ValueKey, rest.slice(sp + 1))
+      continue
+    }
+    if (line.startsWith('R ')) {
+      // `R <origin> <text>`. The origin is a literal the collector wrote and is
+      // allow-listed here, so a record with anything else in that position was
+      // not written by this build and is dropped rather than filed under a
+      // name the panel would then render.
+      const rest = line.slice(2)
+      const sp = rest.indexOf(' ')
+      if (sp === -1) continue
+      const origin = rest.slice(0, sp)
+      if (!(FIREWALL_RULE_ORIGINS as readonly string[]).includes(origin)) continue
+      // Capped on the way in as well as on the host, for DIRECTIVE_CAP's
+      // reason: the host's `head -n` is what should bound this, and a host that
+      // ignored it must not be able to make the panel draw ten thousand rules.
+      const seen = ruleRecords.get(origin as FirewallRuleOrigin) ?? []
+      if (seen.length < FIREWALL_RULE_MAX_LINES) {
+        // freeText again, on top of the host's own scrub: `tr -d` works on
+        // BYTES and U+202E is three of them. A bidi override in a rule reorders
+        // what a person sees without changing what the parser read, which is
+        // the wrong way round for an address somebody is about to act on.
+        const text = freeText(rest.slice(sp + 1))
+        if (text !== null) seen.push(text.slice(0, FIREWALL_RULE_LINE_CAP))
+      }
+      ruleRecords.set(origin as FirewallRuleOrigin, seen)
       continue
     }
     if (line.startsWith('C ')) {
@@ -2278,6 +2484,35 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
   // `fw-backend-status` is deliberately NOT counted as content: the collector
   // emits it on every run, including the `unsupported` one, so counting it
   // would make this condition true for every host.
+  // ---- the rule lines — item 31 ------------------------------------------
+  //
+  // A listing exists for a reading ONLY when that reading answered, which the
+  // collector says by emitting its `fw-rule-lines-*` count — zero included.
+  // Without the count there is no listing at all, so "the ruleset was refused"
+  // can never arrive as "the ruleset is empty".
+  const ruleCommand: Record<FirewallRuleOrigin, string> = {
+    front: fwTool === 'firewalld' ? 'firewall-cmd --list-all' : 'ufw status verbose',
+    backend: backendTool === 'iptables' ? 'iptables -S' : 'nft list ruleset'
+  }
+  const rulesRequested = values.get('fw-rule-collection')?.trim() === 'on'
+  const ruleLines: FirewallRuleListing[] = []
+  for (const origin of FIREWALL_RULE_ORIGINS) {
+    const matched = parseCount(values.get(`fw-rule-lines-${origin}` as ValueKey))
+    if (matched === null) continue
+    const lines = ruleRecords.get(origin) ?? []
+    ruleLines.push({
+      from: origin,
+      command: ruleCommand[origin],
+      lines,
+      matched,
+      // A host that matched more than it sent has been cut. Stated here so no
+      // renderer has to derive it, and so a listing whose count went missing
+      // does not silently claim to be complete.
+      truncated: matched > lines.length,
+      bound: { maxLines: FIREWALL_RULE_MAX_LINES, maxChars: FIREWALL_RULE_LINE_CAP }
+    })
+  }
+
   const firewall: FirewallState | null =
     fwTool === null && backendTool === null && fwActive === null && fwRules === null && fwBackendRules === null
       ? null
@@ -2295,7 +2530,9 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
             rules: fwBackendRules,
             policyIn: oneOf(values.get('fw-backend-policy'), FIREWALL_POLICIES),
             status: backendStatus
-          }
+          },
+          rulesRequested,
+          ruleLines
         }
 
   // ---- SELinux / AppArmor ------------------------------------------------
@@ -2736,6 +2973,19 @@ export function postureToFacts(posture: HostPosture): Record<string, string> {
   put('firewallPolicyIn', posture.firewall?.policyIn ?? null, 'firewall')
   put('firewallRules', posture.firewall?.rules ?? null, 'firewall')
   put('firewallDenyRules', posture.firewall?.denyRules ?? null, 'firewall')
+  // AND NOT THE RULE LINES — roadmap item 31, and the one thing in this
+  // collection that stops here.
+  //
+  // Everything else in this function is a count or a word from a fixed
+  // vocabulary. A rule line is an address and a port, and this store is
+  // durable, fleet-wide and swept by prefix rather than read: writing them
+  // would keep "which address may reach 3306 on every host in the estate" on
+  // this disk months after the hour it was collected in. What the capability
+  // was granted for is a person looking at one host's rules in the panel, and
+  // the shape of that consent does not stretch to a fleet-wide history nobody
+  // asked for. The count goes; the addresses do not.
+  //
+  // tests/posture.test.ts asserts it, because a comment is not a mechanism.
   put('firewallBackend', posture.firewall?.backend.tool ?? null, 'firewall')
   put('firewallBackendRules', posture.firewall?.backend.rules ?? null, 'firewall')
   put('macSystem', posture.mandatoryAccess?.system ?? null, 'mandatory-access')
