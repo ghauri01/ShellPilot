@@ -263,6 +263,7 @@ import {
 } from './services/biometrics'
 import { listAudit } from './services/auditLog'
 import { recordJobApproval } from './services/approvalLog'
+import { planCronEditOnHost, writeCronEdit } from './services/cronEdit'
 import { startMcpServer, stopMcpServer, mcpServerStatus, explainSessionAccess } from './services/mcpServer'
 
 const isDev = !app.isPackaged
@@ -2004,6 +2005,46 @@ ipcMain.handle(
     }
     return out
   }
+)
+
+// ---- Changing what is scheduled ----
+//
+// Reading was shipped alone first so the parser could be proved before anything
+// wrote, and proving it found two silent misreads. This is the write half, and
+// it keeps that posture: the plan is derived against the host's OWN current
+// file rather than against the list the panel is showing, because a list that
+// was collected while /etc/cron.d was unreadable is missing lines, and an edit
+// planned against it deletes them.
+//
+// `exec` and `recordApproval` are injected rather than imported by the service
+// so that file stays free of electron — which is what lets the shell-level
+// tests run the real command string against a temp tree.
+const cronEditDeps = {
+  exec: (cfg: unknown, command: string, timeoutMs: number) =>
+    sshExec(resolveChainSecrets(cfg as SshConnectConfig), command, timeoutMs, false),
+  recordApproval: recordJobApproval
+}
+
+ipcMain.handle(
+  'cron:plan-edit',
+  async (
+    _e,
+    target: { serverId: string; serverName: string; cfg: unknown },
+    edit: unknown,
+    opts?: { sources?: CronSourceReport[] }
+  ) => planCronEditOnHost(cronEditDeps, target as never, edit as never, opts ?? {})
+)
+
+// The write is separate from the plan on purpose: what the operator approved is
+// the `after` text they were shown, and passing it back means the thing written
+// is the thing confirmed rather than a re-derivation that may have moved.
+ipcMain.handle(
+  'cron:write-edit',
+  async (
+    _e,
+    target: { serverId: string; serverName: string; cfg: unknown },
+    req: { before: string; after: string; token: string; runId: string; approval?: unknown }
+  ) => writeCronEdit(cronEditDeps, target as never, req)
 )
 
 // ---- Webhook alerts ----

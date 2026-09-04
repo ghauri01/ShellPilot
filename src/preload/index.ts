@@ -524,7 +524,20 @@ const api = {
         sources?: CronSourceReport[]
         error?: string
       }[]
-    > => ipcRenderer.invoke('cron:collect', targets)
+    > => ipcRenderer.invoke('cron:collect', targets),
+    // Kept beside `collect` rather than in a namespace of its own, because the
+    // panel checks for these at runtime: a main process that has not been
+    // taught the channels answers nothing, and an edit button that does nothing
+    // is worse than no edit button.
+    planEdit: (
+      target: { serverId: string; serverName: string; cfg: unknown },
+      edit: unknown,
+      opts?: unknown
+    ): Promise<unknown> => ipcRenderer.invoke('cron:plan-edit', target, edit, opts),
+    write: (
+      target: { serverId: string; serverName: string; cfg: unknown },
+      req: { before: string; after: string; token: string; runId: string; approval?: unknown }
+    ): Promise<unknown> => ipcRenderer.invoke('cron:write-edit', target, req)
   },
   logtail: {
     start: (
