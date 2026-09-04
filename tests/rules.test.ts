@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { ApprovalVerdict } from '../src/shared/broadcast'
 import {
   RULE_ALERT_KINDS,
   RULE_LIMIT_DEFAULT,
@@ -267,6 +268,21 @@ describe('the rate limit', () => {
   })
 })
 
+/**
+ * The reason a verdict refuses, failing the test if it did not refuse.
+ *
+ * `ApprovalVerdict` is `{ ok: true } | { ok: false; reason: string }`, and
+ * `expect(verdict.ok).toBe(false)` narrows nothing for the compiler — so every
+ * `verdict.reason` below was a property access on a union whose `ok: true` arm
+ * has no such member. Going through here narrows it properly, and an
+ * unexpectedly-approved verdict now fails by saying so rather than by
+ * comparing `undefined` against a sentence.
+ */
+function refusal(verdict: ApprovalVerdict): string {
+  if (verdict.ok) throw new Error('expected this to be refused, but the verdict was ok')
+  return verdict.reason
+}
+
 describe('what a rule is authorised to run', () => {
   it('verifies a rule whose job is what was approved', () => {
     expect(verifyRuleAction(rule({ action: jobAction() }))).toEqual({ ok: true })
@@ -276,26 +292,23 @@ describe('what a rule is authorised to run', () => {
     const drifted = jobAction({
       spec: { ...SPEC, steps: [{ command: 'rm -rf /var/log' }] }
     })
-    const verdict = verifyRuleAction(rule({ action: drifted }))
-    expect(verdict.ok).toBe(false)
-    expect(verdict.reason).toContain('An edited command needs a fresh confirmation.')
+    const reason = refusal(verifyRuleAction(rule({ action: drifted })))
+    expect(reason).toContain('An edited command needs a fresh confirmation.')
   })
 
   it('refuses a rule that grew a host after it was written', () => {
     const grown = jobAction({
       targets: [...TARGETS, { serverId: 'srv-c', serverName: 'charlie' }]
     })
-    const verdict = verifyRuleAction(rule({ action: grown }))
-    expect(verdict.ok).toBe(false)
-    expect(verdict.reason).toContain('charlie')
-    expect(verdict.reason).toContain('runs on nobody’s approval')
+    const reason = refusal(verifyRuleAction(rule({ action: grown })))
+    expect(reason).toContain('charlie')
+    expect(reason).toContain('runs on nobody’s approval')
   })
 
   it('refuses a rule with no usable record at all', () => {
     const forged = { type: 'job', spec: SPEC, targets: TARGETS, approval: { v: 1 } } as unknown as RuleJobAction
-    const verdict = verifyRuleAction(rule({ action: forged }))
-    expect(verdict.ok).toBe(false)
-    expect(verdict.reason).toContain('no usable approval record came with this run')
+    const reason = refusal(verifyRuleAction(rule({ action: forged })))
+    expect(reason).toContain('no usable approval record came with this run')
   })
 
   it('has nothing to verify for a notification', () => {
