@@ -950,6 +950,24 @@ function fakeHost(): FakeHost {
   )
   script('chage', 'printf "Last password change : Sep 13, 2024\\nAccount expires : never\\n"')
 
+  // `id`, STUBBED, and this is the point of the whole helper.
+  //
+  // The collector calls `id -nG "$SP_U"` as a bare word, so without a stub here
+  // PATH finds the machine's own `id` and the answer becomes a reading of
+  // WHOEVER IS RUNNING THE TESTS. Three assertions below then depended on this
+  // laptop not having accounts called `ops`, `deploy` or `nohome` -- true here,
+  // not true of a build server, and nothing in the file said so out loud.
+  //
+  // Answers for `root` and `ops`, refuses `deploy` and `nohome`. That is what
+  // makes the sudoers status `partial` rather than the machine's user database
+  // making it, and it is stated rather than discovered.
+  script(
+    'id',
+    '[ "$1" = "-un" ] && { echo sp-collector; exit 0; }\n' +
+      '[ "$1" = "-nG" ] && { case "$2" in root) echo "root wheel";; ops) echo "ops";; *) exit 1;; esac; exit 0; }\n' +
+      'exit 1'
+  )
+
   return {
     root,
     bin,
@@ -965,6 +983,13 @@ function fakeHost(): FakeHost {
         cmd = cmd
           .replace(new RegExp(`for c in ${name}[^;]*;`), `for c in sp-absent-${name};`)
           .replace(new RegExp(`SP_BIN=${name}(?=[\\s;]|$)`), `SP_BIN=sp-absent-${name}`)
+        // Rewriting the `command -v` probe hides the tool from the STATUS, but
+        // the collector also calls `id` by bare name, and that call would sail
+        // straight past the rewrite to the machine's own binary. So the stub is
+        // replaced by one that refuses, which is what a host without the tool
+        // actually does to that line.
+        writeFileSync(join(bin, name), '#!/bin/sh\nexit 1\n')
+        chmodSync(join(bin, name), 0o755)
       }
       return execFileSync('/bin/sh', ['-c', cmd], {
         encoding: 'utf8',
@@ -1022,16 +1047,22 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
       'authorized-keys=ok',
       'sshd-config=ok',
       'account-status=ok',
-      // `partial`, and correctly so: the tree names accounts the machine
-      // running this test does not have, so `id -nG` answers for some and not
-      // for others. That is exactly the shape of a real host where one account
-      // comes from a directory service that is down, and reporting it as `ok`
-      // would claim group membership had been read for everybody.
+      // `partial`, decided by the stubbed `id` in fakeHost: it answers for
+      // `root` and `ops` and refuses `deploy` and `nohome`. That is the shape
+      // of a real host where some accounts come from a directory service that
+      // is down, and reporting it as `ok` would claim group membership had been
+      // read for everybody.
       'sudoers=partial',
       'last-login=ok'
     ])
     const a = parse(host().collect())
-    expect(a.accounts.filter((x) => x.adminGroups === null).length).toBeGreaterThan(0)
+    // Exactly the two the stub refuses. `toBeGreaterThan(0)` passed here for
+    // years while the number was decided by the machine's user database.
+    expect(a.accounts.filter((x) => x.adminGroups === null).map((x) => x.user).sort()).toEqual([
+      'deploy',
+      'nohome'
+    ])
+    expect(acct(a, 'root').adminGroups).toEqual(['root', 'wheel'])
   })
 
   it('includes a nologin account that has keys and skips one that does not', () => {
@@ -1443,7 +1474,11 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
 
   it('reports the account it ran as, and the host’s own clock', () => {
     const a = parse(host().collect())
-    expect(a.collectedAs).toBe(execFileSync('id', ['-un'], { encoding: 'utf8' }).trim())
+    // The stub's name, not this machine's. Asserting against a live
+    // `execFileSync('id')` compared the collector to whoever ran the suite --
+    // and resolved `id` through the TEST process's PATH, which other suites in
+    // this repo legitimately overwrite while they run.
+    expect(a.collectedAs).toBe('sp-collector')
     expect(a.hostNow).toBeGreaterThan(1_700_000_000_000)
   })
 
