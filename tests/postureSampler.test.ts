@@ -363,19 +363,26 @@ describe('the reader tells three failures apart', () => {
   })
 
   it('calls a successful collection successful even when every probe was refused', async () => {
-    // A collection whose four sources all say `denied` is not a failure — it is
+    // A collection whose every source says `denied` is not a failure — it is
     // the feature, and the panel needs it to say so per source.
     const out = [
       POSTURE_STATUS_MARKER,
       'firewall denied - needs root',
       'mandatory-access denied - unreadable',
       'sshd-hardening denied - cannot enter /etc/ssh',
-      'failed-logins denied - needs root'
+      'failed-logins denied - needs root',
+      'oom-kills denied - the journal needs root'
     ].join('\n')
     const p = await reader({ ok: true, stdout: out }).read({})
     expect(p.ok).toBe(true)
     if (!p.ok) throw new Error('unreachable')
-    expect(p.posture.sources.map((s) => s.status)).toEqual(['denied', 'denied', 'denied', 'denied'])
+    expect(p.posture.sources.map((s) => s.status)).toEqual([
+      'denied',
+      'denied',
+      'denied',
+      'denied',
+      'denied'
+    ])
     expect(p.posture.firewall).toBeNull()
     expect(p.posture.collectedAt).toBe(NOW)
   })

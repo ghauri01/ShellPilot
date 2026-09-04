@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import {
   FAILED_LOGIN_WINDOW_HOURS,
   MAX_AUTH_TRIES_WEAK,
+  OOM_WINDOW_HOURS,
+  postureAlertReadings,
   POSTURE_COMMAND,
   POSTURE_FACT_PREFIX,
   POSTURE_STATUS_MARKER,
@@ -416,7 +418,7 @@ describe('the estate roll-up counts the gaps rather than skipping them', () => {
 
 /** Paths the collector reads, redirected into the fake tree in ONE pass. */
 const ABS_PATHS =
-  /\/(?:etc\/(?:ufw|firewalld|ssh|selinux)|sys\/fs\/selinux|sys\/module\/apparmor|sys\/kernel\/security)/g
+  /\/(?:etc\/(?:ufw|firewalld|ssh|selinux)|sys\/fs\/selinux|sys\/module\/apparmor|sys\/kernel\/security|var\/log)/g
 
 /** Every binary the collector resolves, so a test can say which ones exist. */
 const HIDEABLE = [
@@ -428,7 +430,8 @@ const HIDEABLE = [
   'aa-status',
   'sshd',
   'lastb',
-  'journalctl'
+  'journalctl',
+  'dmesg'
 ]
 
 interface FakeHost {
@@ -989,6 +992,166 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(p.failedLogins).toBeNull()
   })
 
+
+  // ---- OOM kills ---------------------------------------------------------
+  //
+  // PROVENANCE, as the header of this file demands. The kernel blocks below
+  // were reconstructed from the documented shape of the Linux OOM killer's
+  // output — the `invoked oom-killer` header, the task-list dump, the
+  // `oom-kill:constraint=` summary, the `Killed process` line and the
+  // `oom_reaper` line — and not captured from a machine that ran out of
+  // memory. What they prove is the COUNTING RULE and the honesty of the three
+  // sources, which is what the shell decides. Whether a 6.8 kernel spells its
+  // constraint line exactly this way is unverified; nothing here depends on
+  // that line.
+
+  /** One complete kill, as the kernel writes it: twelve lines, three of them
+   *  task-list rows, and exactly one `Killed process`. */
+  const oomBlock = (comm: string, pid: number): string =>
+    [
+      `[12345.678901] ${comm} invoked oom-killer: gfp_mask=0x100cca(GFP_HIGHUSER_MOVABLE), order=0, oom_score_adj=0`,
+      `[12345.678910] CPU: 2 PID: ${pid} Comm: ${comm} Not tainted 5.15.0-91-generic #101-Ubuntu`,
+      '[12345.678915] Call Trace:',
+      '[12345.678920]  dump_stack_lvl+0x4a/0x63',
+      '[12345.678930] Mem-Info:',
+      '[12345.678940] [  pid  ]   uid  tgid total_vm      rss pgtables_bytes swapents oom_score_adj name',
+      '[12345.678950] [    412]     0   412     3567      512    69632        0             0 systemd-journal',
+      '[12345.678960] [    980]     0   980     2210      256    53248        0             0 sshd',
+      `[12345.678970] [   ${pid}]   999  ${pid}  1048576   950000  8433664        0             0 ${comm}`,
+      `[12345.678980] oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/system.slice/${comm}.service,task=${comm},pid=${pid},uid=999`,
+      `[12345.678990] Out of memory: Killed process ${pid} (${comm}) total-vm:4194304kB, anon-rss:3800000kB, file-rss:0kB, shmem-rss:0kB, UID:999 pgtables:8236kB oom_score_adj:0`,
+      `[12345.679000] oom_reaper: reaped process ${pid} (${comm}), now anon-rss:0kB, file-rss:0kB, shmem-rss:0kB`
+    ].join('\n')
+
+  /** Single-quote for the shell, so a fixture with newlines in it reaches
+   *  printf as ONE argument. */
+  const shq = (s: string): string => `'${s.replaceAll("'", "'\\''")}'`
+
+  /** A journalctl that tells its kernel query from its sshd one, and answers
+   *  the `-n 0` readability probe the way the real one does. */
+  const journalctl = (kernel: string, auth = ''): string =>
+    [
+      'K=0',
+      'for a in "$@"; do [ "$a" = "-k" ] && K=1; done',
+      'for a in "$@"; do [ "$a" = "0" ] && exit 0; done',
+      `if [ "$K" = 1 ]; then printf '%s\\n' ${shq(kernel)}; else printf '%s\\n' ${shq(auth)}; fi`
+    ].join('\n')
+
+  it('counts ONE kill from the twelve lines the kernel writes for it', () => {
+    // The bug this names: the kernel dumps one task-list row per process on
+    // the machine before it chooses, and five of these twelve lines contain
+    // the word "oom". Counting anything but `Killed process` counts the host's
+    // process table.
+    const h = host()
+    h.script('journalctl', journalctl(oomBlock('mysqld', 4242)))
+    const p = h.collect({ have: ['journalctl'] })
+    expect(statusOf(p, 'oom-kills')).toBe('ok')
+    expect(p.oomKills).toMatchObject({ source: 'journal', count: 1, processes: 1 })
+  })
+
+  it('counts two kills of the same process as two kills naming one process', () => {
+    const h = host()
+    h.script(
+      'journalctl',
+      journalctl(`${oomBlock('mysqld', 4242)}\n${oomBlock('mysqld', 4310)}`)
+    )
+    const p = h.collect({ have: ['journalctl'] })
+    expect(p.oomKills).toMatchObject({ count: 2, processes: 1 })
+  })
+
+  it('counts two kills of different processes as two names', () => {
+    const h = host()
+    h.script(
+      'journalctl',
+      journalctl(`${oomBlock('mysqld', 4242)}\n${oomBlock('java', 5150)}`)
+    )
+    const p = h.collect({ have: ['journalctl'] })
+    expect(p.oomKills).toMatchObject({ count: 2, processes: 2 })
+  })
+
+  it('reads a journal that holds no kills as a real zero, and says so out loud', () => {
+    const h = host()
+    h.script('journalctl', journalctl(''))
+    const p = h.collect({ have: ['journalctl'] })
+    expect(statusOf(p, 'oom-kills')).toBe('ok')
+    expect(p.oomKills).toMatchObject({ source: 'journal', count: 0 })
+    expect(p.oomKills?.window).toContain(String(OOM_WINDOW_HOURS))
+    // The ONLY combination that may resolve an alert.
+    expect(postureAlertReadings(p).oomKills).toBe(false)
+  })
+
+  it('reports a restricted dmesg as denied and NEVER as no OOM kills', () => {
+    // kernel.dmesg_restrict is set on most modern distributions. The refusal
+    // goes to stderr with an exit status a pipeline would swallow, and a probe
+    // that read the pipeline would report a confident zero.
+    const h = host()
+    h.script('dmesg', 'echo "dmesg: read kernel buffer failed: Operation not permitted" >&2; exit 1')
+    const p = h.collect({ sudo: false, have: ['dmesg'] })
+    expect(statusOf(p, 'oom-kills')).toBe('denied')
+    expect(p.oomKills).toBeNull()
+    expect(postureSource(p, 'oom-kills').detail).toContain('NOT a report of no OOM kills')
+    expect(postureAlertReadings(p).oomKills).toBeNull()
+  })
+
+  it('reads a ring buffer that holds no kills as partial, never as a clean day', () => {
+    // A ring buffer is not a period of time. On a chatty host it holds
+    // minutes, so a zero out of it says nothing about the last day — and this
+    // is the exact half-probe the item refused to ship.
+    const h = host()
+    h.script('dmesg', "printf '[1.0] Linux version 5.15.0\\n'")
+    const p = h.collect({ have: ['dmesg'] })
+    expect(statusOf(p, 'oom-kills')).toBe('partial')
+    expect(p.oomKills).toMatchObject({ source: 'dmesg', count: 0 })
+    expect(postureAlertReadings(p).oomKills).toBeNull()
+  })
+
+  it('believes a kill it read from a ring buffer, because a kill that was read happened', () => {
+    const h = host()
+    h.script('dmesg', `printf '%s\\n' ${shq(oomBlock('nginx', 777))}`)
+    const p = h.collect({ have: ['dmesg'] })
+    expect(statusOf(p, 'oom-kills')).toBe('partial')
+    expect(p.oomKills).toMatchObject({ count: 1, processes: 1 })
+    expect(postureAlertReadings(p).oomKills).toBe(true)
+    expect(postureAlertReadings(p).oomDetail).toBe('1 killed across 1 process')
+  })
+
+  it('escalates to root for a journal that refuses an unprivileged caller', () => {
+    const h = host()
+    h.script('journalctl', rootOnly('journalctl', journalctl(oomBlock('mysqld', 4242))))
+    const p = h.collect({ have: ['journalctl'], env: { SP_ROOTONLY: 'journalctl' } })
+    expect(statusOf(p, 'oom-kills')).toBe('ok')
+    expect(postureSource(p, 'oom-kills').usedSudo).toBe(true)
+    expect(p.oomKills).toMatchObject({ count: 1 })
+  })
+
+  it('reads a journal it may not read as denied rather than as no-tool', () => {
+    // "There is nothing here to ask" and "there is, and you may not" are
+    // different answers with different fixes, and only one of them is a gap a
+    // person can close.
+    const h = host()
+    h.script('journalctl', rootOnly('journalctl', journalctl('')))
+    const p = h.collect({ sudo: false, have: ['journalctl'], env: { SP_ROOTONLY: 'journalctl' } })
+    expect(statusOf(p, 'oom-kills')).toBe('denied')
+    expect(p.oomKills).toBeNull()
+  })
+
+  it('falls back to kern.log, and refuses to call its window a day', () => {
+    const h = host()
+    h.file('var/log/kern.log', `${oomBlock('python3', 8080)}\n`)
+    const p = h.collect({ have: [] })
+    expect(statusOf(p, 'oom-kills')).toBe('partial')
+    expect(p.oomKills).toMatchObject({ source: 'kern-log', count: 1, processes: 1 })
+    expect(p.oomKills?.window).toContain('logrotate')
+    expect(postureAlertReadings(p).oomKills).toBe(true)
+  })
+
+  it('reads a host with no kernel log of any kind as no-tool', () => {
+    const p = host().collect({ have: [] })
+    expect(statusOf(p, 'oom-kills')).toBe('no-tool')
+    expect(p.oomKills).toBeNull()
+    expect(postureAlertReadings(p).oomKills).toBeNull()
+  })
+
   // ---- the whole thing ---------------------------------------------------
 
   it('returns every source and exits 0 on a host that can answer nothing', () => {
@@ -1000,7 +1163,8 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
       'firewall=unsupported',
       'mandatory-access=absent',
       'sshd-hardening=absent',
-      'failed-logins=no-tool'
+      'failed-logins=no-tool',
+      'oom-kills=no-tool'
     ])
   })
 })

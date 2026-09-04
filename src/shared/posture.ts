@@ -188,21 +188,28 @@ export const POSTURE_STATUS_HELP: Record<PostureStatus, string> = {
   unknown: 'The probe ran and its answer could not be read, or the collector never reported on it.'
 }
 
-/** The four things the collector reports on, each read independently. */
-export type PostureSourceId = 'firewall' | 'mandatory-access' | 'sshd-hardening' | 'failed-logins'
+/** The five things the collector reports on, each read independently. */
+export type PostureSourceId =
+  | 'firewall'
+  | 'mandatory-access'
+  | 'sshd-hardening'
+  | 'failed-logins'
+  | 'oom-kills'
 
 export const POSTURE_SOURCE_IDS: PostureSourceId[] = [
   'firewall',
   'mandatory-access',
   'sshd-hardening',
-  'failed-logins'
+  'failed-logins',
+  'oom-kills'
 ]
 
 export const POSTURE_SOURCE_LABEL: Record<PostureSourceId, string> = {
   firewall: 'Firewall',
   'mandatory-access': 'SELinux / AppArmor',
   'sshd-hardening': 'sshd configuration',
-  'failed-logins': 'Failed logins'
+  'failed-logins': 'Failed logins',
+  'oom-kills': 'OOM kills'
 }
 
 export interface PostureSourceReport {
@@ -529,6 +536,102 @@ export interface FailedLoginSummary {
  *  renderer and the test all quote the same number. */
 export const FAILED_LOGIN_WINDOW_HOURS = 24
 
+// ---- OOM kills ------------------------------------------------------------
+//
+// THE SCOPE DECISION, stated here because the decision IS the work.
+//
+// 1. WHAT COUNTS AS ONE KILL. The kernel writes a dozen to several thousand
+//    lines for a single OOM kill: an `invoked oom-killer` header, a call
+//    trace, a Mem-Info block, and then one `[ pid ]` row for EVERY process on
+//    the machine as it dumps the task list it chose from. Counting lines that
+//    merely mention memory counts the task list, and a host with four hundred
+//    processes reports one kill as four hundred. Counting `invoked oom-killer`
+//    is closer and still wrong in both directions: one invocation can reap
+//    more than one process, and an invocation that finds nothing killable
+//    reaps none.
+//
+//    So ONE KILL IS ONE `Killed process <pid> (<comm>)` LINE. That line is
+//    written once per process actually reaped, by the global path and by the
+//    cgroup-v2 memcg path alike (`Memory cgroup out of memory: Killed
+//    process ...`), on every kernel that has an OOM killer. It is also the one
+//    line the task-list rows cannot imitate.
+//
+// 2. WHICH WINDOW. A fixed 24 hours, and the SAME 24 as the failed-login
+//    probe next door, so the panel has one window to explain rather than two.
+//
+//    The alternatives were both rejected for reasons this codebase has already
+//    paid for once. "Since boot" is what an unadorned `dmesg` gives, and a
+//    host up for four hundred days would report a kill from last March as
+//    news at every collection forever — which is precisely the chronic-alert
+//    failure the durable half of store/alerts.ts was written to end. "Since
+//    the last sample" needs state kept on the host between collections, and an
+//    hourly probe that drifts, retries or is run twice by `Check now` would
+//    double-count or skip.
+//
+//    A fixed window also makes the finding RESOLVABLE, which is what lets this
+//    be a state kind at all: twenty-four hours after the last kill the count
+//    returns to zero and the condition "this host has been killing processes
+//    for memory today" becomes false by observation rather than by assumption.
+//
+// 3. WHAT A HALF-PROBE MAY CLAIM, which is the honesty requirement and the
+//    reason this was deferred rather than shipped with the other ten kinds.
+//    Only the journal can be ASKED for a window. `dmesg` reads a ring buffer,
+//    which is not a period of time — it holds as much as it holds, and on a
+//    chatty host that can be minutes. `/var/log/kern.log` is whatever logrotate
+//    has not turned over yet. So the three sources do not produce the same
+//    answer and are not interchangeable, and `oomWindowIsStated` is what every
+//    consumer asks before it treats a zero as a finding. A zero from a ring
+//    buffer is not "no OOM kills in the last day"; it is "nothing in whatever
+//    the buffer still holds", and this build will not shorten that.
+//
+// And the sentence this whole section exists for: journald is frequently
+// root-only, `dmesg` is refused outright wherever `kernel.dmesg_restrict` is
+// set — which is most modern distributions — and a container typically has
+// neither. Every one of those is `denied` or `no-tool`. NONE of them is
+// `ok` with a count of zero.
+
+export const OOM_SOURCES = ['journal', 'dmesg', 'kern-log'] as const
+export type OomSource = (typeof OOM_SOURCES)[number]
+
+/** The window the collector asks the journal for. Named here so the parser,
+ *  the renderer and the test all quote the same number, exactly as
+ *  FAILED_LOGIN_WINDOW_HOURS is. */
+export const OOM_WINDOW_HOURS = 24
+
+/**
+ * Whether this source's answer covers a window somebody can name.
+ *
+ * TRUE ONLY FOR THE JOURNAL. The other two read a buffer and a file whose
+ * extent nothing on this side can establish, so their zero is not a statement
+ * about a period and must never be rendered or alerted as one. A count ABOVE
+ * zero is trustworthy from all three — a `Killed process` line that was read
+ * happened, whatever window it was read over.
+ */
+export function oomWindowIsStated(source: OomSource): boolean {
+  return source === 'journal'
+}
+
+/**
+ * COUNTS ONLY, for the reason FailedLoginSummary gives and one more.
+ *
+ * A victim's `comm` is a string the process chose for itself, so on a shared
+ * host or in a container it is attacker-chosen text — the same argument that
+ * keeps usernames off the failed-login record. What is carried instead is how
+ * many DISTINCT names the kills named, which is the question an operator
+ * actually has: eight kills of one process is a service in a restart loop
+ * eating the box, and eight kills of eight processes is a box that ran out of
+ * memory once and reaped whatever was nearest.
+ */
+export interface OomKillSummary {
+  source: OomSource
+  /** How many processes the kernel reaped. Null is NOT zero. */
+  count: number | null
+  /** How many distinct process names those kills named. */
+  processes: number | null
+  /** What the count covers, as the collector stated it. */
+  window: string | null
+}
+
 // ---- The posture itself ---------------------------------------------------
 
 export interface HostPosture {
@@ -536,6 +639,7 @@ export interface HostPosture {
   mandatoryAccess: MandatoryAccess | null
   sshd: SshdHardening | null
   failedLogins: FailedLoginSummary | null
+  oomKills: OomKillSummary | null
   /** Epoch milliseconds this collection ran, by OUR clock. */
   collectedAt: number
   sources: PostureSourceReport[]
@@ -1151,6 +1255,160 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     'fi',
     'sp_note failed-logins "$SP_FL_ST" "$SP_FL_W" "$SP_FL_D"',
 
+    // =====================================================================
+    // OOM KILLS
+    // =====================================================================
+    //
+    // Three sources, in a strict order of preference, because they do not give
+    // the same answer: the kernel journal can be asked for a WINDOW, and the
+    // other two cannot. See the block comment on OomKillSummary for the whole
+    // scope decision; what matters here is that the source is emitted with the
+    // count, so nothing downstream can read a ring-buffer zero as a statement
+    // about the last day.
+    //
+    // SP_JCTL is the one resolved by the failed-login block above rather than a
+    // second lookup, and that ordering dependency is deliberate: `findBin`
+    // emits a `for c in journalctl ...` line, and a second one would be a
+    // second place a host without journalctl has to be told about.
+    ...findBin('dmesg', 'SP_DMESG'),
+    'SP_OOM_ST=no-tool',
+    'SP_OOM_W="-"',
+    'SP_OOM_D="this host has no readable kernel journal, no readable dmesg and no /var/log/kern.log, so whether the OOM killer has run cannot be established"',
+    // Set the moment something that COULD have answered refuses. Without it a
+    // host whose journal exists and is root-only, with no dmesg and no
+    // kern.log, would fall through to `no-tool` — which reads as "there is
+    // nothing here to ask" when the truth is "there is, and you may not".
+    'SP_OOM_REF=0',
+    // ONE LINE PER KILL, and the whole counting decision is this pattern.
+    // `Killed process <pid> (<comm>)` is written once per process actually
+    // reaped, by the global and the cgroup paths alike. The alternatives all
+    // inflate: the kernel dumps one `[ pid ]` task-list row per process on the
+    // machine before it chooses, so anything matching those counts the host's
+    // process table rather than its kills.
+    "SP_OOMX='Killed process [0-9]'",
+    // The victim's name, off the same line, and it never leaves the host: only
+    // how many DISTINCT names is emitted. A `comm` is a string a process chose
+    // for itself — the same reason the failed-login probe carries counts and
+    // not usernames.
+    "SP_OOMN='s/.*Killed process [0-9][0-9]* (\\([^)]*\\)).*/\\1/p'",
+
+    // ---- the kernel journal, the only source with a window ---------------
+    //
+    // `-k` is its OWN readability question and is probed separately rather
+    // than inherited from the failed-login block's answer: the kernel log is
+    // not the same set of records as sshd's, and an account in `adm` may read
+    // one and not the other. `-n 0` opens the journal, prints nothing, and
+    // exits non-zero when this account may not read it — without it the
+    // counting pipelines below would report 0 for a refusal.
+    'SP_OOMRUN=""',
+    'if [ -n "$SP_JCTL" ]; then',
+    '"$SP_JCTL" --no-pager -q -k -n 0 >/dev/null 2>&1 && SP_OOMRUN="$SP_JCTL"',
+    ...ifSudo(
+      'if [ -z "$SP_OOMRUN" ] && [ "$SP_SUDO" = 1 ]; then',
+      'sudo -n "$SP_JCTL" --no-pager -q -k -n 0 >/dev/null 2>&1 && { SP_OOMRUN="sudo -n $SP_JCTL"; SP_OOM_W=root; }',
+      'fi'
+    ),
+    '[ -z "$SP_OOMRUN" ] && SP_OOM_REF=1',
+    'fi',
+    'if [ -n "$SP_OOMRUN" ]; then',
+    'sp_val oom-tool journal',
+    `SP_OOMA="--no-pager -q -k --since -${OOM_WINDOW_HOURS}hours"`,
+    // Taken from the substitution's OUTPUT rather than from whether the
+    // pipeline succeeded, exactly as the failed-login counts are: `grep -c`
+    // exits 1 when it counts none and still PRINTS `0`, and a probe that read
+    // the exit status would turn a host with no OOM kills into a host that
+    // could not be asked.
+    `sp_val oom-count "$($SP_OOMRUN $SP_OOMA 2>/dev/null | grep -c -E "$SP_OOMX" || true)"`,
+    `sp_val oom-procs "$($SP_OOMRUN $SP_OOMA 2>/dev/null | sed -n "$SP_OOMN" | sort -u | grep -c . || true)"`,
+    `sp_val oom-window "the last ${OOM_WINDOW_HOURS} hours of the kernel journal"`,
+    'SP_OOM_ST=ok',
+    `SP_OOM_D="journalctl -k over the last ${OOM_WINDOW_HOURS} hours"`,
+    'fi',
+
+    // ---- dmesg, which is a buffer and not a window -----------------------
+    'if [ "$SP_OOM_ST" != ok ] && [ -n "$SP_DMESG" ]; then',
+    // `kernel.dmesg_restrict` is set on most modern distributions and the
+    // refusal goes to STDERR with an exit status a pipeline would swallow.
+    // Read the way lastb is read, for the same reason.
+    'SP_ERR=$("$SP_DMESG" 2>&1 >/dev/null | head -n 3)',
+    'SP_DRUN=""',
+    '[ -z "$SP_ERR" ] && SP_DRUN="$SP_DMESG"',
+    ...ifSudo(
+      'if [ -n "$SP_ERR" ] && [ "$SP_SUDO" = 1 ]; then',
+      'SP_E2=$(sudo -n "$SP_DMESG" 2>&1 >/dev/null | head -n 3)',
+      'if [ -z "$SP_E2" ]; then SP_DRUN="sudo -n $SP_DMESG"; SP_OOM_W=root; fi',
+      'fi'
+    ),
+    'if [ -n "$SP_DRUN" ]; then',
+    'sp_val oom-tool dmesg',
+    `sp_val oom-count "$($SP_DRUN 2>/dev/null | grep -c -E "$SP_OOMX" || true)"`,
+    `sp_val oom-procs "$($SP_DRUN 2>/dev/null | sed -n "$SP_OOMN" | sort -u | grep -c . || true)"`,
+    'sp_val oom-window "the kernel ring buffer, which reaches back only as far as it has not been overwritten"',
+    // PARTIAL, not ok, and this is the line that keeps the item honest. The
+    // buffer is not a period of time: on a chatty host it holds minutes. A
+    // count above zero here is real; a zero is not a statement about a day.
+    'SP_OOM_ST=partial',
+    'SP_OOM_D="dmesg. The ring buffer is not a time window - it holds as much as it holds, so a zero read from it is not a report of no OOM kills in the last day"',
+    'else',
+    'SP_OOM_ST=denied',
+    'SP_OOM_REF=1',
+    'SP_OOM_D="dmesg is installed and the kernel refused to let this account read the ring buffer, which is what kernel.dmesg_restrict does. This is NOT a report of no OOM kills."',
+    'fi',
+    'fi',
+
+    // ---- /var/log/kern.log, for a host with neither ----------------------
+    //
+    // Traversal before existence, as everywhere else in this file: a
+    // `chmod 700 /var/log` makes `[ -f /var/log/kern.log ]` false, and that is
+    // "cannot see", not "the kernel log is not written here".
+    'if [ "$SP_OOM_ST" != ok ] && [ "$SP_OOM_ST" != partial ]; then',
+    'if [ -d /var/log ] && [ ! -x /var/log ]; then',
+    'SP_OOM_ST=denied',
+    'SP_OOM_REF=1',
+    'SP_OOM_D="/var/log exists on this host and this account may not enter it, so the kernel log inside it was never opened"',
+    'elif [ -f /var/log/kern.log ]; then',
+    // The error text with the count thrown away, so a permission problem is
+    // told apart from a file that genuinely holds no kills.
+    'SP_KERR=$(grep -c -E "$SP_OOMX" /var/log/kern.log 2>&1 >/dev/null | head -n 1)',
+    'SP_KRUN=""',
+    // The escalation PREFIX, and it is a variable set only inside `ifSudo`
+    // rather than a word this branch spells out. A build without sudo must
+    // contain no `sudo` anywhere at all — tests/posture.test.ts reads the
+    // shipped command as a document and asserts exactly that, which is the
+    // whole reason sudo is omitted at build time instead of guarded at
+    // runtime. A `[ "$SP_KRUN" = sudo ]` here put the word back.
+    'SP_KCAT=""',
+    '[ -z "$SP_KERR" ] && SP_KRUN=1',
+    ...ifSudo(
+      'if [ -n "$SP_KERR" ] && [ "$SP_SUDO" = 1 ]; then',
+      'SP_KE2=$(sudo -n grep -c -E "$SP_OOMX" /var/log/kern.log 2>&1 >/dev/null | head -n 1)',
+      'if [ -z "$SP_KE2" ]; then SP_KRUN=1; SP_KCAT="sudo -n"; SP_OOM_W=root; fi',
+      'fi'
+    ),
+    'if [ -n "$SP_KRUN" ]; then',
+    'sp_val oom-tool kern-log',
+    `sp_val oom-count "$($SP_KCAT grep -c -E "$SP_OOMX" /var/log/kern.log 2>/dev/null || true)"`,
+    `sp_val oom-procs "$($SP_KCAT sed -n "$SP_OOMN" /var/log/kern.log 2>/dev/null | sort -u | grep -c . || true)"`,
+    'sp_val oom-window "the current /var/log/kern.log, which logrotate turns over on a schedule this side cannot see"',
+    'SP_OOM_ST=partial',
+    'SP_OOM_D="/var/log/kern.log. Rotated on a schedule this side cannot see, so a zero read from it is not a report of no OOM kills in the last day"',
+    'else',
+    'SP_OOM_ST=denied',
+    'SP_OOM_REF=1',
+    'SP_OOM_D="/var/log/kern.log exists and reading it needs root on this host"',
+    'fi',
+    'fi',
+    'fi',
+
+    // "There is nothing here to ask" and "there is, and you may not" are
+    // different answers with different fixes, and only one of them is a gap a
+    // person can close. The whole point of SP_OOM_REF.
+    'if [ "$SP_OOM_ST" = no-tool ] && [ "$SP_OOM_REF" = 1 ]; then',
+    'SP_OOM_ST=denied',
+    'SP_OOM_D="a kernel log is present on this host and this account may not read it. This is NOT a report of no OOM kills."',
+    'fi',
+    'sp_note oom-kills "$SP_OOM_ST" "$SP_OOM_W" "$SP_OOM_D"',
+
     // Printed once, at the end, from a variable nothing read out of a file ever
     // touched. This is the cron.ts discipline and it is the reason a
     // PermitRootLogin value cannot forge a firewall status.
@@ -1189,7 +1447,11 @@ const VALUE_KEYS = [
   'fail-tool',
   'fail-count',
   'fail-users',
-  'fail-window'
+  'fail-window',
+  'oom-tool',
+  'oom-count',
+  'oom-procs',
+  'oom-window',
 ] as const
 type ValueKey = (typeof VALUE_KEYS)[number]
 
@@ -1522,6 +1784,22 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
           window: freeText(values.get('fail-window'))
         }
 
+  // ---- OOM kills ---------------------------------------------------------
+  //
+  // Null when no source answered at all, exactly as `failedLogins` is: a
+  // summary object with a null count and a null source would render as a real
+  // reading of a very quiet host, and the reason lives on the source report.
+  const oomSource = oneOf(values.get('oom-tool'), OOM_SOURCES)
+  const oomKills: OomKillSummary | null =
+    oomSource === null
+      ? null
+      : {
+          source: oomSource,
+          count: parseCount(values.get('oom-count')),
+          processes: parseCount(values.get('oom-procs')),
+          window: freeText(values.get('oom-window'))
+        }
+
   // A probe the collector said `ok` about, whose value did not survive, is
   // `unknown` — not `ok` with a null next to it. That substitution is how a
   // security panel ends up showing an all-clear it never earned.
@@ -1551,10 +1829,15 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
       'failed-logins',
       failedLogins !== null && failedLogins.count !== null,
       'the failed-login probe reported success and returned no count'
+    ),
+    confirm(
+      'oom-kills',
+      oomKills !== null && oomKills.count !== null,
+      'the OOM probe reported success and returned no count, so whether this host has killed anything for memory was not established'
     )
   ]
 
-  return { firewall, mandatoryAccess, sshd, failedLogins, collectedAt: now, sources }
+  return { firewall, mandatoryAccess, sshd, failedLogins, oomKills, collectedAt: now, sources }
 }
 
 // ---- Consuming item C's security update count -----------------------------
@@ -1594,6 +1877,61 @@ export function securityUpdateReading(facts: HostFacts | null): {
   }
 }
 
+// ---- What the alert bus is allowed to be told -----------------------------
+//
+// The DECISION lives here rather than in the renderer, for the reason
+// `isDiskCritical` lives in hostHealth.ts: an alert that made its own judgement
+// could disagree with the panel beside it, and the two have to be the same
+// comparison in one place. store/alerts.ts owns damping, repeat windows and
+// snooze; WHAT it is told is decided here, and is testable without a window.
+
+export interface PostureAlertReadings {
+  /**
+   * Whether this host has OOM-killed a process inside a window that was
+   * actually read.
+   *
+   *   true   A `Killed process` line was read. A kill that was read happened,
+   *          whatever window it was read over, so a `partial` source counts.
+   *   false  A STATED window was read and held none. Only the journal can
+   *          produce this — see oomWindowIsStated.
+   *   null   The kernel log could not be read, or was read over a window that
+   *          cannot support the claim. Never raised, never resolved, never
+   *          read as healthy.
+   *
+   * The asymmetry is the point rather than an oversight: a ring buffer can
+   * prove a kill and cannot disprove one.
+   */
+  oomKills: boolean | null
+  /** Our words, for the alert detail. Never the host's, and written in the
+   *  character class store/alerts.ts scrubs a detail to — so no commas. */
+  oomDetail: string
+}
+
+export function postureAlertReadings(posture: HostPosture | null): PostureAlertReadings {
+  if (posture === null) return { oomKills: null, oomDetail: '' }
+
+  const oom = posture.oomKills
+  const oomStatus = postureSource(posture, 'oom-kills').status
+  let oomKills: boolean | null = null
+  let oomDetail = ''
+  if (oom !== null && oom.count !== null) {
+    if (oom.count > 0 && (oomStatus === 'ok' || oomStatus === 'partial')) {
+      oomKills = true
+      oomDetail =
+        oom.processes === null
+          ? `${oom.count} killed`
+          : `${oom.count} killed across ${oom.processes} process${oom.processes === 1 ? '' : 'es'}`
+    } else if (oom.count === 0 && oomStatus === 'ok' && oomWindowIsStated(oom.source)) {
+      oomKills = false
+    }
+    // Everything else stays null. A ZERO FROM A RING BUFFER LANDS HERE, and it
+    // is the line this item was deferred over: a half-probe reporting "no OOM
+    // kills" when it could not read a window is the alert this refuses to send.
+  }
+
+  return { oomKills, oomDetail }
+}
+
 // ---- Summary --------------------------------------------------------------
 
 /**
@@ -1621,6 +1959,11 @@ export interface PostureSummary {
    *  configuration could not be read at all. */
   sshdWeak: number
   sshdUnknown: number
+  /** Hosts that have OOM-killed something inside a window that was read, and
+   *  hosts where that could not be established — which includes every host
+   *  answered by a ring buffer, whose zero is not a statement about a day. */
+  oomKilling: number
+  oomUnknown: number
 }
 
 export function summarisePosture(
@@ -1636,7 +1979,9 @@ export function summarisePosture(
     macAbsent: 0,
     macUnknown: 0,
     sshdWeak: 0,
-    sshdUnknown: 0
+    sshdUnknown: 0,
+    oomKilling: 0,
+    oomUnknown: 0
   }
   for (const { posture } of rows) {
     if (posture === null) {
@@ -1646,6 +1991,7 @@ export function summarisePosture(
       out.firewallUnknown++
       out.macUnknown++
       out.sshdUnknown++
+      out.oomUnknown++
       continue
     }
     out.collected++
@@ -1694,6 +2040,12 @@ export function summarisePosture(
     if (posture.sshd === null || ssh.status === 'denied' || ssh.status === 'absent') out.sshdUnknown++
     else if (posture.sshd.readings.some((r) => r.verdict === 'weak')) out.sshdWeak++
     else if (posture.sshd.readings.every((r) => r.verdict === 'unknown')) out.sshdUnknown++
+
+    // Taken through the SAME function the alert bus is given, so the roll-up
+    // and the alert can never disagree about what a ring-buffer zero means.
+    const oom = postureAlertReadings(posture).oomKills
+    if (oom === true) out.oomKilling++
+    else if (oom === null) out.oomUnknown++
   }
   return out
 }
@@ -1752,6 +2104,9 @@ export function postureToFacts(posture: HostPosture): Record<string, string> {
   put('failedLoginTool', posture.failedLogins?.tool ?? null, 'failed-logins')
   put('failedLogins', posture.failedLogins?.count ?? null, 'failed-logins')
   put('failedLoginUsers', posture.failedLogins?.users ?? null, 'failed-logins')
+  put('oomTool', posture.oomKills?.source ?? null, 'oom-kills')
+  put('oomKills', posture.oomKills?.count ?? null, 'oom-kills')
+  put('oomProcesses', posture.oomKills?.processes ?? null, 'oom-kills')
   // The status of every source, so history can say WHY a null was null at the
   // time rather than only that it was null.
   for (const s of posture.sources) out[`${POSTURE_FACT_PREFIX}source:${s.id}`] = s.status
