@@ -27,5 +27,11 @@
     "allowJs": true,
     "noEmit": true
   },
-  "include": ["tests/**/*.ts", "tests/**/*.tsx"]
+  // `src/renderer/src/env.d.ts` carries the `declare global { interface Window
+  // { shellpilot } }` augmentation. A renderer component reached only through a
+  // test import does not drag its own ambient declarations in, so without this
+  // every `window.shellpilot` in every component a `.tsx` test renders reports
+  // TS2339 — errors in `src/`, from a config that owns none of it. Naming the
+  // file here restores the global the renderer is actually compiled with.
+  "include": ["tests/**/*.ts", "tests/**/*.tsx", "src/renderer/src/env.d.ts"]
 }
