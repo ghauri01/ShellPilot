@@ -1293,7 +1293,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** | mssql not covered, stated | Done |
 | 17 | ~~**Patch management**~~ | 100% | weekly | 5 | strong | **10** | **SHIPPED** | — | Done |
 | 5 | ~~**Backups to real targets**~~ | 90% | weekly | 5 | strong | **8** | **SHIPPED** | — | Done |
-| 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | OOM kills, cert expiry remain | Part done |
+| 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | — | Done |
 | 23 | ~~**Fleet key management**~~ | 100% | quarterly | 5 | very strong | **7** | **READ SHIPPED** | write gated, needs a real host | Part done |
 | 20 | ~~**Compose**~~ | 60% | daily | 3 | some | **6** | **SHIPPED** | — | Done |
 | 6e | ~~**Cron editing**~~ | 80% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
@@ -1301,7 +1301,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 26 | ~~**Capacity trends**~~ | 70% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 27 | ~~**Rule engine**~~ | 40% | continuous | 3 | some | **5** | **SHIPPED** | — | Done |
 | 22 | **Kubernetes lifecycle** | 25% | weekly | 4 | weak | **5** | 4 wk | B | Defer |
-| 7 | **Credential proxy** | 30% | daily | 3 | very strong | **5** | 3.5 wk | — | Strategic |
+| 7 | ~~**Credential proxy**~~ | 30% | daily | 3 | very strong | **5** | **SHIPPED** | — | Done |
 | 25 | ~~**Configuration drift**~~ | 50% | rare | 4 | strong | **4** | **SHIPPED** | — | Done |
 | 28 | ~~**Runbooks on alerts**~~ | 40% | per-incident | 3 | some | **4** | **SHIPPED** | — | Done |
 | 14 | ~~**Change log**~~ | 30% solo | per-incident | 3 | strong | **4** / **8** team | **SHIPPED** | — | Done |
