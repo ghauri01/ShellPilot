@@ -70,6 +70,7 @@ import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
 import { AccessCommitter, AccessReader } from './services/access'
 import { PostureReader } from './services/posture'
+import { DriftReader } from './services/drift'
 import { readChangeLog } from './services/changelog'
 import type { ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
 import type {
@@ -905,11 +906,19 @@ let postureModuleOn = false
 // Absent reads as OFF, like both of its neighbours, so an upgrade never starts
 // reading somebody's local session log for a screen they did not ask for.
 let changeLogModuleOn = false
+// Configuration drift — roadmap item 25. Gated for what it PRODUCES, which is
+// the posture module's argument rather than the access module's: the probe
+// itself reads seven world-readable files with no sudo, and the table it builds
+// is a list of which hosts are behind everybody else.
+//
+// Absent reads as OFF, like all three of its neighbours.
+let driftModuleOn = false
 function syncAccessModule(data: unknown): void {
   const modules = (data as { settings?: { modules?: Record<string, unknown> } } | null)?.settings?.modules
   accessModuleOn = modules?.access === true
   postureModuleOn = modules?.posture === true
   changeLogModuleOn = modules?.changeLog === true
+  driftModuleOn = modules?.drift === true
 }
 try {
   syncAccessModule(loadData())
@@ -918,6 +927,7 @@ try {
   accessModuleOn = false
   postureModuleOn = false
   changeLogModuleOn = false
+  driftModuleOn = false
 }
 
 // Fleet key and access, on the same slow clock — roadmap item 23. One reader
@@ -932,6 +942,20 @@ const accessReader = new AccessReader({
 // the whole process, for the reason the other two are one: it holds no state
 // beyond the exec function, and every probe is a single round trip.
 const postureReader = new PostureReader({
+  exec: (cfg, command, timeoutMs) =>
+    sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
+})
+
+// Configuration drift, on the same slow clock — roadmap item 25. One reader for
+// the whole process, for the reason the other three are one: it holds no state
+// beyond the exec function, and every probe is a single round trip.
+//
+// It gets the SAME exec as the other three and nothing else. In particular it
+// does not get the vault, the credential resolver or anything that could hand a
+// known secret value to `redactOutput`: the pattern rules are what stand between
+// a watched file and the panel, and adding a credential reach here to improve
+// them would put the vault inside a background sweep to make a display nicer.
+const driftReader = new DriftReader({
   exec: (cfg, command, timeoutMs) =>
     sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
 })
@@ -972,6 +996,15 @@ const fleetSampler = new FleetSampler({
   samplePosture: async (_key, cfg) => {
     const probe = await postureReader.read(resolveChainSecrets(cfg as SshConnectConfig))
     return probe.ok ? { ok: true, posture: probe.posture } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
+  },
+  // The configuration drift half — roadmap item 25. Injected like the other
+  // three, allowPrompt: false for the reason they all are, and handed the
+  // host's own name so the `hostnames` normalisation rule has something to
+  // substitute.
+  driftEnabled: () => driftModuleOn,
+  sampleDrift: async (_key, cfg, ctx) => {
+    const probe = await driftReader.read(resolveChainSecrets(cfg as SshConnectConfig), ctx)
+    return probe.ok ? { ok: true, drift: probe.drift } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
   },
   release: (key) => metricsDisconnect(key),
   emit: (event) => {
@@ -1024,6 +1057,26 @@ ipcMain.handle('fleet:access', (_e, serverId: string) => fleetSampler.accessFor(
 // tests/jobsNotExposed.test.ts for why an agent does not get to ask which of
 // the estate's hosts has SELinux switched off.
 ipcMain.handle('fleet:posture', (_e, serverId: string) => fleetSampler.postureFor(serverId))
+// One server's watched configuration files, as the sweep last saw them —
+// roadmap item 25.
+//
+// A read of what the sweep already has; it never triggers a probe, for the
+// reason 'fleet:facts', 'fleet:access' and 'fleet:posture' do not. There is
+// exactly one thing deciding how often every host has seven files read off it,
+// and it is the sampler.
+//
+// There is deliberately no MCP tool beside this, and the reason is sharper than
+// posture's rather than softer. A map of which hosts differ from a known-good
+// configuration is a map of which hosts are BEHIND — "these three still take
+// passwords over ssh where the other twelve do not" is a target list an agent
+// does not get to ask for. See the forbidden-symbol list in
+// tests/jobsNotExposed.test.ts.
+//
+// And there is no write beside it either, ever. src/shared/drift.ts states that
+// refusal in full: bringing a host into line is a job, with the plan and the
+// approval a job carries, and this panel could not decide which side is right
+// in any case.
+ipcMain.handle('fleet:drift', (_e, serverId: string) => fleetSampler.driftFor(serverId))
 
 // ---- Changing who can get in — roadmap item 23, the write half ----
 //

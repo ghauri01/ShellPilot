@@ -23,6 +23,7 @@ import { FleetSearch } from './FleetSearch'
 import { InventoryPanel } from './InventoryPanel'
 import { AccessPanel } from './AccessPanel'
 import { PosturePanel } from './PosturePanel'
+import { DriftPanel } from './DriftPanel'
 import { CapacityPanel } from './CapacityPanel'
 import { BroadcastPanel } from './BroadcastPanel'
 import { PatchPanel } from './PatchPanel'
@@ -415,6 +416,11 @@ export function FleetMonitor(): React.JSX.Element {
       {moduleEnabled(modules, 'posture') && (
         <div style={show('posture')}>
           <PosturePanel servers={servers} onOpen={(id) => openServerTab(id, 'monitor')} />
+        </div>
+      )}
+      {moduleEnabled(modules, 'drift') && (
+        <div style={show('drift')}>
+          <DriftPanel servers={servers} />
         </div>
       )}
       {moduleEnabled(modules, 'patch') && (

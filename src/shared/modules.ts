@@ -31,6 +31,7 @@ export type ModuleId =
   | 'capacity'
   | 'rules'
   | 'changeLog'
+  | 'drift'
 
 export interface ModuleDef {
   id: ModuleId
@@ -160,6 +161,26 @@ export const MODULES: ModuleDef[] = [
     // themselves \u2014 a rule that exists stays on disk with its approval record
     // intact, so switching the module off and on again does not silently
     // re-arm anything. Disarming is per rule, on the rule.
+    defaultEnabled: false
+  },
+  {
+    id: 'drift',
+    label: 'Configuration drift',
+    detail:
+      'Compare a watched configuration file across the estate and say where it diverges \u2014 "all twelve web servers have this nginx.conf, three do not". Every file is compared under normalisation rules that are named on screen, so two files that differ and are called the same say which rule ate the difference. A host that could not be read is never reported as a host that matches. Read-only: it never writes a file back to bring a host into line.',
+    // OFF by default, and this one's toggle gates the COLLECTION rather than
+    // just the panel \u2014 see FleetSamplerDeps.driftEnabled.
+    //
+    // Not for what the probe DOES on the host: it reads seven world-readable
+    // files with no sudo anywhere, which is less than the inventory probe does
+    // and far less than the access one. It is gated for what it PRODUCES, which
+    // is the posture module's argument rather than the access module's.
+    //
+    // A table of which hosts differ from a known-good configuration is a table
+    // of which hosts are behind. "These three still have PasswordAuthentication
+    // where the other twelve do not" is a target list, kept fresh, across the
+    // whole estate. That is worth having \u2014 it is why the item exists \u2014 and it
+    // is not worth having without somebody deciding to have it.
     defaultEnabled: false
   },
   {

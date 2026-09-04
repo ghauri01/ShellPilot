@@ -32,6 +32,7 @@ import type {
 import type { LogLine, LogSource, LogTailState, UnitChoice } from '../shared/logtail'
 import type { CronEntry, CronSourceReport } from '../shared/cron'
 import type { CapacityBridge, CapacityReport } from '../shared/capacity'
+import type { HostDrift } from '../shared/drift'
 import type { RuleDraftWire, RuleView, RulesBridge } from '../shared/rules'
 import type { ChangeLogBridge, ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
 import type {
@@ -627,6 +628,26 @@ const api = {
       serverId: string
     ): Promise<{ posture?: HostPosture; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
       ipcRenderer.invoke('fleet:posture', serverId),
+    // A server's watched configuration files, as the sampler last collected
+    // them — roadmap item 25. Read-only and never a trigger, exactly like
+    // `facts`, `access` and `posture`, and with the same third state: `drift`
+    // absent with no `error` means the probe has not run for this server yet.
+    // A host nobody has looked at is not a host whose configuration matches
+    // everybody else's, and the comparison keeps the two apart.
+    //
+    // Each reading carries two hashes and a BOUNDED, ALREADY-REDACTED preview.
+    // The preview lives in the sampler's memory and nowhere else — it is not in
+    // the durable store and does not survive a restart.
+    //
+    // There is no write beside this and there is not going to be one.
+    // src/shared/drift.ts states the refusal in full: bringing a host into line
+    // is a job, and it goes through the plan and the approval a job carries.
+    // This panel could not decide which side is right in any case — a host that
+    // was fixed first and a host that drifted look identical from here.
+    drift: (
+      serverId: string
+    ): Promise<{ drift?: HostDrift; at?: number; error?: string; errorAt?: number; intervalMs: number }> =>
+      ipcRenderer.invoke('fleet:drift', serverId),
     // Changing who can get in — roadmap item 23, the write half.
     //
     // TWO CALLS AND NOT ONE, on purpose. `accessPlan` asks main what a change

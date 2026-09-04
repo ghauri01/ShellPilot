@@ -63,6 +63,26 @@ const MODULE_FILES: Record<string, string[]> = {
   // fleet-wide map of how to attack the estate. See
   // FleetSamplerDeps.postureEnabled.
   posture: ['src/renderer/src/components/monitor/PosturePanel.tsx'],
+  // Item 25. The collector (src/shared/drift.ts, src/main/services/drift.ts) IS
+  // listed, unlike the three collectors above, and the difference is worth
+  // stating: those run on every install whether or not their module is on, and
+  // this one does not. Nothing reads a watched file unless this module is
+  // enabled — the toggle gates FleetSamplerDeps.driftEnabled, not merely the
+  // tab — so the reader is the module's to own and its closure is the module's
+  // to answer for.
+  //
+  // The main half is also the one most worth walking. It is the only module
+  // file in the repo that handles the CONTENTS of a configuration file, and it
+  // passes because the only thing it reaches for is `services/secretRedaction`:
+  // no vault, no credential resolver, no secret store. Handing it known secret
+  // values to redact against would have improved the redaction and put the
+  // vault inside a background sweep, which is the trade this list exists to
+  // make visible.
+  drift: [
+    'src/shared/drift.ts',
+    'src/main/services/drift.ts',
+    'src/renderer/src/components/monitor/DriftPanel.tsx'
+  ],
   // Item 26. `src/shared/capacity.ts` and `src/renderer/src/lib/capacity.ts`
   // are listed alongside the panel, unlike the collectors above, because they
   // are not the sampler's — nothing runs them unless this panel asks. The

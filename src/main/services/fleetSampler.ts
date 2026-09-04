@@ -8,6 +8,7 @@ import type {
 import type { HostAccess } from '../../shared/access'
 import type { HostFacts } from '../../shared/hostFacts'
 import type { HostPosture } from '../../shared/posture'
+import type { HostDrift } from '../../shared/drift'
 import type { HostMetrics } from '../../shared/ssh'
 import { ACCESS_FACT_PREFIX, accessKeyPrefix, accessToFacts } from '../../shared/access'
 import {
@@ -22,6 +23,7 @@ import {
   hostFactsToFacts
 } from '../../shared/hostFacts'
 import { POSTURE_FACT_PREFIX, postureToFacts } from '../../shared/posture'
+import { DRIFT_FACT_PREFIX, driftToFacts } from './drift'
 
 // Samples the estate on a schedule, in main, whether or not anyone is looking.
 //
@@ -88,6 +90,26 @@ type PostureSampler = (
   key: string,
   cfg: FleetTarget['cfg']
 ) => Promise<{ ok: boolean; posture?: HostPosture; error?: string }>
+
+/**
+ * The configuration drift probe — roadmap item 25. Injected exactly as the
+ * three above are, and for the same reason.
+ *
+ * It rides the FACTS cadence too. A watched configuration file changes when
+ * somebody changes it, and reading seven of them off every host every two
+ * minutes would be a great deal of I/O to watch nothing happen.
+ *
+ * Takes the host's own name as well as the config, because the `hostnames`
+ * normalisation rule cannot substitute a name nobody told it about — and
+ * without it every templated file in the estate is unique and the whole
+ * comparison is noise. `hostname` is what the metrics probe reported this
+ * sweep; `serverName` is what the server is called in ShellPilot.
+ */
+type DriftSampler = (
+  key: string,
+  cfg: FleetTarget['cfg'],
+  ctx: { hostname?: string; serverName?: string }
+) => Promise<{ ok: boolean; drift?: HostDrift; error?: string }>
 
 /**
  * The slice of the durable store this file uses.
@@ -246,6 +268,33 @@ export interface FleetSamplerDeps {
    * which is how every existing test keeps working.
    */
   postureEnabled?: () => boolean
+  /**
+   * The configuration drift probe — roadmap item 25. Optional for the reason
+   * the other three are: a sampler built without it behaves exactly as it did
+   * before, which keeps every existing test valid.
+   *
+   * Same place, same conditions, its own due clock.
+   */
+  sampleDrift?: DriftSampler
+  /**
+   * Whether the drift probe may run at all, resolved PER SWEEP.
+   *
+   * The THIRD place in this file where a module toggle gates a channel rather
+   * than a panel, and it earns that for the posture probe's reason rather than
+   * the access probe's: not what it does on the host — it reads seven
+   * world-readable files with no sudo anywhere — but what it PRODUCES.
+   *
+   * A map of which hosts differ from a known-good configuration is a map of
+   * which hosts are behind, and "these three still have PasswordAuthentication
+   * where the other twelve do not" is a target list. That is worth having,
+   * which is why it exists; it is not worth having without somebody deciding
+   * to have it.
+   *
+   * A function rather than a flag so a toggle takes effect on the next sweep
+   * rather than at the next restart. Absent means the gate is not installed,
+   * which is how every existing test keeps working.
+   */
+  driftEnabled?: () => boolean
   // metricsDisconnect. Called for every target the sampler stops watching.
   //
   // metricsSample holds a pooled connection per key and only releases it when
@@ -378,6 +427,23 @@ export interface FleetCacheEntry {
    *  as a host with no rules. */
   postureError?: string
   postureErrorAt?: number
+  /**
+   * The last successful configuration drift collection — roadmap item 25. Its
+   * own clock again, for the reason `factsAt` has one.
+   *
+   * This is also where the bounded redacted PREVIEW of each watched file lives,
+   * and the only place it ever lives: it is not written to the durable store
+   * and does not survive a restart. See the note at the top of
+   * services/drift.ts about what is stored and what is only held.
+   */
+  drift?: HostDrift
+  driftAt?: number
+  /** Set when the most recent drift probe failed; cleared by a success and
+   *  kept ALONGSIDE the last good collection. A host whose files were read an
+   *  hour ago and whose probe is failing now has NOT come into line, and the
+   *  comparison must not render it as a host that matches. */
+  driftError?: string
+  driftErrorAt?: number
 }
 
 /** One host's contribution to a sweep, held until the whole sweep is written. */
@@ -395,6 +461,8 @@ interface PendingWrite {
   access?: HostAccess
   /** Present only on the sweeps where the posture probe was also due. */
   posture?: HostPosture
+  /** Present only on the sweeps where the drift probe was also due. */
+  drift?: HostDrift
 }
 
 export interface FleetLookup {
@@ -470,6 +538,11 @@ export class FleetSampler {
   // probes fail independently, and one clock would let a host whose access
   // probe keeps timing out postpone its posture collection too.
   private postureDueAt = new Map<string, number>()
+  // And a FOURTH, for the configuration drift probe — roadmap item 25. Same
+  // reason as the second and the third: the probes fail independently, and one
+  // shared clock lets a host whose posture probe keeps timing out postpone its
+  // drift collection too.
+  private driftDueAt = new Map<string, number>()
   // Servers whose last known reachability has already been looked up in the
   // store. Once per server per process: the in-memory map is the answer after
   // that, and a lookup on every sweep would be two reads per host forever.
@@ -538,6 +611,7 @@ export class FleetSampler {
       this.factsDueAt.delete(id)
       this.accessDueAt.delete(id)
       this.postureDueAt.delete(id)
+      this.driftDueAt.delete(id)
     }
 
     this.stopTimer()
@@ -735,6 +809,48 @@ export class FleetSampler {
     }
   }
 
+  /**
+   * Record one configuration drift collection, on the entry the metrics sample
+   * owns.
+   *
+   * Mirrors `rememberPosture` exactly, including the part that matters most: a
+   * FAILURE KEEPS THE LAST GOOD COLLECTION. Replacing it with nothing would
+   * turn "the probe could not run this hour" into a host with no readings, and
+   * a host with no readings is one the comparison reports as uncollected — a
+   * softer word than the truth, which is that this host stopped answering while
+   * still holding whatever configuration it had.
+   */
+  private rememberDrift(serverId: string, at: number, drift?: HostDrift, error?: string): void {
+    const entry = this.samples.get(serverId) ?? {}
+    this.samples.set(
+      serverId,
+      drift
+        ? { ...entry, drift, driftAt: at, driftError: undefined, driftErrorAt: undefined }
+        : { ...entry, driftError: error ?? 'unavailable', driftErrorAt: at }
+    )
+  }
+
+  /** What this sampler last collected about one server's watched configuration
+   *  files, for the IPC surface the drift view reads — roadmap item 25.
+   *  Separate from `postureFor` so a caller that wants a config comparison is
+   *  not handed a firewall reading to ignore. */
+  driftFor(serverId: string): {
+    drift?: HostDrift
+    at?: number
+    error?: string
+    errorAt?: number
+    intervalMs: number
+  } {
+    const entry = this.samples.get(serverId)
+    return {
+      drift: entry?.drift,
+      at: entry?.driftAt,
+      error: entry?.driftError,
+      errorAt: entry?.driftErrorAt,
+      intervalMs: clampFactsInterval(this.cfg.factsIntervalMs)
+    }
+  }
+
   /** What this sampler last collected about who can get into one server, for
    *  the IPC surface the access view reads. Separate from `factsFor` so a
    *  caller that wants keys is not handed an inventory to ignore. */
@@ -917,6 +1033,27 @@ export class FleetSampler {
             }
             store.retireFacts(w.serverId, w.at, POSTURE_FACT_PREFIX, Object.keys(postureFacts))
           }
+
+          // Configuration drift — roadmap item 25, into the SAME store, and
+          // swept unconditionally for exactly the reason posture is: nothing
+          // here is per-object. `driftToFacts` writes a status row for EVERY
+          // watched file on every collection, including the ones that could not
+          // be read, so the key set is complete whatever the probe managed and
+          // a sweep against it can only retire a watch the catalogue no longer
+          // has.
+          //
+          // What is written is two hashes, a status and a list of rule ids per
+          // file. No content of any kind — see services/drift.ts. `upsertFact`
+          // reports 'changed' for a hash that moved, which is what turns a
+          // config edit into a fact-changed event without this file storing a
+          // single line of anybody's nginx.conf.
+          if (w.drift) {
+            const driftFacts = driftToFacts(w.drift)
+            for (const [key, value] of Object.entries(driftFacts)) {
+              store.upsertFact(w.serverId, key, value, w.at)
+            }
+            store.retireFacts(w.serverId, w.at, DRIFT_FACT_PREFIX, Object.keys(driftFacts))
+          }
         }
       })
     } catch (err) {
@@ -1079,6 +1216,39 @@ export class FleetSampler {
                 this.rememberPosture(t.serverId, postureAt, undefined, probe.error ?? 'unavailable')
               }
             }
+
+            // The configuration drift probe — roadmap item 25. Same place, same
+            // conditions, its own due clock, and sequential after the other
+            // three for the reason they are sequential with each other: four
+            // long reads opened at once is four exec channels on a link a
+            // terminal may be typing over.
+            const driftOn = this.deps.driftEnabled?.() ?? true
+            if (this.deps.sampleDrift && driftOn && at >= (this.driftDueAt.get(t.serverId) ?? 0)) {
+              // Set BEFORE the probe, for the reason the other three are.
+              this.driftDueAt.set(t.serverId, at + clampFactsInterval(this.cfg.factsIntervalMs))
+              const probe = await this.deps
+                .sampleDrift(fleetKey(t.serverId), t.cfg, {
+                  // The host's own name, so the `hostnames` normalisation rule
+                  // has something to substitute. Taken from THIS sweep's sample
+                  // rather than from the cache, because a host that was renamed
+                  // would otherwise be normalised against the name it used to
+                  // have and every one of its files would read as drifted.
+                  hostname: (res.data as HostMetrics | undefined)?.hostname,
+                  serverName: t.serverName
+                })
+                .catch((err) => ({
+                  ok: false as const,
+                  error: err instanceof Error ? err.message : String(err)
+                }))
+              if (gen !== this.generation || this.disposed) return
+              const driftAt = this.now
+              if (probe.ok && probe.drift) {
+                this.rememberDrift(t.serverId, driftAt, probe.drift)
+                write.drift = probe.drift
+              } else {
+                this.rememberDrift(t.serverId, driftAt, undefined, probe.error ?? 'unavailable')
+              }
+            }
             writes.push(write)
           } else {
             const error = res.error ?? 'unavailable'
@@ -1159,6 +1329,7 @@ export class FleetSampler {
     this.factsDueAt.clear()
     this.accessDueAt.clear()
     this.postureDueAt.clear()
+    this.driftDueAt.clear()
     this.seeded.clear()
     if (active === this) active = null
     return this.inFlight ?? Promise.resolve()

@@ -636,7 +636,42 @@ describe('what must NOT be able to reach this', () => {
       'shared/posture',
       'fleet:posture',
       'postureFor',
-      'get_host_posture'
+      'get_host_posture',
+      // Configuration drift — roadmap item 25. The posture argument, one step
+      // sharper.
+      //
+      // Posture is a map of how to attack a host. This is a map of which hosts
+      // are BEHIND: "these three still have PasswordAuthentication where the
+      // other twelve do not" is not a description of an estate, it is a ranked
+      // target list, kept fresh, with the divergent hosts already picked out.
+      // The panel's whole purpose is to sort the estate into "the same as
+      // everybody else" and "not", which is precisely the sorting an attacker
+      // would otherwise have to do by hand.
+      //
+      // Read-only is not the argument it sounds like here, for the reason it is
+      // not one for posture: there is no write to refuse, so "it only reads"
+      // has a comfortable ring to it. `execute_command` gated per server
+      // against an access group is a consent story about ONE host and one
+      // command a human can read. "Which of these forty machines has an
+      // nginx.conf that does not match the other thirty-seven" is a different
+      // question with a different answer, and the answer is no — not "not yet".
+      //
+      // The property holds today only by construction: nothing under
+      // src/main/services/mcpServer.ts names any of these. This is what makes
+      // that checkable in a diff rather than by remembering.
+      'buildDriftCommand',
+      'parseDriftCollection',
+      'DRIFT_WATCHES',
+      'DriftReader',
+      'driftToFacts',
+      'readingFromContent',
+      'compareDrift',
+      'normaliseForWatch',
+      'shared/drift',
+      'services/drift',
+      'fleet:drift',
+      'driftFor',
+      'get_config_drift'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }
