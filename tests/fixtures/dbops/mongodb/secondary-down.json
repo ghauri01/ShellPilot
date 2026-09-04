@@ -1,0 +1,908 @@
+{
+ "hello": {
+  "ok": true,
+  "result": {
+   "topologyVersion": {
+    "processId": "6a9a26ec11b04bebdd4ecf8e",
+    "counter": 8
+   },
+   "hosts": [
+    "sp-mongo1:27017",
+    "sp-mongo2:27017",
+    "sp-mongo3:27017"
+   ],
+   "setName": "rs0",
+   "setVersion": 3,
+   "isWritablePrimary": true,
+   "secondary": false,
+   "primary": "sp-mongo1:27017",
+   "me": "sp-mongo1:27017",
+   "electionId": "7fffffff0000000000000001",
+   "lastWrite": {
+    "opTime": {
+     "ts": {
+      "$timestamp": "7681497301784723457"
+     },
+     "t": 1
+    },
+    "lastWriteDate": "2026-09-04T02:12:41.000Z",
+    "majorityOpTime": {
+     "ts": {
+      "$timestamp": "7681497258835050497"
+     },
+     "t": 1
+    },
+    "majorityWriteDate": "2026-09-04T02:12:31.000Z"
+   },
+   "maxBsonObjectSize": 16777216,
+   "maxMessageSizeBytes": 48000000,
+   "maxWriteBatchSize": 100000,
+   "localTime": "2026-09-04T02:12:50.774Z",
+   "logicalSessionTimeoutMinutes": 30,
+   "connectionId": 86,
+   "minWireVersion": 0,
+   "maxWireVersion": 21,
+   "readOnly": false,
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "buildInfo": {
+  "ok": true,
+  "result": {
+   "version": "7.0.40",
+   "gitVersion": "37741b538c02da076d1e34d66113ac0230d4523a",
+   "modules": [],
+   "allocator": "tcmalloc",
+   "javascriptEngine": "mozjs",
+   "sysInfo": "deprecated",
+   "versionArray": [
+    7,
+    0,
+    40,
+    0
+   ],
+   "openssl": {
+    "running": "OpenSSL 3.0.2 15 Mar 2022",
+    "compiled": "OpenSSL 3.0.2 15 Mar 2022"
+   },
+   "buildEnvironment": {
+    "distmod": "ubuntu2204",
+    "distarch": "aarch64",
+    "cc": "/opt/mongodbtoolchain/v4/bin/gcc: gcc (GCC) 11.3.0",
+    "ccflags": "-Werror -include mongo/platform/basic.h -ffp-contract=off -fasynchronous-unwind-tables -g2 -Wall -Wsign-compare -Wno-unknown-pragmas -Winvalid-pch -gdwarf-5 -fno-omit-frame-pointer -fno-strict-aliasing -O2 -march=armv8.2-a -mtune=generic -Wno-unused-local-typedefs -Wno-unused-function -Wno-deprecated-declarations -Wno-unused-const-variable -Wno-unused-but-set-variable -Wno-missing-braces -fstack-protector-strong -gdwarf64 -Wa,--nocompress-debug-sections -Wimplicit-fallthrough=5",
+    "cxx": "/opt/mongodbtoolchain/v4/bin/g++: g++ (GCC) 11.3.0",
+    "cxxflags": "-Woverloaded-virtual -Wpessimizing-move -Wno-maybe-uninitialized -fsized-deallocation -Wno-deprecated -std=c++20",
+    "linkflags": "-Wl,--fatal-warnings -B/opt/mongodbtoolchain/v4/bin -gdwarf-5 -pthread -Wl,-z,now -fuse-ld=lld -fstack-protector-strong -gdwarf64 -Wl,--build-id -Wl,--hash-style=gnu -Wl,-z,noexecstack -Wl,--warn-execstack -Wl,-z,relro -Wl,--compress-debug-sections=none -Wl,-z,origin -Wl,--enable-new-dtags",
+    "target_arch": "aarch64",
+    "target_os": "linux",
+    "cppdefines": "SAFEINT_USE_INTRINSICS 0 PCRE2_STATIC NDEBUG _XOPEN_SOURCE 700 _GNU_SOURCE _FORTIFY_SOURCE 2 ABSL_FORCE_ALIGNED_ACCESS BOOST_ENABLE_ASSERT_DEBUG_HANDLER BOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF BOOST_LOG_NO_SHORTHAND_NAMES BOOST_LOG_USE_NATIVE_SYSLOG BOOST_LOG_WITHOUT_THREAD_ATTR BOOST_MATH_NO_LONG_DOUBLE_MATH_FUNCTIONS BOOST_SYSTEM_NO_DEPRECATED BOOST_THREAD_USES_DATETIME BOOST_THREAD_VERSION 5"
+   },
+   "bits": 64,
+   "debug": false,
+   "maxBsonObjectSize": 16777216,
+   "storageEngines": [
+    "devnull",
+    "wiredTiger"
+   ],
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "serverStatus": {
+  "ok": true,
+  "result": {
+   "host": "c2182d6a996d",
+   "version": "7.0.40",
+   "process": "mongod",
+   "pid": 1,
+   "uptime": 566,
+   "uptimeMillis": 566617,
+   "uptimeEstimate": 566,
+   "localTime": "2026-09-04T02:12:50.777Z",
+   "asserts": {
+    "regular": 0,
+    "warning": 0,
+    "msg": 0,
+    "user": 222,
+    "tripwire": 0,
+    "rollovers": 0
+   },
+   "connections": {
+    "current": 21,
+    "available": 307115,
+    "totalCreated": 74,
+    "rejected": 0,
+    "active": 7,
+    "queuedForEstablishment": 0,
+    "establishmentRateLimit": {
+     "rejected": 0,
+     "exempted": 0,
+     "interruptedDueToClientDisconnect": 0
+    },
+    "threaded": 21,
+    "exhaustIsMaster": 0,
+    "exhaustHello": 3,
+    "awaitingTopologyChanges": 3
+   },
+   "extra_info": {
+    "note": "fields vary by platform",
+    "user_time_us": 209842080,
+    "system_time_us": 950340,
+    "maximum_resident_set_kb": 229876,
+    "input_blocks": 0,
+    "output_blocks": 23368,
+    "page_reclaims": 13986,
+    "page_faults": 0,
+    "voluntary_context_switches": 43361,
+    "involuntary_context_switches": 2913,
+    "threads": 96
+   },
+   "featureCompatibilityVersion": {
+    "major": 7,
+    "minor": 0,
+    "transitioning": 0
+   },
+   "opcounters": {
+    "insert": 23002,
+    "query": 555,
+    "update": 13,
+    "delete": 0,
+    "getmore": 279,
+    "command": 1555
+   },
+   "repl": {
+    "topologyVersion": {
+     "processId": "6a9a26ec11b04bebdd4ecf8e",
+     "counter": 8
+    },
+    "hosts": [
+     "sp-mongo1:27017",
+     "sp-mongo2:27017",
+     "sp-mongo3:27017"
+    ],
+    "setName": "rs0",
+    "setVersion": 3,
+    "isWritablePrimary": true,
+    "secondary": false,
+    "primary": "sp-mongo1:27017",
+    "me": "sp-mongo1:27017",
+    "electionId": "7fffffff0000000000000001",
+    "lastWrite": {
+     "opTime": {
+      "ts": {
+       "$timestamp": "7681497301784723457"
+      },
+      "t": 1
+     },
+     "lastWriteDate": "2026-09-04T02:12:41.000Z",
+     "majorityOpTime": {
+      "ts": {
+       "$timestamp": "7681497258835050497"
+      },
+      "t": 1
+     },
+     "majorityWriteDate": "2026-09-04T02:12:31.000Z"
+    },
+    "primaryOnlyServices": {
+     "TenantMigrationDonorService": {
+      "state": "running",
+      "numInstances": 0
+     },
+     "TenantMigrationRecipientService": {
+      "state": "running",
+      "numInstances": 0
+     }
+    },
+    "rbid": 1,
+    "userWriteBlockMode": 1
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "replSetGetStatus": {
+  "ok": true,
+  "result": {
+   "set": "rs0",
+   "date": "2026-09-04T02:12:50.778Z",
+   "myState": 1,
+   "term": 1,
+   "syncSourceHost": "",
+   "syncSourceId": -1,
+   "heartbeatIntervalMillis": 2000,
+   "majorityVoteCount": 2,
+   "writeMajorityCount": 2,
+   "votingMembersCount": 3,
+   "writableVotingMembersCount": 3,
+   "optimes": {
+    "lastCommittedOpTime": {
+     "ts": {
+      "$timestamp": "7681497258835050497"
+     },
+     "t": 1
+    },
+    "lastCommittedWallTime": "2026-09-04T02:12:31.487Z",
+    "readConcernMajorityOpTime": {
+     "ts": {
+      "$timestamp": "7681497258835050497"
+     },
+     "t": 1
+    },
+    "appliedOpTime": {
+     "ts": {
+      "$timestamp": "7681497301784723457"
+     },
+     "t": 1
+    },
+    "durableOpTime": {
+     "ts": {
+      "$timestamp": "7681497301784723457"
+     },
+     "t": 1
+    },
+    "lastAppliedWallTime": "2026-09-04T02:12:41.488Z",
+    "lastDurableWallTime": "2026-09-04T02:12:41.488Z"
+   },
+   "lastStableRecoveryTimestamp": {
+    "$timestamp": "7681497258835050497"
+   },
+   "electionCandidateMetrics": {
+    "lastElectionReason": "electionTimeout",
+    "lastElectionDate": "2026-09-04T02:03:51.373Z",
+    "electionTerm": 1,
+    "lastCommittedOpTimeAtElection": {
+     "ts": {
+      "$timestamp": "7681494973912449025"
+     },
+     "t": -1
+    },
+    "lastSeenOpTimeAtElection": {
+     "ts": {
+      "$timestamp": "7681494973912449025"
+     },
+     "t": -1
+    },
+    "numVotesNeeded": 2,
+    "priorityAtElection": 1,
+    "electionTimeoutMillis": 10000,
+    "numCatchUpOps": 0,
+    "newTermStartDate": "2026-09-04T02:03:51.400Z",
+    "wMajorityWriteAvailabilityDate": "2026-09-04T02:03:51.922Z"
+   },
+   "members": [
+    {
+     "_id": 0,
+     "name": "sp-mongo1:27017",
+     "health": 1,
+     "state": 1,
+     "stateStr": "PRIMARY",
+     "uptime": 566,
+     "optime": {
+      "ts": {
+       "$timestamp": "7681497301784723457"
+      },
+      "t": 1
+     },
+     "optimeDate": "2026-09-04T02:12:41.000Z",
+     "lastAppliedWallTime": "2026-09-04T02:12:41.488Z",
+     "lastDurableWallTime": "2026-09-04T02:12:41.488Z",
+     "syncSourceHost": "",
+     "syncSourceId": -1,
+     "infoMessage": "",
+     "electionTime": {
+      "$timestamp": "7681495025452056577"
+     },
+     "electionDate": "2026-09-04T02:03:51.000Z",
+     "configVersion": 3,
+     "configTerm": 1,
+     "self": true,
+     "lastHeartbeatMessage": ""
+    },
+    {
+     "_id": 1,
+     "name": "sp-mongo2:27017",
+     "health": 0,
+     "state": 8,
+     "stateStr": "(not reachable/healthy)",
+     "uptime": 0,
+     "optime": {
+      "ts": {
+       "$timestamp": "0"
+      },
+      "t": -1
+     },
+     "optimeDurable": {
+      "ts": {
+       "$timestamp": "0"
+      },
+      "t": -1
+     },
+     "optimeDate": "1970-01-01T00:00:00.000Z",
+     "optimeDurableDate": "1970-01-01T00:00:00.000Z",
+     "lastAppliedWallTime": "2026-09-04T02:12:31.487Z",
+     "lastDurableWallTime": "2026-09-04T02:12:31.487Z",
+     "lastHeartbeat": "2026-09-04T02:12:43.011Z",
+     "lastHeartbeatRecv": "2026-09-04T02:12:31.007Z",
+     "pingMs": 0,
+     "lastHeartbeatMessage": "Request 632 timed out, deadline was 2026-09-04T02:12:43.011+00:00, op was RemoteCommand 632 -- target:[sp-mongo2:27017] db:admin expDate:2026-09-04T02:12:43.011+00:00 cmd:{ replSetHeartbeat: \"rs0\", configVersion: 3, configTerm: 1, hbv: 1, from: \"sp-mongo1:27017\", fromId: 0, term: 1, primaryId: 0 }",
+     "syncSourceHost": "",
+     "syncSourceId": -1,
+     "infoMessage": "",
+     "configVersion": 3,
+     "configTerm": 1
+    },
+    {
+     "_id": 2,
+     "name": "sp-mongo3:27017",
+     "health": 1,
+     "state": 2,
+     "stateStr": "SECONDARY",
+     "uptime": 51,
+     "optime": {
+      "ts": {
+       "$timestamp": "7681497258835050497"
+      },
+      "t": 1
+     },
+     "optimeDurable": {
+      "ts": {
+       "$timestamp": "7681497258835050497"
+      },
+      "t": 1
+     },
+     "optimeDate": "2026-09-04T02:12:31.000Z",
+     "optimeDurableDate": "2026-09-04T02:12:31.000Z",
+     "lastAppliedWallTime": "2026-09-04T02:12:31.487Z",
+     "lastDurableWallTime": "2026-09-04T02:12:31.487Z",
+     "lastHeartbeat": "2026-09-04T02:12:49.026Z",
+     "lastHeartbeatRecv": "2026-09-04T02:12:49.521Z",
+     "pingMs": 0,
+     "lastHeartbeatMessage": "",
+     "syncSourceHost": "sp-mongo2:27017",
+     "syncSourceId": 1,
+     "infoMessage": "",
+     "configVersion": 3,
+     "configTerm": 1
+    }
+   ],
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "oplogFirst": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ts": {
+       "$timestamp": "7681494973912449025"
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "local.oplog.rs"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "oplogLast": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ts": {
+       "$timestamp": "7681497301784723457"
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "local.oplog.rs"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "oplogStats": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ns": "local.oplog.rs",
+      "storageStats": {
+       "size": 8350288,
+       "count": 23115,
+       "avgObjSize": 361,
+       "storageSize": 1449984,
+       "freeStorageSize": 237568,
+       "capped": true,
+       "max": 0,
+       "maxSize": 2011124480,
+       "nindexes": 0,
+       "totalIndexSize": 0,
+       "indexSizes": {},
+       "totalSize": 1449984
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "local.oplog.rs"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "listDatabases": {
+  "ok": true,
+  "result": {
+   "databases": [
+    {
+     "name": "admin",
+     "sizeOnDisk": 81920,
+     "empty": false
+    },
+    {
+     "name": "config",
+     "sizeOnDisk": 258048,
+     "empty": false
+    },
+    {
+     "name": "local",
+     "sizeOnDisk": 1826816,
+     "empty": false
+    },
+    {
+     "name": "shop",
+     "sizeOnDisk": 1810432,
+     "empty": false
+    }
+   ],
+   "totalSize": 3977216,
+   "totalSizeMb": 3,
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "listCollections": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "id": 0,
+    "ns": "shop.$cmd.listCollections",
+    "firstBatch": [
+     {
+      "name": "orders",
+      "type": "collection"
+     },
+     {
+      "name": "customers",
+      "type": "collection"
+     }
+    ]
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "currentOp": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "type": "op",
+      "desc": "conn62",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 10426,
+      "secs_running": 85,
+      "microsecs_running": 85127160,
+      "op": "query",
+      "ns": "shop.orders",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn51",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11786,
+      "secs_running": 9,
+      "microsecs_running": 9777847,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn52",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11787,
+      "secs_running": 9,
+      "microsecs_running": 9773648,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn61",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11789,
+      "secs_running": 9,
+      "microsecs_running": 9768067,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn15",
+      "appName": "OplogFetcher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11876,
+      "secs_running": 4,
+      "microsecs_running": 4289627,
+      "op": "getmore",
+      "ns": "local.oplog.rs",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn84",
+      "appName": "OplogFetcher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11919,
+      "secs_running": 1,
+      "microsecs_running": 1635681,
+      "op": "getmore",
+      "ns": "local.oplog.rs",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn86",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11956,
+      "secs_running": 0,
+      "microsecs_running": 89,
+      "op": "command",
+      "ns": "admin.$cmd.aggregate",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "JournalFlusher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11944,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "NoopWriter",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11797,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "Checkpointer",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "opid": 11773,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "OplogApplier-0",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.784+00:00",
+      "effectiveUsers": [
+       {
+        "user": "__system",
+        "db": "local"
+       }
+      ],
+      "opid": 11938,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     }
+    ],
+    "id": 0,
+    "ns": "admin.$cmd.aggregate"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ },
+ "currentOpOwn": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "type": "op",
+      "desc": "conn62",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 10426,
+      "secs_running": 85,
+      "microsecs_running": 85128216,
+      "op": "query",
+      "ns": "shop.orders",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn51",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11786,
+      "secs_running": 9,
+      "microsecs_running": 9778905,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn52",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11787,
+      "secs_running": 9,
+      "microsecs_running": 9774706,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn61",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11789,
+      "secs_running": 9,
+      "microsecs_running": 9769124,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn15",
+      "appName": "OplogFetcher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11876,
+      "secs_running": 4,
+      "microsecs_running": 4290688,
+      "op": "getmore",
+      "ns": "local.oplog.rs",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn84",
+      "appName": "OplogFetcher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11919,
+      "secs_running": 1,
+      "microsecs_running": 1636739,
+      "op": "getmore",
+      "ns": "local.oplog.rs",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn86",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11957,
+      "secs_running": 0,
+      "microsecs_running": 68,
+      "op": "command",
+      "ns": "admin.$cmd.aggregate",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "JournalFlusher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11944,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "NoopWriter",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11797,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "Checkpointer",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "opid": 11773,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "OplogApplier-0",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:12:50.785+00:00",
+      "effectiveUsers": [
+       {
+        "user": "__system",
+        "db": "local"
+       }
+      ],
+      "opid": 11938,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     }
+    ],
+    "id": 0,
+    "ns": "admin.$cmd.aggregate"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497301784723457"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497301784723457"
+   }
+  }
+ }
+}

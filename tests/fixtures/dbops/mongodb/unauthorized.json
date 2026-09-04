@@ -1,0 +1,202 @@
+{
+ "hello": {
+  "ok": true,
+  "result": {
+   "isWritablePrimary": true,
+   "topologyVersion": {
+    "processId": "6a9a27fc905eeae44ad52fd9",
+    "counter": 0
+   },
+   "maxBsonObjectSize": 16777216,
+   "maxMessageSizeBytes": 48000000,
+   "maxWriteBatchSize": 100000,
+   "localTime": "2026-09-04T02:13:04.849Z",
+   "logicalSessionTimeoutMinutes": 30,
+   "connectionId": 6,
+   "minWireVersion": 0,
+   "maxWireVersion": 21,
+   "readOnly": false,
+   "ok": 1
+  }
+ },
+ "buildInfo": {
+  "ok": true,
+  "result": {
+   "version": "7.0.40",
+   "gitVersion": "37741b538c02da076d1e34d66113ac0230d4523a",
+   "modules": [],
+   "allocator": "tcmalloc",
+   "javascriptEngine": "mozjs",
+   "sysInfo": "deprecated",
+   "versionArray": [
+    7,
+    0,
+    40,
+    0
+   ],
+   "openssl": {
+    "running": "OpenSSL 3.0.2 15 Mar 2022",
+    "compiled": "OpenSSL 3.0.2 15 Mar 2022"
+   },
+   "buildEnvironment": {
+    "distmod": "ubuntu2204",
+    "distarch": "aarch64",
+    "cc": "/opt/mongodbtoolchain/v4/bin/gcc: gcc (GCC) 11.3.0",
+    "ccflags": "-Werror -include mongo/platform/basic.h -ffp-contract=off -fasynchronous-unwind-tables -g2 -Wall -Wsign-compare -Wno-unknown-pragmas -Winvalid-pch -gdwarf-5 -fno-omit-frame-pointer -fno-strict-aliasing -O2 -march=armv8.2-a -mtune=generic -Wno-unused-local-typedefs -Wno-unused-function -Wno-deprecated-declarations -Wno-unused-const-variable -Wno-unused-but-set-variable -Wno-missing-braces -fstack-protector-strong -gdwarf64 -Wa,--nocompress-debug-sections -Wimplicit-fallthrough=5",
+    "cxx": "/opt/mongodbtoolchain/v4/bin/g++: g++ (GCC) 11.3.0",
+    "cxxflags": "-Woverloaded-virtual -Wpessimizing-move -Wno-maybe-uninitialized -fsized-deallocation -Wno-deprecated -std=c++20",
+    "linkflags": "-Wl,--fatal-warnings -B/opt/mongodbtoolchain/v4/bin -gdwarf-5 -pthread -Wl,-z,now -fuse-ld=lld -fstack-protector-strong -gdwarf64 -Wl,--build-id -Wl,--hash-style=gnu -Wl,-z,noexecstack -Wl,--warn-execstack -Wl,-z,relro -Wl,--compress-debug-sections=none -Wl,-z,origin -Wl,--enable-new-dtags",
+    "target_arch": "aarch64",
+    "target_os": "linux",
+    "cppdefines": "SAFEINT_USE_INTRINSICS 0 PCRE2_STATIC NDEBUG _XOPEN_SOURCE 700 _GNU_SOURCE _FORTIFY_SOURCE 2 ABSL_FORCE_ALIGNED_ACCESS BOOST_ENABLE_ASSERT_DEBUG_HANDLER BOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF BOOST_LOG_NO_SHORTHAND_NAMES BOOST_LOG_USE_NATIVE_SYSLOG BOOST_LOG_WITHOUT_THREAD_ATTR BOOST_MATH_NO_LONG_DOUBLE_MATH_FUNCTIONS BOOST_SYSTEM_NO_DEPRECATED BOOST_THREAD_USES_DATETIME BOOST_THREAD_VERSION 5"
+   },
+   "bits": 64,
+   "debug": false,
+   "maxBsonObjectSize": 16777216,
+   "storageEngines": [
+    "devnull",
+    "wiredTiger"
+   ],
+   "ok": 1
+  }
+ },
+ "serverStatus": {
+  "ok": false,
+  "name": "MongoServerError",
+  "code": 13,
+  "codeName": "Unauthorized",
+  "message": "not authorized on admin to execute command { serverStatus: 1, wiredTiger: 0, tcmalloc: 0, metrics: 0, locks: 0, indexStats: 0, transactions: 0, opLatencies: 0, electionMetrics: 0, logicalSessionRecordCache: 0, catalogStats: 0, collectionCatalog: 0, queryAnalyzers: 0, internalTransactions: 0, twoPhaseCommitCoordinator: 0, shardSplits: 0, tenantMigrations: 0, trafficRecording: 0, flowControl: 0, indexBuilds: 0, indexBulkBuilder: 0, oplogTruncation: 0, readConcernCounters: 0, readPreferenceCounters: 0, scramCache: 0, queues: 0, batchedDeletes: 0, defaultRWConcern: 0, profiler: 0, globalLock: 0, storageEngine: 0, network: 0, security: 0, transportSecurity: 0, opcountersRepl: 0, lsid: { id: UUID(\"4fbac30f-dd20-45ce-b091-989bbfb68deb\") }, $db: \"admin\" }"
+ },
+ "replSetGetStatus": {
+  "ok": false,
+  "name": "MongoServerError",
+  "code": 13,
+  "codeName": "Unauthorized",
+  "message": "not authorized on admin to execute command { replSetGetStatus: 1, lsid: { id: UUID(\"4fbac30f-dd20-45ce-b091-989bbfb68deb\") }, $db: \"admin\" }"
+ },
+ "oplogFirst": {
+  "ok": false,
+  "name": "MongoServerError",
+  "code": 13,
+  "codeName": "Unauthorized",
+  "message": "not authorized on local to execute command { find: \"oplog.rs\", filter: {}, sort: { $natural: 1 }, limit: 1, projection: { ts: 1 }, lsid: { id: UUID(\"4fbac30f-dd20-45ce-b091-989bbfb68deb\") }, $db: \"local\" }"
+ },
+ "oplogLast": {
+  "ok": false,
+  "name": "MongoServerError",
+  "code": 13,
+  "codeName": "Unauthorized",
+  "message": "not authorized on local to execute command { find: \"oplog.rs\", filter: {}, sort: { $natural: -1 }, limit: 1, projection: { ts: 1 }, lsid: { id: UUID(\"4fbac30f-dd20-45ce-b091-989bbfb68deb\") }, $db: \"local\" }"
+ },
+ "oplogStats": {
+  "ok": false,
+  "name": "MongoServerError",
+  "code": 13,
+  "codeName": "Unauthorized",
+  "message": "not authorized on local to execute command { aggregate: \"oplog.rs\", pipeline: [ { $collStats: { storageStats: { scale: 1 } } }, { $project: { ns: 1, storageStats.size: 1, storageStats.count: 1, storageStats.avgObjSize: 1, storageStats.storageSize: 1, storageStats.freeStorageSize: 1, storageStats.totalIndexSize: 1, storageStats.indexSizes: 1, storageStats.nindexes: 1, storageStats.capped: 1, storageStats.max: 1, storageStats.maxSize: 1, storageStats.totalSize: 1 } } ], cursor: {}, lsid: { id: UUID(\"4fbac30f-dd20-45ce-b091-989bbfb68deb\") }, $db: \"local\" }"
+ },
+ "listDatabases": {
+  "ok": true,
+  "result": {
+   "databases": [
+    {
+     "name": "shop",
+     "sizeOnDisk": 40960,
+     "empty": false
+    }
+   ],
+   "totalSize": 40960,
+   "totalSizeMb": 0,
+   "ok": 1
+  }
+ },
+ "listCollections": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "id": 0,
+    "ns": "shop.$cmd.listCollections",
+    "firstBatch": [
+     {
+      "name": "orders",
+      "type": "collection"
+     }
+    ]
+   },
+   "ok": 1
+  }
+ },
+ "currentOp": {
+  "ok": false,
+  "name": "MongoServerError",
+  "code": 13,
+  "codeName": "Unauthorized",
+  "message": "not authorized on admin to execute command { aggregate: 1, pipeline: [ { $currentOp: { allUsers: true, idleConnections: false, localOps: true } }, { $project: { opid: 1, type: 1, desc: 1, appName: 1, active: 1, op: 1, ns: 1, secs_running: 1, microsecs_running: 1, planSummary: 1, waitingForLock: 1, currentOpTime: 1, effectiveUsers: 1, killPending: 1 } }, { $sort: { secs_running: -1 } }, { $limit: 20 } ], cursor: {}, lsid: { id: UUID(\"4fbac30f-dd20-45ce-b091-989bbfb68deb\") }, $db: \"admin\" }"
+ },
+ "currentOpOwn": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "type": "op",
+      "desc": "conn6",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:13:04.860+00:00",
+      "effectiveUsers": [
+       {
+        "user": "appuser",
+        "db": "shop"
+       }
+      ],
+      "opid": 3798,
+      "secs_running": 0,
+      "microsecs_running": 121,
+      "op": "command",
+      "ns": "admin.$cmd.aggregate",
+      "waitingForLock": false
+     }
+    ],
+    "id": 0,
+    "ns": "admin.$cmd.aggregate"
+   },
+   "ok": 1
+  }
+ },
+ "collStats:orders": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ns": "shop.orders",
+      "storageStats": {
+       "size": 58,
+       "count": 2,
+       "avgObjSize": 29,
+       "storageSize": 20480,
+       "freeStorageSize": 0,
+       "capped": false,
+       "nindexes": 1,
+       "totalIndexSize": 20480,
+       "indexSizes": {
+        "_id_": 20480
+       },
+       "totalSize": 40960
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "shop.orders"
+   },
+   "ok": 1
+  }
+ },
+ "indexStats:orders": {
+  "ok": false,
+  "name": "MongoServerError",
+  "code": 13,
+  "codeName": "Unauthorized",
+  "message": "not authorized on shop to execute command { aggregate: \"orders\", pipeline: [ { $indexStats: {} } ], cursor: {}, lsid: { id: UUID(\"4fbac30f-dd20-45ce-b091-989bbfb68deb\") }, $db: \"shop\" }"
+ }
+}

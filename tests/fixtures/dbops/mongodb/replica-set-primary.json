@@ -1,0 +1,1089 @@
+{
+ "hello": {
+  "ok": true,
+  "result": {
+   "topologyVersion": {
+    "processId": "6a9a26ec11b04bebdd4ecf8e",
+    "counter": 6
+   },
+   "hosts": [
+    "sp-mongo1:27017",
+    "sp-mongo2:27017"
+   ],
+   "setName": "rs0",
+   "setVersion": 1,
+   "isWritablePrimary": true,
+   "secondary": false,
+   "primary": "sp-mongo1:27017",
+   "me": "sp-mongo1:27017",
+   "electionId": "7fffffff0000000000000001",
+   "lastWrite": {
+    "opTime": {
+     "ts": {
+      "$timestamp": "7681497001137012737"
+     },
+     "t": 1
+    },
+    "lastWriteDate": "2026-09-04T02:11:31.000Z",
+    "majorityOpTime": {
+     "ts": {
+      "$timestamp": "7681497001137012737"
+     },
+     "t": 1
+    },
+    "majorityWriteDate": "2026-09-04T02:11:31.000Z"
+   },
+   "maxBsonObjectSize": 16777216,
+   "maxMessageSizeBytes": 48000000,
+   "maxWriteBatchSize": 100000,
+   "localTime": "2026-09-04T02:11:37.640Z",
+   "logicalSessionTimeoutMinutes": 30,
+   "connectionId": 65,
+   "minWireVersion": 0,
+   "maxWireVersion": 21,
+   "readOnly": false,
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "buildInfo": {
+  "ok": true,
+  "result": {
+   "version": "7.0.40",
+   "gitVersion": "37741b538c02da076d1e34d66113ac0230d4523a",
+   "modules": [],
+   "allocator": "tcmalloc",
+   "javascriptEngine": "mozjs",
+   "sysInfo": "deprecated",
+   "versionArray": [
+    7,
+    0,
+    40,
+    0
+   ],
+   "openssl": {
+    "running": "OpenSSL 3.0.2 15 Mar 2022",
+    "compiled": "OpenSSL 3.0.2 15 Mar 2022"
+   },
+   "buildEnvironment": {
+    "distmod": "ubuntu2204",
+    "distarch": "aarch64",
+    "cc": "/opt/mongodbtoolchain/v4/bin/gcc: gcc (GCC) 11.3.0",
+    "ccflags": "-Werror -include mongo/platform/basic.h -ffp-contract=off -fasynchronous-unwind-tables -g2 -Wall -Wsign-compare -Wno-unknown-pragmas -Winvalid-pch -gdwarf-5 -fno-omit-frame-pointer -fno-strict-aliasing -O2 -march=armv8.2-a -mtune=generic -Wno-unused-local-typedefs -Wno-unused-function -Wno-deprecated-declarations -Wno-unused-const-variable -Wno-unused-but-set-variable -Wno-missing-braces -fstack-protector-strong -gdwarf64 -Wa,--nocompress-debug-sections -Wimplicit-fallthrough=5",
+    "cxx": "/opt/mongodbtoolchain/v4/bin/g++: g++ (GCC) 11.3.0",
+    "cxxflags": "-Woverloaded-virtual -Wpessimizing-move -Wno-maybe-uninitialized -fsized-deallocation -Wno-deprecated -std=c++20",
+    "linkflags": "-Wl,--fatal-warnings -B/opt/mongodbtoolchain/v4/bin -gdwarf-5 -pthread -Wl,-z,now -fuse-ld=lld -fstack-protector-strong -gdwarf64 -Wl,--build-id -Wl,--hash-style=gnu -Wl,-z,noexecstack -Wl,--warn-execstack -Wl,-z,relro -Wl,--compress-debug-sections=none -Wl,-z,origin -Wl,--enable-new-dtags",
+    "target_arch": "aarch64",
+    "target_os": "linux",
+    "cppdefines": "SAFEINT_USE_INTRINSICS 0 PCRE2_STATIC NDEBUG _XOPEN_SOURCE 700 _GNU_SOURCE _FORTIFY_SOURCE 2 ABSL_FORCE_ALIGNED_ACCESS BOOST_ENABLE_ASSERT_DEBUG_HANDLER BOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF BOOST_LOG_NO_SHORTHAND_NAMES BOOST_LOG_USE_NATIVE_SYSLOG BOOST_LOG_WITHOUT_THREAD_ATTR BOOST_MATH_NO_LONG_DOUBLE_MATH_FUNCTIONS BOOST_SYSTEM_NO_DEPRECATED BOOST_THREAD_USES_DATETIME BOOST_THREAD_VERSION 5"
+   },
+   "bits": 64,
+   "debug": false,
+   "maxBsonObjectSize": 16777216,
+   "storageEngines": [
+    "devnull",
+    "wiredTiger"
+   ],
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "serverStatus": {
+  "ok": true,
+  "result": {
+   "host": "c2182d6a996d",
+   "version": "7.0.40",
+   "process": "mongod",
+   "pid": 1,
+   "uptime": 493,
+   "uptimeMillis": 493483,
+   "uptimeEstimate": 493,
+   "localTime": "2026-09-04T02:11:37.643Z",
+   "asserts": {
+    "regular": 0,
+    "warning": 0,
+    "msg": 0,
+    "user": 186,
+    "tripwire": 0,
+    "rollovers": 0
+   },
+   "connections": {
+    "current": 16,
+    "available": 307120,
+    "totalCreated": 57,
+    "rejected": 0,
+    "active": 6,
+    "queuedForEstablishment": 0,
+    "establishmentRateLimit": {
+     "rejected": 0,
+     "exempted": 0,
+     "interruptedDueToClientDisconnect": 0
+    },
+    "threaded": 16,
+    "exhaustIsMaster": 0,
+    "exhaustHello": 3,
+    "awaitingTopologyChanges": 3
+   },
+   "extra_info": {
+    "note": "fields vary by platform",
+    "user_time_us": 136316016,
+    "system_time_us": 850609,
+    "maximum_resident_set_kb": 229876,
+    "input_blocks": 0,
+    "output_blocks": 20936,
+    "page_reclaims": 13890,
+    "page_faults": 0,
+    "voluntary_context_switches": 37985,
+    "involuntary_context_switches": 1859,
+    "threads": 85
+   },
+   "featureCompatibilityVersion": {
+    "major": 7,
+    "minor": 0,
+    "transitioning": 0
+   },
+   "opcounters": {
+    "insert": 23002,
+    "query": 551,
+    "update": 13,
+    "delete": 0,
+    "getmore": 255,
+    "command": 1333
+   },
+   "repl": {
+    "topologyVersion": {
+     "processId": "6a9a26ec11b04bebdd4ecf8e",
+     "counter": 6
+    },
+    "hosts": [
+     "sp-mongo1:27017",
+     "sp-mongo2:27017"
+    ],
+    "setName": "rs0",
+    "setVersion": 1,
+    "isWritablePrimary": true,
+    "secondary": false,
+    "primary": "sp-mongo1:27017",
+    "me": "sp-mongo1:27017",
+    "electionId": "7fffffff0000000000000001",
+    "lastWrite": {
+     "opTime": {
+      "ts": {
+       "$timestamp": "7681497001137012737"
+      },
+      "t": 1
+     },
+     "lastWriteDate": "2026-09-04T02:11:31.000Z",
+     "majorityOpTime": {
+      "ts": {
+       "$timestamp": "7681497001137012737"
+      },
+      "t": 1
+     },
+     "majorityWriteDate": "2026-09-04T02:11:31.000Z"
+    },
+    "primaryOnlyServices": {
+     "TenantMigrationDonorService": {
+      "state": "running",
+      "numInstances": 0
+     },
+     "TenantMigrationRecipientService": {
+      "state": "running",
+      "numInstances": 0
+     }
+    },
+    "rbid": 1,
+    "userWriteBlockMode": 1
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "replSetGetStatus": {
+  "ok": true,
+  "result": {
+   "set": "rs0",
+   "date": "2026-09-04T02:11:37.644Z",
+   "myState": 1,
+   "term": 1,
+   "syncSourceHost": "",
+   "syncSourceId": -1,
+   "heartbeatIntervalMillis": 2000,
+   "majorityVoteCount": 2,
+   "writeMajorityCount": 2,
+   "votingMembersCount": 2,
+   "writableVotingMembersCount": 2,
+   "optimes": {
+    "lastCommittedOpTime": {
+     "ts": {
+      "$timestamp": "7681497001137012737"
+     },
+     "t": 1
+    },
+    "lastCommittedWallTime": "2026-09-04T02:11:31.477Z",
+    "readConcernMajorityOpTime": {
+     "ts": {
+      "$timestamp": "7681497001137012737"
+     },
+     "t": 1
+    },
+    "appliedOpTime": {
+     "ts": {
+      "$timestamp": "7681497001137012737"
+     },
+     "t": 1
+    },
+    "durableOpTime": {
+     "ts": {
+      "$timestamp": "7681497001137012737"
+     },
+     "t": 1
+    },
+    "lastAppliedWallTime": "2026-09-04T02:11:31.477Z",
+    "lastDurableWallTime": "2026-09-04T02:11:31.477Z"
+   },
+   "lastStableRecoveryTimestamp": {
+    "$timestamp": "7681496743438974977"
+   },
+   "electionCandidateMetrics": {
+    "lastElectionReason": "electionTimeout",
+    "lastElectionDate": "2026-09-04T02:03:51.373Z",
+    "electionTerm": 1,
+    "lastCommittedOpTimeAtElection": {
+     "ts": {
+      "$timestamp": "7681494973912449025"
+     },
+     "t": -1
+    },
+    "lastSeenOpTimeAtElection": {
+     "ts": {
+      "$timestamp": "7681494973912449025"
+     },
+     "t": -1
+    },
+    "numVotesNeeded": 2,
+    "priorityAtElection": 1,
+    "electionTimeoutMillis": 10000,
+    "numCatchUpOps": 0,
+    "newTermStartDate": "2026-09-04T02:03:51.400Z",
+    "wMajorityWriteAvailabilityDate": "2026-09-04T02:03:51.922Z"
+   },
+   "members": [
+    {
+     "_id": 0,
+     "name": "sp-mongo1:27017",
+     "health": 1,
+     "state": 1,
+     "stateStr": "PRIMARY",
+     "uptime": 493,
+     "optime": {
+      "ts": {
+       "$timestamp": "7681497001137012737"
+      },
+      "t": 1
+     },
+     "optimeDate": "2026-09-04T02:11:31.000Z",
+     "lastAppliedWallTime": "2026-09-04T02:11:31.477Z",
+     "lastDurableWallTime": "2026-09-04T02:11:31.477Z",
+     "syncSourceHost": "",
+     "syncSourceId": -1,
+     "infoMessage": "",
+     "electionTime": {
+      "$timestamp": "7681495025452056577"
+     },
+     "electionDate": "2026-09-04T02:03:51.000Z",
+     "configVersion": 1,
+     "configTerm": 1,
+     "self": true,
+     "lastHeartbeatMessage": ""
+    },
+    {
+     "_id": 1,
+     "name": "sp-mongo2:27017",
+     "health": 1,
+     "state": 2,
+     "stateStr": "SECONDARY",
+     "uptime": 477,
+     "optime": {
+      "ts": {
+       "$timestamp": "7681497001137012737"
+      },
+      "t": 1
+     },
+     "optimeDurable": {
+      "ts": {
+       "$timestamp": "7681497001137012737"
+      },
+      "t": 1
+     },
+     "optimeDate": "2026-09-04T02:11:31.000Z",
+     "optimeDurableDate": "2026-09-04T02:11:31.000Z",
+     "lastAppliedWallTime": "2026-09-04T02:11:31.477Z",
+     "lastDurableWallTime": "2026-09-04T02:11:31.477Z",
+     "lastHeartbeat": "2026-09-04T02:11:35.762Z",
+     "lastHeartbeatRecv": "2026-09-04T02:11:36.788Z",
+     "pingMs": 0,
+     "lastHeartbeatMessage": "",
+     "syncSourceHost": "sp-mongo1:27017",
+     "syncSourceId": 0,
+     "infoMessage": "",
+     "configVersion": 1,
+     "configTerm": 1
+    }
+   ],
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "oplogFirst": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ts": {
+       "$timestamp": "7681494973912449025"
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "local.oplog.rs"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "oplogLast": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ts": {
+       "$timestamp": "7681497001137012737"
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "local.oplog.rs"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "oplogStats": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ns": "local.oplog.rs",
+      "storageStats": {
+       "size": 8349440,
+       "count": 23107,
+       "avgObjSize": 361,
+       "storageSize": 1449984,
+       "freeStorageSize": 237568,
+       "capped": true,
+       "max": 0,
+       "maxSize": 2011124480,
+       "nindexes": 0,
+       "totalIndexSize": 0,
+       "indexSizes": {},
+       "totalSize": 1449984
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "local.oplog.rs"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "listDatabases": {
+  "ok": true,
+  "result": {
+   "databases": [
+    {
+     "name": "admin",
+     "sizeOnDisk": 81920,
+     "empty": false
+    },
+    {
+     "name": "config",
+     "sizeOnDisk": 258048,
+     "empty": false
+    },
+    {
+     "name": "local",
+     "sizeOnDisk": 1826816,
+     "empty": false
+    },
+    {
+     "name": "shop",
+     "sizeOnDisk": 1810432,
+     "empty": false
+    }
+   ],
+   "totalSize": 3977216,
+   "totalSizeMb": 3,
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "listCollections": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "id": 0,
+    "ns": "shop.$cmd.listCollections",
+    "firstBatch": [
+     {
+      "name": "orders",
+      "type": "collection"
+     },
+     {
+      "name": "customers",
+      "type": "collection"
+     }
+    ]
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "currentOp": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "type": "op",
+      "desc": "conn62",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 10426,
+      "secs_running": 11,
+      "microsecs_running": 11995801,
+      "op": "query",
+      "ns": "shop.orders",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn51",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 10595,
+      "secs_running": 2,
+      "microsecs_running": 2017029,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn52",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 10594,
+      "secs_running": 2,
+      "microsecs_running": 2019720,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn15",
+      "appName": "OplogFetcher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 10611,
+      "secs_running": 1,
+      "microsecs_running": 1148424,
+      "op": "getmore",
+      "ns": "local.oplog.rs",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn61",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 10606,
+      "secs_running": 1,
+      "microsecs_running": 1493271,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn65",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 10643,
+      "secs_running": 0,
+      "microsecs_running": 131,
+      "op": "command",
+      "ns": "admin.$cmd.aggregate",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "JournalFlusher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 10630,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "NoopWriter",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 10520,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "Checkpointer",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "opid": 9639,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "OplogApplier-0",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.652+00:00",
+      "effectiveUsers": [
+       {
+        "user": "__system",
+        "db": "local"
+       }
+      ],
+      "opid": 10624,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     }
+    ],
+    "id": 0,
+    "ns": "admin.$cmd.aggregate"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "currentOpOwn": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "type": "op",
+      "desc": "conn62",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 10426,
+      "secs_running": 11,
+      "microsecs_running": 11996911,
+      "op": "query",
+      "ns": "shop.orders",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn51",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 10595,
+      "secs_running": 2,
+      "microsecs_running": 2018142,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn52",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 10594,
+      "secs_running": 2,
+      "microsecs_running": 2020832,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn15",
+      "appName": "OplogFetcher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 10611,
+      "secs_running": 1,
+      "microsecs_running": 1149542,
+      "op": "getmore",
+      "ns": "local.oplog.rs",
+      "planSummary": "COLLSCAN",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn61",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 10606,
+      "secs_running": 1,
+      "microsecs_running": 1494382,
+      "op": "command",
+      "ns": "admin.$cmd",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "conn65",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 10644,
+      "secs_running": 0,
+      "microsecs_running": 43,
+      "op": "command",
+      "ns": "admin.$cmd.aggregate",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "JournalFlusher",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 10630,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "NoopWriter",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 10520,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "Checkpointer",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "opid": 9639,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     },
+     {
+      "type": "op",
+      "desc": "OplogApplier-0",
+      "active": true,
+      "currentOpTime": "2026-09-04T02:11:37.653+00:00",
+      "effectiveUsers": [
+       {
+        "user": "__system",
+        "db": "local"
+       }
+      ],
+      "opid": 10624,
+      "op": "none",
+      "ns": "",
+      "waitingForLock": false
+     }
+    ],
+    "id": 0,
+    "ns": "admin.$cmd.aggregate"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "collStats:orders": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ns": "shop.orders",
+      "storageStats": {
+       "size": 1748890,
+       "count": 20000,
+       "avgObjSize": 87,
+       "storageSize": 458752,
+       "freeStorageSize": 0,
+       "capped": false,
+       "nindexes": 4,
+       "totalIndexSize": 1081344,
+       "indexSizes": {
+        "_id_": 528384,
+        "sku_1": 249856,
+        "qty_1": 110592,
+        "created_-1_qty_1": 192512
+       },
+       "totalSize": 1540096
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "shop.orders"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "indexStats:orders": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "name": "sku_1",
+      "key": {
+       "sku": 1
+      },
+      "host": "c2182d6a996d:27017",
+      "accesses": {
+       "ops": 500,
+       "since": "2026-09-04T02:03:58.123Z"
+      },
+      "spec": {
+       "v": 2,
+       "key": {
+        "sku": 1
+       },
+       "name": "sku_1"
+      }
+     },
+     {
+      "name": "created_-1_qty_1",
+      "key": {
+       "created": -1,
+       "qty": 1
+      },
+      "host": "c2182d6a996d:27017",
+      "accesses": {
+       "ops": 0,
+       "since": "2026-09-04T02:03:58.377Z"
+      },
+      "spec": {
+       "v": 2,
+       "key": {
+        "created": -1,
+        "qty": 1
+       },
+       "name": "created_-1_qty_1"
+      }
+     },
+     {
+      "name": "_id_",
+      "key": {
+       "_id": 1
+      },
+      "host": "c2182d6a996d:27017",
+      "accesses": {
+       "ops": 0,
+       "since": "2026-09-04T02:03:57.986Z"
+      },
+      "spec": {
+       "v": 2,
+       "key": {
+        "_id": 1
+       },
+       "name": "_id_"
+      }
+     },
+     {
+      "name": "qty_1",
+      "key": {
+       "qty": 1
+      },
+      "host": "c2182d6a996d:27017",
+      "accesses": {
+       "ops": 0,
+       "since": "2026-09-04T02:03:58.254Z"
+      },
+      "spec": {
+       "v": 2,
+       "key": {
+        "qty": 1
+       },
+       "name": "qty_1"
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "shop.orders"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "collStats:customers": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "ns": "shop.customers",
+      "storageStats": {
+       "size": 177780,
+       "count": 3000,
+       "avgObjSize": 59,
+       "storageSize": 86016,
+       "freeStorageSize": 0,
+       "capped": false,
+       "nindexes": 2,
+       "totalIndexSize": 184320,
+       "indexSizes": {
+        "_id_": 94208,
+        "email_1": 90112
+       },
+       "totalSize": 270336
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "shop.customers"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ },
+ "indexStats:customers": {
+  "ok": true,
+  "result": {
+   "cursor": {
+    "firstBatch": [
+     {
+      "name": "_id_",
+      "key": {
+       "_id": 1
+      },
+      "host": "c2182d6a996d:27017",
+      "accesses": {
+       "ops": 0,
+       "since": "2026-09-04T02:03:59.323Z"
+      },
+      "spec": {
+       "v": 2,
+       "key": {
+        "_id": 1
+       },
+       "name": "_id_"
+      }
+     },
+     {
+      "name": "email_1",
+      "key": {
+       "email": 1
+      },
+      "host": "c2182d6a996d:27017",
+      "accesses": {
+       "ops": 0,
+       "since": "2026-09-04T02:03:59.487Z"
+      },
+      "spec": {
+       "v": 2,
+       "key": {
+        "email": 1
+       },
+       "name": "email_1"
+      }
+     }
+    ],
+    "id": 0,
+    "ns": "shop.customers"
+   },
+   "ok": 1,
+   "$clusterTime": {
+    "clusterTime": {
+     "$timestamp": "7681497001137012737"
+    },
+    "signature": {
+     "hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+     "keyId": 0
+    }
+   },
+   "operationTime": {
+    "$timestamp": "7681497001137012737"
+   }
+  }
+ }
+}

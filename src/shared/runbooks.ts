@@ -220,6 +220,10 @@ export type RunbookRecall =
   | { status: 'nothing-run'; occurrences: RunbookOccurrence[] }
   | { status: 'never-fired' }
   | { status: 'unavailable'; reason: RunbookUnavailableReason }
+  /** No host was chosen, so the question was never asked. A FIFTH answer
+   *  rather than an empty `ok`, for the same reason there are already four:
+   *  "we did not ask" is not "we asked and there was nothing". */
+  | { status: 'no-host' }
 
 /** The three sentences, as literals, so the panel cannot paraphrase one into
  *  another and a test can assert which was said. */
@@ -239,6 +243,10 @@ export const RUNBOOK_STORE_DISABLED =
 export const RUNBOOK_STORE_UNREADABLE =
   'The history store could not be read, so what was run last time cannot be told to you. ' +
   'This is not the same as nothing having been run.'
+
+export const RUNBOOK_NO_HOST =
+  'What was run is a per-host question — the same alert on two machines was two incidents ' +
+  'with two answers. Pick a host to see what was actually run.'
 
 export function runbookUnavailableSentence(reason: RunbookUnavailableReason): string {
   return reason === 'store-disabled' ? RUNBOOK_STORE_DISABLED : RUNBOOK_STORE_UNREADABLE
@@ -367,4 +375,26 @@ export interface RunbookView {
    *  notes being null, which means nobody has written one. */
   notesUnreadable: boolean
   recall: RunbookRecall
+}
+
+/**
+ * The bridge, exactly two methods.
+ *
+ * A read and a write of the operator's own note, and nothing else. There is
+ * deliberately no `runbook:run`, no `runbook:copy-to-job` and no filter
+ * argument on the read: the first two are RUNBOOK_NO_RUN_NOTE's refusal
+ * expressed as an absent channel rather than as a disabled button, and the
+ * third is the query surface the history store's rule refuses.
+ *
+ * `satisfies RunbooksBridge` in the preload so a method added to this contract
+ * and forgotten there is a compile error rather than something the panel finds
+ * undefined at runtime.
+ */
+export interface RunbooksBridge {
+  read(kind: StoreAlertKind, hostId: string | null): Promise<RunbookView>
+  saveNote(
+    kind: StoreAlertKind,
+    hostId: string | null,
+    text: string
+  ): Promise<{ ok: boolean; note: RunbookNote | null }>
 }

@@ -1,0 +1,67 @@
+{
+ "infoServer": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'info' command"
+ },
+ "infoMemory": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'info' command"
+ },
+ "infoPersistence": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'info' command"
+ },
+ "infoReplication": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'info' command"
+ },
+ "infoClients": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'info' command"
+ },
+ "infoStats": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'info' command"
+ },
+ "infoKeyspace": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'info' command"
+ },
+ "infoCluster": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'info' command"
+ },
+ "clusterInfo": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'cluster|info' command"
+ },
+ "configSlowlog": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'config|get' command"
+ },
+ "slowlogLen": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'slowlog|len' command"
+ },
+ "slowlogGet": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'slowlog|get' command"
+ },
+ "dbsize": {
+  "ok": false,
+  "name": "ReplyError",
+  "message": "NOPERM User app has no permissions to run the 'dbsize' command"
+ }
+}

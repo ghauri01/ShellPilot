@@ -6,6 +6,7 @@ import {
   RUNBOOK_NEVER_FIRED,
   RUNBOOK_NOTE_MAX,
   RUNBOOK_NOTHING_RUN,
+  RUNBOOK_NO_HOST,
   RUNBOOK_NO_RUN_NOTE,
   RUNBOOK_OCCURRENCES,
   RUNBOOK_RESPONSE_WINDOW_MS,
@@ -75,7 +76,7 @@ describe('what the job-history half says when it has nothing to show', () => {
     expect(r.status === 'nothing-run' && r.occurrences[0].resolvedAt).toBe(T0 + 20 * MIN)
   })
 
-  it('spells the two out of the store differently again, and both differently from the above', () => {
+  it('spells every way of having no answer as its own sentence', () => {
     // Four sentences, four meanings, no two of them the same string. This is
     // the conflation the item exists to refuse: "nothing was run" and "I could
     // not tell you what was run" are not paraphrases of each other.
@@ -85,7 +86,12 @@ describe('what the job-history half says when it has nothing to show', () => {
       RUNBOOK_STORE_DISABLED,
       RUNBOOK_STORE_UNREADABLE
     ]
-    expect(new Set(all).size).toBe(4)
+    // And the fifth: nobody asked. An empty `ok` for a runbook opened without
+    // a host would be "we looked and there was nothing", which is a claim no
+    // read was ever made to support.
+    expect(RUNBOOK_NO_HOST).toContain('per-host question')
+    expect(RUNBOOK_NO_HOST).toContain('Pick a host')
+    expect(new Set([...all, RUNBOOK_NO_HOST]).size).toBe(5)
     expect(RUNBOOK_NOTHING_RUN).toContain('Nothing was run')
     expect(RUNBOOK_STORE_DISABLED).toContain('switched off')
     expect(RUNBOOK_STORE_DISABLED).toContain('not the same as nothing having been run')
