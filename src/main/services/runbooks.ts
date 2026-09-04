@@ -211,16 +211,10 @@ export function removeRunbookNotesForTests(deps: RunbookDeps): void {
 // ---------------------------------------------------------------------------
 
 /**
- * How the job ended ON THIS HOST, in our own vocabulary.
+ * A job's per-host outcome, reduced to the three words a runbook needs.
  *
  * Derived from the stored outcome and exit code, never from a sentence the
- * host wrote. `unknown` is a real answer and is not folded into `failed`: a
- * job the app lost track of — abandoned, orphaned — did not necessarily fail,
- * and calling it a failure is the same invention as a zero for an unmeasured
- * reading.
- */
-/**
- * A job's per-host outcome, reduced to the three words a runbook needs.
+ * host wrote.
  *
  * TAKEN AS `JobHostOutcome`, NOT AS `string`, AND THAT IS THE POINT. This
  * branched on `'failed'` — which has never been a member of that union — so
@@ -230,9 +224,25 @@ export function removeRunbookNotesForTests(deps: RunbookDeps): void {
  * say". A test agreed, because its fixture seeded the same value that does not
  * exist; both were wrong in the same direction, so the test passed.
  *
- * The map below is exhaustive over the union by type rather than by reading, so
- * a new outcome added to the job engine fails to compile here instead of
- * quietly joining `unknown`.
+ * The map is exhaustive over the union by type rather than by reading, so a new
+ * outcome added to the job engine fails to compile here instead of quietly
+ * joining `unknown`.
+ *
+ * `unknown` is a real answer and is not folded into `failed`. The three that
+ * sit there each mean something specific:
+ *
+ *  - `abandoned` — ShellPilot stopped while the host was running. The app's
+ *    fault, not the host's, and the command may well have finished.
+ *  - `cancelled` — nobody ever let it run.
+ *  - `orphaned` — the marker directory outlived the wrapper's pid and no `rc`
+ *    was ever written. `src/shared/jobs.ts` is explicit that this may be a
+ *    command that completed its work and was killed a microsecond before
+ *    recording it, or one that died a third of the way through an upgrade,
+ *    and that claiming to know which is the error. A red mark in the runbook
+ *    would be exactly that claim.
+ *
+ * `timeout` and `unreachable` are failures rather than unknowns because both
+ * are verdicts the app reached itself, about work it was watching.
  */
 const OUTCOME_MEANS: Record<JobHostOutcome, RunbookOutcome> = {
   ok: 'succeeded',
@@ -242,20 +252,20 @@ const OUTCOME_MEANS: Record<JobHostOutcome, RunbookOutcome> = {
   timeout: 'failed',
   unreachable: 'failed',
   unhealthy: 'failed',
-  orphaned: 'failed',
   abandoned: 'unknown',
-  cancelled: 'unknown'
+  cancelled: 'unknown',
+  orphaned: 'unknown'
 }
 
 function outcomeOf(
   outcome: JobHostOutcome | undefined,
   exitCode: number | undefined
 ): RunbookOutcome {
-  // `abandoned` and `cancelled` are `unknown` rather than `failed` on purpose:
-  // neither says the command failed. One stopped because ShellPilot did, the
-  // other never ran. Calling either a failure would put a red mark against a
-  // host that did nothing wrong — the same reasoning that gave `abandoned` its
-  // own name in the job engine rather than reusing `unreachable`.
+  // The `??` is not dead despite the map being total over the union: this row
+  // came off disk, so the type is a claim about what SHOULD be there, not a
+  // guarantee about what is. A store written by an older or newer build can
+  // hold a word this build has never heard of, and the honest reading of a
+  // word we cannot interpret is `unknown`.
   if (outcome !== undefined) return OUTCOME_MEANS[outcome] ?? 'unknown'
   if (typeof exitCode === 'number') return exitCode === 0 ? 'succeeded' : 'failed'
   return 'unknown'
