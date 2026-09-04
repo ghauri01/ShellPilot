@@ -92,8 +92,8 @@ sends you to a second application the moment you need to query a table or look u
 | **Two-factor auth** | Answers keyboard-interactive challenges; connections are shared so you enter a code once, not per session |
 | **SFTP browser** | Browse, edit, upload, rename and delete files over the same connection |
 | **Server monitoring** | Live CPU, memory, disk and network docked under the terminal, with alerts on CPU, memory and failed systemd units |
-| **Background checking** | Sample every server on a schedule, so a host that runs hot or a unit that dies at 3am is noticed while you are looking at something else |
-| **Webhook alerts** | POST alerts to Slack, Discord, Teams or any HTTPS endpoint — friendly server name and what fired, never a host, an IP or a log line |
+| **Background checking** | Sample every server on a schedule, so a server that runs hot or a unit that dies at 3am is noticed while you are looking at something else |
+| **Webhook alerts** | POST alerts to Slack, Discord, Teams or any HTTPS endpoint — friendly server name and what fired, never a hostname, an IP or a log line |
 | **SSH tunnels** | Local forwards, remote forwards and a SOCKS5 proxy |
 | **WireGuard** | Userspace WireGuard with **no administrator rights** — the tunnel appears as a local SOCKS5 proxy and forwards, and your routing table is never touched |
 | **OpenVPN** | Bundled on macOS and Linux, driven over its management interface, with one-time codes and split tunnelling |
@@ -112,25 +112,25 @@ Fleet operations — <kbd>Ctrl</kbd>+<kbd>M</kbd>, and each one **off until you 
 
 | | |
 |---|---|
-| **Inventory** | Every host, its OS and version, what it has pending, and when it was last seen |
-| **Patching** | What is pending per host, applied in waves that stop on the first host that comes back unhealthy rather than rolling on |
-| **Run one command everywhere** | Broadcast across selected hosts with a confirmation naming exactly what runs where, per-host results, and a job that survives the app being closed |
-| **Log tailing** | Follow a file across many hosts at once, in one pane |
-| **Fleet search** | Search across what has already been collected, without touching a host |
+| **Inventory** | Every server, its OS and version, what it has pending, and when it was last seen |
+| **Patching** | What is pending per server, applied in waves that stop on the first server that comes back unhealthy rather than rolling on |
+| **Run one command everywhere** | Broadcast across selected servers with a confirmation naming exactly what runs where, per-server results, and a job that survives the app being closed |
+| **Log tailing** | Follow a file across many servers at once, in one pane |
+| **Fleet search** | Search across what has already been collected, without touching a server |
 | **Docker** | Containers, images and volumes with honest per-item sizes, and reclaim by id against exactly what the preview showed — never a blind `prune` |
 | **Compose** | Read a project's services, their state and their drift from the file on disk |
 | **Kubernetes** | Workloads, cordon, drain and exec — drain refuses seven ways and treats a read that did not answer as a refusal in itself |
 | **Databases, operated** | Replication lag, slow queries, table sizes and connection counts for PostgreSQL, MySQL/MariaDB, MongoDB and Redis |
 | **Backups** | Scheduled dumps to a local path or S3-compatible storage, with restore **verified by restoring**, not by checking a file exists |
-| **Security posture** | SSH config, sudo rules, listening ports and firewall state as they actually are on the host |
+| **Security posture** | SSH config, sudo rules, listening ports and firewall state as they actually are on the server |
 | **Firewall rules** | The rules themselves rather than a count of them — off by default, behind its own consent, never stored, and unreadable by an agent at any setting |
-| **Configuration drift** | What changed on a host since the last time you looked |
+| **Configuration drift** | What changed on a server since the last time you looked |
 | **Capacity trends** | Where disk and memory are heading, from history already collected |
 | **Rules** | "When this fires, run that" — with the run needing the same approval it would need by hand |
-| **Cron** | Read and edit crontabs, planned against the host and written through approval |
-| **Runbooks** | On an alert, what was run the last three times it fired on that host |
+| **Cron** | Read and edit crontabs, planned against the server and written through approval |
+| **Runbooks** | On an alert, what was run the last three times it fired on that server |
 | **Change log** | Who approved what, when, and what it did |
-| **Access & keys** | Which key opens which host, and whose it is |
+| **Access & keys** | Which key opens which server, and whose it is |
 | **Supervised processes** | Keep local processes running, with nothing auto-starting: what survives a restart is the list, not a running command |
 
 ## AI Agent Access
@@ -172,7 +172,7 @@ override individual file paths on top of the blanket read/write setting:
 **You ask Claude Code:** *"Check my production Nginx server."*
 
 1. Claude Code calls ShellPilot's `list_servers` tool. It gets back friendly names for whatever
-   the session's workspace(s) and access group can see — say, `Nginx Server Prod` — never a host,
+   the session's workspace(s) and access group can see — say, `Nginx Server Prod` — never a hostname,
    IP or username.
 2. It calls `get_server_metrics` (or `execute_command` with something like `systemctl status
    nginx`) naming that server. ShellPilot resolves `"Nginx Server Prod"` to the real server record,
@@ -305,7 +305,7 @@ under **Active Sessions** and create a new one rather than hunting for it:
 
 - **Production troubleshooting** — ask an agent to check a service's status, tail a log, or sample
   CPU/memory on a server named in plain English, without ever handing it that server's key.
-- **Bastion / jump-host operations** — the same friendly-name resolution works through chained
+- **Bastion / jump-server operations** — the same friendly-name resolution works through chained
   hops; an agent scoped to a workspace behind a bastion never needs the bastion's credential
   either.
 - **Database investigation** — an agent with `databaseAccess` allowed can query a database that is
@@ -533,7 +533,7 @@ Click **+** in the Connections sidebar, or press <kbd>Ctrl</kbd>+<kbd>N</kbd>.
 
 ![Add Server dialog](docs/images/add-server.png)
 
-Fill in the host, port and username, then pick how to authenticate:
+Fill in the server, port and username, then pick how to authenticate:
 
 - **Password** — stored in your OS keychain
 - **Private key** — browse to the key file; the path and optional passphrase are stored in the keychain, never in plaintext
@@ -551,7 +551,7 @@ Servers inside a private network are reached through a bastion. Click **Add jump
 Each hop can either:
 
 - **Use a saved server** — the hop borrows that server's stored credentials, so a key is defined once and reused, or
-- **Be a custom host** — set its own host, port, user and private key
+- **Be a custom server** — set its own server, port, user and private key
 
 Hops connect in order, top to bottom: `you → Hop 1 → Hop 2 → target`. Use the arrows to reorder.
 
@@ -599,7 +599,7 @@ The Connections toolbar has three actions — from left to right:
 | Icon | Action |
 |---|---|
 | 📁+ | **New folder** — creates a folder and drops straight into rename |
-| ⬇ | **Import from `~/.ssh/config`** — bulk-import your existing hosts |
+| ⬇ | **Import from `~/.ssh/config`** — bulk-import your existing servers |
 | ➕ | **Add server** |
 
 There is also a small **New folder** button on the `CONNECTIONS` section header itself.
@@ -618,7 +618,7 @@ Databases have their own, separate folder tree with the same behaviour, so a "St
 
 ### Import from `~/.ssh/config`
 
-Click the import icon to read your existing SSH config. ShellPilot parses `Host`, `HostName`, `User`, `Port`, `IdentityFile` and `ProxyJump`, applies `Host *` wildcard defaults the way OpenSSH does, and shows a preview so you choose what to import. `ProxyJump` entries become jump hosts automatically, carrying the referenced host's key.
+Click the import icon to read your existing SSH config. ShellPilot parses `Host`, `HostName`, `User`, `Port`, `IdentityFile` and `ProxyJump`, applies `Host *` wildcard defaults the way OpenSSH does, and shows a preview so you choose what to import. `ProxyJump` entries become jump hosts automatically, carrying the referenced server's key.
 
 ## Terminal
 
@@ -648,27 +648,27 @@ Control keys such as <kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>A</kbd> 
 
 ### Alerts
 
-When a host's CPU or memory reaches **80%** (configurable) you get a native OS
+When a server's CPU or memory reaches **80%** (configurable) you get a native OS
 notification, repeated once a minute while it lasts and cleared automatically on
 recovery. A count also appears in the status bar. A **systemd unit that has
 failed** raises one too, on the transition into failure rather than every check,
 so a service that has been down for a week does not re-announce itself.
 
 A **root filesystem more than 85% full** raises one as well — the same 85% at
-which the Fleet Monitor lists the host as needing attention and turns its disk
+which the Fleet Monitor lists the server as needing attention and turns its disk
 bar red, so the alert and the screen it sends you to can never disagree. The
 status-bar count is that same figure and nothing else: clean a disk from 90% to
 82% and the chip goes as soon as the next sample lands, because the Fleet
-Monitor has stopped listing the host. It repeats **every six hours**, not every
+Monitor has stopped listing the server. It repeats **every six hours**, not every
 minute: a disk does not empty itself, and a minute-long window is roughly ten
-thousand notifications a week for one host that nobody can fix before Monday. It
+thousand notifications a week for one server that nobody can fix before Monday. It
 does speak up sooner if the disk gets **5 percentage points worse** than the
 figure it last reported, and again immediately if a disk that had recovered
 fills a second time. Only `/` is measured — the probe is `df -kP /` and nothing
 else, so a full `/var` on its own partition raises nothing here.
 
 **Recovery has a margin, for CPU and memory only.** They clear five points below
-the threshold rather than at it, so a host hovering on the line does not flicker
+the threshold rather than at it, so a server hovering on the line does not flicker
 between alerting and clear on every two-second sample. Disk has no such gap: it
 clears at 85% or below, the moment the Fleet Monitor stops flagging it.
 
@@ -680,10 +680,10 @@ delivery with them. **Switching it off also removes the alerts already showing**
 in the status bar, and forgets the repeat windows behind them: a chip cannot
 outlive the feature that raised it, and switching back on starts a clean slate
 rather than resuming a six-hour disk window that began before the toggle. The
-setting is global — it applies to all hosts, not one at a time — and it persists
+setting is global — it applies to all servers, not one at a time — and it persists
 across restarts.
 
-Under it, **Alert threshold** sets how hard a host has to be working before it
+Under it, **Alert threshold** sets how hard a server has to be working before it
 counts as high: **70%**, **80%** (default), **90%** or **95%**. The same
 threshold applies to both CPU and RAM. Raise it if busy-but-healthy servers are
 noisy, lower it if you want earlier warning. The threshold buttons are greyed
@@ -710,7 +710,7 @@ They are designed not to interrupt you:
 An alert is only worth having if it can reach you when you are not already
 looking at the problem. **Settings → Monitoring → Check servers in the
 background** samples **every server in the workspace** on a schedule, whether or
-not a monitor is open, so a host that runs hot or a unit that dies at 3am is
+not a monitor is open, so a server that runs hot or a unit that dies at 3am is
 noticed rather than discovered later.
 
 It is off by default, because it is not free: each pass opens **one SSH exec
@@ -742,16 +742,16 @@ webhook**.
 
 **What is sent is deliberately narrow.** Only the server's **friendly name** —
 the one you chose — plus what fired, when, and the value against the threshold.
-Never a host, an IP, a username, a log line or command output. The payload is
+Never a server, an IP, a username, a log line or command output. The payload is
 rebuilt field by field from a whitelist rather than forwarded, so nothing a
-remote host says can travel through it to a third-party API.
+remote server says can travel through it to a third-party API.
 
 **The URL is treated as a credential**, because it is one: anyone holding your
 Slack webhook can post as you. It is **https only** (except to loopback), stored
 with your other secrets via the OS keychain rather than in settings or backups,
 and never read back into the app's UI — the settings screen knows only *that* one
 is set. Redirects are not followed, so a `308` cannot quietly move your alerts to
-an internal or cleartext host.
+an internal or cleartext server.
 
 **Send test** posts one sample alert immediately, so a wrong URL is found while
 you are looking at the settings rather than during an incident. It ignores the
@@ -843,7 +843,7 @@ you have not opened has nothing to show.
 ## Fleet operations
 
 The same <kbd>Ctrl</kbd>+<kbd>M</kbd> view carries the work that is about the estate rather than
-one host: inventory, patching, broadcast, log tailing, search, Docker, Compose, Kubernetes,
+one server: inventory, patching, broadcast, log tailing, search, Docker, Compose, Kubernetes,
 database operations, backups, posture, firewall rules, drift, capacity, rules, cron, runbooks,
 the change log, access and keys.
 
@@ -855,16 +855,16 @@ reading a crontab changes nothing; editing one still goes through approval like 
 
 Three rules hold across all of them, and they are the reason this is not just a dashboard:
 
-- **A number nobody measured is not zero.** A host that refused to answer says so, and never
-  contributes a zero that quietly drags a fleet average down. The collectors that read host state
+- **A number nobody measured is not zero.** A server that refused to answer says so, and never
+  contributes a zero that quietly drags a fleet average down. The collectors that read server state
   answer in seven words rather than two — *ok*, *partial*, *absent*, *denied*, *no tool*,
   *unsupported*, *unknown* — because "the tool is not installed", "this account may not look" and
-  "this host cannot answer at all" are three different facts, and only one of them is worth
+  "this server cannot answer at all" are three different facts, and only one of them is worth
   escalating.
 - **Anything that writes goes through the same approval a human would need**, and is recorded in
   the change log with who approved it and what it did. A rule that fires a command does not get a
   quieter path than you typing it.
-- **Work outlives the window.** A broadcast or a patch wave keeps running on the host if ShellPilot
+- **Work outlives the window.** A broadcast or a patch wave keeps running on the server if ShellPilot
   is closed, and is picked back up by id when it reopens — reported honestly as *abandoned* or
   *orphaned* when nobody can say how it ended, rather than guessed at.
 
@@ -1101,7 +1101,7 @@ The **SSH → Keep authenticated connection** setting is the one to know if your
 - Credentials are stored with **Electron `safeStorage`**, backed by DPAPI on Windows, Keychain on macOS and libsecret on Linux — never in plaintext
 - The vault and backups use **AES-256-GCM** with **scrypt** key derivation
 - Workspace passwords are stored as **scrypt verifiers** compared in constant time
-- **Host keys are verified**: unknown hosts prompt with a SHA-256 fingerprint, and a changed key is refused outright
+- **Host keys are verified**: unknown servers prompt with a SHA-256 fingerprint, and a changed key is refused outright
 - Shell input is **parsed, never evaluated** — no `eval` on anything you type
 - The renderer runs with `contextIsolation` on and `nodeIntegration` off, behind a strict Content-Security-Policy
 
@@ -1153,7 +1153,7 @@ passphrase-encrypted backup file. Nothing is uploaded and nothing phones home.
 ### Does ShellPilot support jump hosts and bastions?
 
 Yes — unlimited chained hops per server, configured in the same dialog as the server itself.
-Each hop can either reuse a saved server's credentials or define its own host, port, user and
+Each hop can either reuse a saved server's credentials or define its own server, port, user and
 key. `ProxyJump` entries in `~/.ssh/config` are imported as jump hosts automatically.
 
 ### Which databases does it support?

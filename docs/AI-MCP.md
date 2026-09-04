@@ -33,7 +33,7 @@ another MCP client. For the short pitch and the security summary, see the
    **`127.0.0.1` only** (`startMcpServer`, `mcpServer.ts`). Nothing outside the machine can reach
    it, regardless of firewall or network configuration.
 3. Every tool call authenticates the bearer token against a session (`mcpAuth.ts`), then resolves
-   the target server **by friendly name** (`serverResolver.ts`) — never by host, IP or username,
+   the target server **by friendly name** (`serverResolver.ts`) — never by hostname, IP or username,
    because the tool call never carries one.
 4. The **access group** governing that server/workspace is evaluated for the specific capability
    the tool needs (`policyEngine.ts`), producing `allow`, `ask` or `deny`.
@@ -53,14 +53,14 @@ another MCP client. For the short pitch and the security summary, see the
 |---|---|---|
 | `list_workspaces` | — | The workspace(s) this session is scoped to |
 | `list_servers` | `viewServer` | Friendly names only, filtered to what the session can see |
-| `get_server_details` | `viewServer` | Name, OS, access group, effective ALLOW/ASK/DENY per capability — **never host/IP/username** |
+| `get_server_details` | `viewServer` | Name, OS, access group, effective ALLOW/ASK/DENY per capability — **never hostname/IP/username** |
 | `execute_command` | `terminal` (+ `sudo` if the command is sudo/doas, + file path rules for any absolute path it names) | stdout/stderr/exit code, redacted |
 | `read_file` | `readFiles` + `sftpDownload` (+ file path rules) | File contents, redacted |
 | `write_file` | `writeFiles` + `sftpUpload` (+ file path rules) | Bytes written |
 | `list_files` | `readFiles` + `sftpDownload` (+ file path rules) | Directory listing |
 | `get_server_metrics` | `serverMetrics` | CPU/memory/disk/uptime |
 | `add_server` | `manageServers`, resolved on the **workspace** | The name the new connection was saved under |
-| `list_databases` | `viewServer` | Friendly names and engines, never a host or credential |
+| `list_databases` | `viewServer` | Friendly names and engines, never a hostname or credential |
 | `query_database` | `databaseAccess` for reads; `+ writeFiles` and always ASK for anything that writes | Rows, capped |
 | `list_tunnels` | `sshTunnel` | Configured tunnels and whether each is running |
 | `set_tunnel` | `sshTunnel`, always ASK to start | Confirmation, with the bound port |
@@ -129,7 +129,7 @@ future template string cannot leak one by accident.
 An agent can add an SSH connection, including its credential, when the workspace's access group
 grants `manageServers`. Only **Read & Write**, **Sudo Access** and **Full Access** grant it, and all
 three set it to ASK, so every add surfaces an approval dialog naming the connection, the user and
-the host. The credential itself never appears in that dialog or in the audit log — only the fact
+the server. The credential itself never appears in that dialog or in the audit log — only the fact
 that one was supplied. It goes straight to the OS keychain and cannot be read back through the
 bridge.
 
@@ -283,7 +283,7 @@ comes back — never to a response.
 
 Jump hosts resolve independently: every hop in a chain gets its own credential lookup
 (`resolveChainSecrets`), so a multi-hop path to a bastion doesn't skip this for the intermediate
-hosts.
+servers.
 
 ## The `shellpilot` CLI and pairing
 
