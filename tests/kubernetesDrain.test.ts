@@ -526,6 +526,25 @@ describe('the drain refuses before it runs, not after', () => {
     expect(sent[1]).toContain('drain spk8s-worker --ignore-daemonsets')
   })
 
+  it('the panel offers no drain control at all when the preflight says no', () => {
+    // A source assertion. The refusal must be an ABSENCE of a button, not a
+    // disabled one with a tooltip: the main process re-takes the same preflight
+    // and refuses on its own reading, so a control that could be pressed would
+    // be a control that cannot work.
+    const panel = readFileSync(
+      join(__dirname, '..', 'src/renderer/src/components/kubernetes/KubernetesPanel.tsx'),
+      'utf8'
+    )
+    expect(panel).toMatch(/drainCheck\.assessment\.safe \? \(/)
+    expect(panel).toContain('This drain will not be offered while any of the above is true')
+    // The unchecked reads are rendered, and rendered as hard as a blocker.
+    expect(panel).toMatch(/drainCheck\.assessment\.unchecked\.map/)
+    expect(panel).toContain('read did not answer, so nobody can say')
+    // And there is no override anywhere in the panel.
+    expect(panel).not.toContain('--force')
+    expect(panel).not.toContain('delete-emptydir-data')
+  })
+
   it('refuses without an explicit confirmation, before reading anything', async () => {
     const { reader: r, sent } = reader(() => ({ ok: true, code: 0, stdout: '' }))
     const out = await r.drain(cfg, 'spk8s-worker', 'kind-spk8s', false)

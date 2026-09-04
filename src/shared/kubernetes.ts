@@ -1335,12 +1335,24 @@ export function nodeIsUnhealthy(n: K8sNode): boolean {
  *  the data only reappeared after clicking a different tab. A missing call is
  *  invisible in review — there is nothing on the screen to be wrong about.
  */
-export function readsAfterNamespaceChange(view: 'pods' | 'cluster' | 'usage'): {
+export function readsAfterNamespaceChange(view: 'pods' | 'cluster' | 'usage' | 'resources'): {
   pods: boolean
   overview: boolean
   usage: boolean
+  resources: boolean
 } {
-  return { pods: true, overview: view === 'cluster', usage: view === 'usage' }
+  return {
+    pods: true,
+    overview: view === 'cluster',
+    usage: view === 'usage',
+    // The storage/ingress/access reads are namespace-scoped like the others —
+    // PVCs, Ingresses, RoleBindings and Secrets all are, and only the
+    // ClusterRoleBinding half is not. Leaving this out would have reproduced
+    // the exact bug this function was named for, one tab further along: the
+    // namespace control looks inert and the data only reappears after clicking
+    // a different tab.
+    resources: view === 'resources'
+  }
 }
 
 // =========================================================================

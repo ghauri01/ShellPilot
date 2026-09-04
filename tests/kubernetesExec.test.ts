@@ -324,6 +324,22 @@ describe('the approval is a record, not a boolean', () => {
     expect(plan.confirmation).toEqual({ kind: 'type-to-confirm', phrase: 'EXEC' })
   })
 
+  it('the panel mints against the command the MAIN PROCESS built', () => {
+    // A source assertion, the way tests/broadcastApproval.test.ts asserts the
+    // broadcast panel's surface. The panel must not build its own command
+    // string and approve that: two builders that agree today can drift, and the
+    // one that runs is the main process's.
+    const panel = readFileSync(
+      join(__dirname, '..', 'src/renderer/src/components/kubernetes/KubernetesPanel.tsx'),
+      'utf8'
+    )
+    expect(panel).toMatch(/const \{ plan, command \} = await b\.execPlan\(target\)/)
+    expect(panel).toMatch(/surface: 'k8s-exec'/)
+    expect(panel).toMatch(/commands: \[command\]/)
+    // And it never calls buildK8sExecCommand itself.
+    expect(panel).not.toContain('buildK8sExecCommand')
+  })
+
   it('reports an unreachable host as an UNKNOWN outcome, not a failed command', async () => {
     const t = target()
     const { reader } = build(() => ({ ok: false }))

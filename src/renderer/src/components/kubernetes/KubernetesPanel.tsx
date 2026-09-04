@@ -3,12 +3,15 @@ import {
   Activity,
   Boxes,
   Gauge,
+  HardDrive,
   Layers,
   RefreshCw,
   RotateCw,
   ScrollText,
   Server as ServerIcon,
+  ShieldQuestion,
   Siren,
+  SquareTerminal,
   TriangleAlert
 } from 'lucide-react'
 import { sshHopsFor } from '../../lib/ssh'
@@ -17,23 +20,39 @@ import {
   K8S_FAILURE_HELP,
   k8sRelativeTime,
   nodeIsUnhealthy,
+  planK8sCordon,
+  planK8sDrain,
   planK8sRollout,
   readsAfterNamespaceChange,
   validatePodName,
   workloadIsDegraded,
+  type K8sApiScan,
+  type K8sCordonPlan,
+  type K8sCordonResult,
   type K8sDiagnosis,
+  type K8sDrainAssessment,
+  type K8sDrainPlan,
+  type K8sDrainResult,
   type K8sEvent,
+  type K8sExecPlan,
+  type K8sExecResult,
+  type K8sExecTarget,
+  type K8sHelmList,
+  type K8sNode,
   type K8sOverview,
   type K8sPod,
   type K8sProbe,
   type K8sRead,
+  type K8sResources,
   type K8sRolloutPlan,
   type K8sRolloutResult,
   type K8sRolloutTarget,
+  type K8sSchedulingAction,
   type K8sTextRead,
   type K8sUsage,
   type K8sWorkload
 } from '../../../../shared/kubernetes'
+import { approvalFor, type CommandApproval } from '../../../../shared/broadcast'
 import type { Server } from '../../types'
 
 // Pods on a cluster reachable from a server, and what you do about them.
@@ -44,12 +63,26 @@ import type { Server } from '../../types'
 // in roughly the order an operator asks for it — events, the previous
 // container's logs, then the workload behind the pod and the node under it.
 //
-// It is read-only with EXACTLY one exception, `kubectl rollout restart`, and
-// the exception is treated as one: it has its own confirmation, scaled to blast
-// radius the way shared/broadcast.ts scales its own. Nothing here switches the
-// context, execs into a pod, or deletes anything — see the header of
-// shared/kubernetes.ts, which explains why pod deletion in particular is
-// missing rather than forgotten.
+// FOUR THINGS HERE CHANGE THE CLUSTER, and each is treated as one:
+//  - `rollout restart`, whose confirmation scales to blast radius the way
+//    shared/broadcast.ts scales its own.
+//  - Cordon and uncordon, a plain confirm in both directions. Nothing is
+//    evicted, and the plan says so with the pod count — the single most common
+//    misreading of that button is that it moved something.
+//  - Drain, which is offered ONLY after a preflight read says it is safe, and
+//    which is not offered at all when it is not. A refusal here is no dialog,
+//    not a scarier one: the main process re-takes the same preflight and would
+//    refuse anyway, so a disabled button with a tooltip would be a control that
+//    cannot work.
+//  - Exec, which mints a `CommandApproval` against the command string the MAIN
+//    PROCESS built, not one built here — so if the two ever disagree,
+//    `verifyApproval` refuses rather than running something this dialog did not
+//    describe.
+//
+// Nothing here switches the context, applies a manifest, or deletes anything —
+// see the header of shared/kubernetes.ts, which explains why single-pod
+// deletion in particular is missing rather than forgotten, and why applying is
+// a pipeline's job.
 
 /**
  * The channels this panel calls, described where it calls them.
@@ -83,6 +116,23 @@ interface K8sBridge {
     target: K8sRolloutTarget,
     confirmed: boolean
   ) => Promise<K8sRolloutResult>
+  cordon?: (
+    cfg: unknown,
+    target: { node: string; action: K8sSchedulingAction; podCount: number | null; context?: string | null },
+    confirmed: boolean
+  ) => Promise<K8sCordonResult>
+  drainPreflight?: (cfg: unknown, node: string, context?: string) => Promise<K8sDrainAssessment>
+  drain?: (
+    cfg: unknown,
+    node: string,
+    context: string | undefined,
+    confirmed: boolean
+  ) => Promise<K8sDrainResult & { plan?: K8sDrainPlan }>
+  execPlan?: (target: K8sExecTarget) => Promise<{ plan: K8sExecPlan; command: string }>
+  exec?: (cfg: unknown, target: K8sExecTarget, approval: unknown) => Promise<K8sExecResult>
+  resources?: (cfg: unknown, context?: string, namespace?: string) => Promise<K8sResources>
+  apiScan?: (cfg: unknown, context?: string) => Promise<K8sApiScan>
+  helm?: (cfg: unknown, context?: string) => Promise<K8sHelmList>
 }
 
 const bridge = (): K8sBridge =>
@@ -156,7 +206,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
   const [logs, setLogs] = useState<{ pod: string; output: string } | null>(null)
   const [filter, setFilter] = useState('')
 
-  const [view, setView] = useState<'pods' | 'cluster' | 'usage'>('pods')
+  const [view, setView] = useState<'pods' | 'cluster' | 'usage' | 'resources'>('pods')
   const [overview, setOverview] = useState<K8sOverview | null>(null)
   const [overviewLoading, setOverviewLoading] = useState(false)
   const [usage, setUsage] = useState<K8sUsage | null>(null)
@@ -166,6 +216,38 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
   )
 
   // The state change, and everything it needs to be deliberate.
+  const [resources, setResources] = useState<K8sResources | null>(null)
+  const [apiScan, setApiScan] = useState<K8sApiScan | null>(null)
+  const [helm, setHelm] = useState<K8sHelmList | null>(null)
+  const [resourcesLoading, setResourcesLoading] = useState(false)
+
+  // Node lifecycle. `nodeBusy` is the node name, so two rows cannot be acted on
+  // at once and the row that is working is the one that says so.
+  const [nodeBusy, setNodeBusy] = useState('')
+  const [nodePending, setNodePending] = useState<{ plan: K8sCordonPlan } | null>(null)
+  const [nodeResult, setNodeResult] = useState<K8sCordonResult | null>(null)
+  // The preflight lives beside the drain dialog rather than inside it: it is a
+  // READ, it takes a round trip, and the verdict is the thing the operator is
+  // actually reading before deciding.
+  const [drainCheck, setDrainCheck] = useState<{
+    node: string
+    assessment: K8sDrainAssessment | null
+    plan: K8sDrainPlan | null
+    loading: boolean
+  } | null>(null)
+  const [drainResult, setDrainResult] = useState<(K8sDrainResult & { plan?: K8sDrainPlan }) | null>(
+    null
+  )
+
+  // Exec. `execCommand` is separate from the plan because the plan is only
+  // minted once the command is typed — a dialog cannot describe a command that
+  // does not exist yet.
+  const [execFor, setExecFor] = useState<K8sPod | null>(null)
+  const [execCommand, setExecCommand] = useState('')
+  const [execPhrase, setExecPhrase] = useState('')
+  const [execBusy, setExecBusy] = useState(false)
+  const [execResult, setExecResult] = useState<{ pod: string; r: K8sExecResult } | null>(null)
+
   const [pending, setPending] = useState<{ plan: K8sRolloutPlan } | null>(null)
   const [phrase, setPhrase] = useState('')
   const [restarting, setRestarting] = useState(false)
@@ -251,6 +333,195 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
       setUsage({ pods: f, nodes: f })
     } finally {
       setUsageLoading(false)
+    }
+  }
+
+  const loadResources = async (ns?: string): Promise<void> => {
+    if (!server) return
+    setResourcesLoading(true)
+    const ctx = context || undefined
+    try {
+      const b = bridge()
+      const f = { ok: false, reason: 'unknown', detail: NOT_WIRED } as const
+      setResources(
+        b.resources
+          ? await b.resources(cfgFor(server), ctx, (ns ?? namespace) || undefined)
+          : { pvcs: f, ingresses: f, roleBindings: f, secrets: f }
+      )
+      // Three separate round trips, not one, and the two extra ones are the
+      // reads whose ABSENCE is normal: an api-scan against a cluster that will
+      // not answer, and helm on a host that does not have it. Folding them into
+      // the resources call would make every refresh wait on them.
+      setApiScan(b.apiScan ? await b.apiScan(cfgFor(server), ctx) : null)
+      setHelm(
+        b.helm
+          ? await b.helm(cfgFor(server), ctx)
+          : { ok: false, reason: 'failed', detail: NOT_WIRED }
+      )
+    } catch (e) {
+      const f = {
+        ok: false,
+        reason: 'unknown',
+        detail: e instanceof Error ? e.message : String(e)
+      } as const
+      setResources({ pvcs: f, ingresses: f, roleBindings: f, secrets: f })
+    } finally {
+      setResourcesLoading(false)
+    }
+  }
+
+  const podsOn = (node: string): number => (probe?.ok ? probe.pods : []).filter((p) => p.node === node).length
+
+  const askToCordon = (n: K8sNode, action: K8sSchedulingAction): void => {
+    setNodeResult(null)
+    setDrainCheck(null)
+    // Computed here so the dialog can explain itself, and computed AGAIN in the
+    // main process before anything runs — the same rule the restart follows.
+    setNodePending({
+      plan: planK8sCordon({
+        node: n.name,
+        action,
+        // Only as many as this panel can see. When pods were listed for one
+        // namespace rather than all of them this is an undercount, which is why
+        // the plan's sentence is about eviction rather than about the number.
+        podCount: probe?.ok && probe.allNamespaces ? podsOn(n.name) : null,
+        context: context || (probe?.ok ? probe.currentContext : null)
+      })
+    })
+  }
+
+  const runCordon = async (): Promise<void> => {
+    if (!server || !nodePending) return
+    const t = nodePending.plan.target
+    setNodeBusy(t.node)
+    try {
+      const fn = bridge().cordon
+      const r = fn
+        ? await fn(cfgFor(server), t, true)
+        : {
+            ok: false,
+            action: t.action,
+            node: t.node,
+            alreadyInState: false,
+            output: '',
+            node_status: '',
+            reason: 'unknown' as const,
+            detail: NOT_WIRED
+          }
+      setNodeResult(r)
+      setNodePending(null)
+      if (r.ok) void loadOverview()
+    } finally {
+      setNodeBusy('')
+    }
+  }
+
+  /**
+   * Read the drain verdict. This is the whole safety story of the button, so it
+   * happens before any dialog and its answer is shown rather than summarised.
+   */
+  const checkDrain = async (node: string): Promise<void> => {
+    if (!server) return
+    setNodeResult(null)
+    setNodePending(null)
+    setDrainResult(null)
+    setDrainCheck({ node, assessment: null, plan: null, loading: true })
+    try {
+      const fn = bridge().drainPreflight
+      if (!fn) {
+        setDrainCheck({ node, assessment: null, plan: null, loading: false })
+        return
+      }
+      const a = await fn(cfgFor(server), node, context || undefined)
+      setDrainCheck({ node, assessment: a, plan: planK8sDrain(a), loading: false })
+    } catch {
+      setDrainCheck({ node, assessment: null, plan: null, loading: false })
+    }
+  }
+
+  const runDrain = async (): Promise<void> => {
+    if (!server || !drainCheck) return
+    setNodeBusy(drainCheck.node)
+    try {
+      const fn = bridge().drain
+      // The main process takes the preflight AGAIN and refuses on its own
+      // reading — what is passed here is a confirmation, not a verdict.
+      const r = fn
+        ? await fn(cfgFor(server), drainCheck.node, context || undefined, true)
+        : {
+            ok: false,
+            node: drainCheck.node,
+            evicted: [],
+            pending: [],
+            pdbRejected: [],
+            partial: false,
+            output: '',
+            node_status: '',
+            reason: 'unknown' as const,
+            detail: NOT_WIRED
+          }
+      setDrainResult(r)
+      setDrainCheck(null)
+      setPhrase('')
+      void loadOverview()
+      void load(context)
+    } finally {
+      setNodeBusy('')
+    }
+  }
+
+  const runExec = async (): Promise<void> => {
+    if (!server || !execFor) return
+    setExecBusy(true)
+    try {
+      const b = bridge()
+      const target: K8sExecTarget = {
+        serverId: server.id,
+        serverName: server.name,
+        namespace: execFor.namespace,
+        pod: execFor.name,
+        container: '',
+        command: execCommand,
+        context: context || (probe?.ok ? probe.currentContext : null)
+      }
+      if (!b.execPlan || !b.exec) {
+        setExecResult({
+          pod: execFor.name,
+          r: { ok: false, output: '', containerExit: null, reason: 'unknown', detail: NOT_WIRED }
+        })
+        return
+      }
+      // The command string comes back from the MAIN PROCESS, and the approval
+      // is minted against that rather than against anything built here. It is
+      // the same builder either way, and that is the point: if the two ever
+      // disagree, `verifyApproval` refuses instead of running something the
+      // dialog did not describe.
+      const { plan, command } = await b.execPlan(target)
+      const approval: CommandApproval = approvalFor({
+        surface: 'k8s-exec',
+        commands: [command],
+        targets: [{ serverId: server.id, serverName: server.name }],
+        plan,
+        phrase: execPhrase.trim(),
+        confirmedAt: Date.now()
+      })
+      setExecResult({ pod: execFor.name, r: await b.exec(cfgFor(server), target, approval) })
+      setExecFor(null)
+      setExecCommand('')
+      setExecPhrase('')
+    } catch (e) {
+      setExecResult({
+        pod: execFor.name,
+        r: {
+          ok: false,
+          output: '',
+          containerExit: null,
+          reason: 'unknown',
+          detail: e instanceof Error ? e.message : String(e)
+        }
+      })
+    } finally {
+      setExecBusy(false)
     }
   }
 
@@ -466,10 +737,12 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
               setNamespace(ns)
               setOverview(null)
               setUsage(null)
+              setResources(null)
               const again = readsAfterNamespaceChange(view)
               if (again.pods) void load(context, ns)
               if (again.overview) void loadOverview(ns)
               if (again.usage) void loadUsage(ns)
+              if (again.resources) void loadResources(ns)
             }}
             title="Scopes the cluster and usage reads. Nodes are cluster-scoped and are never namespace-filtered."
           >
@@ -528,6 +801,15 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
               }}
             >
               <Gauge size={12} /> Usage
+            </button>
+            <button
+              className={clsx('chip', view === 'resources' && 'on')}
+              onClick={() => {
+                setView('resources')
+                if (!resources) void loadResources()
+              }}
+            >
+              <HardDrive size={12} /> Storage, ingress &amp; access
             </button>
             <span className="spacer" />
             <span className="muted" style={{ fontSize: 11 }}>
@@ -603,6 +885,20 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
                   >
                     <ScrollText size={13} />
                   </button>
+                  {/* Last, and deliberately the least prominent of the three.
+                      The two beside it answer questions; this one runs code. */}
+                  <button
+                    className="icon-btn sm"
+                    title="Run one command inside this pod — arbitrary code, behind a typed confirmation"
+                    onClick={() => {
+                      setExecResult(null)
+                      setExecCommand('')
+                      setExecPhrase('')
+                      setExecFor(p)
+                    }}
+                  >
+                    <SquareTerminal size={13} />
+                  </button>
                 </div>
               ))}
             </>
@@ -663,6 +959,34 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
                         <span className="faint cron-desc">{n.roles || '—'}</span>
                         <span className="mono grow cron-cmd">{n.name}</span>
                         <span className="faint">{n.version}</span>
+                        {/* Cordon and uncordon are one button, because the node
+                            is in one state or the other and offering both makes
+                            the operator work out which one is a no-op. */}
+                        {/SchedulingDisabled/.test(n.status) ? (
+                          <button
+                            className="btn ghost sm"
+                            disabled={nodeBusy === n.name}
+                            onClick={() => askToCordon(n, 'uncordon')}
+                          >
+                            Uncordon
+                          </button>
+                        ) : (
+                          <button
+                            className="btn ghost sm"
+                            disabled={nodeBusy === n.name}
+                            onClick={() => askToCordon(n, 'cordon')}
+                          >
+                            Cordon
+                          </button>
+                        )}
+                        <button
+                          className="btn ghost sm"
+                          disabled={nodeBusy === n.name || drainCheck?.loading === true}
+                          title="Read whether this node can be drained safely. This is a read; nothing moves."
+                          onClick={() => void checkDrain(n.name)}
+                        >
+                          Check drain
+                        </button>
                       </div>
                     ))
                   )}
@@ -728,6 +1052,189 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
               )}
             </>
           )}
+
+          {view === 'resources' && (
+            <>
+              <div className="row muted" style={{ fontSize: 11, marginTop: 8 }}>
+                <span className="grow">
+                  {namespace ? `namespace ${namespace}` : 'all namespaces'} — ClusterRoleBindings
+                  and the API scan are cluster-wide either way
+                </span>
+                <button
+                  className="btn ghost sm"
+                  disabled={resourcesLoading}
+                  onClick={() => void loadResources()}
+                >
+                  <RefreshCw size={12} className={clsx(resourcesLoading && 'spin')} /> Refresh
+                </button>
+              </div>
+              {!resources && resourcesLoading && (
+                <div className="faint" style={{ fontSize: 12 }}>Reading…</div>
+              )}
+
+              {resources && (
+                <>
+                  <div className="s-title" style={{ marginTop: 8 }}>
+                    <HardDrive size={12} /> PersistentVolumeClaims
+                  </div>
+                  {!resources.pvcs.ok ? (
+                    <Denied read={resources.pvcs} what="PersistentVolumeClaims" />
+                  ) : resources.pvcs.items.length === 0 ? (
+                    <div className="faint" style={{ fontSize: 12 }}>No claims.</div>
+                  ) : (
+                    resources.pvcs.items.map((v) => (
+                      <div key={`${v.namespace}/${v.name}`} className="cron-row">
+                        <span className={clsx('chip', v.status !== 'Bound' && 'warn')}>{v.status}</span>
+                        {/* Both numbers, always. A Pending claim has a request
+                            and no capacity, and showing only the capacity puts a
+                            blank where the size is. */}
+                        <span className="mono cron-when">
+                          {v.capacity || `${v.requested} asked`}
+                        </span>
+                        <span className="faint cron-desc">{v.namespace}</span>
+                        <span className="mono grow cron-cmd">{v.name}</span>
+                        <span className="faint">{v.storageClass || '—'}</span>
+                        <span className="faint">{v.accessModes}</span>
+                      </div>
+                    ))
+                  )}
+
+                  <div className="s-title" style={{ marginTop: 10 }}>
+                    <Activity size={12} /> Ingresses
+                  </div>
+                  {!resources.ingresses.ok ? (
+                    <Denied read={resources.ingresses} what="Ingresses" />
+                  ) : resources.ingresses.items.length === 0 ? (
+                    <div className="faint" style={{ fontSize: 12 }}>No ingresses.</div>
+                  ) : (
+                    resources.ingresses.items.map((i) => (
+                      <div key={`${i.namespace}/${i.name}`} className="cron-row">
+                        {/* An empty address is a real state — nothing has
+                            claimed this Ingress — and it is what a wrong
+                            ingressClassName looks like. */}
+                        <span className={clsx('chip', i.address === '' && 'warn')}>
+                          {i.address || 'no address'}
+                        </span>
+                        <span className="faint cron-desc">{i.namespace}</span>
+                        <span className="mono grow cron-cmd" title={i.rules.join(' · ')}>
+                          {i.name} · {i.rules.join(' · ') || 'no rules'}
+                        </span>
+                        <span className="faint">{i.className || '—'}</span>
+                        {i.tlsSecrets.length > 0 && (
+                          <span className="chip">tls: {i.tlsSecrets.join(', ')}</span>
+                        )}
+                      </div>
+                    ))
+                  )}
+
+                  <div className="s-title" style={{ marginTop: 10 }}>
+                    <ShieldQuestion size={12} /> Role bindings
+                  </div>
+                  {!resources.roleBindings.ok ? (
+                    <Denied read={resources.roleBindings} what="Role bindings" />
+                  ) : (
+                    resources.roleBindings.items.map((b) => (
+                      <div key={`${b.clusterScoped ? '' : b.namespace}/${b.name}`} className="cron-row">
+                        <span className={clsx('chip', b.clusterScoped && 'warn')}>
+                          {b.clusterScoped ? 'cluster' : b.namespace}
+                        </span>
+                        <span className="mono grow cron-cmd">{b.name}</span>
+                        <span className="faint cron-desc">
+                          {b.roleKind}/{b.roleName}
+                        </span>
+                        <span className="mono faint" title={b.subjects.join(' · ')}>
+                          {b.subjects.join(' · ')}
+                        </span>
+                      </div>
+                    ))
+                  )}
+
+                  <div className="s-title" style={{ marginTop: 10 }}>
+                    <ShieldQuestion size={12} /> Secrets — names and key names only
+                  </div>
+                  <div className="faint" style={{ fontSize: 11 }}>
+                    No value is read. The query lists key names and cannot reach what is behind them.
+                  </div>
+                  {!resources.secrets.ok ? (
+                    <Denied read={resources.secrets} what="Secrets" />
+                  ) : (
+                    resources.secrets.items.map((k) => (
+                      <div key={`${k.namespace}/${k.name}`} className="cron-row">
+                        <span className="chip">{k.type}</span>
+                        <span className="faint cron-desc">{k.namespace}</span>
+                        <span className="mono grow cron-cmd">{k.name}</span>
+                        <span className="mono faint">{k.keys.join(', ') || 'no keys'}</span>
+                      </div>
+                    ))
+                  )}
+
+                  <div className="s-title" style={{ marginTop: 10 }}>
+                    <TriangleAlert size={12} /> Deprecated APIs
+                  </div>
+                  {apiScan && (
+                    <>
+                      <div className="faint" style={{ fontSize: 11 }}>
+                        Server {apiScan.serverVersion ?? 'version unknown'}
+                      </div>
+                      {apiScan.findings.length === 0 ? (
+                        <div className="faint" style={{ fontSize: 12 }}>
+                          Nothing in the table is still being served.
+                        </div>
+                      ) : (
+                        apiScan.findings.map((f) => (
+                          <div key={f.groupVersion} className="cron-row">
+                            <span className={clsx('chip', f.pastRemoval ? 'danger' : 'warn')}>
+                              {f.pastRemoval ? `past ${f.removedIn}` : `goes in ${f.removedIn}`}
+                            </span>
+                            <span className="mono grow cron-cmd">{f.groupVersion}</span>
+                            <span className="faint">use {f.replacement}</span>
+                          </div>
+                        ))
+                      )}
+                      {/* Rendered WITH the findings, never behind a toggle.
+                          "Nothing found" is the sentence people act on, and it
+                          is only honest next to what was not looked at. */}
+                      <div className="s-desc faint" style={{ marginTop: 4 }}>
+                        What this did not check:
+                        <ul style={{ margin: '4px 0 0 16px' }}>
+                          {apiScan.notChecked.map((n) => (
+                            <li key={n}>{n}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </>
+                  )}
+
+                  <div className="s-title" style={{ marginTop: 10 }}>
+                    <Layers size={12} /> Helm releases
+                  </div>
+                  {helm && !helm.ok && (
+                    <div className="faint" style={{ fontSize: 12 }}>
+                      {helm.detail}
+                    </div>
+                  )}
+                  {helm?.ok &&
+                    (helm.releases.length === 0 ? (
+                      <div className="faint" style={{ fontSize: 12 }}>
+                        helm answered and has no releases.
+                      </div>
+                    ) : (
+                      helm.releases.map((r) => (
+                        <div key={`${r.namespace}/${r.name}`} className="cron-row">
+                          <span className={clsx('chip', r.status !== 'deployed' && 'warn')}>
+                            {r.status}
+                          </span>
+                          <span className="mono cron-when">rev {r.revision}</span>
+                          <span className="faint cron-desc">{r.namespace}</span>
+                          <span className="mono grow cron-cmd">{r.name}</span>
+                          <span className="faint">{r.chart}</span>
+                        </div>
+                      ))
+                    ))}
+                </>
+              )}
+            </>
+          )}
         </>
       )}
 
@@ -782,6 +1289,278 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
               Cancel
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ---- node scheduling ---- */}
+      {nodePending && (
+        <div className="s-card" style={{ marginTop: 8 }}>
+          <div className="s-title">
+            <ServerIcon size={12} />{' '}
+            {nodePending.plan.target.action === 'cordon' ? 'Cordon' : 'Uncordon'}{' '}
+            {nodePending.plan.target.node}
+          </div>
+          <div className="s-desc mono">
+            kubectl {nodePending.plan.target.action} {nodePending.plan.target.node}
+            {nodePending.plan.target.context ? ` --context=${nodePending.plan.target.context}` : ''}
+          </div>
+          <div className="s-desc warn">
+            <TriangleAlert size={12} /> {nodePending.plan.reasons.join('; ')}.
+          </div>
+          {nodePending.plan.caveats.map((c) => (
+            <div key={c} className="s-desc faint">
+              {c}
+            </div>
+          ))}
+          <div className="row" style={{ gap: 8, marginTop: 8 }}>
+            <button
+              className="btn primary"
+              disabled={nodeBusy !== ''}
+              onClick={() => void runCordon()}
+            >
+              {nodePending.plan.target.action === 'cordon' ? 'Cordon' : 'Uncordon'}
+            </button>
+            <button className="btn ghost" onClick={() => setNodePending(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {nodeResult && (
+        <div className={clsx('s-desc', nodeResult.ok ? '' : 'danger')}>
+          <span className="grow">
+            {nodeResult.ok
+              ? nodeResult.output
+              : `${nodeResult.node} was not ${nodeResult.action}ed — ${
+                  nodeResult.reason ? K8S_FAILURE_HELP[nodeResult.reason] : ''
+                }`}
+          </span>
+          {/* Said out loud rather than folded into a plain success: somebody
+              else's maintenance window is already open on this node. */}
+          {nodeResult.alreadyInState && (
+            <div className="warn" style={{ marginTop: 4 }}>
+              Nothing changed — the node was already in that state before this click. Somebody else
+              may be working on it.
+            </div>
+          )}
+          <div className="mono" style={{ marginTop: 4, opacity: 0.8, whiteSpace: 'pre-wrap' }}>
+            {nodeResult.ok ? nodeResult.node_status : nodeResult.detail}
+          </div>
+          <button className="btn ghost sm" onClick={() => setNodeResult(null)}>
+            Close
+          </button>
+        </div>
+      )}
+
+      {/* ---- the drain verdict, which IS the safety story ---- */}
+      {drainCheck && (
+        <div className="s-card" style={{ marginTop: 8 }}>
+          <div className="s-title">
+            <ShieldQuestion size={12} /> Can {drainCheck.node} be drained?
+          </div>
+          {drainCheck.loading && <div className="s-desc faint">Reading pods, budgets and endpoints…</div>}
+          {!drainCheck.loading && !drainCheck.assessment && (
+            <div className="s-desc danger">{NOT_WIRED}</div>
+          )}
+          {drainCheck.assessment && drainCheck.plan && (
+            <>
+              <div className="s-desc">
+                {drainCheck.assessment.evictable.length} pod(s) would move;{' '}
+                {drainCheck.assessment.daemonSetPods.length} DaemonSet pod(s) stay where they are.
+              </div>
+
+              {/* Reads that did not answer come FIRST and are styled as hard as
+                  a blocker, because they are one. An empty budget list from a
+                  denied read looks exactly like a cluster with no budgets. */}
+              {drainCheck.assessment.unchecked.map((u) => (
+                <div key={u.read} className="s-desc danger">
+                  <TriangleAlert size={12} /> The {u.read} read did not answer, so nobody can say{' '}
+                  {u.meaning}
+                  <div className="mono faint" style={{ marginTop: 2 }}>
+                    {u.detail}
+                  </div>
+                </div>
+              ))}
+
+              {drainCheck.assessment.blockers.map((b) => (
+                <div key={`${b.kind}/${b.namespace}/${b.subject}`} className="s-desc danger">
+                  <TriangleAlert size={12} />{' '}
+                  <span className="mono">
+                    {b.namespace}/{b.subject}
+                  </span>{' '}
+                  — {b.detail}
+                </div>
+              ))}
+
+              {drainCheck.assessment.safe ? (
+                <>
+                  <div className="s-desc mono">
+                    kubectl drain {drainCheck.node} --ignore-daemonsets
+                    {context ? ` --context=${context}` : ''}
+                  </div>
+                  {drainCheck.plan.caveats.map((c) => (
+                    <div key={c} className="s-desc faint">
+                      {c}
+                    </div>
+                  ))}
+                  <div className="input-group" style={{ marginTop: 6 }}>
+                    <input
+                      className="input"
+                      placeholder="Type DRAIN to drain this node"
+                      value={phrase}
+                      onChange={(e) => setPhrase(e.target.value)}
+                    />
+                  </div>
+                  <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                    <button
+                      className="btn primary"
+                      disabled={phrase.trim() !== 'DRAIN' || nodeBusy !== ''}
+                      onClick={() => void runDrain()}
+                    >
+                      Drain
+                    </button>
+                    <button
+                      className="btn ghost"
+                      onClick={() => {
+                        setDrainCheck(null)
+                        setPhrase('')
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* NOT a disabled button with a tooltip, and not a scarier
+                      dialog. There is nothing to press: the main process refuses
+                      on its own reading of this same preflight, so offering the
+                      control would be offering a button that cannot work. */}
+                  <div className="s-desc">
+                    This drain will not be offered while any of the above is true. Fix the cause, or
+                    read the budget yourself — nothing here overrides it.
+                  </div>
+                  <button className="btn ghost sm" onClick={() => setDrainCheck(null)}>
+                    Close
+                  </button>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {drainResult && (
+        <div className={clsx('s-desc', drainResult.ok ? '' : 'danger')}>
+          <span className="grow">
+            {drainResult.ok
+              ? `${drainResult.node} drained — ${drainResult.evicted.length} pod(s) evicted.`
+              : `${drainResult.node} was not fully drained.`}
+          </span>
+          {/* The half that a plain failure message hides. A blocked drain has
+              still moved whatever it got through, and telling the operator the
+              node is untouched is how somebody reboots it. */}
+          {drainResult.partial && (
+            <div className="warn" style={{ marginTop: 4 }}>
+              This drain is PARTIAL: {drainResult.evicted.length} pod(s) were already evicted before
+              it stopped, and the node has been cordoned. It is not untouched.
+            </div>
+          )}
+          {drainResult.pdbRejected.length > 0 && (
+            <div style={{ marginTop: 4 }}>
+              Still held by a PodDisruptionBudget: {drainResult.pdbRejected.join(', ')}. That is a
+              &ldquo;try again later&rdquo;, not a broken cluster.
+            </div>
+          )}
+          <div className="mono" style={{ marginTop: 4, opacity: 0.8, whiteSpace: 'pre-wrap' }}>
+            {drainResult.detail ?? drainResult.output}
+          </div>
+          <button className="btn ghost sm" onClick={() => setDrainResult(null)}>
+            Close
+          </button>
+        </div>
+      )}
+
+      {/* ---- exec ---- */}
+      {execFor && (
+        <div className="s-card" style={{ marginTop: 8 }}>
+          <div className="s-title">
+            <SquareTerminal size={12} /> Run a command in {execFor.namespace}/{execFor.name}
+          </div>
+          <div className="input-group" style={{ marginTop: 6 }}>
+            <input
+              className="input mono"
+              placeholder="e.g. cat /etc/nginx/nginx.conf"
+              value={execCommand}
+              onChange={(e) => setExecCommand(e.target.value)}
+              autoFocus
+            />
+          </div>
+          {execCommand.trim() !== '' && (
+            <>
+              <div className="s-desc danger">
+                <TriangleAlert size={12} /> This runs arbitrary code inside the container. What it
+                can do is whatever that container&rsquo;s own service account and user allow — exec
+                is its own RBAC subresource and this app cannot read what it grants.
+              </div>
+              <div className="s-desc faint">
+                One command, no TTY and no stdin: a program that waits for input will hang until the
+                timeout rather than prompt. This is not a shell session.
+              </div>
+              <div className="input-group" style={{ marginTop: 6 }}>
+                <input
+                  className="input"
+                  placeholder="Type EXEC to run it"
+                  value={execPhrase}
+                  onChange={(e) => setExecPhrase(e.target.value)}
+                />
+              </div>
+            </>
+          )}
+          <div className="row" style={{ gap: 8, marginTop: 8 }}>
+            <button
+              className="btn primary"
+              disabled={execBusy || execCommand.trim() === '' || execPhrase.trim() !== 'EXEC'}
+              onClick={() => void runExec()}
+            >
+              Run
+            </button>
+            <button
+              className="btn ghost"
+              onClick={() => {
+                setExecFor(null)
+                setExecCommand('')
+                setExecPhrase('')
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {execResult && (
+        <div className={clsx('s-desc', execResult.r.ok ? '' : 'danger')}>
+          <span className="grow">
+            {execResult.r.ok
+              ? `${execResult.pod}${
+                  execResult.r.containerExit === null
+                    ? ''
+                    : ` — the command exited ${execResult.r.containerExit}`
+                }`
+              : `${execResult.pod} — ${
+                  execResult.r.reason ? K8S_FAILURE_HELP[execResult.r.reason] : ''
+                }`}
+          </span>
+          <pre className="mono" style={{ marginTop: 4, whiteSpace: 'pre-wrap', maxHeight: 260, overflow: 'auto' }}>
+            {execResult.r.ok
+              ? execResult.r.output || '(the command printed nothing, and worked)'
+              : execResult.r.detail}
+          </pre>
+          <button className="btn ghost sm" onClick={() => setExecResult(null)}>
+            Close
+          </button>
         </div>
       )}
 
