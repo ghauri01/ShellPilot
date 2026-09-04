@@ -1275,8 +1275,8 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 27 | ~~**Rule engine**~~ | 40% | continuous | 3 | some | **5** | **SHIPPED** | — | Done |
 | 22 | **Kubernetes lifecycle** | 25% | weekly | 4 | weak | **5** | 4 wk | B | Defer |
 | 7 | **Credential proxy** | 30% | daily | 3 | very strong | **5** | 3.5 wk | — | Strategic |
-| 25 | **Configuration drift** | 50% | rare | 4 | strong | **4** | 2.5 wk | A, C | Fill-in |
-| 28 | **Runbooks on alerts** | 40% | per-incident | 3 | some | **4** | 1.5 wk | A | Fill-in |
+| 25 | ~~**Configuration drift**~~ | 50% | rare | 4 | strong | **4** | **SHIPPED** | — | Done |
+| 28 | ~~**Runbooks on alerts**~~ | 40% | per-incident | 3 | some | **4** | **SHIPPED** | — | Done |
 | 14 | ~~**Change log**~~ | 30% solo | per-incident | 3 | strong | **4** / **8** team | **SHIPPED** | — | Done |
 | 1 | **pm2 supervision** | 25% | daily | 3 | some | **4** | 2.5 wk local | — | Defer |
 | 2 | **frp ngrok UX** | 20% | rare | 2 | some | **3** | 2.5 wk | — | Defer |
@@ -1396,6 +1396,27 @@ consent that described something narrower. It should be decided deliberately, wi
 line in the capability grid, not added because it is obviously useful.
 
 **Size.** Days to build, and the decision is the part worth taking time over.
+
+---
+
+### 32. A retention horizon per event kind
+
+**Raised by item 28, and it is a defect at a boundary rather than a missing feature.**
+
+Job rows are kept for a year; alert events for ninety days. The runbook joins the two — "what
+was run between this alert raising and clearing" — so it is bounded by the shorter of them.
+The consequence is precise and wrong: **a host with a quarterly problem reads "this has never
+fired here" while the job that fixed it in January is still on disk.** The evidence survives
+and the anchor that would find it does not.
+
+The honest fix is a longer horizon for the `alert` event kind specifically, which means
+retention stops being one number and becomes a policy keyed on kind. That is a change to the
+store's own retention rules, and item 28's author declined to smuggle it in — correctly, since
+retention is the one part of that store that must not acquire exceptions casually. It is
+cheap and it is somebody's deliberate decision.
+
+**Size.** A day, most of it deciding what the second number should be and proving the pass
+still terminates.
 
 ---
 
