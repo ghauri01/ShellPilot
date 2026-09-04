@@ -16,10 +16,16 @@ import reactHooks from 'eslint-plugin-react-hooks'
 export default tseslint.config(
   {
     ignores: [
-      'out/**',
-      'dist/**',
-      'release/**',
-      'node_modules/**',
+      // Anchored at the config's directory, so a bare 'out/**' misses build
+      // output that lives one level down -- which is where it lives whenever a
+      // git worktree is checked out inside the repo. CI never sees those, so a
+      // clean run there says nothing about a run on a working machine.
+      '**/out/**',
+      '**/dist/**',
+      '**/release/**',
+      '**/node_modules/**',
+      // Tooling state, not source: worktrees, agent scratch, local settings.
+      '.claude/**',
       'resources/**',
       'scripts/**',
       '*.config.*',
