@@ -136,6 +136,20 @@ export interface AppSettings {
   // credential and does not belong in a settings file or a backup.
   webhookAlertsEnabled: boolean
   webhookNotifyOnResolved: boolean
+  /**
+   * Ask for Touch ID by itself when the vault screen opens locked.
+   *
+   * Only ever does anything when biometric unlock is already set up, so this
+   * turns no key on and reduces nothing: the prompt is the same one the button
+   * shows, raised without the click. Cancelling it falls straight through to
+   * the password field, which is why it can default on.
+   *
+   * Defaults to `true` and absence must read as ENABLED, for the reason
+   * `localTerminalEnabled` documents below: settings persist wholesale and are
+   * merged saved-over-default, so a `false` shipped as a default would be
+   * written into every install and outrank a later change.
+   */
+  vaultAutoBiometricPrompt: boolean
   // Tightens row heights and paddings across the app.
   compactDensity: boolean
   // Command used to open remote files. Empty means the OS default handler.
@@ -185,6 +199,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   modules: defaultModuleState(),
   webhookAlertsEnabled: false,
   webhookNotifyOnResolved: true,
+  vaultAutoBiometricPrompt: true,
   compactDensity: false,
   externalEditorCommand: 'code',
   openFilesExternally: false,

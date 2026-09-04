@@ -63,7 +63,9 @@ export function VaultUnlockModal(): React.JSX.Element | null {
       <div className="row" style={{ gap: 10, alignItems: 'flex-start', marginBottom: 12 }}>
         <Lock size={18} style={{ color: 'var(--accent)', marginTop: 2 }} />
         <div className="s-desc">
-          {exists
+          {exists === null
+            ? 'Checking this machine for a vault…'
+            : exists
             ? 'This credential is stored in your vault. Unlock it to continue — it stays unlocked for the rest of this session.'
             : 'There is no vault on this machine yet, so this credential cannot be read.'}
         </div>

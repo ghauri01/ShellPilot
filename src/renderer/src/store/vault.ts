@@ -31,7 +31,17 @@ export function newField(): VaultField {
 }
 
 interface VaultState {
-  exists: boolean
+  /**
+   * Whether a vault file is there -- `null` until the main process has said.
+   *
+   * NOT a boolean, and the third state is the whole point. `status()` reaches
+   * safeStorage, which on macOS can block on a keychain prompt for as long as
+   * the user takes to answer it. While that was pending this was `false`, and
+   * `false` renders the CREATE screen: a user with a vault full of credentials
+   * was shown "Create vault" and two empty password fields, which reads as
+   * "your vault is gone". Nobody knows yet is not the same as there isn't one.
+   */
+  exists: boolean | null
   unlocked: boolean
   entries: VaultEntry[]
   selectedId: string | null
@@ -70,7 +80,7 @@ interface VaultState {
 
 // Entries only ever live here while the vault is unlocked; locking drops them.
 export const useVault = create<VaultState>((set, get) => ({
-  exists: false,
+  exists: null,
   unlocked: false,
   entries: [],
   selectedId: null,

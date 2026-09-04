@@ -299,17 +299,25 @@ function VaultState(): React.JSX.Element {
       <div className="s-info">
         <div className="s-title">
           {unlocked ? <LockOpen size={13} /> : <Lock size={13} />}{' '}
-          {!exists ? 'No vault on this computer yet' : unlocked ? 'Vault unlocked' : 'Vault locked'}
+          {exists === null
+            ? 'Checking for a vault…'
+            : !exists
+              ? 'No vault on this computer yet'
+              : unlocked
+                ? 'Vault unlocked'
+                : 'Vault locked'}
         </div>
         <div className="s-desc">
-          {!exists
+          {exists === null
+            ? 'Reading this machine\u2019s keychain. Nothing is decided until it answers.'
+            : !exists
             ? 'A vault holds one copy of each credential and travels inside an encrypted backup. Without one, every server keeps its own.'
             : unlocked
               ? 'Anything that needs a saved credential can use it until the timer below runs out.'
               : 'Anything that needs a saved credential will ask you to unlock first.'}
         </div>
       </div>
-      {!exists ? (
+      {exists === null ? null : !exists ? (
         <button className="btn sm" onClick={() => setActivity('vault')}>
           Set up a vault
         </button>
@@ -418,6 +426,12 @@ export function Settings(): React.JSX.Element {
                 </div>
               </div>
               <AutoStartSetting />
+              <SettingSwitch
+                label="Ask for Touch ID when the vault is locked"
+                desc="When you open the Vault and it is locked, raise the fingerprint prompt without waiting for a click. Cancel it and the master password field is right there. Does nothing unless you have already set up biometric unlock."
+                checked={settings.vaultAutoBiometricPrompt}
+                onChange={(v) => setSettings({ vaultAutoBiometricPrompt: v })}
+              />
               <SettingSwitch
                 label="Compact density"
                 desc="Tighter rows and padding across trees, lists and the docked monitor. Font sizes are unchanged."

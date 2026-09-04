@@ -56,6 +56,27 @@ export function VaultView(): React.JSX.Element {
     []
   )
 
+  // `null` is "main has not answered yet", and it must not fall through to the
+  // create screen. status() reaches safeStorage, which on macOS blocks on a
+  // keychain prompt for as long as the user takes to answer it -- and for that
+  // whole time a user with a full vault was being shown "Create vault" and two
+  // empty password fields.
+  if (exists === null) {
+    return (
+      <div className="main vault-gate">
+        <div className="vault-gate-card">
+          <div className="vault-gate-icon">
+            <Lock size={26} />
+          </div>
+          <h2>Opening the vault</h2>
+          <p className="faint">
+            Checking this machine for a vault. If your keychain asks for permission, that is
+            ShellPilot reading the key it stored there.
+          </p>
+        </div>
+      </div>
+    )
+  }
   if (!exists) return <VaultGate mode="create" />
   if (!unlocked) return <VaultGate mode="unlock" />
   return <VaultBrowser />
@@ -98,11 +119,29 @@ function VaultGate({ mode }: { mode: 'create' | 'unlock' }): React.JSX.Element {
     void refreshBiometrics()
   }, [refreshBiometrics])
 
-  // Deliberately NOT fired automatically. The prompt is a gate, not a
-  // cryptographic step, and a prompt that appears unbidden every time the app
-  // opens trains people to touch the sensor without reading it — which is
-  // exactly the habit that makes a prompt worth phishing. The button is one
-  // click and says what it does.
+  // Fired automatically, but only here and only once, and the earlier refusal
+  // to do it at all is worth keeping in view rather than deleting.
+  //
+  // The argument against was: a prompt that appears unbidden every time the app
+  // opens trains people to touch the sensor without reading it, which is the
+  // habit that makes a prompt worth phishing. That objection is about an
+  // UNBIDDEN prompt. This one is not — it fires because the user navigated to
+  // the Vault screen and found it locked, which is them asking to open the
+  // vault. It never fires from the credential modal, never on app start, and
+  // never anywhere else.
+  //
+  // Once per mount, guarded by a ref: cancelling must leave the password field
+  // sitting there, not raise the sheet again. `promptTouchID` rejects on
+  // cancel, `unlockWithBiometrics` swallows that into a failed result, and the
+  // guard means neither can loop.
+  const autoPrompted = useRef(false)
+  const autoPrompt = useApp((s) => s.settings.vaultAutoBiometricPrompt)
+
+  useEffect(() => {
+    if (!canUseBio || !autoPrompt || autoPrompted.current || busy) return
+    autoPrompted.current = true
+    void unlockWithBiometrics()
+  }, [canUseBio, autoPrompt, busy, unlockWithBiometrics])
 
   const creating = mode === 'create'
   const mismatch = creating && confirm.length > 0 && password !== confirm
@@ -252,6 +291,9 @@ function BiometricOffer(): React.JSX.Element | null {
         <div className="s-title">Unlock with {label} next time?</div>
         <div className="s-desc">
           Your master password is never stored either way, and you can change this at any time.
+          Once it is on, opening a locked Vault asks for {label} on its own; cancel and the
+          password field is still there. Settings turns that off.
+          <br />
           <br />
           <b>While the app is running</b> — nothing extra is written to disk. You type the master
           password once per launch, and {label} reopens the vault after that.
