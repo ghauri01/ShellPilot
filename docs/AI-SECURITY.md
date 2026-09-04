@@ -149,6 +149,21 @@ durability defeats revocation: `denyAllPending()` resolves requests that are *pe
 already detached on fifteen hosts has nothing pending to deny. So its rows would be AI-labelled rows
 no AI produced, for exactly the local terminal's reason.
 
+**One reader now spans all three, and it does not merge them.** The change log
+(`changelog.ts`) reads all three files to answer *"who changed what on this estate, and who
+approved it"* — a question none of them answers alone. It reads them; it does not combine them into
+a fourth file, and each row keeps the source it came from, so the argument above still holds: an
+entry from the local terminal is still labelled as the local terminal, not as an agent. The
+separation is in what each file *means*, and that survives being read together. The change log is
+also read-only over them — nothing it does writes back, and it is not reachable from the bridge.
+
+**None of the three is pruned, and that is a real gap rather than a decision.** The history store
+has a retention horizon per event kind; these three files have none, so they grow for as long as the
+app is used. In practice that is slow — one line per approval or per agent call, not per output line
+— but "slow" is not "bounded", and an operator who wants a bound has to remove the file themselves
+today. Deleting one loses history and breaks nothing: each is opened append-only and recreated on
+next write.
+
 ## Granting `vpnControl` is a bigger decision than it looks
 
 Read this before setting `vpnControl` to anything other than `deny`.

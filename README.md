@@ -108,6 +108,31 @@ sends you to a second application the moment you need to query a table or look u
 | **Rebindable shortcuts** | Every shortcut is remappable per context, with conflict detection and export/import |
 | **AI & MCP** | Let Claude Code, Claude Desktop, Codex and other MCP clients operate your servers — scoped by access group, with human approval on sensitive actions |
 
+Fleet operations — <kbd>Ctrl</kbd>+<kbd>M</kbd>, and each one **off until you turn it on**:
+
+| | |
+|---|---|
+| **Inventory** | Every host, its OS and version, what it has pending, and when it was last seen |
+| **Patching** | What is pending per host, applied in waves that stop on the first host that comes back unhealthy rather than rolling on |
+| **Run one command everywhere** | Broadcast across selected hosts with a confirmation naming exactly what runs where, per-host results, and a job that survives the app being closed |
+| **Log tailing** | Follow a file across many hosts at once, in one pane |
+| **Fleet search** | Search across what has already been collected, without touching a host |
+| **Docker** | Containers, images and volumes with honest per-item sizes, and reclaim by id against exactly what the preview showed — never a blind `prune` |
+| **Compose** | Read a project's services, their state and their drift from the file on disk |
+| **Kubernetes** | Workloads, cordon, drain and exec — drain refuses seven ways and treats a read that did not answer as a refusal in itself |
+| **Databases, operated** | Replication lag, slow queries, table sizes and connection counts for PostgreSQL, MySQL/MariaDB, MongoDB and Redis |
+| **Backups** | Scheduled dumps to a local path or S3-compatible storage, with restore **verified by restoring**, not by checking a file exists |
+| **Security posture** | SSH config, sudo rules, listening ports and firewall state as they actually are on the host |
+| **Firewall rules** | The rules themselves rather than a count of them — off by default, behind its own consent, never stored, and unreadable by an agent at any setting |
+| **Configuration drift** | What changed on a host since the last time you looked |
+| **Capacity trends** | Where disk and memory are heading, from history already collected |
+| **Rules** | "When this fires, run that" — with the run needing the same approval it would need by hand |
+| **Cron** | Read and edit crontabs, planned against the host and written through approval |
+| **Runbooks** | On an alert, what was run the last three times it fired on that host |
+| **Change log** | Who approved what, when, and what it did |
+| **Access & keys** | Which key opens which host, and whose it is |
+| **Supervised processes** | Keep local processes running, with nothing auto-starting: what survives a restart is the list, not a running command |
+
 ## AI Agent Access
 
 Claude Code, Claude Desktop, Codex, Gemini CLI and anything else that speaks
@@ -815,6 +840,34 @@ sampled — for open sessions, and for the whole workspace if **Check servers in
 background** is on — so opening this view adds no extra SSH load. With neither, a server
 you have not opened has nothing to show.
 
+## Fleet operations
+
+The same <kbd>Ctrl</kbd>+<kbd>M</kbd> view carries the work that is about the estate rather than
+one host: inventory, patching, broadcast, log tailing, search, Docker, Compose, Kubernetes,
+database operations, backups, posture, firewall rules, drift, capacity, rules, cron, runbooks,
+the change log, access and keys.
+
+Twelve of these are **modules**, in *Settings → Modules*, and all but one ship **off**. Nothing is
+collected for a module you have not enabled, and one you never enable costs you nothing — no screen,
+no SSH traffic, no rows in the store. That is what "we do not ship bloatware" had to mean in
+practice rather than as a claim. The exception is *Scheduled jobs*, which is on by default because
+reading a crontab changes nothing; editing one still goes through approval like any other write.
+
+Three rules hold across all of them, and they are the reason this is not just a dashboard:
+
+- **A number nobody measured is not zero.** A host that refused to answer says so, and never
+  contributes a zero that quietly drags a fleet average down. The collectors that read host state
+  answer in seven words rather than two — *ok*, *partial*, *absent*, *denied*, *no tool*,
+  *unsupported*, *unknown* — because "the tool is not installed", "this account may not look" and
+  "this host cannot answer at all" are three different facts, and only one of them is worth
+  escalating.
+- **Anything that writes goes through the same approval a human would need**, and is recorded in
+  the change log with who approved it and what it did. A rule that fires a command does not get a
+  quieter path than you typing it.
+- **Work outlives the window.** A broadcast or a patch wave keeps running on the host if ShellPilot
+  is closed, and is picked back up by id when it reopens — reported honestly as *abandoned* or
+  *orphaned* when nobody can say how it ended, rather than guessed at.
+
 ## Command palette
 
 Press <kbd>Ctrl</kbd>+<kbd>K</kbd> anywhere — including with focus inside a
@@ -973,6 +1026,10 @@ Every engine gets an **interactive shell** alongside the query editor:
 **Databases over SSH:** pick a bastion in the *SSH tunnel* field and ShellPilot opens a forward automatically, so you can reach a database that is only routable from inside the network.
 
 **Databases over a VPN:** pick a WireGuard or OpenVPN profile in the *Network* field and the tunnel is brought up before the connection is attempted. A bastion and a VPN can both be set — the VPN is the outer transport, and the bastion is reached through it.
+
+**Operating a database, not just querying it.** Beside the client there is a read of how the server itself is doing: replication lag, slow queries, table and index sizes, connection counts against the ceiling, and the locks and long transactions behind them. It covers **PostgreSQL, MySQL/MariaDB, MongoDB and Redis**; SQL Server has the client but not this, and the app says so rather than showing an empty panel.
+
+A replica reporting zero lag is not the same as a replica that is healthy — a stopped one says zero too — so the read distinguishes "caught up" from "not replicating", which is the distinction a real dead replica taught it to make.
 
 ## SSH tunnels
 

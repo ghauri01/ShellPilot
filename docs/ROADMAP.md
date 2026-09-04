@@ -1,7 +1,11 @@
 # ShellPilot roadmap
 
-Sixteen things we intended to build, what each one actually rests on in the code today, and what is
-genuinely hard about it. Written after 0.8.0, and maintained since: 0.9.0 through 0.9.3 shipped
+What we intended to build, what each one actually rests on in the code today, and what is genuinely
+hard about it. It began as sixteen items and grew to thirty-two as the work found things the plan
+had not; the next section says where all of them now stand, and the rest of this document is kept
+because the reasoning behind an ordering outlives the ordering.
+
+Written after 0.8.0, and maintained since: 0.9.0 through 0.9.3 shipped
 nine of the sixteen, and 0.9.4 through 0.9.7 were stability releases, and this document keeps their write-ups rather than deleting them, because the
 reasoning outlives the ticket.
 
@@ -27,6 +31,33 @@ can be argued with.
 This is a statement of direction, not a schedule. Sizes are rough and relative — "weeks" means a
 focused person, not a calendar quarter. Where something is a real unknown it says so rather than
 guessing, because the cost of a wrong estimate here is a commitment nobody can keep.
+
+## Where this stands, as of 0.13.1
+
+**Every item in the matrix below is shipped, cut, or gated on something only a real host can
+answer.** Four releases did it: 0.10.0, 0.11.0, 0.12.0 and 0.13.0, with 0.13.1 as a fix.
+
+| | |
+|---|---|
+| **Shipped** | 24 of the 26 matrix rows, plus items 29–32 which were raised by the work rather than planned |
+| **Cut, deliberately** | Ghostty (8), Tauri (10), n8n (9) and DNS/TLS — see the cut list |
+| **Built but switched off** | Item 23's write half: key revoke. `ACCESS_WRITE_ENABLED` is `false` |
+| **Not built, and correctly so** | Item 15(b), a third-party extension API. 15(a) — optional first-party modules — shipped |
+| **Tests** | 2,215 → 4,648 |
+| **Runtime dependencies added** | None. Every item above is built on `node:sqlite`, `ssh2` and what was already here |
+
+**The one thing waiting on the physical world.** Item 23 can stage a key revoke, and the code is
+written and tested. It is off because a claim in its design has never been checked against a host
+that behaves the way the claim assumes: a RHEL 9 machine with `KillUserProcesses=yes`, where ending
+the session kills the user's processes. Stage a revoke there, end the session, and see whether the
+authorized_keys file comes back. Until someone does that, shipping the write would be shipping a
+rollback nobody has watched roll back. The read half is shipped and useful on its own.
+
+**What has never met a real estate.** Patch management, detached execution, Kubernetes drain and the
+access collector are tested against real servers, real Postgres and MySQL, a real MinIO and a real
+`kind` cluster — each of which found bugs no double did — but not against a production fleet under
+load. That is the next thing that will teach us something, and it is not a thing more tests can
+substitute for.
 
 ## Built since this was written
 
