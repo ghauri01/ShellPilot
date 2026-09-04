@@ -11,7 +11,6 @@ import {
   POSTURE_STATUS_MARKER,
   POSTURE_COMMAND,
   POSTURE_FACT_PREFIX,
-  POSTURE_STATUS_MARKER,
   buildPostureCommand,
   judgeSshd,
   parsePosture,

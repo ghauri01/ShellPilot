@@ -311,25 +311,30 @@ describe('what was run the last three times it fired', () => {
     const cmd = r.status === 'ok' ? r.occurrences[0].jobs[0].commands[0] : null
     expect(cmd?.text).toBe('fstrim -av')
     // ------------------------------------------------------------------
-    // A PRODUCTION DEFECT, and this line is the record of it.
+    // WHY THIS LINE HAS A NOTE ON IT.
     //
-    // `outcomeOf` in src/main/services/runbooks.ts reads
+    // `outcomeOf` used to read
     //   `if (outcome === 'failed' || outcome === 'timeout' || outcome === 'unhealthy')`
-    // but `JobHostOutcome` has no `failed`. The real vocabulary is ok,
+    // and `JobHostOutcome` has never had a `failed`. The real vocabulary is ok,
     // nonzero, missing-command, permission-denied, timeout, unreachable,
     // cancelled, abandoned, orphaned, unhealthy — so every failure except
-    // `timeout` and `unhealthy` falls through to `unknown`, and the runbook
-    // tells an operator "we do not know how that went" about a command that
-    // plainly failed.
+    // `timeout` and `unhealthy` fell through to `unknown`, and the runbook told
+    // an operator "we do not know how that went" about a command that plainly
+    // failed. A non-zero exit is the commonest failure there is.
     //
-    // It was invisible because this seed wrote `failed`: the fixture matched
-    // the branch rather than the store, so the test agreed with the bug. With
-    // the real value it asserts what the code does TODAY. Fixing `outcomeOf`
-    // to match `JobHostOutcome` is a change to src/, which is out of scope for
-    // the pass that found this; when it lands, this expectation becomes
-    // `'failed'` and the name above starts being true again.
+    // It was invisible because this seed wrote `failed` too: the fixture
+    // matched the branch rather than the store, so the test and the code were
+    // wrong in the same direction and the test passed. Nothing but the type
+    // checker was ever going to say so — which is the whole argument for
+    // type-checking the suite.
+    //
+    // `outcomeOf` now maps the union exhaustively BY TYPE, so a new outcome
+    // added to the job engine fails to compile there rather than quietly
+    // joining `unknown`. `abandoned` and `cancelled` still mean `unknown`, on
+    // purpose: one stopped because ShellPilot did, the other never ran, and
+    // neither says the command failed.
     // ------------------------------------------------------------------
-    expect(cmd?.outcome).toBe('unknown')
+    expect(cmd?.outcome).toBe('failed')
     expect(cmd?.hostReported).toBe('fstrim: /: the discard operation is not supported')
   })
 
