@@ -6,6 +6,7 @@ import {
   RUNBOOK_OCCURRENCES,
   buildRunbookRecall,
   isRunbookKind,
+  runbookJobWindow,
   runbookKey,
   sanitiseRunbookNote,
   type RunbookAlertRow,
@@ -30,8 +31,9 @@ import { redactOutput } from './secretRedaction'
 //
 //   THE HISTORY STORE HAS RETENTION AND A NOTE MUST NOT.
 //
-// Events are dropped at ninety days and facts are retired when the probe stops
-// seeing them. Both are correct for a MEASUREMENT — nobody can retake it, and
+// Events are dropped on a horizon per kind — a quarter for most of them, and
+// item 32's 400 days is still not never — and facts are retired when the probe
+// stops seeing them. Both are correct for a MEASUREMENT — nobody can retake it, and
 // nobody needs the one from March — and both are catastrophic for a sentence a
 // person wrote at 3am about what to check first. A note that quietly disappears
 // after a quiet quarter is worse than no notes feature at all, because the
@@ -65,11 +67,14 @@ import { redactOutput } from './secretRedaction'
 //  * WORK DONE OUTSIDE THE JOB ENGINE. An operator who opened a terminal tab
 //    and typed `rm` is invisible here — that is a local shell, and the change
 //    log is where those rows live. This half sees jobs and nothing else.
-//  * ANYTHING OLDER THAN THE EVENT HORIZON. Job rows are kept for a year and
-//    alert events for ninety days, so a job from ten months ago is still on
-//    disk and still unreachable from here: the raise that would have anchored
-//    it is gone. RUNBOOK_NEVER_FIRED says so rather than leaving it as an
-//    absence.
+//  * ANYTHING OLDER THAN THE ALERT HORIZON. This used to be the shorter of two
+//    horizons and it was a defect: job rows were kept for a year and alert
+//    events for ninety days, so a job from ten months ago was still on disk and
+//    unreachable from here because the raise that would have anchored it was
+//    gone. Roadmap item 32 made retention a policy per kind and gave the alert
+//    kind 400 days — longer than the job rows it anchors — so the anchor is no
+//    longer the short side. Past 400 days there is genuinely nothing to join,
+//    and RUNBOOK_NEVER_FIRED says so rather than leaving it as an absence.
 //  * A HOST THE ALERT DID NOT NAME. Every read is per host, because the same
 //    alert on two machines was two incidents with two answers.
 
@@ -276,7 +281,17 @@ export function readRunbookRecall(
       }
     }
 
-    jobs = store.jobsForHost(hostId, from, now, 200).map((run) => ({
+    // Bounded by the OCCURRENCES, not by the lookback. The cap below is 200
+    // jobs newest-first, and over a 400-day lookback those are all from the
+    // last fortnight on a busy host — the job that answered a raise from the
+    // spring would fall off the end and the recall would say nothing was run.
+    // See runbookJobWindow, which derives the span from the same three raises
+    // buildRunbookRecall will report.
+    const window = runbookJobWindow(alerts)
+    jobs = (window === null
+      ? []
+      : store.jobsForHost(hostId, Math.max(from, window.from), Math.min(now, window.to), 200)
+    ).map((run) => ({
       id: run.job.id,
       title: run.job.title,
       // When it STARTED on this host, falling back to when the row was minted.

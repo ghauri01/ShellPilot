@@ -10,12 +10,17 @@ import {
 } from '../src/main/services/runbooks'
 import {
   DISABLE_ENV,
+  RETENTION_ALERT_DAYS,
   loadHistory,
   resetHistoryModuleForTests,
   type HistoryStore
 } from '../src/main/services/history'
 import { ALERT_HISTORY_KIND, type StoredAlertEvent } from '../src/shared/webhook'
-import { RUNBOOK_NOTE_MAX } from '../src/shared/runbooks'
+import {
+  RUNBOOK_LOOKBACK_DAYS,
+  RUNBOOK_NEVER_FIRED,
+  RUNBOOK_NOTE_MAX
+} from '../src/shared/runbooks'
 
 // Item 28's main-process half: where a note lives, and what the job history can
 // and cannot be made to say.
@@ -312,13 +317,75 @@ describe('what was run the last three times it fired', () => {
     expect(r.status === 'ok' && r.occurrences[0].jobs[0].commands[0].outcome).toBe('unknown')
   })
 
-  it('reads only the last ninety days, and says so rather than looking older', async () => {
+  it('reads back to the alert horizon, and stops there', async () => {
+    // Item 32. This read's ceiling exists because of the event horizon, so it
+    // moved when the horizon did: a raise four months back is inside both the
+    // job-row horizon and the alert horizon, and is now answerable. A raise
+    // past the alert horizon is not, and by then the job that answered it has
+    // gone too — which is the ordering item 32 was about.
     const s = await store()
-    // The raise is inside the job-row horizon (a year) and outside the event
-    // horizon (ninety days). The job is still on disk; the raise that would
-    // anchor it is not.
     raise(s, 'raised', T0 - 120 * 86_400_000)
-    job(s, 'j1', T0 - 120 * 86_400_000 + 5 * MIN, ['ancient-fix'])
+    job(s, 'j1', T0 - 120 * 86_400_000 + 5 * MIN, ['old-fix'])
+    expect(readRunbookRecall(deps({ history: () => s }), 'disk', 'web-1').status).toBe('ok')
+  })
+
+  it('stops at the alert horizon rather than reading older', async () => {
+    // Past 400 days the raise is gone from the store, and by then so is the
+    // job that answered it — which is the ordering item 32 was about. A read
+    // that looked further would promise rows nothing keeps.
+    const s = await store()
+    raise(s, 'raised', T0 - 420 * 86_400_000)
+    job(s, 'j1', T0 - 420 * 86_400_000 + 5 * MIN, ['ancient-fix'])
     expect(readRunbookRecall(deps({ history: () => s }), 'disk', 'web-1').status).toBe('never-fired')
+  })
+
+  it('answers for an alert that fired six months ago', async () => {
+    // The defect item 32 names, from this side. The job row was always there;
+    // the raise that anchors it was dropped at ninety days, so the panel said
+    // the alert had never fired on a host where it fired in the spring.
+    const s = await store()
+    const spring = T0 - 180 * 86_400_000
+    raise(s, 'raised', spring)
+    job(s, 'j1', spring + 5 * MIN, ['journalctl --vacuum-time=2d'], { outcome: 'ok', exitCode: 0 })
+    raise(s, 'resolved', spring + 30 * MIN)
+
+    const r = readRunbookRecall(deps({ history: () => s }), 'disk', 'web-1')
+
+    expect(r.status).toBe('ok')
+    expect(r.status === 'ok' ? r.occurrences[0].at : 0).toBe(spring)
+    expect(r.status === 'ok' ? r.occurrences[0].jobs[0].commands.map((c) => c.text) : []).toEqual([
+      'journalctl --vacuum-time=2d'
+    ])
+  })
+
+  it('finds that job on a host that has run hundreds since', async () => {
+    // The read is capped, and a cap over a 400-day window is a different cap
+    // from one over ninety days: the newest two hundred jobs on a busy host
+    // are all from the last fortnight, and the one that answered the spring
+    // raise is not among them. So the job read is bounded by the occurrences
+    // themselves rather than by the whole lookback.
+    const s = await store()
+    const spring = T0 - 180 * 86_400_000
+    raise(s, 'raised', spring)
+    job(s, 'j1', spring + 5 * MIN, ['journalctl --vacuum-time=2d'], { outcome: 'ok', exitCode: 0 })
+    raise(s, 'resolved', spring + 30 * MIN)
+    s.transaction(() => {
+      for (let i = 0; i < 250; i++) job(s, `noise-${i}`, T0 - i * 60 * MIN, ['uptime'])
+    })
+
+    const r = readRunbookRecall(deps({ history: () => s }), 'disk', 'web-1')
+
+    expect(r.status).toBe('ok')
+    expect(r.status === 'ok' ? r.occurrences[0].jobs.map((j) => j.id) : []).toEqual(['j1'])
+  })
+
+  it('keeps its ceiling equal to the horizon the store actually applies', () => {
+    // RUNBOOK_LOOKBACK_DAYS is a mirror of the store's alert horizon: shared/
+    // cannot import a main-process module, so the two are asserted equal here
+    // rather than left to drift. Literals as well, so moving both at once to
+    // the same wrong number still has to be deliberate.
+    expect(RUNBOOK_LOOKBACK_DAYS).toBe(RETENTION_ALERT_DAYS)
+    expect(RUNBOOK_LOOKBACK_DAYS).toBe(400)
+    expect(RUNBOOK_NEVER_FIRED).toContain('400 days')
   })
 })

@@ -117,14 +117,20 @@ export const RUNBOOK_RESPONSE_WINDOW_MS = 24 * 3_600_000
 /**
  * How far back occurrences are looked for.
  *
- * Ninety days because that is what the history store keeps events for
- * (RETENTION_HOURLY_DAYS), not because ninety is a good number. Job ROWS are
- * kept for a year, so this half of the answer is bounded by the alert half:
- * a job from ten months ago is still on disk and still unreachable from here,
- * because the raise that would have anchored it is gone. Said out loud in
- * RUNBOOK_NEVER_FIRED rather than left as an absence.
+ * It is the history store's horizon for the `alert` kind, because a ceiling
+ * above that would promise raises the store no longer holds and one below it
+ * would hide raises the store still has. This number used to be ninety for the
+ * first of those reasons, and it was the defect roadmap item 32 fixed rather
+ * than a good number: job ROWS were kept for a year and alert EVENTS for a
+ * quarter, so a host with a quarterly problem read "this has never fired here"
+ * while the job that fixed it in January was still on disk.
+ *
+ * It MIRRORS `RETENTION_ALERT_DAYS` in src/main/services/history.ts and cannot
+ * import it: this file is shared and that one is a main-process module that
+ * opens a database. The two are asserted equal in tests/runbookService.test.ts,
+ * which is the drift guard a second copy of a number needs.
  */
-export const RUNBOOK_LOOKBACK_DAYS = 90
+export const RUNBOOK_LOOKBACK_DAYS = 400
 
 // ---------------------------------------------------------------------------
 // The note
@@ -229,8 +235,8 @@ export type RunbookRecall =
  *  another and a test can assert which was said. */
 export const RUNBOOK_NEVER_FIRED =
   `This alert has not been raised on this host in the last ${RUNBOOK_LOOKBACK_DAYS} days, so ` +
-  'there is no last time to show. Older raises are past what the history store keeps, even ' +
-  'where the job that answered them is still on record.'
+  'there is no last time to show. Older raises are past what the history store keeps — and so, ' +
+  'by then, is the job that answered them.'
 
 export const RUNBOOK_NOTHING_RUN =
   'It was raised, and no job ran against this host while it was outstanding. Nothing was ' +
@@ -291,6 +297,48 @@ export interface RunbookRecallInput {
   windowMs?: number
 }
 
+/**
+ * The raises one recall is about: the newest RUNBOOK_OCCURRENCES, newest first.
+ *
+ * Exported because the READ side has to bound its job query by the same set —
+ * see `runbookJobWindow` — and two places choosing "the last three" by
+ * different rules is a job silently missing from an occurrence rather than an
+ * error anybody would see.
+ */
+export function runbookRaises(alerts: readonly RunbookAlertRow[]): number[] {
+  return alerts
+    .filter((a) => a.raised)
+    .map((a) => a.at)
+    .sort((a, b) => b - a)
+    .slice(0, RUNBOOK_OCCURRENCES)
+}
+
+/**
+ * The span of job history a recall can possibly use, or `null` when the alert
+ * has no raises to answer for.
+ *
+ * The job read is capped, and a cap over the lookback is only as good as the
+ * lookback is short. At ninety days the newest two hundred jobs on a host
+ * plausibly reached back to the oldest raise; at RUNBOOK_LOOKBACK_DAYS they are
+ * all from the last fortnight, and the job that answered a raise from the
+ * spring is not among them — the alert would be found and the work that
+ * answered it dropped on the floor, which reads as "nothing was run" and is a
+ * lie this file has a separate status for.
+ *
+ * So the read is bounded by the OCCURRENCES rather than by the lookback: from
+ * the oldest raise being reported to the end of the newest raise's response
+ * window. Everything outside that is a job `buildRunbookRecall` would discard
+ * anyway.
+ */
+export function runbookJobWindow(
+  alerts: readonly RunbookAlertRow[],
+  windowMs = RUNBOOK_RESPONSE_WINDOW_MS
+): { from: number; to: number } | null {
+  const raises = runbookRaises(alerts)
+  if (raises.length === 0) return null
+  return { from: raises[raises.length - 1], to: raises[0] + windowMs }
+}
+
 function capCommand(text: string, redact: (t: string) => string, max: number): string {
   // REDACT FIRST. Reversing these two lines is the bug this whole comment
   // exists for: a 400-character cap through the middle of a PEM block removes
@@ -311,11 +359,7 @@ function capCommand(text: string, redact: (t: string) => string, max: number): s
  */
 export function buildRunbookRecall(input: RunbookRecallInput): RunbookRecall {
   const windowMs = input.windowMs ?? RUNBOOK_RESPONSE_WINDOW_MS
-  const raises = input.alerts
-    .filter((a) => a.raised)
-    .map((a) => a.at)
-    .sort((a, b) => b - a)
-    .slice(0, RUNBOOK_OCCURRENCES)
+  const raises = runbookRaises(input.alerts)
   if (raises.length === 0) return { status: 'never-fired' }
 
   const resolves = input.alerts
