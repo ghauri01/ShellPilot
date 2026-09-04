@@ -6,11 +6,15 @@ import type {
   DockerFailure,
   DockerInspectProbe,
   DockerProbe,
+  DockerReclaimItem,
+  DockerReclaimResult,
   DockerStatsProbe
 } from '../../shared/docker'
 import {
   SUDO_PROBE,
   buildDockerActionCommand,
+  buildDockerReclaimCommand,
+  parseDockerReclaimOutput,
   buildDockerDiskCommand,
   buildDockerDiskDetailCommand,
   buildDockerInspectCommand,
@@ -245,10 +249,13 @@ export class DockerReader {
    * usually a paragraph of question. The panel asks for it when the operator
    * asks for it.
    *
-   * READ-ONLY, and that is not an omission to be tidied up later. Nothing this
-   * returns is a handle on anything: it is the list the operator takes into a
-   * shell, and tests/dockerOps.test.ts holds every builder here to that — this
-   * one included.
+   * READ-ONLY, and it stays that way even though `reclaim` below now exists.
+   * What this returns is a listing; what `reclaim` takes is a list of ids the
+   * caller derived from one. The two are deliberately separate calls rather
+   * than one "list and remove" round trip, because the gap between them is
+   * where the re-preview goes — and a combined call would have to trust a
+   * listing it took itself thirty seconds earlier, which is the assumption this
+   * whole item exists to avoid making.
    */
   async diskDetail(cfg: unknown, opts: DockerListOptions = {}): Promise<DockerDiskDetailProbe> {
     try {
@@ -356,6 +363,52 @@ export class DockerReader {
         command,
         (output, code) => parseDockerActionOutput(refs, output, code),
         actionTimeoutMs(refs.length),
+        (detail) => ({ ok: false, reason: 'unknown', detail })
+      )
+      return result.ok && opts.sudo === true ? { ...result, usedSudo: true } : result
+    } catch (e) {
+      return { ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  /**
+   * Remove exactly these objects, and nothing that resembles them.
+   *
+   * The second state-changing method here, and it inherits every rule `act`
+   * follows rather than inventing softer ones:
+   *
+   *  * NO AUTO-SUDO. A read retried as root gives the same answer either way;
+   *    a removal retried as root is a privileged delete the user did not ask
+   *    for. A passwordless sudoers entry is not consent to a state change, and
+   *    it is even less so when the state change is a `docker volume rm`.
+   *  * The command is BUILT OUTSIDE the try, so a reference the builder cannot
+   *    prove safe rejects the call instead of arriving dressed as a host
+   *    condition. An image reference that is a tag rather than an id lands
+   *    there, which is the difference between removing an image and untagging
+   *    one.
+   *  * The timeout is the lifecycle one. `docker rmi` on a large image walks
+   *    its layers, and a wedged daemon must not hold the channel open all
+   *    afternoon.
+   *
+   * WHAT THIS METHOD DOES NOT DO is decide whether the removal is a good idea.
+   * The preview, the plan, the fresh re-read and the refuse-on-diff all live in
+   * shared/docker.ts and run where the human is — the same division `act` makes
+   * with `planDockerAction`, and the same one broadcast makes. What is enforced
+   * here is the part a dialog cannot enforce: that the thing sent to the host
+   * is a list of ids and cannot become anything else.
+   */
+  async reclaim(
+    cfg: unknown,
+    items: DockerReclaimItem[],
+    opts: { sudo?: boolean } = {}
+  ): Promise<DockerReclaimResult> {
+    const command = buildDockerReclaimCommand(items, { sudo: opts.sudo })
+    try {
+      const result = await this.attempt<DockerReclaimResult>(
+        cfg,
+        command,
+        (output, code) => parseDockerReclaimOutput(items, output, code),
+        actionTimeoutMs(items.length),
         (detail) => ({ ok: false, reason: 'unknown', detail })
       )
       return result.ok && opts.sudo === true ? { ...result, usedSudo: true } : result

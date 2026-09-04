@@ -1,0 +1,3 @@
+===SHELLPILOT-RMIMAGE===
+Error response from daemon: conflict: unable to delete 410766c85e52 (must be forced) - image is referenced in multiple repositories
+===SHELLPILOT-END===

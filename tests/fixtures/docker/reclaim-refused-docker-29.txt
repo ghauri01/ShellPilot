@@ -1,0 +1,9 @@
+===SHELLPILOT-RMCONTAINER===
+Error response from daemon: cannot remove container "f4a732d020f7": container is running: stop the container before removing or force remove
+Error response from daemon: No such container: 000000000000
+===SHELLPILOT-RMIMAGE===
+Error response from daemon: conflict: unable to delete 56f53e94e311 (must be forced) - image is being used by stopped container 11339eaf9fd8
+Error response from daemon: conflict: unable to delete 410766c85e52 (cannot be forced) - image is being used by running container f4a732d020f7
+===SHELLPILOT-RMVOLUME===
+Error response from daemon: remove sp21b-named-inuse: volume is in use - [f4a732d020f7376a6d306e4d977a8956b16b31e01252ca6b861a654cf90c4325]
+===SHELLPILOT-END===
