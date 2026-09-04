@@ -520,3 +520,28 @@ describe('the workspace’s own databases', () => {
     await waitFor(() => expect(screen.queryByTestId('patch-block')).toBeNull())
   })
 })
+
+describe('what a colour claims', () => {
+  it('marks a question that cannot be answered as unknown, not as a warning', () => {
+    // Arch publishes no security channel, so the security count there is
+    // "cannot be answered" -- nothing is wrong and nothing wants attention.
+    // It was painted `warn`, the same amber as a real degradation, directly
+    // under a comment saying the two must not be confusable. Amber says "look
+    // at this"; this is the app saying "I cannot tell you", and those are the
+    // two meanings an operator most needs kept apart.
+    seedFacts({
+      b: facts({
+        distroId: 'arch',
+        packageManager: 'pacman',
+        securityUpdates: null,
+        sources: sources({ 'security-updates': 'unsupported' })
+      })
+    })
+    render(<PatchPanel servers={[server('b', 'archbox')]} />)
+
+    const cell = document.querySelector('tr[data-host="archbox"] td[data-col="security"]')
+    const marked = cell?.querySelector('.state-unknown')
+    expect(marked).toBeTruthy()
+    expect(cell?.querySelector('.warn')).toBeNull()
+  })
+})

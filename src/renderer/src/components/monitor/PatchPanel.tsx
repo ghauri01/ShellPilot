@@ -74,9 +74,17 @@ function Count({ count }: { count: PatchCount }): React.JSX.Element {
   }
   // Never a dash, never a zero, never blank. On an Arch or Alpine host the true
   // security count is "cannot be answered" and the two must not be confusable.
+  //
+  // Which is why this is `state-unknown` and not `warn`. Amber says "look at
+  // this", and a distribution that does not publish a security channel is not
+  // asking to be looked at -- nothing is wrong, the question simply has no
+  // answer there. Painting it the same colour as a real degradation is the
+  // confusion the comment above is about, made in the stylesheet instead of in
+  // the number. `state-unknown` is deliberately the only achromatic one, so it
+  // reads as absent rather than as a third severity.
   return (
     <span
-      className={clsx('faint', count.gap === 'unsupported' && 'warn')}
+      className={clsx('faint', count.gap === 'unsupported' && 'state-unknown')}
       title={count.help}
     >
       {PATCH_GAP_LABEL[count.gap]}
