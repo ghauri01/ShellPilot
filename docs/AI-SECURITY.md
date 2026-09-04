@@ -59,6 +59,17 @@ Regardless of which access group a session holds:
   reachable", and `tests/localTerminalNotExposed.test.ts` fails the build if that stops being true —
   it walks the transitive import closure of `mcpServer.ts` and `src/cli/`, so the module cannot even
   be *imported* by anything an agent talks to, let alone called.
+- **Third-party API keys, and the proxy that uses them.** The API credential proxy
+  (`credProxy.ts`) lets a script call a third-party API without holding its key: the credential is
+  resolved through the same `credentialResolver.ts` and injected at the boundary. An agent gets
+  neither half of it. It cannot *define a rule*, because a rule is a durable statement of where one
+  of your credentials may go — a row in a JSON file that outlives the session that wrote it, with
+  nothing pending for `denyAllPending()` to revoke, which is the same objection this document's
+  companion makes about the job engine, one turn further. And it cannot *call the proxy*, because
+  a caller that does not hold the key is still spending your API budget on somebody else's meter,
+  under a credential no audit here can attribute to it. There is no tool, no capability and no ASK
+  prompt; `tests/jobsNotExposed.test.ts` walks the same import closure the local terminal relies on
+  and fails the build if the module becomes reachable.
 - **A VPN's endpoint, keys or listener addresses.** `list_vpns` reports which profiles exist,
   which engine carries each one and whether it is up. The cached record it reads from
   (`CachedVpn`, `mcpDataCache.ts`) does not hold an endpoint, a key ref or a bind address at all,
