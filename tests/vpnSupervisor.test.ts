@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -627,4 +627,148 @@ describe('supervisor against a real child process', () => {
     expect(order).toEqual(['graceful'])
     expect(exits.at(-1)?.signal).toBe('SIGKILL')
   }, 20_000)
+})
+
+// ---------------------------------------------------------------------------
+// The supervisor is the general process supervisor, not a VPN module
+// ---------------------------------------------------------------------------
+//
+// Roadmap item 1 gives it a second consumer (src/main/services/processes.ts).
+// Two properties have to hold for that to be safe, and neither is visible in
+// the VPN suites because VPN is the only caller they exercise.
+
+describe('a second, non-VPN consumer', () => {
+  let sup: Supervisor
+
+  beforeEach(() => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date']
+    })
+  })
+
+  it('names the thing it is running, rather than calling a dev server a tunnel', async () => {
+    // `first` is settled by finish() when a run is stopped while it is still
+    // starting — an ordinary double-click on Start then Stop. The sentence it
+    // rejects with is the ONLY place the supervisor names what it runs, and it
+    // is shown to the user verbatim.
+    const spawned: FakeChild[] = []
+    sup = new Supervisor({
+      runRoot: root,
+      platform: 'darwin',
+      spawn: () => {
+        const child = new FakeChild()
+        spawned.push(child)
+        return child as unknown as ChildProcess
+      },
+      // A SIGKILL that no child ever answers would leave stop() waiting on a
+      // faked timer that this test never advances.
+      kill: (_pid, signal) => {
+        if (signal !== 0) spawned.at(-1)?.exit(null, 'SIGKILL')
+      }
+    })
+
+    // Readiness that never settles, so the run is still starting when Stop
+    // arrives.
+    const started = sup.spawn(
+      baseSpec({ id: 'proc-noun', noun: 'process', readiness: () => new Promise<void>(() => {}) })
+    )
+    const rejected = started.then(
+      () => 'resolved',
+      (e: unknown) => (e instanceof Error ? e.message : String(e))
+    )
+    await waitFor(() => spawned.length === 1)
+    await sup.stop('proc-noun', { force: true })
+
+    expect(await rejected).toBe(
+      'Something went wrong inside ShellPilot. The process was stopped while it was starting.'
+    )
+  })
+
+  it('still says "tunnel" when no noun is given, so no VPN sentence changed', async () => {
+    const spawned: FakeChild[] = []
+    sup = new Supervisor({
+      runRoot: root,
+      platform: 'darwin',
+      spawn: () => {
+        const child = new FakeChild()
+        spawned.push(child)
+        return child as unknown as ChildProcess
+      },
+      kill: (_pid, signal) => {
+        if (signal !== 0) spawned.at(-1)?.exit(null, 'SIGKILL')
+      }
+    })
+
+    const started = sup.spawn(
+      baseSpec({ id: 'vpn-noun', readiness: () => new Promise<void>(() => {}) })
+    )
+    const rejected = started.then(
+      () => 'resolved',
+      (e: unknown) => (e instanceof Error ? e.message : String(e))
+    )
+    await waitFor(() => spawned.length === 1)
+    await sup.stop('vpn-noun', { force: true })
+
+    expect(await rejected).toBe(
+      'Something went wrong inside ShellPilot. The tunnel was stopped while it was starting.'
+    )
+  })
+
+  it('reaps only pid records under its OWN root, never a sibling supervisor\'s', async () => {
+    // Rule 1 in supervisor.ts's header, asserted rather than trusted.
+    //
+    // reapOrphans() treats every *.pid file under its root as its own, and
+    // "its own" means SIGTERM then SIGKILL once the identity probe matches.
+    // Two supervisors sharing a root would therefore kill each other's live
+    // children at launch: the process supervisor would take down the user's
+    // tunnel and the VPN supervisor would take down their dev server. The
+    // separation is the only thing that prevents it.
+    //
+    // Linux rather than darwin, deliberately. The darwin probe parses
+    // `ps -o lstart=`, whose output is in the machine's local time while the
+    // record is in UTC, so whether the identity matches would depend on the
+    // timezone the suite runs in. /proc mtimes are epoch seconds on both sides.
+    const vpnRoot = mkdtempSync(join(tmpdir(), 'sp-sup-vpn-'))
+    const procRoot = mkdtempSync(join(tmpdir(), 'sp-sup-proc-'))
+    try {
+      const killed: [number, number | NodeJS.Signals][] = []
+      const startedAtMs = 1_700_000_000_000
+      // A record written by the OTHER supervisor, in the other root, for a pid
+      // that is alive and whose identity the probe below confirms.
+      writeFileSync(
+        join(vpnRoot, 'tunnel-1.pid'),
+        JSON.stringify({
+          pid: 9101,
+          startedAtIso: new Date(startedAtMs).toISOString(),
+          exePath: '/opt/shellpilot/openvpn',
+          runId: 'tunnel-1',
+          runDir: join(vpnRoot, 'tunnel-1')
+        })
+      )
+
+      const processes = new Supervisor({
+        runRoot: procRoot,
+        platform: 'linux',
+        // Signal 0 is the liveness probe: returning normally says the pid is
+        // alive, which is the case this rule is about.
+        kill: (pid, signal) => {
+          if (signal !== 0) killed.push([pid, signal])
+        },
+        runProbe: async (command) =>
+          command === 'readlink' ? '/opt/shellpilot/openvpn\n' : `${startedAtMs / 1000}\n`,
+        reapTermGraceMs: 0,
+        spawn: () => new FakeChild() as unknown as ChildProcess
+      })
+
+      await processes.reapOrphans()
+
+      // Point `runRoot` at vpnRoot instead and both of these fail: the live
+      // tunnel gets SIGTERM then SIGKILL, and its record is deleted.
+      expect(killed).toEqual([])
+      expect(existsSync(join(vpnRoot, 'tunnel-1.pid'))).toBe(true)
+    } finally {
+      rmSync(vpnRoot, { recursive: true, force: true })
+      rmSync(procRoot, { recursive: true, force: true })
+    }
+  })
 })

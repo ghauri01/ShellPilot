@@ -1,23 +1,52 @@
 import type {
+  K8sCordonResult,
+  K8sCordonTarget,
+  K8sDrainAssessment,
+  K8sDrainPlan,
+  K8sDrainResult,
+  K8sExecResult,
+  K8sExecTarget,
+  K8sApiScan,
+  K8sHelmList,
+  K8sResources,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
   K8sRolloutResult,
   K8sRolloutTarget,
+  K8sSchedulingAction,
   K8sUsage,
   K8sWorkloadKind
 } from '../../shared/kubernetes'
 import {
+  buildK8sCordonCommand,
   buildK8sDiagnoseCommand,
+  buildK8sDrainCommand,
+  buildK8sDrainPreflightCommand,
+  buildK8sApiScanCommand,
+  buildK8sExecCommand,
+  buildK8sHelmListCommand,
+  buildK8sResourcesCommand,
   buildK8sOverviewCommand,
   buildK8sReadCommand,
   buildK8sRolloutRestartCommand,
   buildK8sTopCommand,
+  parseK8sCordonResult,
   parseK8sDiagnosis,
+  assessK8sDrain,
+  parseK8sDrainPreflight,
+  parseK8sDrainResult,
+  parseK8sApiScan,
+  parseK8sExecResult,
+  parseK8sHelmList,
+  parseK8sResources,
   parseK8sOutput,
   parseK8sOverview,
   parseK8sRolloutResult,
   parseK8sUsage,
+  planK8sCordon,
+  planK8sDrain,
+  planK8sExec,
   planK8sRollout
 } from '../../shared/kubernetes'
 
@@ -34,6 +63,8 @@ import {
 // usually does not exist, turning a precise "your token cannot list events"
 // into a vague "no configuration has been provided". See
 // K8S_SUDO_DOES_NOT_HELP.
+
+import { verifyApproval } from '../../shared/broadcast'
 
 export type K8sExec = (
   cfg: unknown,
@@ -208,8 +239,310 @@ export class KubernetesReader {
     }
   }
 
+  /**
+   * Cordon or uncordon one node.
+   *
+   * Shaped exactly like `rolloutRestart` and for the same reasons: `confirmed`
+   * must be literally true, the builder throws on a name it cannot prove safe,
+   * and the plan is re-derived here rather than trusted across IPC.
+   *
+   * A TRANSPORT FAILURE IS AN UNKNOWN STATE, not a failed cordon — the same
+   * reading as the restart. `cordon` is a one-field patch and it may well have
+   * reached the API server before the SSH connection died. Saying "the node
+   * was not cordoned" would be a guess, and the wrong guess sends someone to
+   * click again on a node that is already frozen, or worse, to start a reboot
+   * believing the freeze did not take.
+   */
+  async cordon(
+    cfg: unknown,
+    target: K8sCordonTarget,
+    confirmed: boolean
+  ): Promise<K8sCordonResult> {
+    const action = target.action as K8sSchedulingAction
+    const fail = (detail: string, reason: K8sCordonResult['reason'] = 'unknown'): K8sCordonResult => ({
+      ok: false,
+      action,
+      node: target.node,
+      alreadyInState: false,
+      output: '',
+      node_status: '',
+      reason,
+      detail
+    })
+    if (confirmed !== true) {
+      return fail(`refusing to ${action} a node without an explicit confirmation`)
+    }
+    try {
+      const cmd = buildK8sCordonCommand(target.node, action, target.context ?? undefined)
+      // 20s: two kubectl calls, each already bounded at 10s by
+      // --request-timeout, plus the SSH round trip. Neither waits on anything
+      // in the cluster — a cordon is a patch and the node read is a get.
+      const r = await this.deps.exec(cfg, cmd, 20_000)
+      if (!r.ok) {
+        return fail(
+          `${r.error ?? 'could not reach the host'} — the ${action} may or may not have been applied; re-read the node before retrying`
+        )
+      }
+      return parseK8sCordonResult(action, target.node, merge(r), r.code ?? null)
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Read everything the drain decision is made from.
+   *
+   * Exposed on its own so the panel can show the verdict BEFORE anyone reaches
+   * for a confirm dialog. It is a preview and nothing more — `drain` below
+   * takes this read again for itself, because endpoint readiness is only true
+   * of the instant it was read and the instant that matters is the one
+   * immediately before the command runs.
+   */
+  async drainPreflight(cfg: unknown, node: string, context?: string): Promise<K8sDrainAssessment> {
+    const fail = (detail: string): K8sDrainAssessment => {
+      const f = { ok: false, reason: 'unknown', detail } as const
+      // A transport failure makes every one of the four reads unknown, which is
+      // exactly what it is. Reporting it as "no PodDisruptionBudgets" would be
+      // the lie this module exists to refuse, arriving by a different route.
+      return assessK8sDrain(node, { nodeState: f, pods: f, pdbs: f, endpoints: f })
+    }
+    try {
+      const cmd = buildK8sDrainPreflightCommand(node, context)
+      // 45s: four kubectl calls at up to 10s each plus the SSH round trip. Same
+      // reasoning as the overview — a per-call bound that adds up past the
+      // exec's own timeout means the transport gives up first and the user sees
+      // a timeout instead of the three blocks that did answer.
+      const r = await this.deps.exec(cfg, cmd, 45_000)
+      if (!r.ok) return fail(r.error ?? 'could not reach the host')
+      return parseK8sDrainPreflight(node, merge(r), r.code ?? null)
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Drain a node, or refuse to.
+   *
+   * THE PREFLIGHT IS TAKEN HERE, not accepted from the caller, and that is the
+   * whole security and correctness story of this method. An assessment that
+   * crossed IPC is a structured-clone value with no runtime type; a caller that
+   * sent `{safe:true, blockers:[]}` would be granting itself permission to
+   * drain. It is also stale by construction — the renderer computed it when the
+   * dialog opened and the user has been reading it since.
+   *
+   * A REFUSAL IS NOT A SCARIER DIALOG. When the preflight says no, no drain
+   * command is built at all and the reasons come back as text. There is no
+   * override flag on this method, and `--force` / `--delete-emptydir-data` are
+   * not passed anywhere in this module — both of those turn a blocked drain
+   * into a successful one by destroying whatever blocked it.
+   */
+  async drain(
+    cfg: unknown,
+    node: string,
+    context: string | undefined,
+    confirmed: boolean
+  ): Promise<K8sDrainResult & { plan?: K8sDrainPlan }> {
+    const fail = (detail: string, plan?: K8sDrainPlan): K8sDrainResult & { plan?: K8sDrainPlan } => ({
+      ok: false,
+      node,
+      evicted: [],
+      pending: [],
+      pdbRejected: [],
+      partial: false,
+      output: '',
+      node_status: '',
+      reason: 'unknown',
+      detail,
+      ...(plan === undefined ? {} : { plan })
+    })
+    if (confirmed !== true) {
+      return fail('refusing to drain a node without an explicit confirmation')
+    }
+    try {
+      const assessment = await this.drainPreflight(cfg, node, context)
+      const plan = planK8sDrain(assessment)
+      if (plan.refusals.length > 0) {
+        return fail(
+          `refusing to drain ${node}: ${plan.refusals.join(' — ')}`,
+          plan
+        )
+      }
+      // 150s against the drain's own 120s --timeout. The transport must outlast
+      // kubectl, or a drain that stalls on a budget is reported as a host that
+      // went away — and the operator is then told the node is untouched when it
+      // has been cordoned and half emptied.
+      const r = await this.deps.exec(cfg, buildK8sDrainCommand(node, context), 150_000)
+      if (!r.ok) {
+        return fail(
+          `${r.error ?? 'could not reach the host'} — the drain was sent and its outcome is unknown; the node has been cordoned and some pods may already have moved. Re-read the node before retrying.`,
+          plan
+        )
+      }
+      return { ...parseK8sDrainResult(node, merge(r), r.code ?? null), plan }
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Run one command inside a container, against a written-down approval.
+   *
+   * The approval is not a boolean and this method does not take one. It takes
+   * the RECORD a human's answer produced, and it checks three things against a
+   * fresh re-derivation before anything runs:
+   *
+   *  - the command text is the one that was approved, byte for byte. The
+   *    record carries it, so an exec edited between the dialog and the run is
+   *    a comparison rather than an act of faith. This is the check a `confirmed
+   *    === true` flag cannot make at all: the flag says a dialog was answered,
+   *    not what it said.
+   *  - the host is one that was in the confirmed target list.
+   *  - the confirmation demanded now is the confirmation that was answered. A
+   *    build that later decides exec needs more than it did will not honour an
+   *    approval minted under the weaker rule.
+   *
+   * `verifyApproval` is shared/broadcast.ts's, unmodified. Re-implementing the
+   * comparison here would be a second verifier that can drift from the first,
+   * which is the failure the single-record design exists to prevent.
+   */
+  async exec(cfg: unknown, target: K8sExecTarget, approval: unknown): Promise<K8sExecResult> {
+    try {
+      // Built BEFORE the check, because the built command is what the check is
+      // about. Verifying a target object and then building from it separately
+      // would leave a gap between what was agreed and what runs.
+      const command = buildK8sExecCommand(target)
+      const plan = planK8sExec(target)
+      const verdict = verifyApproval(
+        approval,
+        {
+          commands: [command],
+          targets: [{ serverId: target.serverId, serverName: target.serverName }]
+        },
+        { risk: plan.risk, confirmation: plan.confirmation }
+      )
+      if (!verdict.ok) {
+        return { ok: false, output: '', containerExit: null, reason: 'unknown', detail: verdict.reason }
+      }
+      // 60s. An exec runs somebody else's program and there is no sensible
+      // upper bound on it, so this is a deliberate ceiling rather than a
+      // measurement: past a minute the answer is "use a job", and a command
+      // that waits on stdin would otherwise hold the transport open forever.
+      const r = await this.deps.exec(cfg, command, 60_000)
+      if (!r.ok) {
+        return {
+          ok: false,
+          output: '',
+          containerExit: null,
+          reason: 'unknown',
+          // The same reading as the restart and the drain. A transport failure
+          // leaves the exec in an UNKNOWN state: it may well have reached the
+          // host and run, and telling somebody it did not is how a command that
+          // is not idempotent gets run twice.
+          detail: `${r.error ?? 'could not reach the host'} — the command may or may not have run inside the container`
+        }
+      }
+      return parseK8sExecResult(merge(r), r.code ?? null)
+    } catch (e) {
+      return {
+        ok: false,
+        output: '',
+        containerExit: null,
+        reason: 'unknown',
+        detail: e instanceof Error ? e.message : String(e)
+      }
+    }
+  }
+
+  /** PVCs, ingresses, RBAC bindings and which secrets exist. */
+  async resources(cfg: unknown, context?: string, namespace?: string): Promise<K8sResources> {
+    const fail = (detail: string): K8sResources => {
+      const f = { ok: false, reason: 'unknown', detail } as const
+      return { pvcs: f, ingresses: f, roleBindings: f, secrets: f }
+    }
+    try {
+      // 45s: five kubectl calls at up to 10s each, the same arithmetic as the
+      // overview.
+      const r = await this.deps.exec(cfg, buildK8sResourcesCommand(context, namespace), 45_000)
+      if (!r.ok) return fail(r.error ?? 'could not reach the host')
+      return parseK8sResources(merge(r), r.code ?? null)
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Which deprecated APIs this server still serves, and what the scan could
+   * not look at.
+   *
+   * The second half is not a disclaimer — see K8S_API_SCAN_BLIND_SPOTS. A
+   * transport failure makes the whole scan unknown, and it says so rather than
+   * reporting an empty finding list, which is the same lie as "no pods" for a
+   * denied read.
+   */
+  async apiScan(cfg: unknown, context?: string): Promise<K8sApiScan> {
+    try {
+      const r = await this.deps.exec(cfg, buildK8sApiScanCommand(context), 25_000)
+      if (!r.ok) return this.unscanned(r.error ?? 'could not reach the host')
+      return parseK8sApiScan(merge(r), r.code ?? null)
+    } catch (e) {
+      return this.unscanned(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * A scan that did not happen, with the reason at the top of what it could
+   * not check.
+   *
+   * Rather than an empty `findings` list and nothing else, which is the shape
+   * that reads as "this cluster serves no deprecated APIs".
+   */
+  private unscanned(detail: string): K8sApiScan {
+    const empty = parseK8sApiScan('', null)
+    return {
+      ...empty,
+      notChecked: [`the scan did not run at all (${detail})`, ...empty.notChecked]
+    }
+  }
+
+  /** `helm list -A`, on a host that probably does not have helm. */
+  async helm(cfg: unknown, context?: string): Promise<K8sHelmList> {
+    try {
+      const r = await this.deps.exec(cfg, buildK8sHelmListCommand(context), 25_000)
+      if (!r.ok) {
+        // NOT `not-installed`. A host we could not reach has told us nothing
+        // about whether helm is on it, and the two have completely different
+        // fixes.
+        return { ok: false, reason: 'failed', detail: r.error ?? 'could not reach the host' }
+      }
+      return parseK8sHelmList(merge(r), r.code ?? null)
+    } catch (e) {
+      return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
   /** Exposed so the main process can log what was approved, in its own words. */
   plan(target: K8sRolloutTarget): ReturnType<typeof planK8sRollout> {
     return planK8sRollout(target)
+  }
+
+  /** The same, for a scheduling change. */
+  cordonPlan(target: K8sCordonTarget): ReturnType<typeof planK8sCordon> {
+    return planK8sCordon(target)
+  }
+
+  /**
+   * The same, for an exec — and the renderer needs BOTH halves of this.
+   *
+   * The plan is what the dialog is built from, and `buildK8sExecCommand` is
+   * what the approval must record: an approval minted against anything other
+   * than the exact command string this service will rebuild is one
+   * `verifyApproval` refuses. Exposing the pair together is what keeps those
+   * from drifting apart.
+   */
+  execPlan(target: K8sExecTarget): {
+    plan: ReturnType<typeof planK8sExec>
+    command: string
+  } {
+    return { plan: planK8sExec(target), command: buildK8sExecCommand(target) }
   }
 }

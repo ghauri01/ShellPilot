@@ -1,0 +1,10 @@
+===SHELLPILOT-DRAIN===
+node/spk8s-worker cordoned
+Warning: ignoring DaemonSet-managed Pods: edge/log-shipper-c2hkg, kube-system/kindnet-wzkbx, kube-system/kube-proxy-c979n
+evicting pod shop/checkout-6c99dcd7bb-n2bfx
+evicting pod shop/catalog-78f5dff949-bff58
+pod/checkout-6c99dcd7bb-n2bfx evicted
+pod/catalog-78f5dff949-bff58 evicted
+node/spk8s-worker drained
+===SHELLPILOT-NODE===
+spk8s-worker   Ready,SchedulingDisabled   <none>   16m   v1.33.1

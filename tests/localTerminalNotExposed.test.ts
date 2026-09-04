@@ -378,6 +378,14 @@ describe('the AI permission model has no word for a local shell', () => {
     // rather than a widening of serverMetrics, because a count of unpatched
     // vulnerabilities is materially different from CPU and memory.
     'hostFacts',
+    // Roadmap item 31. Reviewed and added deliberately, and it is the one entry
+    // here that grants an agent NOTHING: it gates whether ShellPilot's own
+    // hourly posture probe may read a host's firewall rule lines, and no MCP
+    // tool can reach them at any setting — see tests/jobsNotExposed.test.ts.
+    // It is in the grid because that is where a consent to collect the
+    // addresses and ports a host accepts traffic on belongs, not because a
+    // bridge tool answers with it.
+    'firewallRules',
     'manageServers',
     'vpnControl'
   ]

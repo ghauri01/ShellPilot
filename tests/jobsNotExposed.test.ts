@@ -274,6 +274,30 @@ const REVIEWED_JOB_FILES = ['jobDetached', 'jobExec', 'jobRunner']
  *  authorisation to run a command; this is a standing authorisation to send a
  *  named API KEY to a named host, held in a file, surviving every session that
  *  could have been revoked. See the note at JOB_TOOL. */
+/** `processes` covers BOTH halves of roadmap item 1 — `src/shared/processes.ts`
+ *  and `src/main/services/processes.ts` — because the match below is on a
+ *  basename and is case-insensitive.
+ *
+ *  It is the strongest case on this list, and the argument is the file's own
+ *  header taken one step further. `rules` is a standing authorisation to run a
+ *  command on a remote host; `credProxy` is a standing authorisation to send a
+ *  named API key to a named host. This is ARBITRARY CODE EXECUTION ON THE
+ *  MACHINE THE VAULT IS ON, held in a file, with a restart policy.
+ *
+ *  DURABILITY DEFEATS REVOCATION applies here without any of the softening the
+ *  job engine gets. A job on fifteen hosts has nothing pending WHILE IT RUNS,
+ *  and finishes. A supervised process has nothing pending AND DOES NOT FINISH:
+ *  `denyAllPending()` resolves every waiting approval, revokes every session
+ *  and stops the bridge, and the child is still there — still logging, still
+ *  holding its port, and with a supervisor ready to start it AGAIN the moment
+ *  it exits. There is no request to deny, no session whose revocation reaches
+ *  it, and no channel whose closure stops it.
+ *
+ *  It is also a persistence primitive rather than merely an execution one. An
+ *  agent that could write a row here would be writing a program that starts
+ *  when a human presses a button they have every reason to press — see the
+ *  auto-start refusal in shared/processes.ts, which is what keeps that from
+ *  being "starts on its own". See the note at JOB_TOOL. */
 const SHARED_JOB_MODULES = [
   'jobs',
   'patch',
@@ -281,7 +305,8 @@ const SHARED_JOB_MODULES = [
   'broadcast',
   'approvalLog',
   'rules',
-  'credProxy'
+  'credProxy',
+  'processes'
 ]
 
 const JOB_MODULE_NAMES = [...new Set([...scanJobModules(), ...SHARED_JOB_MODULES])]
@@ -354,7 +379,10 @@ describe('the job engine is enumerated by scanning, not by memory', () => {
       './rules',
       './credProxy',
       '../../shared/credproxy',
-      '../services/credProxy.js'
+      '../services/credProxy.js',
+      './processes',
+      '../../shared/processes',
+      '../services/processes.js'
     ]) {
       expect(isForbiddenSpecifier(spec), spec).toBe(true)
     }
@@ -563,6 +591,12 @@ describe('the AI permission model has no word for a job', () => {
     'sudo',
     'serverMetrics',
     'hostFacts',
+    // Roadmap item 31, reviewed here as well: it grants an agent nothing at
+    // all. What it gates is whether ShellPilot's own hourly posture read may
+    // collect a host's firewall rule LINES — the addresses and ports it
+    // accepts traffic on — for a person to look at. The bridge cannot reach
+    // them at any setting; section 4 below holds that by name.
+    'firewallRules',
     'manageServers',
     'vpnControl'
   ]
@@ -711,6 +745,41 @@ describe('what must NOT be able to reach this', () => {
       'fleet:posture',
       'postureFor',
       'get_host_posture',
+      // The firewall RULE LIST — roadmap item 31, and the posture argument at
+      // its sharpest, because this is the one part of that collection that is
+      // not a count.
+      //
+      // Posture's scalars are a map of how to attack the estate. This is the
+      // map itself: the addresses and ports each host accepts traffic on, in
+      // the firewall's own words. It is the single most attacker-valuable
+      // thing this application holds, and reading it is indistinguishable from
+      // preparing to use it.
+      //
+      // GATED IS NOT AN ANSWER HERE, and this is the case where that has to be
+      // said out loud, because unlike everything else on this list the rule
+      // list HAS a capability of its own — `firewallRules`, item 31's line in
+      // the consent grid. That capability governs whether ShellPilot's own
+      // hourly probe may COLLECT the lines for a person to read. It is not an
+      // agent grant and no tool consults it, deliberately: an agent that can
+      // read one host's ruleset can read forty, and an agent that can read
+      // forty rulesets can put them somewhere. There is no value of a
+      // permission — not ASK, which a model can ask for in a plausible voice
+      // during work a human already approved — that survives that.
+      //
+      // The property holds today only by construction: nothing under
+      // src/main/services/mcpServer.ts names any of these. This is what makes
+      // that checkable in a diff rather than by remembering.
+      'FirewallRuleListing',
+      'FIREWALL_RULE_ORIGINS',
+      'FIREWALL_RULE_MAX_LINES',
+      'FIREWALL_RULE_LINE_CAP',
+      'FIREWALL_RULES_HOST_REPORTED_NOTE',
+      'ruleLines',
+      'rulesRequested',
+      'fw-rule-lines',
+      'fw-rule-collection',
+      'sp_rule',
+      'firewallRules',
       // Configuration drift — roadmap item 25. The posture argument, one step
       // sharper.
       //
@@ -792,7 +861,128 @@ describe('what must NOT be able to reach this', () => {
       'credproxy:save-rule',
       'credproxy:remove-rule',
       'credproxy:token',
-      'credproxy:calls'
+      'credproxy:calls',
+      // Kubernetes node lifecycle — roadmap item 22. The mutating half, and it
+      // is STRICTLY MORE POWERFUL than the job engine this file exists to keep
+      // away from the bridge.
+      //
+      // A job runs a command on hosts a human picked. `kubectl cordon` takes a
+      // machine out of a cluster's schedulable capacity and `kubectl drain`
+      // evicts everything running on it — both against whatever cluster the
+      // kubeconfig on that host points at, which is a blast radius nobody
+      // chose per-server. `execute_command` gated per server against an access
+      // group is a consent story about ONE host and one command a human can
+      // read; "take this node out of the fleet" is a different question about a
+      // different system, and the answer is no — not "not yet".
+      //
+      // Not gated, not asked-for, NOT THERE.
+      'buildK8sCordonCommand',
+      'planK8sCordon',
+      'parseK8sCordonResult',
+      'k8s:cordon',
+      // The drain, which is the sharpest case in this block. It evicts every
+      // controller-owned pod on a machine and leaves the machine cordoned
+      // afterwards — and unlike everything else on this list, a drain that
+      // fails has still moved half the workloads, so there is no state an
+      // agent could leave behind that a human can simply undo.
+      //
+      // The preflight is on the list too, and that is deliberate rather than
+      // over-broad. It is a read, and it is the read that decides whether the
+      // drain is allowed; a caller holding the preflight and not the drain
+      // would be holding the safety check for an action it cannot take, which
+      // is only useful to something planning to take it another way.
+      'buildK8sDrainCommand',
+      'buildK8sDrainPreflightCommand',
+      'assessK8sDrain',
+      'planK8sDrain',
+      'parseK8sDrainResult',
+      'parseK8sDrainPreflight',
+      'K8S_DRAIN_PHRASE',
+      'k8s:drain',
+      'k8s:drain-preflight',
+      // Exec, which is the one that needs no argument at all. Arbitrary code
+      // inside a container, under whatever identity that container runs as.
+      // The bridge's `execute_command` is gated per server against an access
+      // group a human wrote; `pods/exec` is a different subresource on a
+      // different system, and an agent reaching it would be running code
+      // somewhere nobody granted anything.
+      //
+      // Its approval record is on the list for the same reason `approvalLog`
+      // is: a caller that can mint one can launder consent for work it was
+      // never granted.
+      'buildK8sExecCommand',
+      'planK8sExec',
+      'parseK8sExecResult',
+      'K8S_EXEC_PHRASE',
+      'k8s:exec',
+      'k8s:exec-plan',
+      // And the reads. Read-only is not the argument it sounds like — the same
+      // point posture and drift make on this list, one step sharper here.
+      // `k8s:resources` lists which secrets exist and every RBAC binding in the
+      // cluster: it does not read a secret's value, and "which service account
+      // is bound to cluster-admin, and what is the name of the secret holding
+      // its token" is a map of how to escalate, assembled and kept fresh. An
+      // agent asking that for one cluster could ask it for every cluster every
+      // host in the estate can reach.
+      'buildK8sResourcesCommand',
+      'parseK8sResources',
+      'buildK8sApiScanCommand',
+      'buildK8sHelmListCommand',
+      'k8s:resources',
+      'k8s:api-scan',
+      'k8s:helm',
+      // Already true before item 22 and asserted here now that the file has
+      // company: the one older mutation, and the module itself.
+      'buildK8sRolloutRestartCommand',
+      'planK8sRollout',
+      'k8s:rollout-restart',
+      'shared/kubernetes',
+      'services/kubernetes',
+      'KubernetesReader',
+      // Supervised local processes — roadmap item 1, and the sharpest entry on
+      // this list.
+      //
+      // Everything above is a power over a REMOTE system, exercised through a
+      // credential that could in principle be rotated afterwards. This is a
+      // child process of ShellPilot itself, on the machine the vault is on,
+      // with a restart policy — and the restart policy is what makes the kill
+      // switch's guarantee not merely weaker but absent. `denyAllPending()`
+      // resolves what is PENDING; a supervised process has nothing pending, is
+      // not finished, and will be started again by the supervisor when it
+      // exits. Stopping the bridge does not reach it. Revoking every session
+      // does not reach it. There is nothing to deny.
+      //
+      // "It only runs what a human already defined" is the comfortable version
+      // of the argument here, the way "it only reads" is for posture and drift
+      // and "it only sends what a rule allows" is for the credential proxy. It
+      // is not one, in either direction: a caller that can CREATE a definition
+      // chooses the program, and a caller that can START one chooses the
+      // moment — and the whole point of the auto-start refusal in
+      // shared/processes.ts is that the moment belongs to a human.
+      //
+      // Not gated, not asked-for, NOT THERE. The import-closure half is
+      // `processes` in SHARED_JOB_MODULES above; these are the words.
+      'ProcessService',
+      'processService',
+      'shared/processes',
+      'services/processes',
+      'sanitiseProcess',
+      'sanitiseProcesses',
+      'processDraftProblem',
+      'toProcessView',
+      'readProcessFile',
+      'writeProcessFile',
+      'ManagedProcess',
+      'ProcessDraft',
+      'PROCESS_CRASH_LOOP',
+      'processes:list',
+      'processes:status',
+      'processes:create',
+      'processes:remove',
+      'processes:start',
+      'processes:stop',
+      'processes:restart',
+      'processes:logs'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }

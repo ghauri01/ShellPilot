@@ -129,6 +129,27 @@ const MODULE_FILES: Record<string, string[]> = {
     'src/renderer/src/components/monitor/LogTailPanel.tsx'
   ],
   cron: ['src/shared/cron.ts', 'src/renderer/src/components/monitor/CronPanel.tsx'],
+  // Item 1. All three files are listed, and the main half is the one that most
+  // needs the closure walked: it is the only module file in the repo that
+  // SPAWNS A PROGRAM ON THIS MACHINE. It passes because everything it acts
+  // with is injected — the supervisor, the file reader and writer, and the
+  // vault lookup are handed to it by main — so it imports no credential
+  // resolver and no secret store of its own, exactly as `rules` and the
+  // credential proxy do. Reaching for `services/vault` to read an environment
+  // variable's value would have put the master key inside the one module that
+  // can start a program, which is the trade this list exists to make visible.
+  //
+  // Worth writing down beside the file list: what this module's toggle gates
+  // is the PANEL, not the definitions. A stored process stays on disk with the
+  // module off and nothing about it executes by existing — there is no
+  // auto-start (see src/shared/processes.ts) — so switching the module off
+  // does not silently disarm something a user believes is running, and
+  // switching it back on does not arm anything either.
+  processes: [
+    'src/shared/processes.ts',
+    'src/main/services/processes.ts',
+    'src/renderer/src/components/processes/ProcessesPanel.tsx'
+  ],
   docker: ['src/shared/docker.ts', 'src/main/services/docker.ts', 'src/renderer/src/components/docker/DockerPanel.tsx'],
   kubernetes: [
     'src/shared/kubernetes.ts',

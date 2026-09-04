@@ -15,6 +15,39 @@ import { disposeRunDir, runIdSegment, sweepRunDirs, vpnRunRoot } from './runDir'
 // `child_process` directly so that backoff, crash-loop detection, bounded log
 // capture and orphan reaping apply uniformly rather than three times, subtly
 // differently.
+//
+// ---------------------------------------------------------------------------
+// THIS IS NOT A VPN MODULE. IT IS THE PROCESS SUPERVISOR, AND IT LIVES HERE.
+// ---------------------------------------------------------------------------
+//
+// `SupervisedSpec` describes a child process: a command, arguments, a working
+// directory, a restart policy, a readiness probe, an optional health check.
+// Nothing in the machinery below knows what a tunnel is. VPN was simply the
+// first thing that needed it, and roadmap item 1 — pm2-style process
+// supervision — is the second: `src/main/services/processes.ts` runs the user's
+// own long-lived processes through this same class rather than a second,
+// subtly different copy of backoff and crash-loop detection.
+//
+// It stays in `vpn/` on purpose. Moving the file means editing the import in
+// every driver, and this is the one module in the app whose behaviour is pinned
+// by four driver suites plus a live-engine e2e — a rename is all downside and no
+// user-visible upside. What was actually general has been generalised in place:
+// the `noun` below, the exported `SupervisedLogLine` / `SupervisorPidRecord`
+// aliases, and this comment.
+//
+// TWO RULES FOR A SECOND CONSUMER, both of which are load-bearing:
+//
+//   1. GIVE IT ITS OWN `runRoot`. `reapOrphans()` treats every `*.pid` file
+//      under its root as its own: a record whose identity probe MATCHES gets
+//      SIGTERM, then SIGKILL. Two supervisors sharing a root would therefore
+//      reap each other's live children on launch — the process supervisor
+//      would kill the user's running tunnel, and the VPN supervisor would kill
+//      the user's dev server. Nothing in the class detects this; the
+//      separation is the whole defence.
+//   2. THE ERROR TYPE IS `VpnError` AND ITS PROSE IS VPN PROSE. A crash loop
+//      reads "The tunnel program kept exiting". A non-VPN consumer must
+//      translate on the way out rather than show it — see
+//      `PROCESS_FAILURE_MESSAGE` in `src/shared/processes.ts`.
 
 const DEFAULT_READINESS_TIMEOUT_MS = 30_000
 const DEFAULT_HEALTH_INTERVAL_MS = 15_000
@@ -37,10 +70,25 @@ const FINAL_EXIT_WAIT_MS = 4_000
 const START_TIME_TOLERANCE_MS = 2_000
 const TRUNCATION_NOTE = '…[truncated]'
 
+/** A captured output line. `VpnLogLine` is its original name and stays the
+ *  exported one so no driver has to change; this alias is what a non-VPN
+ *  consumer imports, so its own types do not have to say "Vpn". */
+export type SupervisedLogLine = VpnLogLine
+
 export interface SupervisedSpec {
   id: string
   command: string
   args: string[]
+  /**
+   * What this run is called in the one sentence the supervisor writes about it
+   * — "The {noun} was stopped while it was starting."
+   *
+   * Defaults to `tunnel`, so every existing VPN caller reads exactly as it did.
+   * It is not decoration: that sentence is the only place the supervisor names
+   * the thing it is running, and a dev server reported as a tunnel is a bug
+   * report nobody can act on.
+   */
+  noun?: string
   /** Secrets are allowed here (frp reads its token from an env template);
    *  they are never allowed in `args`. */
   env?: Record<string, string>
@@ -111,7 +159,10 @@ export type SpawnFn = (
 ) => ChildProcess
 
 export interface SupervisorOptions {
-  /** Where `<runId>.pid` files live. Defaults to `vpnRunRoot()`. */
+  /** Where `<runId>.pid` files live. Defaults to `vpnRunRoot()`.
+   *
+   *  A second consumer MUST pass its own. See rule 1 in the header: the reaper
+   *  claims every `*.pid` file under this root, and claiming means killing. */
   runRoot?: string
   platform?: NodeJS.Platform
   spawn?: SpawnFn
@@ -129,7 +180,7 @@ export interface SupervisorOptions {
 /** What is written next to every run so a crash can be cleaned up afterwards.
  *  `exePath` and `startedAtIso` together are the PID-reuse defence: neither is
  *  sufficient alone (E47). */
-export interface VpnPidRecord {
+export interface SupervisorPidRecord {
   pid: number
   startedAtIso: string
   exePath: string
@@ -139,6 +190,11 @@ export interface VpnPidRecord {
   runId: string
   runDir: string
 }
+
+/** The name this record has always had. Kept as an export so no driver, test
+ *  or reaper has to change; `SupervisorPidRecord` is the same shape under a
+ *  name that does not claim the record is about a tunnel. */
+export type VpnPidRecord = SupervisorPidRecord
 
 export interface ProcessIdentity {
   exePath: string
@@ -759,7 +815,9 @@ export class Supervisor {
     // for the rest of the process. Stopping during a start is an ordinary
     // double-click, not an exotic case.
     if (run.first) {
-      run.first.reject(new VpnError('internal', 'The tunnel was stopped while it was starting.'))
+      run.first.reject(
+        new VpnError('internal', `The ${run.spec.noun ?? 'tunnel'} was stopped while it was starting.`)
+      )
       run.first = null
     }
     this.runs.delete(run.spec.id)
@@ -786,7 +844,7 @@ export class Supervisor {
       // 30 MB sidecar every few seconds would be pure waste.
       run.exeSha256 = await sha256File(run.spec.command).catch(() => undefined)
     }
-    const record: VpnPidRecord = {
+    const record: SupervisorPidRecord = {
       pid: run.pid,
       startedAtIso: new Date(this.now()).toISOString(),
       exePath: run.spec.command,
@@ -799,9 +857,9 @@ export class Supervisor {
     await writeFile(run.pidFile, JSON.stringify(record), { mode: 0o600 }).catch(() => {})
   }
 
-  private async readPidRecord(file: string): Promise<VpnPidRecord | null> {
+  private async readPidRecord(file: string): Promise<SupervisorPidRecord | null> {
     try {
-      const rec = JSON.parse(await readFile(file, 'utf8')) as VpnPidRecord
+      const rec = JSON.parse(await readFile(file, 'utf8')) as SupervisorPidRecord
       if (typeof rec.pid !== 'number' || !rec.pid || !rec.exePath || !rec.startedAtIso) return null
       if (!rec.runId) return null
       return rec
@@ -921,7 +979,7 @@ export function parseWindowsProcess(out: string): ProcessIdentity | null {
  *  another copy of the same engine; the start time alone is defeated by any
  *  process that happens to be younger than our record. */
 export function identityMatches(
-  record: VpnPidRecord,
+  record: SupervisorPidRecord,
   identity: ProcessIdentity,
   platform: NodeJS.Platform
 ): boolean {

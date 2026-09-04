@@ -1,0 +1,4 @@
+===SHELLPILOT-CORDON===
+node/spk8s-worker cordoned
+===SHELLPILOT-NODE===
+spk8s-worker   Ready,SchedulingDisabled   <none>   7m50s   v1.33.1

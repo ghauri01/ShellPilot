@@ -1056,15 +1056,40 @@ describe('changing the namespace re-reads', () => {
   // an empty "namespace X" heading, and the data only came back when the user
   // clicked a different tab — whose handler reloads whatever is null.
   it('always re-reads the pod list', () => {
-    for (const v of ['pods', 'cluster', 'usage'] as const) {
+    for (const v of ['pods', 'cluster', 'usage', 'resources'] as const) {
       expect(readsAfterNamespaceChange(v).pods).toBe(true)
     }
   })
 
   it('re-reads the tab being looked at, and only that one', () => {
-    expect(readsAfterNamespaceChange('cluster')).toEqual({ pods: true, overview: true, usage: false })
-    expect(readsAfterNamespaceChange('usage')).toEqual({ pods: true, overview: false, usage: true })
-    // Nothing extra on the default tab: both are loaded lazily on first view.
-    expect(readsAfterNamespaceChange('pods')).toEqual({ pods: true, overview: false, usage: false })
+    expect(readsAfterNamespaceChange('cluster')).toEqual({
+      pods: true,
+      overview: true,
+      usage: false,
+      resources: false
+    })
+    expect(readsAfterNamespaceChange('usage')).toEqual({
+      pods: true,
+      overview: false,
+      usage: true,
+      resources: false
+    })
+    // The storage/ingress/access tab, added with roadmap item 22. PVCs,
+    // Ingresses, RoleBindings and Secrets are all namespace-scoped, so leaving
+    // it out would have reproduced the bug this function is named for one tab
+    // further along.
+    expect(readsAfterNamespaceChange('resources')).toEqual({
+      pods: true,
+      overview: false,
+      usage: false,
+      resources: true
+    })
+    // Nothing extra on the default tab: the rest are loaded lazily on first view.
+    expect(readsAfterNamespaceChange('pods')).toEqual({
+      pods: true,
+      overview: false,
+      usage: false,
+      resources: false
+    })
   })
 })

@@ -1,0 +1,4 @@
+===SHELLPILOT-CORDON===
+Error from server (Forbidden): nodes "spk8s-worker" is forbidden: User "system:serviceaccount:shop:deployer" cannot get resource "nodes" in API group "" at the cluster scope
+===SHELLPILOT-NODE===
+Error from server (Forbidden): nodes "spk8s-worker" is forbidden: User "system:serviceaccount:shop:deployer" cannot get resource "nodes" in API group "" at the cluster scope

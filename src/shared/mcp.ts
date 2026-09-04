@@ -19,6 +19,7 @@ export type AiCapability =
   | 'sudo'
   | 'serverMetrics'
   | 'hostFacts'
+  | 'firewallRules'
   | 'manageServers'
   | 'vpnControl'
 
@@ -103,6 +104,29 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string; detail: string 
     detail:
       'Distribution and version, CPU model, architecture, virtualisation type, package manager, how many updates are pending, how many of those are SECURITY updates, and whether the host is waiting on a reboot. That is a patch-status report: it tells an agent which of your hosts are unpatched and against what.'
   },
+  // Its own capability again, and this one is not reachable by an agent AT ALL
+  // — which is why the detail says so rather than leaving a reader to assume
+  // the grid's usual meaning. Roadmap item 31 settled that deliberately: a
+  // firewall rule list is a map of how to attack the host, and an agent that
+  // could read one could exfiltrate it. tests/jobsNotExposed.test.ts holds the
+  // property, by name, in the MCP bridge's own closure.
+  //
+  // What this line grants is COLLECTION. Item 24's posture probe reads firewall
+  // scalars — tool, active, default policy, rule count — on every host once an
+  // hour; the rule LINES are read only where this says allow, and the probe is
+  // built without the commands that would list them everywhere else. So the
+  // grid is the consent surface for a human-only feature, which is unusual and
+  // is the point: this is the one thing in the posture read that turns counts
+  // and fixed vocabulary into addresses and ports.
+  //
+  // 'ask' collects nothing. The sweep is unattended and hourly, with nobody at
+  // the screen to answer, so anything short of 'allow' means do not read them.
+  {
+    id: 'firewallRules',
+    label: 'Firewall rules: the addresses and ports this host accepts',
+    detail:
+      'The rule lines themselves, as ufw, firewalld, nft or iptables print them — every address, port and protocol named in them, capped and stripped of control characters on the host. That is an inventory of what this host is exposed on and to whom, which is the thing an attacker would otherwise have to scan for. No agent can read it whatever this is set to: it is not behind any MCP tool. Setting it to allow lets ShellPilot COLLECT the rules for this server, for a person to read in Security posture; anything else and they are never asked for.'
+  },
   {
     id: 'manageServers',
     label: 'Add servers to the workspace',
@@ -111,7 +135,16 @@ export const AI_CAPABILITIES: { id: AiCapability; label: string; detail: string 
   {
     id: 'vpnControl',
     label: 'VPN & reverse proxies',
-    detail: 'Lists VPN profiles and reverse proxies, and starts or stops them.'
+    // Says what it grants and what it does not. It used to say "and starts
+    // or stops them", which promised something no value of this setting
+    // delivers: an frp reverse proxy makes a port on the user's own machine
+    // reachable from the internet, so set_vpn refuses one outright and no
+    // access group can permit it. A permission UI that offers a power the
+    // code refuses is how an operator ends up believing they granted less
+    // than they did, or more.
+    detail:
+      'Lists VPN profiles and reverse proxies, and starts or stops the VPNs. Reverse proxies ' +
+      'are never started or stopped by an agent, at any setting.'
   }
 ]
 

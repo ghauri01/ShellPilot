@@ -1,0 +1,3 @@
+===SHELLPILOT-EXEC===
+cat: can't open '/nope/missing': No such file or directory
+command terminated with exit code 1

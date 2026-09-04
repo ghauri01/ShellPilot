@@ -35,6 +35,7 @@ import { MODULES, moduleEnabled, type ModuleDef, type ModuleId } from '../../../
 import { openSettings, useNav } from '../../store/nav'
 import { DockerPanel } from '../docker/DockerPanel'
 import { KubernetesPanel } from '../kubernetes/KubernetesPanel'
+import { ProcessesPanel } from '../processes/ProcessesPanel'
 
 function pct(used: number, total: number): number {
   return total > 0 ? (used / total) * 100 : 0
@@ -452,6 +453,15 @@ export function FleetMonitor(): React.JSX.Element {
       {moduleEnabled(modules, 'changeLog') && (
         <div style={show('changeLog')}>
           <ChangeLogPanel servers={servers} />
+        </div>
+      )}
+      {/* Roadmap item 1. No `servers` prop, and that is the feature rather than
+          an omission: this panel supervises processes on THIS machine and has
+          nothing to say about the estate. See the remote refusal at the top of
+          src/shared/processes.ts. */}
+      {moduleEnabled(modules, 'processes') && (
+        <div style={show('processes')}>
+          <ProcessesPanel />
         </div>
       )}
       {moduleEnabled(modules, 'docker') && (

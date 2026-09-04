@@ -10,6 +10,7 @@ import {
   ScrollText,
   Square,
   SquareTerminal,
+  Trash2,
   TriangleAlert
 } from 'lucide-react'
 import { useApp } from '../../store/app'
@@ -17,9 +18,14 @@ import { sshHopsFor } from '../../lib/ssh'
 import { clsx } from '../../lib/format'
 import {
   DOCKER_FAILURE_HELP,
+  buildDockerReclaimPreview,
+  diffDockerReclaim,
+  dockerReclaimBlocked,
+  dockerReclaimKey,
   formatDockerEngineAge,
   groupByComposeProject,
   planDockerAction,
+  planDockerReclaim,
   validateContainerRef,
   type DockerAction,
   type DockerActionPlan,
@@ -30,10 +36,16 @@ import {
   type DockerDiskProbe,
   type DockerInspectProbe,
   type DockerProbe,
+  type DockerReclaimDiff,
+  type DockerReclaimItem,
+  type DockerReclaimPlan,
+  type DockerReclaimPreview,
+  type DockerReclaimResult,
   type DockerStat
 } from '../../../../shared/docker'
 import type { Server } from '../../types'
 import { ComposePanel } from './ComposePanel'
+import { ReclaimDialog, ReclaimOutcome } from './Reclaim'
 
 // Containers on a server, and what an operator does with them.
 //
@@ -116,6 +128,19 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   // category totals should not pay for it.
   const [diskItems, setDiskItems] = useState<DockerDiskDetailProbe | null>(null)
   const [diskItemsLoading, setDiskItemsLoading] = useState(false)
+  // Reclaim. NOTHING is pre-selected and there is no select-all: the lifecycle
+  // model's rule is that targets are explicit, and a select-all checkbox is
+  // `prune` reached by a click instead of a flag. The set is keyed by
+  // `dockerReclaimKey`, which is kind + id and nothing that can move — a
+  // selection keyed on a label would survive a retag, which is exactly the
+  // change the re-preview exists to catch.
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [reclaimPlan, setReclaimPlan] = useState<DockerReclaimPlan | null>(null)
+  const [reclaimPhrase, setReclaimPhrase] = useState('')
+  const [reclaimDiff, setReclaimDiff] = useState<DockerReclaimDiff | null>(null)
+  const [reclaimChecking, setReclaimChecking] = useState(false)
+  const [reclaiming, setReclaiming] = useState(false)
+  const [reclaimResult, setReclaimResult] = useState<DockerReclaimResult | null>(null)
   const [stats, setStats] = useState<Record<string, DockerStat> | null>(null)
   const [statsError, setStatsError] = useState<string | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
@@ -170,8 +195,27 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
   // dead one is dropped instead of shown.
   const generation = useRef(0)
 
+  /**
+   * Forget the selection and everything downstream of it.
+   *
+   * Called whenever the listing it was made against stops being the listing on
+   * screen — a new read, a different server, a completed removal. A selection
+   * that outlived its listing is a set of ids describing a host that is no
+   * longer being looked at, which is the failure the whole re-preview step is
+   * built to refuse.
+   */
+  const clearReclaim = (): void => {
+    setPicked(new Set())
+    setReclaimPlan(null)
+    setReclaimPhrase('')
+    setReclaimDiff(null)
+    setReclaimChecking(false)
+    setReclaiming(false)
+  }
+
   const clearReads = (): void => {
     generation.current++
+    setReclaimResult(null)
     setLogs(null)
     setDisk(null)
     setDiskItems(null)
@@ -179,6 +223,7 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
     setStatsError(null)
     setDetail(null)
     setActionResult(null)
+    clearReclaim()
     // The reads being abandoned owned these. Left set, the new server's
     // buttons sit disabled until a request about the old one comes back.
     setDiskLoading(false)
@@ -260,6 +305,8 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
     try {
       const r = await bridge()?.diskDetail?.(cfgFor(server), { sudo: useSudo })
       if (generation.current !== gen) return
+      // A fresh listing invalidates a selection made against the old one.
+      clearReclaim()
       setDiskItems(
         r ?? { ok: false, reason: 'unknown', detail: 'The itemised disk view is not wired up in this build.' }
       )
@@ -268,6 +315,100 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
       setDiskItems({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
     } finally {
       setDiskItemsLoading(false)
+    }
+  }
+
+  // ---- reclaim ----
+
+  /**
+   * What may be offered, derived from the listing on screen and nothing else.
+   *
+   * A pure function of one read, which is what makes the re-preview meaningful:
+   * the same listing always yields the same offer set, so a difference between
+   * two of them is a difference on the host rather than in this function.
+   */
+  const preview: DockerReclaimPreview | null = useMemo(
+    () => (diskItems?.ok === true ? buildDockerReclaimPreview(diskItems.disk) : null),
+    [diskItems]
+  )
+  const pickedItems: DockerReclaimItem[] = useMemo(
+    () => (preview === null ? [] : preview.items.filter((i) => picked.has(dockerReclaimKey(i)))),
+    [preview, picked]
+  )
+
+  const togglePick = (item: DockerReclaimItem): void => {
+    const key = dockerReclaimKey(item)
+    setPicked((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  /**
+   * Read the disk again, and refuse if it disagrees.
+   *
+   * The honest answer to everything that can move between the preview and the
+   * click. It runs on the CONFIRM, not on the button that opens the dialog, so
+   * the window it closes is the one the operator spent reading the caveats —
+   * which is the window that actually matters, and the one a check done any
+   * earlier would leave open.
+   *
+   * A read that FAILS is treated as a refusal too. "The disk could not be
+   * re-read, so we went ahead on the old list" is precisely the sentence this
+   * step exists to make impossible.
+   */
+  const confirmReclaim = async (): Promise<void> => {
+    if (!server || reclaimPlan === null) return
+    setReclaimChecking(true)
+    const gen = generation.current
+    try {
+      const fresh = await bridge()?.diskDetail?.(cfgFor(server), { sudo: useSudo })
+      if (generation.current !== gen) return
+      if (!fresh || !fresh.ok) {
+        setDiskItems(
+          fresh ?? { ok: false, reason: 'unknown', detail: 'The itemised disk view is not wired up in this build.' }
+        )
+        setReclaimPlan(null)
+        setReclaimResult({
+          ok: false,
+          reason: fresh?.ok === false ? fresh.reason : 'unknown',
+          detail:
+            fresh?.ok === false
+              ? `Nothing was removed: the disk could not be read again to check the list. ${fresh.detail}`
+              : 'Nothing was removed: the disk could not be read again to check the list.'
+        })
+        return
+      }
+      const again = buildDockerReclaimPreview(fresh.disk)
+      const diff = diffDockerReclaim(reclaimPlan.items, again)
+      // The listing is replaced either way, so whatever happens next is chosen
+      // against what the host actually holds now.
+      setDiskItems(fresh)
+      if (dockerReclaimBlocked(diff)) {
+        setPicked(new Set())
+        setReclaimDiff(diff)
+        return
+      }
+      setReclaimPlan(null)
+      setPicked(new Set())
+      setReclaiming(true)
+      const r = await bridge()?.reclaim?.(cfgFor(server), reclaimPlan.items, { sudo: useSudo })
+      setReclaimResult(r ?? { ok: false, reason: 'unknown', detail: 'Reclaim is not wired up in this build.' })
+      // The listing and the category totals are both stale now, whatever
+      // happened — a partial removal leaves some of it changed.
+      const after = await bridge()?.diskDetail?.(cfgFor(server), { sudo: useSudo })
+      if (generation.current !== gen) return
+      if (after) setDiskItems(after)
+      void loadDisk()
+    } catch (e) {
+      if (generation.current !== gen) return
+      setReclaimPlan(null)
+      setReclaimResult({ ok: false, reason: 'unknown', detail: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setReclaimChecking(false)
+      setReclaiming(false)
     }
   }
 
@@ -556,8 +697,9 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
 
           {/* Disk. The reclaimable column is the one people came for: it is the
               answer to "the disk is full and I do not know what is using it".
-              Nothing here offers to reclaim it — see the note in
-              shared/docker.ts about prune. */}
+              What reclaims it is the ITEMISED view below, one ticked id at a
+              time — never a prune. The figure here stays docker's own, computed
+              on a host that knows which image layers are shared. */}
           {disk && !disk.ok && (
             <div className="s-desc danger">
               <TriangleAlert size={12} /> {DOCKER_FAILURE_HELP[disk.reason]}
@@ -595,9 +737,10 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
               ))}
               {diskTotalReclaimable !== null && diskTotalReclaimable > 0 && (
                 <div className="faint" style={{ fontSize: 11 }}>
-                  {humanBytes(diskTotalReclaimable)} could be reclaimed. Nothing here removes it — what
-                  counts as unused depends on which containers happen to be stopped right now, and that
-                  is a judgement a button cannot make for you.
+                  {humanBytes(diskTotalReclaimable)} could be reclaimed — docker&rsquo;s own figure, from the
+                  RECLAIMABLE column above. Nothing is removed from this summary: &ldquo;unused&rdquo; here
+                  means &ldquo;not attached right now&rdquo;, which includes the database volume of anything
+                  that happens to be stopped. Itemise below to pick what goes, by name.
                 </div>
               )}
 
@@ -627,7 +770,8 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
                   </button>
                   {diskItems === null ? (
                     <span className="faint" style={{ fontSize: 11 }}>
-                      Every image, container, volume and cache entry, largest first. Read-only.
+                      Every image, container, volume and cache entry, largest first — and where something
+                      can be removed, a checkbox for it.
                     </span>
                   ) : (
                     <button className="btn ghost sm" onClick={() => setDiskItems(null)}>
@@ -636,7 +780,66 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
                   )}
                 </div>
               )}
-              {diskItems?.ok && <DiskItems probe={diskItems} onClose={() => setDiskItems(null)} />}
+              {diskItems?.ok && preview && (
+                <>
+                  <DiskItems
+                    probe={diskItems}
+                    preview={preview}
+                    picked={picked}
+                    onToggle={togglePick}
+                    onClose={() => {
+                      setDiskItems(null)
+                      clearReclaim()
+                    }}
+                  />
+                  {/* The bar. A COUNT and no byte figure, and that is not an
+                      oversight: per-item sizes do not add up, because image
+                      layers are shared, so "3.1GB selected" would be a number
+                      this app invented. The honest total comes from re-reading
+                      `docker system df` afterwards. */}
+                  <div className="row" style={{ gap: 8, marginTop: 8, alignItems: 'center' }}>
+                    <button
+                      className="btn"
+                      disabled={pickedItems.length === 0 || reclaiming || reclaimChecking}
+                      title={
+                        pickedItems.length === 0
+                          ? 'Tick the things to remove. Nothing is selected for you, and there is no select-all.'
+                          : 'Removes exactly these, by id. The disk is read again first.'
+                      }
+                      onClick={() => {
+                        setReclaimDiff(null)
+                        setReclaimPhrase('')
+                        setReclaimResult(null)
+                        setReclaimPlan(planDockerReclaim(pickedItems))
+                      }}
+                    >
+                      <Trash2 size={13} /> Remove{' '}
+                      {pickedItems.length === 0 ? 'selected' : `${pickedItems.length} selected`}
+                    </button>
+                    <span className="faint" style={{ fontSize: 11 }}>
+                      By id, one docker command per kind — never a prune. No size is totalled here: image
+                      layers are shared, so adding the rows up would overstate what comes back.
+                    </span>
+                  </div>
+                </>
+              )}
+              {reclaimPlan && (
+                <ReclaimDialog
+                  plan={reclaimPlan}
+                  diff={reclaimDiff}
+                  checking={reclaimChecking}
+                  running={reclaiming}
+                  phrase={reclaimPhrase}
+                  onPhrase={setReclaimPhrase}
+                  onConfirm={() => void confirmReclaim()}
+                  onCancel={() => {
+                    setReclaimPlan(null)
+                    setReclaimDiff(null)
+                    setReclaimPhrase('')
+                  }}
+                />
+              )}
+              {reclaimResult && <ReclaimOutcome result={reclaimResult} />}
             </>
           )}
 
@@ -937,29 +1140,87 @@ function InspectDetail({ probe }: { probe: DockerInspectProbe | null }): React.J
 }
 
 /**
- * The disk, item by item — and NOTHING that removes any of it.
+ * The disk, item by item — with a checkbox against each thing that may go.
  *
  * The summary above answers "which category is big". This answers "which one",
- * which is the question an operator actually has at 2am, and it answers it by
- * handing over a list they take into a shell. There is no delete button here
- * and its absence is a decision: what is safe to remove depends on which
+ * which is the question an operator actually has at 2am.
+ *
+ * WHAT CHANGED FROM 21a, and what did not. There used to be no delete button
+ * here, and the reason given was that "what is safe to remove depends on which
  * containers happen to be stopped right now, and a list rendered thirty seconds
- * ago cannot know that.
+ * ago cannot know that". That objection is still true and it is still not
+ * answered by this component — it is answered by the two steps around it: the
+ * offer set never contains a thing docker would refuse to remove anyway, and
+ * the disk is read AGAIN immediately before anything runs, with the removal
+ * abandoned if the two readings disagree. A checkbox here is a proposal, not a
+ * decision.
+ *
+ * Nothing is ticked for you and there is no select-all. `shared/docker.ts`
+ * states the rule — targets are explicit, there is no "all containers" action —
+ * and a select-all box would be `prune` reached by a click instead of a flag.
+ *
+ * A row this refuses to offer still appears, greyed, with the reason on it. An
+ * operator hunting 40GB needs to know that the 1.4GB volume is not offered
+ * BECAUSE something is linked to it; a row that silently had no checkbox would
+ * read as a rendering bug.
  *
  * THE NUMBER THIS COMPONENT DOES NOT COMPUTE: a total. Image SIZE counts layers
  * shared with other images, so adding the rows up overstates the disk, often by
  * a multiple — and it looks right in any fixture, because a fixture has no
  * shared layers. The headline stays with `docker system df`, which did the
- * arithmetic on the host and knows about the sharing.
+ * arithmetic on the host and knows about the sharing. That holds for the
+ * SELECTION too: the bar below this component counts rows, it does not add
+ * bytes.
  */
 function DiskItems({
   probe,
+  preview,
+  picked,
+  onToggle,
   onClose
 }: {
   probe: Extract<DockerDiskDetailProbe, { ok: true }>
+  preview: DockerReclaimPreview
+  picked: Set<string>
+  onToggle: (item: DockerReclaimItem) => void
   onClose: () => void
 }): React.JSX.Element {
   const d = probe.disk
+  const offered = new Map(preview.items.map((i) => [dockerReclaimKey(i), i]))
+  const refused = new Map(preview.withheld.map((w) => [dockerReclaimKey(w), w]))
+
+  /**
+   * The checkbox, or the reason there isn't one.
+   *
+   * Both come from `buildDockerReclaimPreview` rather than from a rule written
+   * again here. A second copy of "is this removable" living in the renderer is
+   * how the box and the command eventually disagree about the same row.
+   */
+  const pick = (kind: string, id: string): React.JSX.Element => {
+    const key = dockerReclaimKey({ kind, id })
+    const item = offered.get(key)
+    if (item === undefined) {
+      const why = refused.get(key)
+      return (
+        <span
+          className="faint mono"
+          style={{ width: 14, display: 'inline-block', textAlign: 'center' }}
+          title={why ? `Not offered: ${why.reason}` : 'Not offered for removal'}
+        >
+          ·
+        </span>
+      )
+    }
+    return (
+      <input
+        type="checkbox"
+        checked={picked.has(key)}
+        aria-label={`Remove ${item.label}`}
+        title={`Remove ${item.label} by id (${item.id})`}
+        onChange={() => onToggle(item)}
+      />
+    )
+  }
   // Largest first, per kind. Sorting is most of the reason to itemise at all:
   // the answer is nearly always in the first two rows.
   const images = [...d.images].sort((a, b) => (b.uniqueSizeBytes ?? 0) - (a.uniqueSizeBytes ?? 0))
@@ -1007,12 +1268,14 @@ function DiskItems({
       </div>
 
       <div className="faint" style={{ fontSize: 11 }}>
-        Nothing on this list can be removed from here. It is the list to take into a shell.
+        Tick what should go. Nothing is ticked for you, there is no select-all, and a row with a dot
+        instead of a box says why on hover — that is docker refusing, not this panel being cautious.
       </div>
 
       {images.length > 0 && heading('Images', images.length)}
       {images.map((i) => (
         <div key={`${i.id}:${i.repository}:${i.tag}`} className="cron-row">
+          {pick('image', i.id)}
           <span className="mono cron-when" style={nameCell} title={`${i.repository}:${i.tag}`}>
             {i.repository}:{i.tag}
           </span>
@@ -1048,6 +1311,7 @@ function DiskItems({
       {containers.length > 0 && heading('Containers', containers.length)}
       {containers.map((c) => (
         <div key={c.id} className="cron-row">
+          {pick('container', c.id)}
           <span className="mono cron-when" style={nameCell} title={c.name}>
             {c.name}
           </span>
@@ -1065,13 +1329,22 @@ function DiskItems({
       {volumes.length > 0 && heading('Volumes', volumes.length)}
       {volumes.map((v) => (
         <div key={v.name} className="cron-row">
+          {pick('volume', v.name)}
           {/* A generated 64-hex name is unreadable at full length and its first
               twelve characters are what `docker volume ls` shows anyway. A name
               a person typed is shown whole. */}
           <span className="mono cron-when" style={nameCell} title={v.name}>
             {v.anonymous ? v.name.slice(0, 12) : v.name}
           </span>
-          <span className="faint cron-desc">{v.anonymous ? 'anonymous' : 'named'}</span>
+          {/* Named and anonymous are different risks wearing the same row.
+              An anonymous volume with no links is usually rubbish; a NAMED one
+              with no links is usually the database of something that happens to
+              be stopped — and docker's own `volume prune` has skipped named
+              ones since 23, which this deliberately does not. The plan says so
+              in a caveat; the word here is so it is visible before the tick. */}
+          <span className={clsx('faint cron-desc', !v.anonymous && 'warn')}>
+            {v.anonymous ? 'anonymous' : 'named'}
+          </span>
           <span className="grow" />
           {/* No links is not the same as unwanted: an anonymous volume with no
               links is usually rubbish, a NAMED one with no links is usually the
@@ -1085,6 +1358,10 @@ function DiskItems({
       {cache.length > 0 && heading('Build cache', cache.length)}
       {cache.map((c) => (
         <div key={c.id} className="cron-row">
+          {/* Never a checkbox. A single build-cache entry has no `docker builder
+              rm`; it comes out only through `builder prune --filter`, which is a
+              prune, and nothing here runs one. */}
+          {pick('cache', c.id)}
           <span className="mono cron-when">{c.id}</span>
           <span className="faint cron-desc">
             {c.type} · last used {c.lastUsed === '' ? 'never' : c.lastUsed}

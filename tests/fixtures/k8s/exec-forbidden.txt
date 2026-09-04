@@ -1,0 +1,2 @@
+===SHELLPILOT-EXEC===
+Error from server (Forbidden): pods "toolbox" is forbidden: User "system:serviceaccount:shop:deployer" cannot create resource "pods/exec" in API group "" in the namespace "shop"

@@ -46,8 +46,25 @@ const PHRASING: Record<AiCapability, Phrasing> = {
     verb: 'read the host inventory and its pending security updates',
     gerund: 'reading the host inventory and its pending security updates'
   },
+  // "collect", not "read": no agent can read these at all, and the verb has to
+  // survive being read quickly. What the grant does is let ShellPilot's own
+  // hourly posture probe ASK the host for its rule lines.
+  firewallRules: {
+    verb: 'collect this host’s firewall rule list',
+    gerund: 'collecting this host’s firewall rule list'
+  },
   manageServers: { verb: 'add servers to the workspace', gerund: 'adding servers to the workspace' },
-  vpnControl: { verb: 'control VPNs and reverse proxies', gerund: 'controlling VPNs and reverse proxies' }
+  // Says what it grants and what it does not, matching the capability's own
+  // detail. "Control VPNs and reverse proxies" reads as a power over both, and
+  // no value of this setting grants the second: an frp proxy makes a port on
+  // the operator's own machine reachable from the internet, so `set_vpn`
+  // refuses one at any setting and no access group can permit it. A summary
+  // that names a power the code refuses is how somebody ends up believing they
+  // granted less than they did — or more.
+  vpnControl: {
+    verb: 'start and stop VPNs, and list reverse proxies',
+    gerund: 'starting and stopping VPNs, and listing reverse proxies'
+  }
 }
 
 // The three that do not merely act on a server the user already trusts: sudo is
@@ -247,7 +264,7 @@ export interface AccessGroupSummary {
 /**
  * A plain-English description of what an access group permits.
  *
- * Deliberately complete rather than abbreviated: there are only twelve
+ * Deliberately complete rather than abbreviated: there are only a dozen or so
  * capabilities, and "and 3 more" in a security summary invites exactly the
  * distrust this screen is trying to remove.
  *

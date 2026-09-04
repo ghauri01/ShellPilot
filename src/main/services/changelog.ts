@@ -19,6 +19,28 @@ import {
   type ChangeLogSource
 } from '../../shared/changelog'
 import { redactOutput } from './secretRedaction'
+import type { ApprovalSurface } from '../../shared/broadcast'
+
+/**
+ * How an approval names itself in the timeline.
+ *
+ * A ternary here read `broadcast ? 'Broadcast' : 'Job'`, which was true of the
+ * two surfaces that existed when it was written and quietly wrong the moment a
+ * third arrived: a Kubernetes exec would have been filed as a Job in a record
+ * kept for a year. A total `Record` over the union means the next surface is a
+ * compile error rather than a mislabelled row.
+ *
+ * The `??` beside it is not redundant. This reads rows written by earlier and
+ * later versions of the app, so a surface this build has never heard of is a
+ * real thing to find on disk — and it should read as an approval of some kind
+ * rather than be silently called one of the ones we do know.
+ */
+const SURFACE_LABEL: Record<ApprovalSurface, string> = {
+  broadcast: 'Broadcast',
+  job: 'Job',
+  'k8s-exec': 'Kubernetes exec'
+}
+
 
 // The reader half of roadmap item 14. src/shared/changelog.ts argues the shape;
 // this file does the reading, and only the reading.
@@ -219,7 +241,7 @@ function fromApprovals(rows: JobApprovalEntry[]): ChangeLogEntry[] {
       ts,
       actor: 'human',
       kind: 'approval',
-      summary: `${r.surface === 'broadcast' ? 'Broadcast' : 'Job'} ${field(r.event) || 'recorded'} — ${field(r.title) || 'untitled'}`,
+      summary: `${SURFACE_LABEL[r.surface] ?? 'Approval'} ${field(r.event) || 'recorded'} — ${field(r.title) || 'untitled'}`,
       detail,
       hostId: null,
       hosts

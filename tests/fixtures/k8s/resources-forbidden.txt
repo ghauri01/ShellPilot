@@ -1,0 +1,10 @@
+===SHELLPILOT-PVC===
+Error from server (Forbidden): persistentvolumeclaims is forbidden: User "system:serviceaccount:shop:deployer" cannot list resource "persistentvolumeclaims" in API group "" at the cluster scope
+===SHELLPILOT-ING===
+Error from server (Forbidden): ingresses.networking.k8s.io is forbidden: User "system:serviceaccount:shop:deployer" cannot list resource "ingresses" in API group "networking.k8s.io" at the cluster scope
+===SHELLPILOT-RB===
+Error from server (Forbidden): rolebindings.rbac.authorization.k8s.io is forbidden: User "system:serviceaccount:shop:deployer" cannot list resource "rolebindings" in API group "rbac.authorization.k8s.io" at the cluster scope
+===SHELLPILOT-CRB===
+Error from server (Forbidden): clusterrolebindings.rbac.authorization.k8s.io is forbidden: User "system:serviceaccount:shop:deployer" cannot list resource "clusterrolebindings" in API group "rbac.authorization.k8s.io" at the cluster scope
+===SHELLPILOT-SEC===
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:shop:deployer" cannot list resource "secrets" in API group "" at the cluster scope

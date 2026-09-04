@@ -567,19 +567,37 @@ export function buildDockerShellCommand(ref: string, opts: { sudo?: boolean } = 
 //
 // What is deliberately NOT here, and will not be added casually:
 //
-//  * `docker rm` / `rmi` / `volume rm`. Removing a container is recoverable
-//    only if you can reconstruct how it was run; removing a volume is not
-//    recoverable at all. A button cannot carry that.
-//  * `docker system prune`. It deletes every stopped container, every dangling
-//    image, every unused network and — with one more flag people habitually
-//    add — every unused volume, on a host where "unused" means "not attached
-//    right now", which includes the database volume of anything that happens to
-//    be stopped. It is the single most regretted docker command, its blast
-//    radius is not knowable from the UI that offers it, and the disk-usage
-//    panel above it exists precisely so the operator can decide what to remove
-//    themselves, in a shell, with the numbers in front of them.
+//  * `docker system prune`, in every spelling — `system`, `image`, `volume`,
+//    `network`, `builder`, `container`. It deletes every stopped container,
+//    every dangling image, every unused network and — with one more flag people
+//    habitually add — every unused volume, on a host where "unused" means "not
+//    attached right now", which includes the database volume of anything that
+//    happens to be stopped. It is the single most regretted docker command, and
+//    the objection that keeps it out is falsifiable rather than a preference:
+//    **its blast radius is not knowable from the UI that offers it.**
+//
+//    That objects to `prune`, not to reclaiming disk. The answer is to make the
+//    blast radius a literal list of ids, which is what the reclaim section near
+//    the bottom of this file does — `docker rm` / `rmi` / `volume rm` /
+//    `network rm` against exactly the ids a preview displayed, and nothing
+//    else. So `prune` is not merely still absent; it is absent *because* the
+//    replacement exists, and `tests/dockerOps.test.ts` holds every builder in
+//    this file to that.
+//
+//    `-a` is refused rather than deferred, and for a reason that is not about
+//    taste either. `system prune -a` removes stopped containers FIRST, so an
+//    image whose only reference was a stopped container becomes unreferenced
+//    within the same command and is deleted too. A preview built by listing
+//    images beforehand cannot show that image. It is not a race; it is a
+//    preview that is structurally wrong.
 //  * `docker kill`. `stop` sends SIGTERM and waits; kill does not, and the
 //    difference is whether a database finishes its write.
+//  * `--force` / `-f` on any removal. A forced removal is docker overruling its
+//    own safety check, and the checks it overrules — "container is running",
+//    "image is being used by stopped container X", "volume is in use" — are the
+//    exact facts a preview taken thirty seconds ago cannot vouch for. Refusing
+//    them means a target that stopped being safe fails on its own terms, in
+//    docker's own words, per item.
 
 const ANY_MARKER = /===SHELLPILOT-[A-Z]+===/
 
@@ -600,6 +618,20 @@ export const DOCKER_MARKERS = {
   health: '===SHELLPILOT-HEALTH===',
   stats: '===SHELLPILOT-STATS===',
   act: '===SHELLPILOT-ACT===',
+  /**
+   * One marker per removal kind, because the four commands are four different
+   * programs and their output must never be pooled.
+   *
+   * `docker volume rm` names the CONTAINER that holds a busy volume in its
+   * error line — `volume is in use - [f4a732d020f7…]` — and a container id in
+   * that line has nothing to do with a container the operator also selected.
+   * Attributing per block keeps that line inside the volume block, where the
+   * only references it can be matched against are volume names.
+   */
+  rmContainer: '===SHELLPILOT-RMCONTAINER===',
+  rmImage: '===SHELLPILOT-RMIMAGE===',
+  rmVolume: '===SHELLPILOT-RMVOLUME===',
+  rmNetwork: '===SHELLPILOT-RMNETWORK===',
   /**
    * A CLOSING marker, which the others do not need.
    *
@@ -1826,6 +1858,655 @@ export function parseDockerActionOutput(
   return { ok: true, outcomes, unattributed }
 }
 
+// ------------------------------------------------------- reclaim, by id
+//
+// The answer to `prune`, and it is the same answer the header gives: the
+// objection to `prune` was that its blast radius is not knowable from the UI
+// that offers it, so the blast radius here is **a literal list of ids**.
+//
+// Nothing below ever runs `prune`. `docker rm`, `docker rmi`, `docker volume
+// rm` and `docker network rm` are given exactly the ids a preview displayed,
+// and the consequences of that are all in the right direction:
+//
+//  * Anything that became eligible AFTER the preview is untouched, because it
+//    is not in the list. The container that crashed while the operator was
+//    reading the dialog survives. `prune` cannot make that promise; a list can.
+//  * Anything that stopped being eligible fails on its own terms, in docker's
+//    own words, per item — `container is running`, `image is being used by
+//    stopped container X`, `volume is in use`. Recorded on Docker 29.5.3; see
+//    tests/fixtures/docker/reclaim-refused-docker-29.txt.
+//
+// THE THREE RULES THAT SHAPE THE SELECTION, none of which is a preference:
+//
+//  1. **Nothing is offered that docker itself would not prune, and several
+//     things docker WOULD prune are still not offered.** A paused or restarting
+//     container is not offered: docker does not prune either, and offering them
+//     widens the blast radius past what was asked for. A volume with LINKS > 0
+//     is never offered at all.
+//  2. **Nothing is pre-selected, and there is no select-all.** The lifecycle
+//     header above states the rule this inherits — targets are explicit, there
+//     is no "all containers" action. A select-all checkbox is `prune` under
+//     another name, reached by one click instead of one flag.
+//  3. **An image is removed by ID, never by tag.** `docker rmi nginx:latest`
+//     UNTAGS; `docker rmi <id>` removes. They are different operations wearing
+//     the same verb, and resolving a tag to an id is a lookup that can race
+//     with a rebuild. By-id also fails safe in the one ambiguous case: an image
+//     carrying more than one tag is refused rather than half-removed —
+//     `conflict: unable to delete 410766c85e52 (must be forced) - image is
+//     referenced in multiple repositories`, recorded on 29.5.3.
+//
+// THE RISK MODEL IS `planK8sRollout`'S, NOT `planDockerAction`'S. Lifecycle
+// escalates on the target COUNT, because stopping ten containers is a fan-out
+// and stopping one is not. Removal does not work like that: one volume is
+// unrecoverable and fifty dangling images are re-pullable, so the count is the
+// wrong axis entirely. What escalates here is what the removal costs if it was
+// wrong — and `caveats` is carried separately from `reasons` for the reason
+// K8sRolloutPlan gives: they are not arguments for pressing harder, they are
+// things that would otherwise be discovered afterwards.
+
+export type DockerReclaimKind = 'container' | 'image' | 'volume' | 'network'
+
+/** The allow-list. A kind reaches the builder over IPC, where its type is a claim. */
+export const DOCKER_RECLAIM_KINDS: readonly DockerReclaimKind[] = [
+  'container',
+  'image',
+  'volume',
+  'network'
+]
+
+export interface DockerReclaimItem {
+  kind: DockerReclaimKind
+  /**
+   * What docker is told. An id for a container, an image or a network; a NAME
+   * for a volume, because a volume has no other handle — `docker volume rm`
+   * takes names and docker's anonymous names are 64 hex characters, which is an
+   * id in everything but the column heading.
+   *
+   * Never a tag. See rule 3 above and `buildDockerReclaimCommand`.
+   */
+  id: string
+  /** What the row reads as — `nginx:1.25`, `old-frontend`. Shown, never sent. */
+  label: string
+  /** Docker's own formatting of this item's bytes. Displayed per row; NEVER summed. */
+  size: string
+  sizeBytes: number | null
+  /** Volumes only: 64 hex characters is a name docker generated, anything else is one a person typed. */
+  anonymous?: boolean
+  /** Images only: `<none>:<none>` — a previous build's layers, which no registry has a copy of. */
+  dangling?: boolean
+  /** Containers only: how many local volumes it mounts. `docker rm` does not remove them. */
+  mountedVolumes?: number
+}
+
+/** Something the itemised read listed and this refuses to offer, with the reason it refuses. */
+export interface DockerReclaimWithheld {
+  kind: DockerReclaimKind | 'cache'
+  id: string
+  label: string
+  reason: string
+}
+
+export interface DockerReclaimPreview {
+  items: DockerReclaimItem[]
+  withheld: DockerReclaimWithheld[]
+}
+
+/**
+ * States a container may be in and still be offered.
+ *
+ * `paused` and `restarting` are absent deliberately: docker prunes neither, and
+ * a UI that offers them is removing things the operator's mental model of
+ * "unused" does not contain. `dead` is present — it is a container whose
+ * filesystem docker failed to tear down, and it is exactly the leftover this
+ * feature is for.
+ */
+const RECLAIMABLE_CONTAINER_STATES = ['exited', 'created', 'dead']
+
+/**
+ * Turn the itemised disk read into what may be offered, and what may not.
+ *
+ * A pure function of one read, so the offer set is reproducible: the same
+ * listing always produces the same items, which is what makes the re-preview
+ * diff below mean anything at all.
+ *
+ * Build cache is never offered. There is no `docker builder rm <id>` — a single
+ * cache entry can only be removed by `docker builder prune --filter`, which is
+ * `prune`, and the whole point of this section is that it does not run one.
+ */
+export function buildDockerReclaimPreview(disk: DockerDiskDetail): DockerReclaimPreview {
+  const items: DockerReclaimItem[] = []
+  const withheld: DockerReclaimWithheld[] = []
+
+  for (const c of disk.containers) {
+    const label = c.name === '' ? c.id : c.name
+    if (c.state === 'running') {
+      withheld.push({ kind: 'container', id: c.id, label, reason: 'it is running' })
+      continue
+    }
+    if (c.state === 'paused' || c.state === 'restarting') {
+      withheld.push({
+        kind: 'container',
+        id: c.id,
+        label,
+        reason: `it is ${c.state}, which docker does not prune either`
+      })
+      continue
+    }
+    if (!RECLAIMABLE_CONTAINER_STATES.includes(c.state)) {
+      withheld.push({ kind: 'container', id: c.id, label, reason: 'its state could not be read' })
+      continue
+    }
+    items.push({
+      kind: 'container',
+      id: c.id,
+      label,
+      size: c.size,
+      sizeBytes: c.sizeBytes,
+      mountedVolumes: c.localVolumes ?? undefined
+    })
+  }
+
+  for (const i of disk.images) {
+    const label = `${i.repository}:${i.tag}`
+    if (i.id === '') {
+      withheld.push({
+        kind: 'image',
+        id: '',
+        label,
+        reason: 'this runtime printed no image id, and an image is only ever removed by id'
+      })
+      continue
+    }
+    if (i.containers === null) {
+      withheld.push({
+        kind: 'image',
+        id: i.id,
+        label,
+        reason: 'this runtime did not say how many containers reference it'
+      })
+      continue
+    }
+    if (i.containers > 0) {
+      withheld.push({
+        kind: 'image',
+        id: i.id,
+        label,
+        reason: `${i.containers} container${i.containers === 1 ? '' : 's'} still reference it`
+      })
+      continue
+    }
+    items.push({
+      kind: 'image',
+      id: i.id,
+      label,
+      // UNIQUE SIZE, because SIZE counts layers shared with other images. The
+      // fallback is for a runtime that prints no such column.
+      size: i.uniqueSize === '' ? i.size : i.uniqueSize,
+      sizeBytes: i.uniqueSize === '' ? i.sizeBytes : i.uniqueSizeBytes,
+      dangling: i.dangling
+    })
+  }
+
+  for (const v of disk.volumes) {
+    if (v.links === null) {
+      withheld.push({
+        kind: 'volume',
+        id: v.name,
+        label: v.name,
+        reason: 'this runtime did not say how many containers are linked to it'
+      })
+      continue
+    }
+    if (v.links > 0) {
+      withheld.push({
+        kind: 'volume',
+        id: v.name,
+        label: v.name,
+        reason: `${v.links} container${v.links === 1 ? '' : 's'} linked to it`
+      })
+      continue
+    }
+    items.push({
+      kind: 'volume',
+      id: v.name,
+      label: v.name,
+      size: v.size,
+      sizeBytes: v.sizeBytes,
+      anonymous: v.anonymous
+    })
+  }
+
+  for (const c of disk.buildCache) {
+    withheld.push({
+      kind: 'cache',
+      id: c.id,
+      label: c.id,
+      reason: 'a build cache entry can only be removed by `docker builder prune`, and nothing here runs a prune'
+    })
+  }
+
+  return { items, withheld }
+}
+
+export type DockerReclaimRisk = 'elevated' | 'destructive'
+
+export interface DockerReclaimPlan {
+  items: DockerReclaimItem[]
+  risk: DockerReclaimRisk
+  confirmation: DockerConfirmation
+  reasons: string[]
+  /**
+   * Ways this will not do what the button implies.
+   *
+   * Kept apart from `reasons` for the reason `K8sRolloutPlan` gives: they are
+   * not arguments for pressing harder — they are things that would otherwise be
+   * discovered afterwards.
+   */
+  caveats: string[]
+}
+
+/** The word the operator types. Names the verb, so the dialog says what happens. */
+export const DOCKER_RECLAIM_PHRASE = 'REMOVE'
+
+/**
+ * How hard the operator has to press to remove this set.
+ *
+ * NEVER `{ kind: 'none' }`, and not because deletion feels serious: there is no
+ * undo button next to it the way `start` sits next to `stop`.
+ *
+ * The one unconditional escalation is a volume, and it does not scale with
+ * count because the cost does not. One volume is somebody's database and it is
+ * not coming back; a hundred dangling images are a `docker pull` away. Count is
+ * the wrong axis, which is why this is `planK8sRollout`'s shape and not
+ * `planDockerAction`'s.
+ */
+export function planDockerReclaim(items: DockerReclaimItem[]): DockerReclaimPlan {
+  const of = (kind: DockerReclaimKind): DockerReclaimItem[] => items.filter((i) => i.kind === kind)
+  const containers = of('container')
+  const images = of('image')
+  const volumes = of('volume')
+  const networks = of('network')
+  const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
+
+  const reasons: string[] = []
+  const caveats: string[] = []
+
+  if (volumes.length > 0) {
+    reasons.push(
+      `removes ${plural(volumes.length, 'volume')}, and what is inside a volume cannot be recovered afterwards`
+    )
+  }
+  if (containers.length > 0) {
+    reasons.push(
+      `removes ${plural(containers.length, 'container')}, which can only be brought back if you know how it was run`
+    )
+  }
+  if (images.length > 0) {
+    reasons.push(
+      `removes ${plural(images.length, 'image')}, which has to be pulled or rebuilt to come back`
+    )
+  }
+  if (networks.length > 0) reasons.push(`removes ${plural(networks.length, 'network')}`)
+
+  const named = volumes.filter((v) => v.anonymous !== true)
+  if (named.length > 0) {
+    // Docker 23 changed `volume prune` to skip named volumes precisely because
+    // removing them was the regret people kept reporting. This does remove
+    // them — by name, one at a time, because that is what was selected — and
+    // saying so is the difference between a decision and a surprise.
+    caveats.push(
+      `${plural(named.length, 'named volume')} — docker's own \`volume prune\` skips these on Docker 23 and later, and this does not, because you picked them by name`
+    )
+  }
+  if (images.some((i) => i.dangling === true)) {
+    caveats.push(
+      'a dangling image is a previous build\'s layers; no registry has a copy, so it comes back only by rebuilding'
+    )
+  }
+  if (images.length > 0) {
+    caveats.push(
+      'an image carrying more than one tag is refused rather than untagged — docker says so per image and the image stays'
+    )
+  }
+  const orphaning = containers.filter((c) => (c.mountedVolumes ?? 0) > 0)
+  if (orphaning.length > 0) {
+    caveats.push(
+      `${plural(orphaning.length, 'container')} here mount local volumes; removing the container leaves those volumes behind, it does not delete them`
+    )
+  }
+  caveats.push(
+    'only the ids listed here are removed — anything that became removable while this dialog was open is left alone'
+  )
+
+  const risk: DockerReclaimRisk = volumes.length > 0 ? 'destructive' : 'elevated'
+  const confirmation: DockerConfirmation =
+    volumes.length > 0 ? { kind: 'type-to-confirm', phrase: DOCKER_RECLAIM_PHRASE } : { kind: 'confirm' }
+
+  return { items, risk, confirmation, reasons, caveats }
+}
+
+// ------------------------------------------------- the re-preview, and the diff
+
+export interface DockerReclaimChange {
+  item: DockerReclaimItem
+  /** What moved, in the words the dialog prints verbatim. */
+  detail: string
+}
+
+export interface DockerReclaimDiff {
+  /** Selected items the fresh read does not list at all. Already gone, or renamed. */
+  gone: DockerReclaimItem[]
+  /** Selected items still there and no longer offerable — something started using them. */
+  ineligible: DockerReclaimChange[]
+  /** Selected items whose displayed figures moved since the operator read them. */
+  changed: DockerReclaimChange[]
+  /**
+   * Newly offerable items nobody has seen.
+   *
+   * Reported, and NOT a reason to refuse. They are untouched by construction —
+   * the command carries explicit ids and theirs are not among them — so
+   * refusing on them would make a busy host permanently unreclaimable while
+   * protecting nothing. The count on screen would otherwise be quietly wrong,
+   * which is the only thing worth saying about them.
+   */
+  appeared: DockerReclaimItem[]
+}
+
+/**
+ * The identity of one item across two reads: its kind and its id, and nothing
+ * else.
+ *
+ * The separator is a space, and it is only a separator: a kind comes from a
+ * four-value allow-list and cannot contain one, so no id can forge another
+ * item's key by carrying the delimiter.
+ *
+ * Exported because the renderer keys its selection on exactly this. A selection
+ * keyed on anything else — the label, the row's position, the size — would
+ * survive a re-read that changed the thing it was keyed on, and the diff below
+ * would then be comparing an item against itself under a name that had moved.
+ */
+export function dockerReclaimKey(item: { kind: string; id: string }): string {
+  return `${item.kind} ${item.id}`
+}
+
+const keyOf = dockerReclaimKey
+
+/**
+ * The selected set, against a listing taken a moment ago.
+ *
+ * This is the honest answer to everything that can move between the preview and
+ * the click, and it is why the executed set never has to be trusted: the ids are
+ * re-derived from a fresh read, and if the fresh read disagrees with what the
+ * operator was shown, nothing runs.
+ */
+export function diffDockerReclaim(
+  selected: DockerReclaimItem[],
+  fresh: DockerReclaimPreview
+): DockerReclaimDiff {
+  const offered = new Map(fresh.items.map((i) => [keyOf(i), i]))
+  const refused = new Map(fresh.withheld.map((w) => [keyOf(w), w]))
+  const chosen = new Set(selected.map(keyOf))
+
+  const gone: DockerReclaimItem[] = []
+  const ineligible: DockerReclaimChange[] = []
+  const changed: DockerReclaimChange[] = []
+
+  for (const item of selected) {
+    const k = keyOf(item)
+    const now = offered.get(k)
+    if (now === undefined) {
+      const why = refused.get(k)
+      if (why !== undefined) ineligible.push({ item, detail: why.reason })
+      else gone.push(item)
+      continue
+    }
+    if (now.label !== item.label) {
+      changed.push({ item, detail: `it is now ${now.label}, not ${item.label}` })
+      continue
+    }
+    if (now.size !== item.size) {
+      changed.push({ item, detail: `it is now ${now.size}, not ${item.size}` })
+    }
+  }
+
+  const appeared = fresh.items.filter((i) => !chosen.has(keyOf(i)))
+  return { gone, ineligible, changed, appeared }
+}
+
+/**
+ * Whether the fresh read disagrees with what the operator approved.
+ *
+ * `appeared` is excluded on purpose — see the field's own note. Everything else
+ * means the dialog was describing a host that no longer exists, and the honest
+ * response to that is to show the diff and remove nothing.
+ */
+export function dockerReclaimBlocked(diff: DockerReclaimDiff): boolean {
+  return diff.gone.length > 0 || diff.ineligible.length > 0 || diff.changed.length > 0
+}
+
+// ------------------------------------------------------------ the removal
+
+/**
+ * A docker object id: hex, short or full, and nothing else.
+ *
+ * This is the rule that keeps `rmi` off tags. A tag contains `:` or `/` and a
+ * repository name contains letters, so neither can pass — which means
+ * `buildDockerReclaimCommand` cannot be handed `nginx:latest` even by a caller
+ * that means well, and cannot be handed `-f` or `--force` by one that does not.
+ */
+const OBJECT_ID_RE = /^[0-9a-f]{12,64}$/
+
+export function validateDockerObjectId(id: string): boolean {
+  return OBJECT_ID_RE.test(id.trim())
+}
+
+/**
+ * A volume reference, which is a NAME and not an id.
+ *
+ * Docker's own volume-name grammar, the same one `validateContainerRef`
+ * enforces for containers. An anonymous volume's name is 64 hex characters and
+ * passes this too.
+ */
+export function validateDockerVolumeRef(name: string): boolean {
+  return REF_RE.test(name.trim())
+}
+
+/** The docker subcommand each kind is removed with. Never `prune`, in any spelling. */
+const RECLAIM_VERB: Record<DockerReclaimKind, string> = {
+  container: 'rm',
+  image: 'rmi',
+  volume: 'volume rm',
+  network: 'network rm'
+}
+
+const RECLAIM_MARKER: Record<DockerReclaimKind, string> = {
+  container: DOCKER_MARKERS.rmContainer,
+  image: DOCKER_MARKERS.rmImage,
+  volume: DOCKER_MARKERS.rmVolume,
+  network: DOCKER_MARKERS.rmNetwork
+}
+
+/**
+ * `docker rm` / `rmi` / `volume rm` / `network rm`, against exactly these ids.
+ *
+ * No flags. Not `-f`, not `-a`, not `--volumes`, not `--filter` — the argument
+ * grammar has no room for one, because every reference is matched against a
+ * regex that admits only hex or a docker name. That is not defence in depth
+ * dressed up: it is the reason an operator can read the built command and know
+ * what it will touch, which was the original objection to `prune`.
+ *
+ * ORDER IS LOAD-BEARING, and it is not the `system prune -a` hazard in
+ * miniature. Containers go first because docker refuses to remove an image a
+ * container still references — but an image with a referencing container is
+ * never OFFERED (see `buildDockerReclaimPreview`), so removing a container here
+ * can never make a selected image removable that the preview called blocked.
+ * The ordering serves docker's dependency; it cannot widen the set.
+ *
+ * Each kind is its own block behind its own marker so one failing command
+ * cannot swallow the next one's output, and so a volume's error line — which
+ * names the CONTAINER holding it — is never matched against a container the
+ * operator also selected.
+ */
+export function buildDockerReclaimCommand(
+  items: DockerReclaimItem[],
+  opts: { sudo?: boolean } = {}
+): string {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('refusing to build a reclaim command with no items')
+  }
+  if (items.length > DOCKER_ACTION_MAX_REFS) {
+    throw new Error(`refusing to remove more than ${DOCKER_ACTION_MAX_REFS} items at once`)
+  }
+  const seen = new Set<string>()
+  for (const item of items) {
+    if (item === null || typeof item !== 'object') {
+      throw new Error('refusing to build a reclaim command from something that is not an item')
+    }
+    if (!DOCKER_RECLAIM_KINDS.includes(item.kind)) {
+      throw new Error('refusing to build a reclaim command for an unknown docker object kind')
+    }
+    if (typeof item.id !== 'string') {
+      throw new Error('refusing to build a reclaim command from a reference that is not a string')
+    }
+    const ok = item.kind === 'volume' ? validateDockerVolumeRef(item.id) : validateDockerObjectId(item.id)
+    if (!ok) {
+      // An image reference that is a tag lands here, and that is the point:
+      // `docker rmi nginx:latest` untags where `docker rmi <id>` removes.
+      throw new Error('refusing to build a reclaim command from an invalid docker object reference')
+    }
+    const k = keyOf(item)
+    // The same id twice would make docker's second attempt fail with "no such
+    // object", which is a failure this app invented and would then have to
+    // explain. Refused instead.
+    if (seen.has(k)) throw new Error('refusing to build a reclaim command that names the same object twice')
+    seen.add(k)
+  }
+
+  const run = runner(opts.sudo)
+  const blocks: string[] = []
+  for (const kind of DOCKER_RECLAIM_KINDS) {
+    const refs = items.filter((i) => i.kind === kind).map((i) => i.id.trim())
+    if (refs.length === 0) continue
+    blocks.push(`echo "${RECLAIM_MARKER[kind]}"`)
+    blocks.push(`${run} ${RECLAIM_VERB[kind]} ${refs.join(' ')} 2>&1`)
+  }
+  return [
+    resolveBinary('docker'),
+    ...blocks,
+    // The last block's own status, held over the echo and handed back — the
+    // same shape `buildDockerDiskDetailCommand` uses, and for the same reason.
+    // The closing marker keeps a login shell's parting words (an motd, a locale
+    // warning) out of the final block, where they would be read as a line
+    // docker printed about an object.
+    `SP_RC=$?; echo "${DOCKER_MARKERS.end}"; exit $SP_RC`
+  ].join('; ')
+}
+
+export interface DockerReclaimOutcome {
+  item: DockerReclaimItem
+  ok: boolean
+  error?: string
+}
+
+export type DockerReclaimResult =
+  | {
+      ok: true
+      outcomes: DockerReclaimOutcome[]
+      /** Lines docker printed that name no selected object. Shown rather than dropped. */
+      unattributed: string[]
+      usedSudo?: boolean
+    }
+  | { ok: false; reason: DockerFailure; detail: string }
+
+/**
+ * A line saying an object went away.
+ *
+ * `docker rm`, `docker volume rm` and `docker network rm` echo the reference
+ * they were given, verbatim, one per line. `docker rmi` does not: it prints
+ * `Untagged: <ref>` and `Deleted: sha256:<64 hex>`, and the short id it was
+ * given is a PREFIX of that digest rather than equal to it. Both recorded on
+ * Docker 29.5.3 — see tests/fixtures/docker/reclaim-removed-docker-29.txt.
+ */
+const REMOVED_LINE = /^(Untagged|Deleted):\s/i
+
+/**
+ * What actually happened to each object.
+ *
+ * `ok: false` is reserved for docker never having run — a dead daemon, a
+ * refused socket, a missing binary. An object that failed on its own terms is a
+ * successful read of a failed removal, and flattening the two would put a
+ * permissions problem behind the words "nothing happened". The same division
+ * `parseDockerActionOutput` makes, for the same reason.
+ */
+export function parseDockerReclaimOutput(
+  items: DockerReclaimItem[],
+  output: string,
+  exitCode: number | null
+): DockerReclaimResult {
+  const kinds = [...new Set(items.map((i) => i.kind))]
+  const bodies = new Map<DockerReclaimKind, string>()
+  for (const kind of kinds) {
+    const body = section(output, RECLAIM_MARKER[kind])
+    if (body !== undefined) bodies.set(kind, body)
+  }
+  // Not one block reached: the shell never got to any docker at all.
+  if (bodies.size === 0) {
+    const detail = nonEmptyLines(output)[0] ?? 'docker did not run'
+    return { ok: false, reason: classifyDockerFailure(output, exitCode), detail }
+  }
+
+  const done = new Set<string>()
+  const errors = new Map<string, string>()
+  const unattributed: string[] = []
+
+  for (const kind of kinds) {
+    const body = bodies.get(kind)
+    if (body === undefined) continue
+    // Only this kind's references are candidates, so a volume's `volume is in
+    // use - [<container id>]` can never be attributed to a container.
+    const refs = items.filter((i) => i.kind === kind)
+    // Longest first, so a short id that prefixes a longer one does not claim
+    // the other's line.
+    const byLength = [...refs].sort((a, b) => b.id.length - a.id.length)
+    for (const line of nonEmptyLines(body)) {
+      const exact = byLength.find((r) => r.id === line)
+      if (exact !== undefined) {
+        done.add(keyOf(exact))
+        continue
+      }
+      const named = byLength.find((r) => line.includes(r.id))
+      if (named !== undefined) {
+        const k = keyOf(named)
+        if (REMOVED_LINE.test(line)) {
+          done.add(k)
+          continue
+        }
+        if (!done.has(k) && !errors.has(k)) errors.set(k, line)
+        continue
+      }
+      unattributed.push(line)
+    }
+  }
+
+  if (done.size === 0 && errors.size === 0) {
+    const failure = blockFailure(unattributed.join('\n'), exitCode)
+    if (failure) return { ok: false, ...failure }
+  }
+
+  const outcomes: DockerReclaimOutcome[] = items.map((item) => {
+    const k = keyOf(item)
+    if (done.has(k)) return { item, ok: true }
+    const error = errors.get(k)
+    if (error !== undefined) return { item, ok: false, error }
+    // Not mentioned at all. Saying so is the honest answer; assuming success
+    // would tell an operator a volume is gone when nothing confirmed it — and
+    // assuming failure would tell them it is still there when it may not be.
+    return { item, ok: false, error: 'docker did not say what happened to this object' }
+  })
+
+  return { ok: true, outcomes, unattributed }
+}
+
 // ------------------------------------------------------------- the bridge
 
 /**
@@ -1866,4 +2547,18 @@ export interface DockerBridge {
     refs: string[],
     opts?: { sudo?: boolean; timeoutSec?: number }
   ): Promise<DockerActionResult>
+  /**
+   * Remove exactly these objects.
+   *
+   * Takes ITEMS rather than refs, because the kind decides which docker verb
+   * runs and a bare list of ids would leave main guessing. There is no
+   * `prune` channel and there is no `force` option: the plan, the re-preview
+   * and the diff decide whether this is called at all, and the builder decides
+   * what it is allowed to say.
+   */
+  reclaim(
+    cfg: unknown,
+    items: DockerReclaimItem[],
+    opts?: { sudo?: boolean }
+  ): Promise<DockerReclaimResult>
 }

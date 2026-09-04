@@ -69,7 +69,7 @@ import { JobRunner, type JobStore } from './services/jobRunner'
 import { attachedJobExecutor } from './services/jobExec'
 import { detachedJobExecutor } from './services/jobDetached'
 import { AccessCommitter, AccessReader } from './services/access'
-import { PostureReader } from './services/posture'
+import { PostureReader, firewallRulesGranted } from './services/posture'
 import { DriftReader } from './services/drift'
 import { readChangeLog } from './services/changelog'
 import { readRunbook, saveRunbookNote } from './services/runbooks'
@@ -106,7 +106,7 @@ import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSou
 import { DockerReader } from './services/docker'
 import { ComposeReader } from './services/compose'
 import { buildDockerLogsCommand } from '../shared/docker'
-import type { DockerAction, DockerLogsOptions } from '../shared/docker'
+import type { DockerAction, DockerLogsOptions, DockerReclaimItem } from '../shared/docker'
 import type { ComposeImageWriteRequest, ComposeProjectRef } from '../shared/compose'
 
 // The one refusal worth retrying as root. Deliberately narrow: a container that
@@ -114,7 +114,7 @@ import type { ComposeImageWriteRequest, ComposeProjectRef } from '../shared/comp
 const DOCKER_SOCKET_REFUSED = /permission denied while trying to connect|got permission denied.*docker/i
 import { KubernetesReader } from './services/kubernetes'
 import { buildK8sLogsCommand } from '../shared/kubernetes'
-import type { K8sRolloutTarget } from '../shared/kubernetes'
+import type { K8sCordonTarget, K8sExecTarget, K8sRolloutTarget } from '../shared/kubernetes'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import { planBroadcast, verifyApproval } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
@@ -173,9 +173,17 @@ import {
 import { vpnCommitImport, vpnDeleteSecrets, vpnImport } from './services/vpn/import'
 import { wireguardDriver } from './services/vpn/drivers/wireguard'
 import { mintKeypair, storeKeypair } from './services/vpn/keys'
+import { storeFrpToken } from './services/vpn/frpSetup'
 import { toVpnResult } from './services/vpn/errors'
 import { withVpnTransport, withVpnTransportDb } from './services/vpn/transport'
-import type { VpnKeygenResult, VpnKind, VpnMintResult, VpnPublicKeyResult, VpnSpec } from '../shared/vpn'
+import type {
+  FrpTokenResult,
+  VpnKeygenResult,
+  VpnKind,
+  VpnMintResult,
+  VpnPublicKeyResult,
+  VpnSpec
+} from '../shared/vpn'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
 import {
   backupExport,
@@ -230,6 +238,13 @@ import {
   readCredProxyFile,
   writeCredProxyFile
 } from './services/credProxy'
+import {
+  ProcessService,
+  readProcessFile,
+  writeProcessFile
+} from './services/processes'
+import type { ProcessDraft, ProcessLogLine, ProcessStatus } from '../shared/processes'
+import { Supervisor } from './services/vpn/supervisor'
 import { DEFAULT_CRED_PROXY_PORT } from '../shared/credproxy'
 import type { CredProxyCall, CredProxyStatus } from '../shared/credproxy'
 import {
@@ -245,12 +260,17 @@ import {
   createGroup,
   saveGroup,
   deleteGroup,
+  getGroup,
   listAssignments,
   setAssignment,
   removeAssignment,
   listServerMeta,
   setServerAliases
 } from './services/policyStore'
+// The same resolution the MCP bridge uses for a server: the assignment on the
+// server wins over the one on its workspace. Imported for the firewall rule
+// gate below — see groupForServer.
+import { resolveGroupId } from './services/policyEngine'
 import type { AccessGroup, ApprovalRequest, McpGlobalConfig, PolicyAssignment } from '../shared/mcp'
 import {
   getMcpConfig,
@@ -962,6 +982,23 @@ const postureReader = new PostureReader({
     sshExec(cfg as Parameters<typeof sshExec>[0], command, timeoutMs, false)
 })
 
+// Which access group governs a server, resolved exactly as the MCP bridge
+// resolves it: the assignment on the server, else the one on its workspace,
+// else none — and none means No AI Access.
+//
+// Used for one thing, roadmap item 31's firewall rule lines. The decision it
+// feeds lives in services/posture.ts as `firewallRulesGranted`, where a test
+// can assert it; this is only the lookup. A server the cache has not seen
+// resolves to null and therefore to no rules, which is the direction to be
+// wrong in: the panel then says "not collected" and names the capability to
+// grant, which is a sentence somebody can act on.
+function groupForServer(serverId: string): AccessGroup | null {
+  const server = getCachedServer(serverId)
+  if (!server) return null
+  const groupId = resolveGroupId(listAssignments(), serverId, server.workspaceId)
+  return groupId ? getGroup(groupId) : null
+}
+
 // Configuration drift, on the same slow clock — roadmap item 25. One reader for
 // the whole process, for the reason the other three are one: it holds no state
 // beyond the exec function, and every probe is a single round trip.
@@ -1009,8 +1046,20 @@ const fleetSampler = new FleetSampler({
   // and reading a host's firewall must never be what raises a host-key trust
   // dialog the user cannot connect to anything they just did.
   postureEnabled: () => postureModuleOn,
-  samplePosture: async (_key, cfg) => {
-    const probe = await postureReader.read(resolveChainSecrets(cfg as SshConnectConfig))
+  samplePosture: async (key, cfg) => {
+    // The RULE LINES are collected per server and only where somebody granted
+    // them — roadmap item 31. The posture module's toggle above decides
+    // whether this probe runs at all; this decides whether it asks for the one
+    // thing in it that is not a count, which is the addresses and ports the
+    // host accepts traffic on.
+    //
+    // The sampler keys on 'fleet:<serverId>' and the capability is per server,
+    // so the id is taken back out rather than the gate being widened to the
+    // whole estate. fleetKey() is the only thing that writes that prefix.
+    const serverId = key.startsWith('fleet:') ? key.slice('fleet:'.length) : key
+    const probe = await postureReader.read(resolveChainSecrets(cfg as SshConnectConfig), {
+      firewallRules: firewallRulesGranted(groupForServer(serverId))
+    })
     return probe.ok ? { ok: true, posture: probe.posture } : { ok: false, error: `${probe.reason}: ${probe.detail}` }
   },
   // The configuration drift half — roadmap item 25. Injected like the other
@@ -1874,6 +1923,48 @@ ipcMain.handle(
   (_e, cfg: unknown, target: K8sRolloutTarget, confirmed: unknown) =>
     k8sReader.rolloutRestart(cfg, target, confirmed === true)
 )
+// Node scheduling. A cordon evicts nothing — see the header of
+// shared/kubernetes.ts — which is why it is a plain confirm and why it ships
+// ahead of drain.
+ipcMain.handle(
+  'k8s:cordon',
+  (_e, cfg: unknown, target: K8sCordonTarget, confirmed: unknown) =>
+    k8sReader.cordon(cfg, target, confirmed === true)
+)
+// The preflight is a READ, so it needs no confirmation and is offered on its
+// own: the panel shows the verdict before anybody reaches for a dialog.
+ipcMain.handle('k8s:drain-preflight', (_e, cfg: unknown, node: string, context?: string) =>
+  k8sReader.drainPreflight(cfg, node, context)
+)
+// The drain re-takes that preflight for itself and refuses on its own reading,
+// never on one that crossed IPC. There is no override argument on this channel
+// on purpose — see KubernetesReader.drain.
+ipcMain.handle(
+  'k8s:drain',
+  (_e, cfg: unknown, node: string, context: string | undefined, confirmed: unknown) =>
+    k8sReader.drain(cfg, node, context, confirmed === true)
+)
+// Exec. The only channel in this module that takes an approval RECORD rather
+// than a boolean, because it is the only one whose command text is written by
+// the user — so "a dialog was answered" is not enough and "this exact command
+// was answered for" is what has to be checked. The record is minted in the
+// renderer at the moment the human types the phrase and verified here against
+// a fresh re-derivation; see KubernetesReader.exec.
+// Reads, all four of them, needing no confirmation. The secret read lists
+// which secrets exist and what their keys are called and never a value — see
+// the SECRET_TEMPLATE comment in shared/kubernetes.ts for why that is a
+// property of the query rather than a rule applied afterwards.
+ipcMain.handle('k8s:resources', (_e, cfg: unknown, context?: string, namespace?: string) =>
+  k8sReader.resources(cfg, context, namespace)
+)
+ipcMain.handle('k8s:api-scan', (_e, cfg: unknown, context?: string) =>
+  k8sReader.apiScan(cfg, context)
+)
+ipcMain.handle('k8s:helm', (_e, cfg: unknown, context?: string) => k8sReader.helm(cfg, context))
+ipcMain.handle('k8s:exec-plan', (_e, target: K8sExecTarget) => k8sReader.execPlan(target))
+ipcMain.handle('k8s:exec', (_e, cfg: unknown, target: K8sExecTarget, approval: unknown) =>
+  k8sReader.exec(cfg, target, approval)
+)
 
 ipcMain.handle('docker:list', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
   dockerReader.list(cfg, opts ?? {})
@@ -1928,7 +2019,11 @@ ipcMain.handle('docker:disk', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSu
   dockerReader.disk(cfg, opts ?? {})
 )
 // The itemised form of the same read. Still read-only: it lists what is on the
-// disk, and nothing on this channel or below it can remove any of it.
+// disk and returns no handle on any of it. `docker:reclaim` below removes
+// things, and it is a SEPARATE channel taking a separate list of ids on
+// purpose — the gap between the two calls is where the re-preview goes, and a
+// channel that listed and removed in one round trip would be trusting a
+// listing it took itself.
 ipcMain.handle('docker:disk-detail', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
   dockerReader.diskDetail(cfg, opts ?? {})
 )
@@ -1961,6 +2056,33 @@ ipcMain.handle(
     refs: string[],
     opts?: { sudo?: boolean; timeoutSec?: number }
   ) => dockerReader.act(cfg, action, refs, opts ?? {})
+)
+
+// The second state-changing docker channel, and the only one that removes
+// anything. `docker rm` / `rmi` / `volume rm` / `network rm` against exactly
+// the ids the caller names.
+//
+// There is no prune channel, in any spelling, and there is no force option.
+// `docker system prune -a` removes stopped containers first, so an image whose
+// only reference was a stopped container is deleted inside the same command —
+// which means a preview built by listing images beforehand cannot show it.
+// That is a structurally wrong preview rather than a race, so `-a` is refused
+// rather than deferred, and `buildDockerReclaimCommand` has no argument
+// grammar that could express either flag.
+//
+// `items` is a claim about shape and nothing more. The builder checks every
+// kind against an allow-list and every reference against a regex that admits
+// only hex or a docker name — so a tag cannot reach `rmi`, where it would
+// untag rather than remove — and it THROWS, so a refused build rejects the
+// invoke instead of running a narrower command.
+//
+// Like `act` and unlike every read, this never escalates on its own. A
+// passwordless sudoers entry is not consent to a state change, and it is least
+// of all consent to a `docker volume rm`.
+ipcMain.handle(
+  'docker:reclaim',
+  (_e, cfg: unknown, items: DockerReclaimItem[], opts?: { sudo?: boolean }) =>
+    dockerReader.reclaim(cfg, items, opts ?? {})
 )
 
 // ---- Compose ----
@@ -2256,6 +2378,71 @@ ipcMain.handle('credproxy:token', (): { ok: boolean; token?: string; error?: str
   return mintCredProxyToken()
 })
 ipcMain.handle('credproxy:rotate-token', () => mintCredProxyToken())
+
+// ---- Supervised local processes ----
+//
+// Roadmap item 1, the LOCAL half. `ProcessService` is a list and a set of
+// refusals; the supervision itself is the same `Supervisor` the VPN drivers
+// use — backoff, crash-loop detection, readiness, a bounded log ring, pid
+// records and orphan reaping.
+//
+// ITS OWN `runRoot`, AND THAT IS LOAD-BEARING. `reapOrphans()` claims every
+// `*.pid` file under its root, and claiming means SIGTERM then SIGKILL once
+// the identity probe matches — so a supervisor pointed at `vpn-run` would kill
+// the user's live tunnel at launch, and the VPN supervisor would return the
+// favour. See rule 1 at the top of services/vpn/supervisor.ts, and the test
+// that fails with [[9101,'SIGTERM'],[9101,'SIGKILL']] when the roots are
+// shared.
+//
+// ITS OWN FILE, not `shellpilot-data.json`. That blob is renderer-owned and is
+// also the backup/export payload, and a command line that will be executed on
+// this machine does not belong in a file that gets mailed around. Written
+// temp-then-rename at 0600 like the vault and the rule file.
+//
+// DELIBERATELY NOT REACHABLE FROM THE MCP BRIDGE. An agent that could write a
+// row here would be writing a program to run on the machine the vault is on,
+// and an agent that could start one would be choosing the moment. Neither is
+// covered by `denyAllPending()`: a supervised process has nothing pending, is
+// not finished, and has a restart policy that will start it again when it
+// exits. tests/jobsNotExposed.test.ts fails on the import closure and on the
+// symbol names, which is what keeps that true without anyone remembering it.
+const processService = ((): ProcessService => {
+  const path = join(app.getPath('userData'), 'shellpilot-processes.json')
+  return new ProcessService({
+    now: () => Date.now(),
+    newId: () => randomUUID(),
+    read: () => readProcessFile(path),
+    write: (file) => writeProcessFile(path, file),
+    // Resolved through credentialResolver at START time, never cached, so
+    // nothing holds a copy of a value after the vault re-locks. The two
+    // failures are kept apart for the reason the credential proxy keeps them
+    // apart: a locked vault is a state the user can fix, and a missing entry
+    // is a process pointing at nothing.
+    resolveSecret: (ref) => {
+      try {
+        const value = resolveVaultField(ref)
+        return value === null ? { ok: false, reason: 'credential-missing' } : { ok: true, value }
+      } catch (err) {
+        if (isVaultLockedError(err)) return { ok: false, reason: 'vault-locked' }
+        return { ok: false, reason: 'credential-missing' }
+      }
+    },
+    supervisor: new Supervisor({ runRoot: join(app.getPath('userData'), 'process-run') })
+  })
+})()
+
+ipcMain.handle('processes:list', () => processService.list())
+ipcMain.handle('processes:status', (): ProcessStatus[] => processService.status())
+ipcMain.handle('processes:create', (_e, draft: ProcessDraft) => processService.create(draft))
+ipcMain.handle('processes:remove', (_e, id: string) => processService.remove(String(id)))
+ipcMain.handle('processes:start', (_e, id: string) => processService.start(String(id)))
+ipcMain.handle('processes:stop', (_e, id: string) => processService.stop(String(id)))
+ipcMain.handle('processes:restart', (_e, id: string) => processService.restart(String(id)))
+ipcMain.handle(
+  'processes:logs',
+  (_e, id: string, limit?: number): ProcessLogLine[] =>
+    processService.logs(String(id), typeof limit === 'number' ? limit : undefined)
+)
 
 function mintCredProxyToken(): { ok: boolean; token?: string; error?: string } {
   // 32 bytes of urandom. The token is the only thing standing between a rule
@@ -2804,6 +2991,21 @@ ipcMain.handle(
     }
   }
 )
+// The guided tunnel setup's one credential. Same road as `wireguardKeygen`:
+// the renderer holds the token only while its form is open, this writes it to
+// the vault, and a ref goes back. It exists because a setup that ends by
+// telling the user to add the token somewhere else has not happened once.
+//
+// Nothing here publishes anything. Creating and starting an frp proxy is the
+// renderer's own `vpn:start`, which the MCP bridge is refused outright — see
+// AI_REFUSED_VPN_KINDS in policyEngine.ts.
+ipcMain.handle(
+  'vpn:frpToken',
+  (
+    _e,
+    req: { profileName: string; workspaceId: string; token: string; replaces?: string }
+  ): Promise<FrpTokenResult> => storeFrpToken(req)
+)
 ipcMain.handle('vpn:logs', (_e, id: string, limit?: number) => vpnLogs(id, limit))
 ipcMain.handle('vpn:dependents', (_e, id: string) => vpnDependentsOf(id))
 // Log lines stop at the ring buffer unless a drawer is open. Refcounted, so
@@ -3112,7 +3314,18 @@ app.on('before-quit', (e) => {
   // next launch, an app that will not quit is a support ticket.
   const cap = new Promise<void>((resolve) => setTimeout(resolve, 4000))
   void Promise.race([
-    Promise.all([vpnDisposeAll().catch(() => undefined), historyClosed]),
+    Promise.all([
+      vpnDisposeAll().catch(() => undefined),
+      // Supervised children are ours, so they go down with us rather than
+      // being left for the next launch's reaper to find. Here rather than in
+      // the synchronous block above, for the reason vpnDisposeAll is here: the
+      // stop ladder needs turns of the event loop, and a fire-and-forget call
+      // up there would be racing app.exit(0) — the SIGTERM would frequently
+      // not have been sent at all. The same 4s cap applies, so a wedged dev
+      // server still cannot hold the app open.
+      processService.stopAll().catch(() => undefined),
+      historyClosed
+    ]),
     cap
   ]).finally(() => app.exit(0))
 })
@@ -3213,6 +3426,17 @@ app.whenReady().then(() => {
   // cheaper than either.
   powerMonitor.on('resume', () => vpnHandleWake())
   powerMonitor.on('unlock-screen', () => vpnHandleWake())
+
+  // Children a previous run left behind. Identity — exe path AND start time —
+  // is verified before anything is signalled, because a pid on its own says
+  // nothing: the OS reuses them and the one recorded may now be the user's
+  // editor.
+  //
+  // This is the ONLY thing the process service does at launch. Nothing is
+  // started: what survives a restart is the list, and a stored command is
+  // arbitrary local code execution that should not run before a human has
+  // looked at the screen. See the auto-start refusal in shared/processes.ts.
+  void processService.reapOrphans().catch((e) => console.error('[processes] reap failed:', e))
 
   void vpnInit()
     .catch((e) => console.error('[vpn] init failed:', e))

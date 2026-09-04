@@ -15,6 +15,7 @@ import {
   buildDockerInspectCommand,
   buildDockerListCommand,
   buildDockerLogsCommand,
+  buildDockerReclaimCommand,
   buildDockerStatsCommand,
   formatDockerEngineAge,
   groupByComposeProject,
@@ -1181,6 +1182,8 @@ describe('what happened to each container', () => {
 // ---------------------------------------------------------------------------
 
 describe('what cannot be built at all', () => {
+  // Every builder in the module EXCEPT the reclaim one, which exists to remove
+  // things and is held to its own rules in tests/dockerReclaim.test.ts.
   const everything = (): string[] => [
     buildDockerListCommand(),
     buildDockerListCommand({ sudo: true }),
@@ -1193,10 +1196,13 @@ describe('what cannot be built at all', () => {
     ...DOCKER_ACTIONS.map((a) => buildDockerActionCommand(a, ['web']))
   ]
 
-  it('has no builder that can remove a container, an image or a volume', () => {
+  it('has no builder but the reclaim one that can remove anything', () => {
     // Removing a container is recoverable only if you can reconstruct how it
-    // was run; removing a volume is not recoverable at all. A button cannot
-    // carry that, so no builder here can produce one.
+    // was run; removing a volume is not recoverable at all. Exactly ONE builder
+    // in this module is allowed to say so, it takes an explicit list of ids,
+    // and it is the one deliberately left out of `everything()` above. A `rm`
+    // appearing in the list command, or the stats command, or the log tailer,
+    // is this feature having leaked into a read.
     for (const cmd of everything()) {
       expect(cmd, cmd.slice(0, 60)).not.toMatch(/\b(rm|rmi)\b/)
       expect(cmd, cmd.slice(0, 60)).not.toMatch(/\bprune\b/)
@@ -1204,12 +1210,34 @@ describe('what cannot be built at all', () => {
     }
   })
 
-  it('has no prune, in any spelling', () => {
+  it('has no prune, in any spelling, and that invariant got STRONGER', () => {
     // `docker system prune` deletes every stopped container and — with the flag
     // people habitually add — every unused volume, where "unused" means "not
     // attached right now". Its blast radius is not knowable from the UI that
     // would offer it.
-    for (const cmd of everything()) expect(cmd).not.toMatch(/system\s+prune|image\s+prune|builder\s+prune/)
+    //
+    // Reclaim-by-id does not soften this; it is the reason it holds. The whole
+    // point of removing by id is that the blast radius IS the list, so a prune
+    // appearing anywhere — including inside the reclaim builder, which is the
+    // one place it would look reasonable — is the feature having reverted to
+    // the thing it was built to replace. So the reclaim command is checked
+    // here too, and only for this.
+    const withReclaim = [
+      ...everything(),
+      buildDockerReclaimCommand([
+        { kind: 'container', id: '4b07fd557da1', label: 'x', size: '0B', sizeBytes: 0 },
+        { kind: 'image', id: 'cfa60c5d01ea', label: 'y', size: '0B', sizeBytes: 0 },
+        { kind: 'volume', id: 'pgdata', label: 'pgdata', size: '0B', sizeBytes: 0 },
+        { kind: 'network', id: '41263af10316', label: 'z', size: '0B', sizeBytes: 0 }
+      ]),
+      buildDockerReclaimCommand([{ kind: 'image', id: 'cfa60c5d01ea', label: 'y', size: '0B', sizeBytes: 0 }], {
+        sudo: true
+      })
+    ]
+    for (const cmd of withReclaim) {
+      expect(cmd).not.toMatch(/\bprune\b/)
+      expect(cmd).not.toMatch(/system\s+prune|image\s+prune|builder\s+prune|volume\s+prune|network\s+prune/)
+    }
   })
 
   it('cannot kill, only stop', () => {

@@ -34,6 +34,13 @@ import type { CronEntry, CronSourceReport } from '../shared/cron'
 import type { CapacityBridge, CapacityReport } from '../shared/capacity'
 import type { HostDrift } from '../shared/drift'
 import type { RuleDraftWire, RuleView, RulesBridge } from '../shared/rules'
+import type {
+  ManagedProcessView,
+  ProcessDraft,
+  ProcessLogLine,
+  ProcessStatus,
+  ProcessesBridge
+} from '../shared/processes'
 import type { ChangeLogBridge, ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
 import type { RunbookNote, RunbookView, RunbooksBridge } from '../shared/runbooks'
 import type { StoreAlertKind } from '../shared/webhook'
@@ -46,6 +53,8 @@ import type {
   DockerInspectProbe,
   DockerLogsOptions,
   DockerProbe,
+  DockerReclaimItem,
+  DockerReclaimResult,
   DockerStatsProbe
 } from '../shared/docker'
 import type {
@@ -58,6 +67,17 @@ import type {
   ComposeProjectRef
 } from '../shared/compose'
 import type {
+  K8sCordonResult,
+  K8sCordonTarget,
+  K8sDrainAssessment,
+  K8sDrainPlan,
+  K8sDrainResult,
+  K8sExecPlan,
+  K8sExecResult,
+  K8sExecTarget,
+  K8sApiScan,
+  K8sHelmList,
+  K8sResources,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -97,6 +117,7 @@ import type { DbOpsReport } from '../shared/dbOps'
 import type { VaultEntry, VaultListResult, VaultResult, VaultStatus } from '../shared/vault'
 import type { TunnelConfig, TunnelResult, TunnelSshConfig, TunnelStatus } from '../shared/tunnel'
 import type {
+  FrpTokenResult,
   VpnDependent,
   VpnEngineInfo,
   VpnImportResult,
@@ -426,6 +447,35 @@ const api = {
       ipcRenderer.invoke('rules:enable', id, enabled),
     remove: (id: string): Promise<boolean> => ipcRenderer.invoke('rules:remove', id)
   } satisfies RulesBridge,
+  // Roadmap item 1 — supervised LOCAL processes.
+  //
+  // Eight channels and no subscription, deliberately. A crash-looping process
+  // writes as fast as the OS will let it, and a push channel would repaint the
+  // renderer at that rate: the ring in main is bounded, but a stream out of a
+  // bounded ring is not. The panel polls and asks for one capped page, so the
+  // cost of a process that has lost its mind is fixed rather than emergent.
+  //
+  // `list` returns keys and sources for the environment and NEVER a value —
+  // main does not send one, literal or resolved. Editing a value is "replace
+  // this one", which needs no read.
+  //
+  // `satisfies ProcessesBridge` so a channel added to the contract and
+  // forgotten here is a compile error rather than a method the panel calls at
+  // runtime and finds undefined.
+  processes: {
+    list: (): Promise<ManagedProcessView[]> => ipcRenderer.invoke('processes:list'),
+    status: (): Promise<ProcessStatus[]> => ipcRenderer.invoke('processes:status'),
+    create: (draft: ProcessDraft): Promise<ManagedProcessView | null> =>
+      ipcRenderer.invoke('processes:create', draft),
+    remove: (id: string): Promise<boolean> => ipcRenderer.invoke('processes:remove', id),
+    start: (id: string): Promise<ProcessStatus | null> =>
+      ipcRenderer.invoke('processes:start', id),
+    stop: (id: string): Promise<ProcessStatus | null> => ipcRenderer.invoke('processes:stop', id),
+    restart: (id: string): Promise<ProcessStatus | null> =>
+      ipcRenderer.invoke('processes:restart', id),
+    logs: (id: string, limit?: number): Promise<ProcessLogLine[]> =>
+      ipcRenderer.invoke('processes:logs', id, limit)
+  } satisfies ProcessesBridge,
   // Roadmap item 14. One method, taking a filter and returning a page, for the
   // reason `capacity` above has one: the merge, the ordering, the redaction and
   // the per-source budget all live in main, and what crosses is the ANSWER.
@@ -492,7 +542,38 @@ const api = {
       target: K8sRolloutTarget,
       confirmed: boolean
     ): Promise<K8sRolloutResult> =>
-      ipcRenderer.invoke('k8s:rollout-restart', cfg, target, confirmed)
+      ipcRenderer.invoke('k8s:rollout-restart', cfg, target, confirmed),
+    cordon: (
+      cfg: unknown,
+      target: K8sCordonTarget,
+      confirmed: boolean
+    ): Promise<K8sCordonResult> => ipcRenderer.invoke('k8s:cordon', cfg, target, confirmed),
+    drainPreflight: (
+      cfg: unknown,
+      node: string,
+      context?: string
+    ): Promise<K8sDrainAssessment> => ipcRenderer.invoke('k8s:drain-preflight', cfg, node, context),
+    drain: (
+      cfg: unknown,
+      node: string,
+      context: string | undefined,
+      confirmed: boolean
+    ): Promise<K8sDrainResult & { plan?: K8sDrainPlan }> =>
+      ipcRenderer.invoke('k8s:drain', cfg, node, context, confirmed),
+    // Two calls on purpose. The plan call returns the exact command string the
+    // approval must be minted against, so the renderer cannot approve one
+    // thing and send another — `verifyApproval` in the main process compares
+    // them and refuses when they differ.
+    resources: (cfg: unknown, context?: string, namespace?: string): Promise<K8sResources> =>
+      ipcRenderer.invoke('k8s:resources', cfg, context, namespace),
+    apiScan: (cfg: unknown, context?: string): Promise<K8sApiScan> =>
+      ipcRenderer.invoke('k8s:api-scan', cfg, context),
+    helm: (cfg: unknown, context?: string): Promise<K8sHelmList> =>
+      ipcRenderer.invoke('k8s:helm', cfg, context),
+    execPlan: (target: K8sExecTarget): Promise<{ plan: K8sExecPlan; command: string }> =>
+      ipcRenderer.invoke('k8s:exec-plan', target),
+    exec: (cfg: unknown, target: K8sExecTarget, approval: unknown): Promise<K8sExecResult> =>
+      ipcRenderer.invoke('k8s:exec', cfg, target, approval)
   },
   // `satisfies DockerBridge` so a channel added to the contract and forgotten
   // here is a compile error rather than a method the panel calls at runtime and
@@ -529,7 +610,16 @@ const api = {
       action: DockerAction,
       refs: string[],
       opts?: { sudo?: boolean; timeoutSec?: number }
-    ): Promise<DockerActionResult> => ipcRenderer.invoke('docker:act', cfg, action, refs, opts)
+    ): Promise<DockerActionResult> => ipcRenderer.invoke('docker:act', cfg, action, refs, opts),
+    // Removal by id, and the only method here that deletes anything. There is
+    // deliberately no `prune` sibling: the objection to prune was that its
+    // blast radius is not knowable from the UI offering it, and this takes the
+    // blast radius as a literal list.
+    reclaim: (
+      cfg: unknown,
+      items: DockerReclaimItem[],
+      opts?: { sudo?: boolean }
+    ): Promise<DockerReclaimResult> => ipcRenderer.invoke('docker:reclaim', cfg, items, opts)
   } satisfies DockerBridge,
   // The file half. `satisfies ComposeBridge` for the same reason as above: a
   // channel added to the contract and forgotten here becomes a compile error
@@ -862,6 +952,15 @@ const api = {
     // while the user is still typing a key in.
     wireguardPublicKey: (privateKey: string): Promise<VpnPublicKeyResult> =>
       ipcRenderer.invoke('vpn:wireguardPublicKey', privateKey),
+    // The frp server token the guided tunnel setup collects. Writes to the
+    // vault and returns a ref; the token itself never comes back, and the
+    // renderer holds it only for as long as the setup form is open.
+    frpToken: (req: {
+      profileName: string
+      workspaceId: string
+      token: string
+      replaces?: string
+    }): Promise<FrpTokenResult> => ipcRenderer.invoke('vpn:frpToken', req),
     // Called when a profile is deleted. The profile itself lives in the
     // renderer's data blob, but its key material lives in the vault and would
     // otherwise be orphaned there with no UI pointing at it.
