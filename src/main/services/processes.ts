@@ -15,6 +15,7 @@ import type {
   ManagedProcess,
   ManagedProcessView,
   ProcessDraft,
+  ProcessEnvSlot,
   ProcessEnvVar,
   ProcessLogLine,
   ProcessState,
@@ -82,7 +83,7 @@ export interface ProcessServiceDeps {
    *  nothing here holds a copy after the vault re-locks. */
   resolveSecret(ref: {
     vaultEntryId: string
-    slot: string
+    slot: ProcessEnvSlot
     fieldKey?: string
   }): ProcessSecretResolution
   /**
