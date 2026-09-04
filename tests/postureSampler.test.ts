@@ -371,12 +371,14 @@ describe('the reader tells three failures apart', () => {
       'mandatory-access denied - unreadable',
       'sshd-hardening denied - cannot enter /etc/ssh',
       'failed-logins denied - needs root',
-      'oom-kills denied - the journal needs root'
+      'oom-kills denied - the journal needs root',
+      'certificates denied - /etc/letsencrypt would not be entered'
     ].join('\n')
     const p = await reader({ ok: true, stdout: out }).read({})
     expect(p.ok).toBe(true)
     if (!p.ok) throw new Error('unreachable')
     expect(p.posture.sources.map((s) => s.status)).toEqual([
+      'denied',
       'denied',
       'denied',
       'denied',

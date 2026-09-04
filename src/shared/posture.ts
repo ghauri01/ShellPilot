@@ -125,6 +125,12 @@
 // the environment rather than anything about Docker — that `ssh host cmd` gets
 // a non-login PATH of roughly /usr/bin:/bin, so /usr/local/bin and /usr/sbin
 // are not on it, and that `sudo -n` is the only escalation that cannot prompt.
+// The strict base64 decoder src/shared/access.ts already owns. Reused rather
+// than written twice: it refuses anything outside the alphabet instead of
+// guessing, which is exactly what a certificate body coming off a host needs,
+// and it is in a shared file with no `node:` imports so the renderer can bundle
+// it. See the note there on why this codebase decodes rather than shelling out.
+import { decodeBase64 } from './access'
 import { SUDO_PROBE, resolveBinary } from './docker'
 import type { FactStatus, HostFacts } from './hostFacts'
 import { factSource } from './hostFacts'
@@ -188,20 +194,22 @@ export const POSTURE_STATUS_HELP: Record<PostureStatus, string> = {
   unknown: 'The probe ran and its answer could not be read, or the collector never reported on it.'
 }
 
-/** The five things the collector reports on, each read independently. */
+/** The six things the collector reports on, each read independently. */
 export type PostureSourceId =
   | 'firewall'
   | 'mandatory-access'
   | 'sshd-hardening'
   | 'failed-logins'
   | 'oom-kills'
+  | 'certificates'
 
 export const POSTURE_SOURCE_IDS: PostureSourceId[] = [
   'firewall',
   'mandatory-access',
   'sshd-hardening',
   'failed-logins',
-  'oom-kills'
+  'oom-kills',
+  'certificates'
 ]
 
 export const POSTURE_SOURCE_LABEL: Record<PostureSourceId, string> = {
@@ -209,7 +217,8 @@ export const POSTURE_SOURCE_LABEL: Record<PostureSourceId, string> = {
   'mandatory-access': 'SELinux / AppArmor',
   'sshd-hardening': 'sshd configuration',
   'failed-logins': 'Failed logins',
-  'oom-kills': 'OOM kills'
+  'oom-kills': 'OOM kills',
+  certificates: 'Certificate expiry'
 }
 
 export interface PostureSourceReport {
@@ -632,6 +641,216 @@ export interface OomKillSummary {
   window: string | null
 }
 
+// ---- Certificates on hosts we manage --------------------------------------
+//
+// NOT A DNS/TLS PRODUCT. There is no chain validation here, no OCSP, no
+// hostname matching, no cipher opinion and nothing that opens a socket. The
+// question is the one an operator actually loses sleep over: "is a certificate
+// on one of MY boxes about to expire while the renewal that was supposed to
+// handle it has quietly stopped running".
+//
+// ---------------------------------------------------------------------------
+// THE SCOPE DECISION, which is the work
+// ---------------------------------------------------------------------------
+//
+// WHICH PATHS. An unbounded walk of /etc on a production host is its own
+// outage, so this borrows the whole discipline of `buildComposeSearchCommand`
+// in src/shared/compose.ts: named roots, `-maxdepth`, `-xdev`, a result cap,
+// and all four printed on screen rather than buried here.
+//
+//   /etc/letsencrypt/live   The renewal-managed set, and the highest-value
+//                           one by a distance: a certbot timer that stopped
+//                           firing is the single most common way a certificate
+//                           on a managed host expires.
+//   /etc/pki/tls/certs      RHEL's host certificates.
+//   /etc/nginx              Where a hand-placed certificate sits, next to the
+//   /etc/apache2            configuration that references it. Reading the
+//   /etc/httpd              config to find `ssl_certificate` lines would find
+//                           more, and would mean parsing two more
+//                           configuration languages to do it; the directory is
+//                           where they nearly always are.
+//
+// AND WHAT IS DELIBERATELY NOT A ROOT: /etc/ssl/certs. On Debian and Ubuntu
+// that directory IS the distribution trust store — roughly 150 root CA
+// certificates, symlinked by subject hash, owned by the `ca-certificates`
+// package. Watching it would mean alerting an operator that a root CA they do
+// not control and cannot renew expires in three weeks, roughly 150 times, and
+// burying the one certificate that is theirs. The bundles that live in the
+// other roots are excluded by name for the same reason — see CERT_SKIPPED.
+//
+// HOW MANY. CERT_SEARCH_MAX_FILES, and the cap is low on purpose: a host with
+// more host certificates than this in these directories is unusual, and
+// `truncated` says out loud that the list is a prefix rather than an
+// inventory. A cap that was generous enough never to be hit would be a cap
+// that let a pathological tree hold an SSH channel open.
+//
+// ---------------------------------------------------------------------------
+// WHY THE CERTIFICATE IS PARSED HERE AND NOT BY openssl ON THE HOST
+// ---------------------------------------------------------------------------
+//
+// `openssl x509 -enddate -noout` is the obvious command and it is refused, for
+// exactly the reason src/shared/access.ts refuses `ssh-keygen -l` and computes
+// its own fingerprints: the tool is not universally present. Alpine ships
+// without the `openssl` binary unless somebody installs it, minimal and
+// distroless container images ship without it, and a host that has certificates
+// and no openssl would report NO CERTIFICATES — which is the half-probe this
+// whole item was deferred rather than ship.
+//
+// A certificate's validity is four ASN.1 fields into the DER, and DER is a
+// tag-length-value format a hundred lines of TypeScript can walk. This file
+// already trusts that argument once: access.ts walks SSH key blobs by hand.
+//
+// The cost, stated: this side has to be strict, because a certificate is a file
+// a host controls. `certificateNotAfter` returns a failure on ANY inconsistency
+// — a length that runs past the end, a tag that is not the one the structure
+// requires, a time that is not RFC 5280's UTC form — and never reads past the
+// buffer. A certificate that could not be parsed is `unparseable`, which is a
+// FINDING. It is never a certificate that is valid.
+//
+// ---------------------------------------------------------------------------
+// THE HONESTY REQUIREMENT
+// ---------------------------------------------------------------------------
+//
+//  * A directory that could not be entered is not a directory with no
+//    certificates. `/etc/letsencrypt` is 0700 root on Debian, so this is the
+//    COMMON case rather than an edge one: `unreadableRoots` counts them, the
+//    source reads `partial` or `denied`, and nothing renders as "none found".
+//  * A file that could not be read is `unreadable`, not absent.
+//  * A certificate that could not be parsed is `unparseable`, not valid.
+//  * A host where the search ran cleanly and found nothing has NO expiry
+//    reading at all — `certificateDays` is null. "No certificates" is not
+//    "infinitely far from expiry", and an alert path that treated it as a
+//    number would report every host in the estate as healthy on this axis.
+
+export const CERT_SEARCH_ROOTS = [
+  '/etc/letsencrypt/live',
+  '/etc/pki/tls/certs',
+  '/etc/nginx',
+  '/etc/apache2',
+  '/etc/httpd'
+] as const
+
+/** Deep enough for `/etc/letsencrypt/live/<domain>/fullchain.pem` and for the
+ *  `ssl/<site>/` layout people give nginx, and no deeper. */
+export const CERT_SEARCH_MAX_DEPTH = 3
+
+/** The cap on files read. `truncated` says when it was reached. */
+export const CERT_SEARCH_MAX_FILES = 16
+
+/** The most base64 transmitted per certificate. A leaf certificate is 1.1 to
+ *  2.2 KB of base64, so this holds a whole normal one; a certificate longer
+ *  than this arrives cut and is reported `truncated`, which is a gap and not a
+ *  date. Sixteen of these is the worst case this probe can put on the wire. */
+export const CERT_B64_CAP = 2048
+
+export const CERT_NAMES = ['*.pem', '*.crt', '*.cer'] as const
+
+/**
+ * Names never read, and every one of them earns its place.
+ *
+ * The three `ca-*` bundles are the distribution trust store wherever it leaks
+ * into a root that IS watched; `chain.pem` is the intermediate, whose expiry is
+ * the CA's problem and not the operator's; `privkey.pem` is a PRIVATE KEY and
+ * must never be opened at all. The key is belt to the braces of the collector's
+ * own extractor, which can only ever transmit bytes lying between a BEGIN
+ * CERTIFICATE and an END CERTIFICATE line — a key file yields nothing from it
+ * even if a name slips through.
+ */
+export const CERT_SKIPPED = [
+  'ca-bundle.crt',
+  'ca-bundle.trust.crt',
+  'ca-certificates.crt',
+  'chain.pem',
+  'privkey.pem',
+  'dhparam.pem'
+] as const
+
+/** The bounds, as DATA, so the panel prints them rather than a developer
+ *  remembering to. Same shape and same reason as `composeSearchBound`. */
+export interface CertSearchBound {
+  roots: readonly string[]
+  maxDepth: number
+  maxFiles: number
+  names: readonly string[]
+  skipped: readonly string[]
+  /** Always false. `-xdev` is in the command; stating it as data is what puts
+   *  it on screen next to the other three. */
+  crossesFilesystems: boolean
+}
+
+export function certSearchBound(): CertSearchBound {
+  return {
+    roots: CERT_SEARCH_ROOTS,
+    maxDepth: CERT_SEARCH_MAX_DEPTH,
+    maxFiles: CERT_SEARCH_MAX_FILES,
+    names: CERT_NAMES,
+    skipped: CERT_SKIPPED,
+    crossesFilesystems: false
+  }
+}
+
+/**
+ * The line, in days remaining.
+ *
+ * Thirty, because that is the number certbot itself renews at: a Let's Encrypt
+ * certificate inside thirty days of expiry is one whose renewal was SUPPOSED
+ * to have run and has not. That is the finding — not "this certificate is
+ * getting old", which is not actionable, but "the automation you believe in
+ * has stopped".
+ *
+ * Fixed rather than the configurable resource threshold, exactly as
+ * DISK_DANGER, INODE_DANGER and LOAD_DANGER are fixed: it is not a percentage,
+ * it does not belong on a slider beside one, and it is the number the panel
+ * colours a row at. Here rather than in the alert store so the panel and the
+ * alert cannot end up a few days apart — the trap `isDiskCritical` was written
+ * to close.
+ */
+export const CERT_EXPIRY_DAYS = 30
+
+/** At or below the line. A certificate ON thirty days is inside the window
+ *  certbot would already have renewed in. */
+export function isCertificateExpiringSoon(days: number): boolean {
+  return days <= CERT_EXPIRY_DAYS
+}
+
+/** Why a file the search found has no date on it. Never `null` alongside a
+ *  date, and never absent alongside no date. */
+export type CertReadProblem =
+  /** The file was found and could not be opened. NOT a file with no
+   *  certificate in it. */
+  | 'unreadable'
+  /** It opened and holds no `-----BEGIN CERTIFICATE-----` block: a private
+   *  key, a CSR, a DH parameter file, a README somebody named `.pem`. */
+  | 'not-a-certificate'
+  /** The certificate is longer than CERT_B64_CAP and its validity was not
+   *  inside the part that was transmitted. */
+  | 'truncated'
+  /** It decoded and its DER is not a certificate this build can date. NOT a
+   *  certificate that is valid. */
+  | 'unparseable'
+
+export interface CertificateReading {
+  /** The path as the host printed it, scrubbed like any other host text. */
+  path: string
+  /** notAfter in epoch milliseconds, or null with a `problem` beside it. */
+  notAfter: number | null
+  /** Whole days from the collection to notAfter. NEGATIVE means it expired
+   *  that many days ago, which is a different sentence from expiring soon and
+   *  is rendered as one. */
+  daysRemaining: number | null
+  problem: CertReadProblem | null
+}
+
+export interface CertificateInventory {
+  certificates: CertificateReading[]
+  /** The file cap was reached, so this is a prefix rather than an inventory. */
+  truncated: boolean
+  /** Roots that are present on this host and could not be entered. A number
+   *  above zero is why "none found" may not be said. */
+  unreadableRoots: number
+  bound: CertSearchBound
+}
+
 // ---- The posture itself ---------------------------------------------------
 
 export interface HostPosture {
@@ -640,6 +859,7 @@ export interface HostPosture {
   sshd: SshdHardening | null
   failedLogins: FailedLoginSummary | null
   oomKills: OomKillSummary | null
+  certificates: CertificateInventory | null
   /** Epoch milliseconds this collection ran, by OUR clock. */
   collectedAt: number
   sources: PostureSourceReport[]
@@ -762,6 +982,15 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     // so two drop-ins that disagree arrive as two records and are reported as
     // ambiguous instead of one of them being silently picked.
     "sp_dir() { SP_V=$(sp_clean \"$1\"); [ -n \"$SP_V\" ] && printf 'D %s\\n' \"$SP_V\"; }",
+    // One certificate: the base64 body FIRST and the path last, so a path
+    // containing a space is the remainder of the line rather than something
+    // the parser has to guess the end of. The body gets its own cap — a
+    // certificate is kilobytes and VALUE_CAP is 512 — and its own scrub, which
+    // deletes control characters AND spaces: base64 contains neither, so
+    // anything removed here was never part of a certificate. A body that
+    // survives to nothing becomes `-`, which the parser reads as a file it
+    // could not open rather than as an empty certificate.
+    `sp_cert() { SP_B=$(printf '%s' "$1" | tr -d '\\000-\\037\\177 ' | cut -c1-${CERT_B64_CAP}); SP_P=$(sp_clean "$2"); [ -n "$SP_P" ] && printf 'C %s %s\\n' "\${SP_B:--}" "$SP_P"; }`,
     probe,
 
     // =====================================================================
@@ -1409,6 +1638,121 @@ export function buildPostureCommand(opts: PostureCollectOptions = {}): string {
     'fi',
     'sp_note oom-kills "$SP_OOM_ST" "$SP_OOM_W" "$SP_OOM_D"',
 
+    // =====================================================================
+    // CERTIFICATES
+    // =====================================================================
+    //
+    // A BOUNDED search, and the bounds are the compose module's four —
+    // named roots, `-maxdepth`, `-xdev` and a result cap — for the reason
+    // buildComposeSearchCommand gives: an unbounded walk of /etc on a
+    // production host is its own outage. `certSearchBound()` hands all four to
+    // the panel so they are read rather than trusted.
+    //
+    // WHAT LEAVES THE HOST is the base64 between a BEGIN CERTIFICATE and an
+    // END CERTIFICATE line, and NOTHING else. That is a property of the
+    // extractor rather than of the skip list: pointed at `privkey.pem` it
+    // emits nothing at all, so a private key cannot be transmitted even if a
+    // name slips past CERT_SKIPPED. The FIRST block only — `fullchain.pem`
+    // holds the leaf first and the intermediates after it, and an
+    // intermediate's expiry is the CA's problem rather than the operator's.
+    //
+    // The certificate is DATED IN TYPESCRIPT and not by `openssl x509` here.
+    // See the block comment on CERT_SEARCH_ROOTS: openssl is not universally
+    // present, and a host with certificates and no openssl reporting NO
+    // CERTIFICATES is the half-probe this item was deferred rather than ship.
+    'SP_CERT_ST=absent',
+    'SP_CERT_W="-"',
+    'SP_CERT_D="none of the certificate directories ShellPilot looks in is present on this host"',
+    'SP_CERT_ROOTS=""',
+    // The escalation prefix, empty unless a root needed root. /etc/letsencrypt
+    // is 0700 root on Debian, which makes this the COMMON case rather than an
+    // edge one — and it is a variable rather than a spelled-out word so a build
+    // without sudo contains none.
+    'SP_CERT_SU=""',
+    'SP_CERT_MISS=0',
+    'SP_CERT_ANY=0',
+    'SP_CERT_LIST=""',
+    ...CERT_SEARCH_ROOTS.flatMap((r) => {
+      // Literals, so their parents are literals too and no dirname runs on the
+      // host. Only a parent that is not /etc is worth testing: a /etc nobody
+      // can enter is a host on which nothing in this file works.
+      const parent = r.slice(0, r.lastIndexOf('/'))
+      return [
+        `if [ -d ${r} ] && [ -x ${r} ]; then`,
+        `SP_CERT_ANY=1; SP_CERT_ROOTS="$SP_CERT_ROOTS ${r}"`,
+        ...ifSudo(
+          `elif [ "$SP_SUDO" = 1 ] && sudo -n test -x ${r}; then`,
+          `SP_CERT_ANY=1; SP_CERT_ROOTS="$SP_CERT_ROOTS ${r}"; SP_CERT_SU="sudo -n"; SP_CERT_W=root`
+        ),
+        `elif [ -d ${r} ]; then`,
+        'SP_CERT_ANY=1; SP_CERT_MISS=$((SP_CERT_MISS+1))',
+        // TRAVERSAL BEFORE EXISTENCE, and here it is the whole case rather
+        // than a corner: `[ -d /etc/letsencrypt/live ]` is FALSE on a host
+        // whose /etc/letsencrypt is 0700, so without this branch the single
+        // most important root on the box reads as "not present" — which is
+        // exactly "a directory that could not be read is not a directory with
+        // no certificates", got wrong.
+        ...(parent === '/etc'
+          ? []
+          : [
+              `elif [ -d ${parent} ] && [ ! -x ${parent} ]; then`,
+              'SP_CERT_ANY=1; SP_CERT_MISS=$((SP_CERT_MISS+1))'
+            ]),
+        'fi'
+      ]
+    }),
+    'if [ -n "$SP_CERT_ROOTS" ]; then',
+    // `-maxdepth` immediately after the roots, because GNU find warns when a
+    // global option follows a test and a warning line in this block is a path
+    // the loop below would try to open. stderr discarded and `|| true` for
+    // compose.ts's reasons: find exits non-zero when a root vanishes between
+    // the test above and here, and `head` closing the pipe makes it non-zero
+    // again.
+    `SP_CERT_LIST=$($SP_CERT_SU find $SP_CERT_ROOTS -xdev -maxdepth ${CERT_SEARCH_MAX_DEPTH} -type f \\( ${CERT_NAMES.map((n) => `-name '${n}'`).join(' -o ')} \\) ${CERT_SKIPPED.map((n) => `! -name ${n}`).join(' ')} -print 2>/dev/null | head -n ${CERT_SEARCH_MAX_FILES} || true)`,
+    'fi',
+    'if [ -n "$SP_CERT_LIST" ]; then',
+    // `while read` over a pipe rather than `for f in $SP_CERT_LIST`, so a
+    // certificate under a path with a space in it is read rather than split
+    // into two paths that do not exist. Nothing is accumulated in the
+    // subshell — every record is printed as it is read — so the pipeline
+    // costing a subshell costs nothing.
+    'printf \'%s\\n\' "$SP_CERT_LIST" | while IFS= read -r f; do',
+    '[ -n "$f" ] || continue',
+    // awk rather than sed: `sed -n \'/a/,/b/{...q...}\' is accepted by GNU sed
+    // and is exactly the kind of block BSD sed has historically been fussy
+    // about, and this has to run on whatever POSIX userland the host has.
+    `SP_B64=$($SP_CERT_SU awk '/-----BEGIN CERTIFICATE-----/{f=1;next} /-----END CERTIFICATE-----/{if(f)exit} f{print}' "$f" 2>/dev/null | tr -d '\\n\\r')`,
+    // TWO SENTINELS, not one, because the causes have different fixes. `.` is
+    // a file that opened and holds no certificate — a key, a CSR, a README
+    // somebody named .pem. Empty becomes `-`: the file was found and could not
+    // be opened, which is NOT a file with no certificate in it.
+    'if [ -n "$SP_B64" ]; then sp_cert "$SP_B64" "$f"',
+    `elif $SP_CERT_SU head -c 1 "$f" >/dev/null 2>&1; then sp_cert . "$f"`,
+    'else sp_cert "" "$f"; fi',
+    'done',
+    'fi',
+    // Decided ONCE, at the end, from what was counted rather than inside
+    // whichever branch ran last — the fix access.ts had to make after a
+    // skipped file left a source reading `ok`.
+    'if [ "$SP_CERT_ANY" = 0 ]; then',
+    'SP_CERT_ST=absent',
+    'elif [ -z "$SP_CERT_ROOTS" ]; then',
+    'SP_CERT_ST=denied',
+    'SP_CERT_D="every certificate directory present on this host refused to be entered. This is NOT a report of no certificates."',
+    'elif [ "$SP_CERT_MISS" -gt 0 ]; then',
+    'SP_CERT_ST=partial',
+    'SP_CERT_D="some certificate directories were read and some refused to be entered. A directory that could not be read is not a directory with no certificates."',
+    'else',
+    'SP_CERT_ST=ok',
+    'SP_CERT_D="read every certificate directory that is present on this host"',
+    'fi',
+    'sp_val cert-refused "$SP_CERT_MISS"',
+    // Emitted on every run including the empty one, so the parser can tell "the
+    // search ran and found nothing" from "this block never ran" — the same
+    // distinction fw-backend-status is deliberately NOT counted for.
+    'sp_val cert-searched "$SP_CERT_ANY"',
+    'sp_note certificates "$SP_CERT_ST" "$SP_CERT_W" "$SP_CERT_D"',
+
     // Printed once, at the end, from a variable nothing read out of a file ever
     // touched. This is the cron.ts discipline and it is the reason a
     // PermitRootLogin value cannot forge a firewall status.
@@ -1452,6 +1796,8 @@ const VALUE_KEYS = [
   'oom-count',
   'oom-procs',
   'oom-window',
+  'cert-refused',
+  'cert-searched',
 ] as const
 type ValueKey = (typeof VALUE_KEYS)[number]
 
@@ -1506,6 +1852,210 @@ function parseActive(raw: string | undefined): boolean | null {
   if (t === 'active' || t === 'yes' || t === 'running' || t === 'enabled') return true
   if (t === 'inactive' || t === 'no' || t === 'not running' || t === 'disabled') return false
   return null
+}
+
+// ---- Dating a certificate, from its DER, here --------------------------------
+//
+// A hundred lines instead of `openssl x509 -enddate`, for access.ts's reason:
+// the tool is not universally present and a host that has certificates and no
+// openssl would report having none.
+//
+// The rule every branch obeys: RETURN A FAILURE ON ANY INCONSISTENCY, and
+// never read past the buffer. A certificate is a file the host controls, and
+// the one thing that must never come out of here is a date this build was not
+// certain of.
+
+interface Tlv {
+  tag: number
+  /** First byte of the value. */
+  start: number
+  /** One past the last byte of the value, which MAY exceed the buffer — that
+   *  is how truncation is detected rather than crashed on. */
+  end: number
+}
+
+/**
+ * One DER tag-length-value header at `at`.
+ *
+ * Refuses the two things a certificate's spine never contains and an attacker
+ * might: a multi-byte tag, and BER's indefinite length. Refuses a long-form
+ * length of more than four bytes because nothing in a certificate needs one and
+ * accepting it is how a length becomes an unbounded integer.
+ */
+function readTlv(der: Uint8Array, at: number): Tlv | null {
+  if (at < 0 || at + 2 > der.length) return null
+  const tag = der[at]
+  if ((tag & 0x1f) === 0x1f) return null
+  let i = at + 1
+  let len = der[i++]
+  if ((len & 0x80) !== 0) {
+    const n = len & 0x7f
+    if (n === 0 || n > 4 || i + n > der.length) return null
+    len = 0
+    for (let j = 0; j < n; j++) len = len * 256 + der[i++]
+  }
+  return { tag, start: i, end: i + len }
+}
+
+/** ASCII, one byte per character, because every field read here is ASCII by
+ *  definition and a multi-byte decode would invent characters. */
+const asciiOf = (b: Uint8Array): string => Array.from(b, (c) => String.fromCharCode(c)).join('')
+
+/**
+ * An ASN.1 UTCTime or GeneralizedTime, as RFC 5280 requires them to be written.
+ *
+ * §4.1.2.5 requires seconds and requires Z, so a value without them is a
+ * certificate this build will not date rather than one it will guess at.
+ * §4.1.2.5.1 is the two-digit-year rule: 50 and above is 19YY, below it 20YY.
+ */
+function asn1Time(tag: number, body: Uint8Array): number | null {
+  const s = asciiOf(body)
+  let year: number
+  let m: RegExpExecArray | null
+  if (tag === 0x17) {
+    m = /^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/.exec(s)
+    if (m === null) return null
+    const yy = Number(m[1])
+    year = yy >= 50 ? 1900 + yy : 2000 + yy
+  } else if (tag === 0x18) {
+    m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/.exec(s)
+    if (m === null) return null
+    year = Number(m[1])
+  } else {
+    return null
+  }
+  const mo = Number(m[2])
+  const d = Number(m[3])
+  const h = Number(m[4])
+  const mi = Number(m[5])
+  const se = Number(m[6])
+  // Checked rather than left to Date.UTC, which rolls a month of 13 into the
+  // next January instead of refusing it.
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 60) return null
+  const t = Date.UTC(year, mo - 1, d, h, mi, Math.min(se, 59))
+  return Number.isFinite(t) ? t : null
+}
+
+export type CertNotAfter =
+  | { ok: true; notAfter: number }
+  | { ok: false; problem: 'truncated' | 'unparseable' }
+
+/**
+ * `notAfter`, walked out of the certificate's DER.
+ *
+ *   Certificate ::= SEQUENCE {
+ *     tbsCertificate ::= SEQUENCE {
+ *       [0] version           OPTIONAL and EXPLICIT, absent on a v1 certificate
+ *       serialNumber          INTEGER
+ *       signature             SEQUENCE
+ *       issuer                SEQUENCE
+ *       validity              SEQUENCE { notBefore, notAfter }
+ *       ...
+ *
+ * Everything before `validity` is skipped by length rather than decoded: this
+ * has no business knowing what an issuer DN contains, and the less of a
+ * host-controlled file it interprets the better.
+ *
+ * TRUNCATED VERSUS UNPARSEABLE is decided from the outer SEQUENCE's own
+ * declared length. The collector caps how much base64 it sends, so a
+ * certificate with a very long issuer really can arrive with its validity cut
+ * off — and "we did not transmit enough of this" is a different sentence from
+ * "this is not a certificate", with a different fix.
+ */
+export function certificateNotAfter(der: Uint8Array): CertNotAfter {
+  const cert = readTlv(der, 0)
+  if (cert === null || cert.tag !== 0x30) return { ok: false, problem: 'unparseable' }
+  // Everything below fails one way when the buffer simply ran out and another
+  // when what is here is not a certificate.
+  const fail = (): CertNotAfter => ({
+    ok: false,
+    problem: cert.end > der.length ? 'truncated' : 'unparseable'
+  })
+
+  const tbs = readTlv(der, cert.start)
+  if (tbs === null || tbs.tag !== 0x30) return fail()
+
+  let at = tbs.start
+  let f = readTlv(der, at)
+  if (f === null) return fail()
+  // [0] EXPLICIT version. Absent on a v1 certificate, which is rare and legal.
+  if (f.tag === 0xa0) {
+    at = f.end
+    f = readTlv(der, at)
+    if (f === null) return fail()
+  }
+  if (f.tag !== 0x02) return fail() // serialNumber
+  at = f.end
+  f = readTlv(der, at)
+  if (f === null || f.tag !== 0x30) return fail() // signature AlgorithmIdentifier
+  at = f.end
+  f = readTlv(der, at)
+  if (f === null || f.tag !== 0x30) return fail() // issuer Name
+  at = f.end
+  const validity = readTlv(der, at)
+  if (validity === null || validity.tag !== 0x30) return fail()
+
+  const notBefore = readTlv(der, validity.start)
+  if (notBefore === null) return fail()
+  const notAfter = readTlv(der, notBefore.end)
+  if (notAfter === null) return fail()
+  // The bytes have to actually BE here. Without this the subarray below would
+  // silently shorten and `asn1Time` would refuse a date that is merely absent —
+  // reporting a cut certificate as unparseable rather than as truncated.
+  if (notAfter.end > der.length) return { ok: false, problem: 'truncated' }
+
+  const t = asn1Time(notAfter.tag, der.subarray(notAfter.start, notAfter.end))
+  return t === null ? { ok: false, problem: 'unparseable' } : { ok: true, notAfter: t }
+}
+
+/**
+ * One `C` record, turned into a reading.
+ *
+ * The two sentinels are the collector's, and they are two words rather than one
+ * because the causes have different fixes: `-` is a file the search found and
+ * could not open, and `.` is a file that opened and holds no certificate at
+ * all — a private key, a CSR, a README somebody named `.pem`.
+ */
+function readCertificate(body: string, rawPath: string, now: number): CertificateReading {
+  const path = freeText(rawPath) ?? ''
+  const gap = (problem: CertReadProblem): CertificateReading => ({
+    path,
+    notAfter: null,
+    daysRemaining: null,
+    problem
+  })
+  if (body === '-' || body === '') return gap('unreadable')
+  if (body === '.') return gap('not-a-certificate')
+  const der = decodeBase64(body)
+  if (der === null || der.length === 0) return gap('unparseable')
+  const r = certificateNotAfter(der)
+  if (!r.ok) return gap(r.problem)
+  return {
+    path,
+    notAfter: r.notAfter,
+    // Floored, so "12 days" means at least twelve whole days and an expiry
+    // three days ago is -3 rather than -2.something rounded towards zero.
+    daysRemaining: Math.floor((r.notAfter - now) / 86_400_000),
+    problem: null
+  }
+}
+
+/**
+ * The fewest days remaining across every certificate that PARSED.
+ *
+ * Null, not Infinity and not a large number, when nothing parsed. A host with
+ * no certificates is not a host whose certificates are fine, and a host whose
+ * certificate directory was refused is neither — see the honesty rules on
+ * CertificateInventory.
+ */
+export function soonestCertificateExpiry(inv: CertificateInventory | null): number | null {
+  if (inv === null) return null
+  let soonest: number | null = null
+  for (const c of inv.certificates) {
+    if (c.daysRemaining === null) continue
+    if (soonest === null || c.daysRemaining < soonest) soonest = c.daysRemaining
+  }
+  return soonest
 }
 
 function parseStatusLine(line: string): PostureSourceReport | null {
@@ -1643,6 +2193,8 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
   /** Every value seen for one directive, in the order the collector emitted
    *  them, so a disagreement can be reported rather than arbitrated. */
   const directives = new Map<SshdDirective, string[]>()
+  /** One entry per file the bounded search found, in the order it found them. */
+  const certRecords: { body: string; path: string }[] = []
 
   for (const raw of lines.slice(0, markerAt === -1 ? lines.length : markerAt)) {
     const line = raw.replace(/\r$/, '')
@@ -1654,6 +2206,21 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
       if (!(VALUE_KEYS as readonly string[]).includes(key)) continue
       // Last wins, matching the collector's own last-definition-wins reads.
       values.set(key as ValueKey, rest.slice(sp + 1))
+      continue
+    }
+    if (line.startsWith('C ')) {
+      // `C <base64> <path>`. The path is the REMAINDER, so a path with a space
+      // in it survives; the body has no spaces by construction.
+      const rest = line.slice(2)
+      const sp = rest.indexOf(' ')
+      if (sp === -1) continue
+      // Capped on the way in as well as on the host, for DIRECTIVE_CAP's
+      // reason: the host's `head -n` is what should bound this, and a host that
+      // ignored it must not be able to make the parser walk ten thousand
+      // certificates.
+      if (certRecords.length < CERT_SEARCH_MAX_FILES) {
+        certRecords.push({ body: rest.slice(0, sp), path: rest.slice(sp + 1) })
+      }
       continue
     }
     if (!line.startsWith('D ')) continue
@@ -1800,6 +2367,25 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
           window: freeText(values.get('oom-window'))
         }
 
+  // ---- certificates ------------------------------------------------------
+  //
+  // Null ONLY when the block never ran. `cert-searched` is emitted on every
+  // collection including the one that found nothing, so "the search ran and
+  // this host has no certificates in the roots it looks in" is an inventory
+  // with an empty list — a reading — and not a null.
+  const certSearched = values.get('cert-searched') !== undefined
+  const certificates: CertificateInventory | null =
+    !certSearched && certRecords.length === 0
+      ? null
+      : {
+          certificates: certRecords.map((c) => readCertificate(c.body, c.path, now)),
+          // The host's `head -n` cap was reached, so this list is a prefix
+          // rather than an inventory and the panel says so.
+          truncated: certRecords.length >= CERT_SEARCH_MAX_FILES,
+          unreadableRoots: parseCount(values.get('cert-refused')) ?? 0,
+          bound: certSearchBound()
+        }
+
   // A probe the collector said `ok` about, whose value did not survive, is
   // `unknown` — not `ok` with a null next to it. That substitution is how a
   // security panel ends up showing an all-clear it never earned.
@@ -1834,10 +2420,24 @@ export function parsePosture(output: string, now = Date.now()): HostPosture {
       'oom-kills',
       oomKills !== null && oomKills.count !== null,
       'the OOM probe reported success and returned no count, so whether this host has killed anything for memory was not established'
+    ),
+    confirm(
+      'certificates',
+      certificates !== null,
+      'the certificate probe reported success and returned no search at all, so nothing about what expires on this host was established'
     )
   ]
 
-  return { firewall, mandatoryAccess, sshd, failedLogins, oomKills, collectedAt: now, sources }
+  return {
+    firewall,
+    mandatoryAccess,
+    sshd,
+    failedLogins,
+    oomKills,
+    certificates,
+    collectedAt: now,
+    sources
+  }
 }
 
 // ---- Consuming item C's security update count -----------------------------
@@ -1905,10 +2505,24 @@ export interface PostureAlertReadings {
   /** Our words, for the alert detail. Never the host's, and written in the
    *  character class store/alerts.ts scrubs a detail to — so no commas. */
   oomDetail: string
+  /**
+   * Days remaining on the SOONEST certificate that parsed, or null.
+   *
+   * NULL, not a large number, when nothing parsed — and that covers three
+   * different hosts which must all be silent rather than healthy: one whose
+   * certificate directories refused to be entered, one whose certificates
+   * could not be parsed, and one that genuinely has none in the roots this
+   * looks in. "No certificates" is not "infinitely far from expiry", and a
+   * path that turned it into a number would report the whole estate clean.
+   *
+   * Negative means expired that many days ago, which the alert renders as a
+   * different sentence rather than as a small number.
+   */
+  certDays: number | null
 }
 
 export function postureAlertReadings(posture: HostPosture | null): PostureAlertReadings {
-  if (posture === null) return { oomKills: null, oomDetail: '' }
+  if (posture === null) return { oomKills: null, oomDetail: '', certDays: null }
 
   const oom = posture.oomKills
   const oomStatus = postureSource(posture, 'oom-kills').status
@@ -1929,7 +2543,25 @@ export function postureAlertReadings(posture: HostPosture | null): PostureAlertR
     // kills" when it could not read a window is the alert this refuses to send.
   }
 
-  return { oomKills, oomDetail }
+  // The soonest certificate that PARSED. A certificate that could not be read
+  // contributes nothing rather than contributing reassurance: it is counted as
+  // a gap by the panel and by the roll-up, and the alert simply has one fewer
+  // number to be worst.
+  return { oomKills, oomDetail, certDays: soonestCertificateExpiry(posture.certificates) }
+}
+
+/**
+ * Whether anything about this host's certificates could not be read.
+ *
+ * Deliberately TRUE for a directory that refused entry as well as for a file
+ * that would not parse: both are reasons the number above may be missing the
+ * certificate that actually matters, and a panel that showed "45 days" beside
+ * a silently skipped /etc/letsencrypt would be worse than one that showed
+ * nothing.
+ */
+export function certificatesIncomplete(inv: CertificateInventory | null): boolean {
+  if (inv === null) return true
+  return inv.unreadableRoots > 0 || inv.truncated || inv.certificates.some((c) => c.problem !== null)
 }
 
 // ---- Summary --------------------------------------------------------------
@@ -1964,6 +2596,14 @@ export interface PostureSummary {
    *  answered by a ring buffer, whose zero is not a statement about a day. */
   oomKilling: number
   oomUnknown: number
+  /** Hosts with a certificate at or inside the line, hosts with one that has
+   *  already expired, and hosts where some part of the certificate search
+   *  could not be read. The third is not folded into "fine": a host whose
+   *  /etc/letsencrypt refused to be entered is not a host with no
+   *  certificates. */
+  certExpiringSoon: number
+  certExpired: number
+  certUnknown: number
 }
 
 export function summarisePosture(
@@ -1981,7 +2621,10 @@ export function summarisePosture(
     sshdWeak: 0,
     sshdUnknown: 0,
     oomKilling: 0,
-    oomUnknown: 0
+    oomUnknown: 0,
+    certExpiringSoon: 0,
+    certExpired: 0,
+    certUnknown: 0
   }
   for (const { posture } of rows) {
     if (posture === null) {
@@ -1992,6 +2635,7 @@ export function summarisePosture(
       out.macUnknown++
       out.sshdUnknown++
       out.oomUnknown++
+      out.certUnknown++
       continue
     }
     out.collected++
@@ -2046,6 +2690,15 @@ export function summarisePosture(
     const oom = postureAlertReadings(posture).oomKills
     if (oom === true) out.oomKilling++
     else if (oom === null) out.oomUnknown++
+
+    // Through the same function again, for the same reason. `certExpired` is
+    // counted SEPARATELY from `certExpiringSoon` rather than as its worst
+    // case: "expires in four days" and "expired four days ago" are different
+    // incidents, one of which is already an outage.
+    const days = postureAlertReadings(posture).certDays
+    if (days !== null && days < 0) out.certExpired++
+    else if (days !== null && isCertificateExpiringSoon(days)) out.certExpiringSoon++
+    if (certificatesIncomplete(posture.certificates)) out.certUnknown++
   }
   return out
 }
@@ -2107,6 +2760,16 @@ export function postureToFacts(posture: HostPosture): Record<string, string> {
   put('oomTool', posture.oomKills?.source ?? null, 'oom-kills')
   put('oomKills', posture.oomKills?.count ?? null, 'oom-kills')
   put('oomProcesses', posture.oomKills?.processes ?? null, 'oom-kills')
+  put('certificatesFound', posture.certificates?.certificates.length ?? null, 'certificates')
+  put('certificateRootsRefused', posture.certificates?.unreadableRoots ?? null, 'certificates')
+  put('certificateDaysRemaining', soonestCertificateExpiry(posture.certificates), 'certificates')
+  put(
+    'certificatesUnread',
+    posture.certificates === null
+      ? null
+      : posture.certificates.certificates.filter((c) => c.problem !== null).length,
+    'certificates'
+  )
   // The status of every source, so history can say WHY a null was null at the
   // time rather than only that it was null.
   for (const s of posture.sources) out[`${POSTURE_FACT_PREFIX}source:${s.id}`] = s.status

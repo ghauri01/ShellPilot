@@ -8,6 +8,7 @@ import {
   MAX_AUTH_TRIES_WEAK,
   OOM_WINDOW_HOURS,
   postureAlertReadings,
+  POSTURE_STATUS_MARKER,
   POSTURE_COMMAND,
   POSTURE_FACT_PREFIX,
   POSTURE_STATUS_MARKER,
@@ -21,6 +22,7 @@ import {
 } from '../src/shared/posture'
 import type { HostPosture, PostureSourceId, SshdDirective } from '../src/shared/posture'
 import { parseHostFacts } from '../src/shared/hostFacts'
+import { CERT_FAR, CERT_GENERALIZED, CERT_SOON } from './postureCertificateFixtures'
 
 // ---------------------------------------------------------------------------
 // PROVENANCE, stated rather than assumed — the rule tests/hostFacts.test.ts
@@ -418,7 +420,7 @@ describe('the estate roll-up counts the gaps rather than skipping them', () => {
 
 /** Paths the collector reads, redirected into the fake tree in ONE pass. */
 const ABS_PATHS =
-  /\/(?:etc\/(?:ufw|firewalld|ssh|selinux)|sys\/fs\/selinux|sys\/module\/apparmor|sys\/kernel\/security|var\/log)/g
+  /\/(?:etc\/(?:ufw|firewalld|ssh|selinux|letsencrypt|pki|nginx|apache2|httpd)|sys\/fs\/selinux|sys\/module\/apparmor|sys\/kernel\/security|var\/log)/g
 
 /** Every binary the collector resolves, so a test can say which ones exist. */
 const HIDEABLE = [
@@ -497,6 +499,22 @@ function fakeHost(): FakeHost {
       return parsePosture(out, NOW)
     }
   }
+}
+
+/** The collector's raw output, for the case that has to prove something never
+ *  reached the wire at all rather than that it was parsed away. */
+const rawCollect = (h: FakeHost, opts: { sudo?: boolean; have?: string[] } = {}): string => {
+  let cmd = buildPostureCommand({ sudo: opts.sudo ?? true }).replace(ABS_PATHS, (m) => h.root + m)
+  for (const name of HIDEABLE) {
+    if ((opts.have ?? []).includes(name)) continue
+    cmd = cmd
+      .replace(new RegExp(`for c in ${name}[^;]*;`), `for c in sp-absent-${name};`)
+      .replace(new RegExp(`SP_BIN=${name}(?=[\\s;]|$)`), `SP_BIN=sp-absent-${name}`)
+  }
+  return execFileSync('/bin/sh', ['-c', cmd], {
+    encoding: 'utf8',
+    env: { PATH: `${h.bin}:/usr/bin:/bin`, SP_ROOTONLY: '' }
+  })
 }
 
 const trees: string[] = []
@@ -1152,6 +1170,151 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(postureAlertReadings(p).oomKills).toBeNull()
   })
 
+
+  // ---- certificates ------------------------------------------------------
+  //
+  // The certificates here are REAL — see tests/postureCertificateFixtures.ts.
+  // What these cases prove is the shell: which directories are entered, what
+  // is refused, what is extracted out of a file, and above all that a
+  // directory nobody could read never renders as a host with no certificates.
+
+  /** Write a PEM file, armour and all, the way certbot and nginx do. */
+  const pem = (h: FakeHost, rel: string, ...bodies: string[]): void =>
+    h.file(
+      rel,
+      bodies
+        .map(
+          (b) =>
+            `-----BEGIN CERTIFICATE-----\n${(b.match(/.{1,64}/g) ?? []).join('\n')}\n-----END CERTIFICATE-----\n`
+        )
+        .join('')
+    )
+
+  // Days remaining is measured against THIS file's NOW, which is
+  // 2027-01-15T08:00:00Z — eight hours later than the one
+  // tests/postureCertificates.test.ts pins. So the same CERT_FAR fixture is
+  // 502 days away here and 503 there, and both are right. Written as literals
+  // in both places rather than computed, which is what makes the discrepancy
+  // visible instead of cancelling out.
+  const certs = (p: HostPosture): { path: string; days: number | null; problem: string | null }[] =>
+    (p.certificates?.certificates ?? []).map((c) => ({
+      path: c.path.replace(/^.*(\/etc\/)/, '$1'),
+      days: c.daysRemaining,
+      problem: c.problem
+    }))
+
+  it('reads a certbot certificate and dates it without shelling out to openssl', () => {
+    const h = host()
+    pem(h, 'etc/letsencrypt/live/soon.example.com/fullchain.pem', CERT_SOON)
+    const p = h.collect({ have: [] })
+    expect(statusOf(p, 'certificates')).toBe('ok')
+    expect(certs(p)).toEqual([
+      { path: '/etc/letsencrypt/live/soon.example.com/fullchain.pem', days: 17, problem: null }
+    ])
+  })
+
+  it('reads only the FIRST block of a fullchain, so the answer is the leaf', () => {
+    // fullchain.pem is leaf-then-intermediates. The intermediate outlives the
+    // leaf by years, so a probe that read the whole file and took the last
+    // certificate — or the longest-lived one — would report a host as fine for
+    // years after its own certificate expired.
+    const h = host()
+    pem(h, 'etc/letsencrypt/live/x/fullchain.pem', CERT_SOON, CERT_FAR, CERT_GENERALIZED)
+    const p = h.collect({ have: [] })
+    expect(certs(p)).toEqual([{ path: '/etc/letsencrypt/live/x/fullchain.pem', days: 17, problem: null }])
+  })
+
+  it('never transmits a private key, whatever the file is called', () => {
+    // Two defences and this proves the second. `privkey.pem` is in
+    // CERT_SKIPPED, so the first one is the find; the extractor is the one
+    // that has to hold when a name slips through, because it can only ever
+    // emit bytes lying between BEGIN CERTIFICATE and END CERTIFICATE.
+    const h = host()
+    h.file(
+      'etc/nginx/server.key.pem',
+      '-----BEGIN PRIVATE KEY-----\nTUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lC\n-----END PRIVATE KEY-----\n'
+    )
+    const out = rawCollect(h)
+    expect(out).not.toContain('TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lC')
+    expect(out).not.toContain('PRIVATE KEY')
+    // And it is reported as what it is, rather than silently dropped.
+    const p = parsePosture(out, NOW)
+    expect(certs(p)).toEqual([
+      { path: '/etc/nginx/server.key.pem', days: null, problem: 'not-a-certificate' }
+    ])
+  })
+
+  it('reports a file it could not open as unreadable, which is not a file with no certificate', () => {
+    const h = host()
+    pem(h, 'etc/nginx/secret.pem', CERT_SOON)
+    chmodSync(join(h.root, 'etc/nginx/secret.pem'), 0o000)
+    const p = h.collect({ sudo: false, have: [] })
+    expect(certs(p)).toEqual([{ path: '/etc/nginx/secret.pem', days: null, problem: 'unreadable' }])
+    // No date came out of it, and nothing invented one.
+    expect(postureAlertReadings(p).certDays).toBeNull()
+  })
+
+  it('reports a certificate directory it cannot enter as partial, NEVER as no certificates', () => {
+    const h = host()
+    pem(h, 'etc/nginx/good.pem', CERT_FAR)
+    h.dir('etc/apache2/ssl')
+    chmodSync(join(h.root, 'etc/apache2'), 0o000)
+    const p = h.collect({ sudo: false, have: [] })
+    chmodSync(join(h.root, 'etc/apache2'), 0o755)
+    expect(statusOf(p, 'certificates')).toBe('partial')
+    expect(p.certificates?.unreadableRoots).toBe(1)
+    expect(postureSource(p, 'certificates').detail).toContain(
+      'not a directory with no certificates'
+    )
+    // What WAS read is still shown. A partial reading is real, it is just not
+    // the whole picture.
+    expect(certs(p)).toEqual([{ path: '/etc/nginx/good.pem', days: 502, problem: null }])
+  })
+
+  it('counts a 0700 /etc/letsencrypt as refused, though its live directory is invisible', () => {
+    // TRAVERSAL BEFORE EXISTENCE, and this is the case that matters most:
+    // /etc/letsencrypt is 0700 root on Debian, so `[ -d /etc/letsencrypt/live ]`
+    // is FALSE — the root the operator most cares about looks exactly like a
+    // root that is not installed. Without the parent test the most common
+    // certificate directory in the world reads as "not present" and the host
+    // renders as having nothing to renew.
+    const h = host()
+    h.dir('etc/letsencrypt/live/x')
+    pem(h, 'etc/letsencrypt/live/x/cert.pem', CERT_SOON)
+    chmodSync(join(h.root, 'etc/letsencrypt'), 0o000)
+    const p = h.collect({ sudo: false, have: [] })
+    chmodSync(join(h.root, 'etc/letsencrypt'), 0o755)
+    expect(statusOf(p, 'certificates')).toBe('denied')
+    expect(p.certificates?.unreadableRoots).toBe(1)
+    expect(certs(p)).toEqual([])
+    expect(postureAlertReadings(p).certDays).toBeNull()
+  })
+
+  it('reads a host with none of the certificate directories as absent, and dates nothing', () => {
+    const p = host().collect({ have: [] })
+    expect(statusOf(p, 'certificates')).toBe('absent')
+    expect(p.certificates?.certificates).toEqual([])
+    // "No certificates" is NOT "infinitely far from expiry".
+    expect(postureAlertReadings(p).certDays).toBeNull()
+  })
+
+  it('does not descend past the depth it says it descends to', () => {
+    const h = host()
+    pem(h, 'etc/nginx/a/b/c/deep.pem', CERT_SOON)
+    pem(h, 'etc/nginx/a/b/shallow.pem', CERT_FAR)
+    const p = h.collect({ have: [] })
+    // maxdepth 3 from /etc/nginx reaches a/b/shallow.pem and not a/b/c/deep.pem.
+    expect(certs(p)).toEqual([{ path: '/etc/nginx/a/b/shallow.pem', days: 502, problem: null }])
+  })
+
+  it('skips the trust-store bundles that live in a watched root', () => {
+    const h = host()
+    pem(h, 'etc/pki/tls/certs/ca-bundle.crt', CERT_SOON)
+    pem(h, 'etc/pki/tls/certs/localhost.crt', CERT_FAR)
+    const p = h.collect({ have: [] })
+    expect(certs(p)).toEqual([{ path: '/etc/pki/tls/certs/localhost.crt', days: 502, problem: null }])
+  })
+
   // ---- the whole thing ---------------------------------------------------
 
   it('returns every source and exits 0 on a host that can answer nothing', () => {
@@ -1164,7 +1327,8 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
       'mandatory-access=absent',
       'sshd-hardening=absent',
       'failed-logins=no-tool',
-      'oom-kills=no-tool'
+      'oom-kills=no-tool',
+      'certificates=absent'
     ])
   })
 })
