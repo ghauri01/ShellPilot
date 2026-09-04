@@ -146,6 +146,21 @@ describe('reading a rule back', () => {
     mount([])
     expect(await screen.findByText('No rules. Nothing runs on its own.')).toBeTruthy()
   })
+
+  it('does not say it before it has read them', async () => {
+    // "Nothing runs on its own" is a claim about whether anything is going to
+    // fire, and it was being made about rules nobody had looked at yet: `rules`
+    // began as `[]`, which this screen renders as a confident nothing. On the
+    // one screen whose subject is what happens without you, that is the single
+    // sentence it must not get wrong.
+    //
+    // The neighbouring test cannot catch this -- `findByText` WAITS, so it
+    // passes whether or not the claim was also on screen a moment earlier. This
+    // one holds the read open and looks while it is still pending.
+    mount([], { list: () => new Promise(() => {}) })
+    expect(await screen.findByText(/Reading the rules/)).toBeTruthy()
+    expect(screen.queryByText('No rules. Nothing runs on its own.')).toBeNull()
+  })
 })
 
 describe('writing a job rule', () => {
@@ -293,6 +308,10 @@ describe('a bridge that is not there', () => {
     // renderer is newer than the preload, so every method is undefined.
     stubBridge({})
     render(<RulesPanel servers={SERVERS} />)
-    expect(await screen.findByText('No rules. Nothing runs on its own.')).toBeTruthy()
+    // Was asserting 'No rules. Nothing runs on its own.' -- which, with no
+    // bridge at all, is a claim about what will fire made by a panel that
+    // cannot read anything. It says what is actually wrong now.
+    expect(await screen.findByText(/preload does not expose the rule engine/)).toBeTruthy()
+    expect(screen.queryByText('No rules. Nothing runs on its own.')).toBeNull()
   })
 })

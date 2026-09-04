@@ -183,8 +183,17 @@ function RuleCard({
 }
 
 export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Element {
-  const [rules, setRules] = useState<RuleView[]>([])
+  // `null` until the read comes back, NOT `[]`.
+  //
+  // An empty array means "there are no rules", and this screen says that out
+  // loud -- "No rules. Nothing runs on its own." That is a confident claim
+  // about whether anything is going to fire, and before the read returned it
+  // was being made about rules that had not been looked at yet. On a screen
+  // whose entire subject is what runs without you, asserting that nothing does
+  // is the one thing it must not get wrong.
+  const [rules, setRules] = useState<RuleView[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [noBridge, setNoBridge] = useState(false)
   const [open, setOpen] = useState(false)
 
   const [name, setName] = useState('')
@@ -202,7 +211,16 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
 
   const refresh = useCallback(async (): Promise<void> => {
     const list = bridge()?.list
-    if (typeof list !== 'function') return
+    if (typeof list !== 'function') {
+      // A definite answer, and not the same one as "still reading". The
+      // capability is missing from this build's preload, so nothing will ever
+      // arrive -- leaving the panel on "Reading the rules…" would be a spinner
+      // that never resolves, which is the failure the tri-state was added to
+      // avoid, just pointed the other way.
+      setNoBridge(true)
+      return
+    }
+    setNoBridge(false)
     try {
       setRules(await list())
     } catch (e) {
@@ -526,7 +544,15 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
         </div>
       )}
 
-      {rules.length === 0 ? (
+      {noBridge ? (
+        <div className="panel-note is-alarm">
+          This build’s preload does not expose the rule engine yet. Restart the app to rebuild it.
+        </div>
+      ) : rules === null ? (
+        <div className="panel-empty">
+          <p className="panel-empty-title">Reading the rules…</p>
+        </div>
+      ) : rules.length === 0 ? (
         // Was one grey sentence with no next step. The sentence is kept —
         // "nothing runs on its own" is the reassurance a rules screen owes the
         // reader — and now it says what to do about it.
