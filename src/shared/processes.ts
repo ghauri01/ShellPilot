@@ -139,11 +139,29 @@ export const PROCESS_LOG_PAGE = 500
 /** Backoff between restarts. Jittered for the reason the supervisor jitters
  *  everything: several processes pointed at the same dead port would otherwise
  *  retry in lockstep. */
-export const PROCESS_BACKOFF = { baseMs: 1_000, maxMs: 60_000, jitter: 0.3 } as const
+export const PROCESS_BACKOFF = { baseMs: 1_000, maxMs: 30_000, jitter: 0.3 } as const
 
-/** Six exits in a minute is a process that is not going to start. Stopping and
- *  saying so beats respawning it until someone notices the fan. */
-export const PROCESS_CRASH_LOOP = { windowMs: 60_000, maxRestarts: 6 } as const
+/**
+ * Seven exits inside the window is a process that is not going to start.
+ * Stopping and saying so beats respawning it until somebody notices the fan.
+ *
+ * THE WINDOW MUST BE LONGER THAN THE CUMULATIVE BACKOFF, and getting that
+ * wrong is silent. The detector counts exits inside a ROLLING window, and the
+ * backoff between them grows exponentially — so if the delays add up to more
+ * than the window, the oldest exit falls out before the newest arrives, the
+ * count never reaches the limit, and the process restarts FOREVER while a
+ * crash-loop detector sits there looking implemented.
+ *
+ * The arithmetic, with `PROCESS_BACKOFF` above: six restarts wait
+ * 1 + 2 + 4 + 8 + 16 + 30 = 61 seconds, and jitter can stretch that to
+ * 61 × 1.3 ≈ 80. Five minutes leaves room for both and is still short enough
+ * that a process which crashed once this morning is not held against it.
+ *
+ * (The first draft of this file had a 60-second window against a 60-second
+ * backoff ceiling, which could not trip at all. The behavioural test in
+ * tests/processService.test.ts is what found it.)
+ */
+export const PROCESS_CRASH_LOOP = { windowMs: 300_000, maxRestarts: 6 } as const
 
 export const PROCESS_NAME_MAX = 60
 export const PROCESS_ARG_MAX = 4_000
