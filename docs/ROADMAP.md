@@ -1070,19 +1070,38 @@ disk-usage panel exists precisely so the operator can decide what to remove them
 shell, with the numbers in front of them"* — by giving them the numbers per item instead of
 per category. **3–5 days.**
 
-**21b — reclaim by id. Deferred, and costed honestly.** Not `prune`: `docker rm`/`rmi`/
-`volume rm` against exactly the ids the preview displayed, so anything that became eligible
-afterwards is untouched and the crashed container you were about to debug survives. It needs
-a re-preview-and-refuse-on-diff step, a per-item selection UI, podman fixtures nobody has
-yet, and a rewrite of three prose blocks and a forty-line test suite that currently assert
-the opposite. **1.5–2 weeks**, which is what moved it out of the cheap-wins wave.
+**21b — reclaim by id. Shipped.** Not `prune`: `docker rm`/`rmi`/`volume rm`/`network rm`
+against exactly the ids the preview displayed, so anything that became eligible afterwards
+is untouched and the crashed container you were about to debug survives, while anything
+that stopped being eligible fails on its own terms in docker's own words, per item.
+
+The re-preview is on the CONFIRM, not on the button that opens the dialog: the window that
+matters is the one the operator spends reading the caveats. A re-read that *fails* is a
+refusal too. Nothing is pre-selected and there is no select-all, because a select-all is
+`prune` reached by a click instead of a flag. Risk is `planK8sRollout`'s shape rather than
+`planDockerAction`'s — count is the wrong axis when fifty dangling images are a pull away
+and one volume is not — so a volume is destructive and typed-confirm on its own, and
+`caveats` rides separately from `reasons`.
+
+Three things are still refused, and each is refused rather than deferred. **`-a`**, for the
+structural reason above. **`--force`**, because the checks it overrules are exactly the facts
+a preview cannot vouch for. **Build cache**, because a single entry comes out only through
+`builder prune --filter`, which is a prune.
+
+**The podman gap remains, and is now stated in the fixtures rather than implied.** Podman's
+`rm`/`rmi`/`volume rm` print different success lines and different refusal wording, and no
+podman host was available to record on. Nothing was invented to fill it in: an invented
+refusal string would read as evidence that podman works. The parser attributes by looking
+for the reference inside the line, which is the most runtime-agnostic rule available, and on
+podman would most likely report every object as "docker did not say what happened" — the
+honest failure rather than a wrong success.
 
 **Engine age, without phoning home.** `{{.Server.BuildTime}}` gives an absolute age that
 cannot go stale and cannot be wrong. A baked table of release versions was considered and
 rejected: it needs an owner and a refresh cadence, and a table that rots states something
 false. Age alone is honest and free.
 
-**Size.** 21a: 3–5 days. 21b: 1.5–2 weeks, unscheduled.
+**Size.** 21a: 3–5 days. 21b: 1.5–2 weeks, spent.
 
 ---
 
