@@ -1,0 +1,15 @@
+===SHELLPILOT-DNODE===
+spk8s-worker||True
+===SHELLPILOT-DPODS===
+edge|log-shipper-c2hkg|DaemonSet|log-shipper|Running||{"app":"log-shipper","controller-revision-hash":"f6f5bdb68","pod-template-generation":"1"}|
+kube-system|kindnet-wzkbx|DaemonSet|kindnet|Running||{"app":"kindnet","controller-revision-hash":"68b4c65c75","k8s-app":"kindnet","pod-template-generation":"1","tier":"node"}|
+kube-system|kube-proxy-c979n|DaemonSet|kube-proxy|Running||{"controller-revision-hash":"84c68674f8","k8s-app":"kube-proxy","pod-template-generation":"1"}|
+shop|catalog-78f5dff949-bff58|ReplicaSet|catalog-78f5dff949|Running||{"app":"catalog","pod-template-hash":"78f5dff949","tier":"web"}|
+shop|checkout-6c99dcd7bb-n2bfx|ReplicaSet|checkout-6c99dcd7bb|Running||{"app":"checkout","pod-template-hash":"6c99dcd7bb","tier":"web"}|
+===SHELLPILOT-DPDB===
+shop|search-loose|2|3|1|3|{"app":"search"}|
+===SHELLPILOT-DEPS===
+default|kubernetes|=true,
+kube-system|kube-dns|coredns-674b8bbfcf-v6ksj=true,coredns-674b8bbfcf-j6w5t=true,
+shop|catalog|catalog-78f5dff949-bff58=true,catalog-78f5dff949-t6lmx=true,
+shop|checkout|checkout-6c99dcd7bb-29rw4=true,checkout-6c99dcd7bb-n2bfx=true,

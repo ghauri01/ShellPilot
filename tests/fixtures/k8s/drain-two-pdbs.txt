@@ -1,0 +1,15 @@
+===SHELLPILOT-DRAIN===
+node/spk8s-worker cordoned
+Warning: ignoring DaemonSet-managed Pods: edge/log-shipper-c2hkg, kube-system/kindnet-wzkbx, kube-system/kube-proxy-c979n
+evicting pod shop/catalog-58dbc7bbbf-7pkxl
+evicting pod shop/catalog-58dbc7bbbf-7m89p
+There are pending pods in node "spk8s-worker" when an error occurred: [error when evicting pods/"catalog-58dbc7bbbf-7m89p" -n "shop": This pod has more than one PodDisruptionBudget, which the eviction subresource does not support., error when evicting pods/"catalog-58dbc7bbbf-7pkxl" -n "shop": This pod has more than one PodDisruptionBudget, which the eviction subresource does not support.]
+pod/catalog-58dbc7bbbf-7m89p
+pod/catalog-58dbc7bbbf-7pkxl
+error: unable to drain node "spk8s-worker" due to error: [error when evicting pods/"catalog-58dbc7bbbf-7m89p" -n "shop": This pod has more than one PodDisruptionBudget, which the eviction subresource does not support., error when evicting pods/"catalog-58dbc7bbbf-7pkxl" -n "shop": This pod has more than one PodDisruptionBudget, which the eviction subresource does not support.], continuing command...
+There are pending nodes to be drained:
+ spk8s-worker
+error when evicting pods/"catalog-58dbc7bbbf-7m89p" -n "shop": This pod has more than one PodDisruptionBudget, which the eviction subresource does not support.
+error when evicting pods/"catalog-58dbc7bbbf-7pkxl" -n "shop": This pod has more than one PodDisruptionBudget, which the eviction subresource does not support.
+===SHELLPILOT-NODE===
+spk8s-worker   Ready,SchedulingDisabled   <none>   20m   v1.33.1

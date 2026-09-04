@@ -72,13 +72,45 @@ the sentences are real RBAC output, not a hand-written approximation of one.
 | `cordon-notfound.txt` | The same command against a node name that does not exist. |
 | `cordon-forbidden.txt` | The same command, impersonating `deployer`. Note the verb: kubectl needs **`get` on nodes** before it can patch one, so the denial names `get`, not `patch`. |
 
+### Drain preflights
+
+Each of these is one run of `buildK8sDrainPreflightCommand(node, 'kind-spk8s')` — four
+kubectl calls in one shell command, section markers included.
+
+| File | Node, and what makes it interesting |
+|---|---|
+| `preflight-blocked.txt` | `spk8s-worker`, holding four separate blockers at once: a bare pod, a pod with **two** emptyDir volumes, a `disruptionsAllowed: 0` budget over `catalog`, and the `matchExpressions` budget nothing can evaluate. |
+| `preflight-sole-endpoint.txt` | `spk8s-worker2`, holding the only Ready endpoint of Service `shop/checkout`. |
+| `preflight-clear.txt` | `spk8s-worker` after the blockers were removed and `checkout` was scaled to two. The one recording where a drain may proceed. |
+| `preflight-pdb-denied.txt` | **The important one.** Recorded as a ServiceAccount with cluster-wide `get`/`list` on pods, nodes and endpointslices and **nothing on `poddisruptionbudgets`**. Three blocks answer with real data and the fourth is a Forbidden line — which is what makes "an empty budget list" and "a budget list I was not allowed to read" distinguishable at all. |
+| `preflight-forbidden.txt` | The same command as `deployer`, who can read none of the four. |
+
+### Drains
+
+Each is one run of `buildK8sDrainCommand(node, 'kind-spk8s')`.
+
+| File | What happened |
+|---|---|
+| `drain-ok.txt` | Two pods evicted, `node/spk8s-worker drained`. Note the node is left **`Ready,SchedulingDisabled`** — kubectl does not uncordon afterwards. |
+| `drain-blocked-by-pdb.txt` | The recording that shaped the result type. Five pods were attempted, **three were evicted**, and two `catalog` pods hit `Cannot evict pod as it would violate the pod's disruption budget.` and were retried every five seconds until `global timeout reached: 2m0s`. A blocked drain is **not** a no-op. It also contains the case that corrected the parser: `search-698cd569f8-hhqrl` was rejected by the budget once and then evicted eight seconds later, so a rejection is not the same as a pod the budget is still holding. |
+| `drain-two-pdbs.txt` | **The trap documentation would not have shown.** With two PDBs overlapping one pod — one on `matchLabels: {app: catalog}`, one on `matchExpressions: tier In (web, api)` — the API server answers `This pod has more than one PodDisruptionBudget, which the eviction subresource does not support.` *regardless of what either budget allows*. Both budgets had disruptions to spare. Nothing was evicted. |
+| `drain-bare-pod.txt` | The refusal on a pod with no controller, with kubectl's real doubled wording: `cannot delete cannot delete Pods that declare no controller`. The node was cordoned **before** the refusal, which the read-back shows. |
+
 ## What could not be captured
 
 - **A multi-node drain in anger.** `kind` nodes are containers on one host; every
-  drain here rescheduled onto a sibling container on the same machine. Nothing in
-  these fixtures proves how a drain behaves when the remaining nodes cannot fit the
-  evicted pods — the pods go `Pending` and the drain still reports success, and that
-  path is untested against a real cluster.
+  drain here rescheduled onto a sibling container on the same machine, and the
+  cluster was never under real resource pressure. Nothing in these fixtures proves
+  how a drain behaves when the remaining nodes **cannot fit** the evicted pods: the
+  replacements go `Pending`, the eviction still succeeds, and `kubectl drain` still
+  reports the node drained. That path needs a real multi-node cluster with real
+  requests and limits, and it is untested.
+- **A drain of a NotReady node.** `planK8sDrain` carries a caveat about a kubelet
+  that never confirms the deletions, and that caveat is reasoned rather than
+  recorded — every node in these recordings was `Ready`.
+- **A StatefulSet drain.** Everything here is a Deployment or a DaemonSet, so
+  nothing exercises a pod with a bound `ReadWriteOnce` PersistentVolume that cannot
+  follow it to another node.
 - **Helm.** No `helm` binary was available on the recording machine, so the Helm
   release listing has only its **not-installed** path recorded. The parse of a real
   `helm list -A -o json` document is unproven.

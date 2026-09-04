@@ -1,0 +1,8 @@
+===SHELLPILOT-DRAIN===
+node/spk8s-worker cordoned
+error: unable to drain node "spk8s-worker" due to error: cannot delete cannot delete Pods that declare no controller (use --force to override): shop/orphan-debug, continuing command...
+There are pending nodes to be drained:
+ spk8s-worker
+cannot delete cannot delete Pods that declare no controller (use --force to override): shop/orphan-debug
+===SHELLPILOT-NODE===
+spk8s-worker   Ready,SchedulingDisabled   <none>   20m   v1.33.1

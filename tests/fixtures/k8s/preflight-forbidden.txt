@@ -1,0 +1,8 @@
+===SHELLPILOT-DNODE===
+Error from server (Forbidden): nodes "spk8s-worker" is forbidden: User "system:serviceaccount:shop:deployer" cannot get resource "nodes" in API group "" at the cluster scope
+===SHELLPILOT-DPODS===
+Error from server (Forbidden): pods is forbidden: User "system:serviceaccount:shop:deployer" cannot list resource "pods" in API group "" at the cluster scope
+===SHELLPILOT-DPDB===
+Error from server (Forbidden): poddisruptionbudgets.policy is forbidden: User "system:serviceaccount:shop:deployer" cannot list resource "poddisruptionbudgets" in API group "policy" at the cluster scope
+===SHELLPILOT-DEPS===
+Error from server (Forbidden): endpointslices.discovery.k8s.io is forbidden: User "system:serviceaccount:shop:deployer" cannot list resource "endpointslices" in API group "discovery.k8s.io" at the cluster scope

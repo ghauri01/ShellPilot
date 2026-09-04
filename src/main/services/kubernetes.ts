@@ -1,6 +1,9 @@
 import type {
   K8sCordonResult,
   K8sCordonTarget,
+  K8sDrainAssessment,
+  K8sDrainPlan,
+  K8sDrainResult,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -13,17 +16,23 @@ import type {
 import {
   buildK8sCordonCommand,
   buildK8sDiagnoseCommand,
+  buildK8sDrainCommand,
+  buildK8sDrainPreflightCommand,
   buildK8sOverviewCommand,
   buildK8sReadCommand,
   buildK8sRolloutRestartCommand,
   buildK8sTopCommand,
   parseK8sCordonResult,
   parseK8sDiagnosis,
+  assessK8sDrain,
+  parseK8sDrainPreflight,
+  parseK8sDrainResult,
   parseK8sOutput,
   parseK8sOverview,
   parseK8sRolloutResult,
   parseK8sUsage,
   planK8sCordon,
+  planK8sDrain,
   planK8sRollout
 } from '../../shared/kubernetes'
 
@@ -259,6 +268,101 @@ export class KubernetesReader {
         )
       }
       return parseK8sCordonResult(action, target.node, merge(r), r.code ?? null)
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Read everything the drain decision is made from.
+   *
+   * Exposed on its own so the panel can show the verdict BEFORE anyone reaches
+   * for a confirm dialog. It is a preview and nothing more — `drain` below
+   * takes this read again for itself, because endpoint readiness is only true
+   * of the instant it was read and the instant that matters is the one
+   * immediately before the command runs.
+   */
+  async drainPreflight(cfg: unknown, node: string, context?: string): Promise<K8sDrainAssessment> {
+    const fail = (detail: string): K8sDrainAssessment => {
+      const f = { ok: false, reason: 'unknown', detail } as const
+      // A transport failure makes every one of the four reads unknown, which is
+      // exactly what it is. Reporting it as "no PodDisruptionBudgets" would be
+      // the lie this module exists to refuse, arriving by a different route.
+      return assessK8sDrain(node, { nodeState: f, pods: f, pdbs: f, endpoints: f })
+    }
+    try {
+      const cmd = buildK8sDrainPreflightCommand(node, context)
+      // 45s: four kubectl calls at up to 10s each plus the SSH round trip. Same
+      // reasoning as the overview — a per-call bound that adds up past the
+      // exec's own timeout means the transport gives up first and the user sees
+      // a timeout instead of the three blocks that did answer.
+      const r = await this.deps.exec(cfg, cmd, 45_000)
+      if (!r.ok) return fail(r.error ?? 'could not reach the host')
+      return parseK8sDrainPreflight(node, merge(r), r.code ?? null)
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Drain a node, or refuse to.
+   *
+   * THE PREFLIGHT IS TAKEN HERE, not accepted from the caller, and that is the
+   * whole security and correctness story of this method. An assessment that
+   * crossed IPC is a structured-clone value with no runtime type; a caller that
+   * sent `{safe:true, blockers:[]}` would be granting itself permission to
+   * drain. It is also stale by construction — the renderer computed it when the
+   * dialog opened and the user has been reading it since.
+   *
+   * A REFUSAL IS NOT A SCARIER DIALOG. When the preflight says no, no drain
+   * command is built at all and the reasons come back as text. There is no
+   * override flag on this method, and `--force` / `--delete-emptydir-data` are
+   * not passed anywhere in this module — both of those turn a blocked drain
+   * into a successful one by destroying whatever blocked it.
+   */
+  async drain(
+    cfg: unknown,
+    node: string,
+    context: string | undefined,
+    confirmed: boolean
+  ): Promise<K8sDrainResult & { plan?: K8sDrainPlan }> {
+    const fail = (detail: string, plan?: K8sDrainPlan): K8sDrainResult & { plan?: K8sDrainPlan } => ({
+      ok: false,
+      node,
+      evicted: [],
+      pending: [],
+      pdbRejected: [],
+      partial: false,
+      output: '',
+      node_status: '',
+      reason: 'unknown',
+      detail,
+      ...(plan === undefined ? {} : { plan })
+    })
+    if (confirmed !== true) {
+      return fail('refusing to drain a node without an explicit confirmation')
+    }
+    try {
+      const assessment = await this.drainPreflight(cfg, node, context)
+      const plan = planK8sDrain(assessment)
+      if (plan.refusals.length > 0) {
+        return fail(
+          `refusing to drain ${node}: ${plan.refusals.join(' — ')}`,
+          plan
+        )
+      }
+      // 150s against the drain's own 120s --timeout. The transport must outlast
+      // kubectl, or a drain that stalls on a budget is reported as a host that
+      // went away — and the operator is then told the node is untouched when it
+      // has been cordoned and half emptied.
+      const r = await this.deps.exec(cfg, buildK8sDrainCommand(node, context), 150_000)
+      if (!r.ok) {
+        return fail(
+          `${r.error ?? 'could not reach the host'} — the drain was sent and its outcome is unknown; the node has been cordoned and some pods may already have moved. Re-read the node before retrying.`,
+          plan
+        )
+      }
+      return { ...parseK8sDrainResult(node, merge(r), r.code ?? null), plan }
     } catch (e) {
       return fail(e instanceof Error ? e.message : String(e))
     }

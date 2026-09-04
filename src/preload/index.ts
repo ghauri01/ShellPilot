@@ -60,6 +60,9 @@ import type {
 import type {
   K8sCordonResult,
   K8sCordonTarget,
+  K8sDrainAssessment,
+  K8sDrainPlan,
+  K8sDrainResult,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -499,7 +502,19 @@ const api = {
       cfg: unknown,
       target: K8sCordonTarget,
       confirmed: boolean
-    ): Promise<K8sCordonResult> => ipcRenderer.invoke('k8s:cordon', cfg, target, confirmed)
+    ): Promise<K8sCordonResult> => ipcRenderer.invoke('k8s:cordon', cfg, target, confirmed),
+    drainPreflight: (
+      cfg: unknown,
+      node: string,
+      context?: string
+    ): Promise<K8sDrainAssessment> => ipcRenderer.invoke('k8s:drain-preflight', cfg, node, context),
+    drain: (
+      cfg: unknown,
+      node: string,
+      context: string | undefined,
+      confirmed: boolean
+    ): Promise<K8sDrainResult & { plan?: K8sDrainPlan }> =>
+      ipcRenderer.invoke('k8s:drain', cfg, node, context, confirmed)
   },
   // `satisfies DockerBridge` so a channel added to the contract and forgotten
   // here is a compile error rather than a method the panel calls at runtime and

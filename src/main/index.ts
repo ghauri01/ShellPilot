@@ -1882,6 +1882,19 @@ ipcMain.handle(
   (_e, cfg: unknown, target: K8sCordonTarget, confirmed: unknown) =>
     k8sReader.cordon(cfg, target, confirmed === true)
 )
+// The preflight is a READ, so it needs no confirmation and is offered on its
+// own: the panel shows the verdict before anybody reaches for a dialog.
+ipcMain.handle('k8s:drain-preflight', (_e, cfg: unknown, node: string, context?: string) =>
+  k8sReader.drainPreflight(cfg, node, context)
+)
+// The drain re-takes that preflight for itself and refuses on its own reading,
+// never on one that crossed IPC. There is no override argument on this channel
+// on purpose — see KubernetesReader.drain.
+ipcMain.handle(
+  'k8s:drain',
+  (_e, cfg: unknown, node: string, context: string | undefined, confirmed: unknown) =>
+    k8sReader.drain(cfg, node, context, confirmed === true)
+)
 
 ipcMain.handle('docker:list', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
   dockerReader.list(cfg, opts ?? {})

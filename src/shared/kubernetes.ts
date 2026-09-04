@@ -59,10 +59,20 @@
 //    consent story, and it would arrive there by accident rather than by
 //    decision. `rollout restart` is a human clicking a confirm dialog.
 //
-// CORDON AND UNCORDON now ship, and they are the honest first step of the
-// node-lifecycle half: a cordon changes one boolean on the Node object and
-// evicts nothing, so the worst case is that pods stop landing somewhere until
-// somebody notices. See buildK8sCordonCommand.
+// CORDON, UNCORDON AND DRAIN now ship. A cordon changes one boolean on the
+// Node object and evicts nothing, so it is the honest first step; a drain is
+// the dangerous one, and it ships only because the two things the refusal
+// above named as missing — PDB awareness and endpoint state at the moment of
+// the click — are now read and are now BLOCKING. A drain that cannot see a
+// PodDisruptionBudget is refused rather than attempted. See
+// buildK8sDrainPreflightCommand and assessK8sDrain.
+//
+// Single-pod DELETION is still refused, and the second half of the paragraph
+// above is still why: a drain answers "can this node lose everything on it",
+// which is a question about a node and is answerable from the node's own pod
+// list. "Can this workload lose this one pod" is a question about a workload,
+// and `rollout restart` already reaches the same remediation through the
+// controller.
 //
 // RBAC is the part that makes Kubernetes different from Docker, and the honest
 // position is that we cannot predict it: a token may list pods in one namespace
@@ -1484,5 +1494,785 @@ export function planK8sCordon(target: K8sCordonTarget): K8sCordonPlan {
     confirmation: { kind: 'confirm' },
     reasons,
     caveats
+  }
+}
+
+// =========================================================================
+// NODE LIFECYCLE, PART 2: DRAIN
+// =========================================================================
+//
+// The dangerous one, and the file's original refusal named the precondition:
+// ownership references tell you a pod will be RECREATED, they do not tell you
+// the workload can afford to lose it RIGHT NOW. That gap is what this section
+// closes, and the rule is that it closes it or the drain does not run — there
+// is no "warn harder and let them through" path here.
+//
+// A DRAIN IS NOT ATOMIC, which is the fact that decides the whole design.
+// Recorded against a real three-node cluster: a drain of a node holding one
+// `search` pod and one `catalog` pod evicted `search`, then hit a
+// PodDisruptionBudget on `catalog` and retried it every five seconds until the
+// timeout. It ended with `error: unable to drain node`, exit 1 — and one pod
+// already gone. So a drain that "fails" has still moved half the workloads,
+// and a check that happens after the click is not a check. Everything below
+// runs BEFORE kubectl drain is built.
+//
+// WHAT IS CHECKED, AND WHY EACH ONE IS HERE:
+//
+//  1. A POD WITH NO OWNER. `kubectl drain` refuses these itself unless given
+//     `--force`, and we do not pass `--force`. It is in the list anyway
+//     because the operator should be told which pod and why before the
+//     command runs, rather than reading kubectl's doubled "cannot delete
+//     cannot delete Pods that declare no controller" out of an error pane.
+//
+//  2. A PDB WITH NO DISRUPTIONS LEFT. `.status.disruptionsAllowed` at zero
+//     means the API server will reject the eviction with `Cannot evict pod as
+//     it would violate the pod's disruption budget.` — recorded verbatim.
+//     kubectl then retries forever. A drain that ignores PodDisruptionBudgets
+//     is how a service goes down during routine maintenance.
+//
+//  3. A POD COVERED BY MORE THAN ONE PDB. Found by running it, and not
+//     something documentation would have shown: the API server answers
+//
+//       This pod has more than one PodDisruptionBudget, which the eviction
+//       subresource does not support.
+//
+//     — regardless of what either budget allows. Two PDBs that each permit a
+//     disruption still make every pod they overlap on completely unevictable,
+//     so a check that only looked at `disruptionsAllowed` would have cleared a
+//     drain that cannot make progress at all.
+//
+//  4. A PDB SELECTOR WE CANNOT EVALUATE. `matchLabels` we can match against a
+//     pod's labels. `matchExpressions` we cannot, from a list read. An
+//     unevaluated selector is an UNKNOWN, and the entire premise of this
+//     module is that "could not see" must never render as "nothing there" —
+//     so an unreadable selector in a namespace whose pods are about to be
+//     evicted refuses the drain instead of being skipped.
+//
+//  5. THE ONLY READY ENDPOINT BEHIND A SERVICE. The case the original refusal
+//     named. Ownership says this pod comes back; the EndpointSlice says that
+//     between now and then the Service has nowhere to send traffic. Read at
+//     the moment of the click, because that is the only moment it is true of.
+//
+//  6. AN emptyDir VOLUME. `kubectl drain` refuses without
+//     `--delete-emptydir-data`, and that flag deletes the data. We do not pass
+//     it, so this is a refusal with a name rather than a flag we quietly set.
+//
+//  7. ANY READ THAT DID NOT ANSWER. RBAC refuses verbs individually — a token
+//     can list pods and be denied PodDisruptionBudgets, and the API server
+//     says so on stderr while the list comes back empty. An empty PDB list
+//     from a denied read is indistinguishable from a cluster with no PDBs
+//     unless the failure is carried, which is why `unchecked` exists and why
+//     it blocks exactly as hard as a real blocker does.
+//
+// WHAT IS STILL REFUSED: `--force` (bare pods) and `--delete-emptydir-data`.
+// Both turn a blocked drain into a successful one by destroying the thing
+// that blocked it, which is not the same as the drain being safe.
+
+/** A pod on the node being drained, as the preflight read it. */
+export interface K8sDrainPod {
+  namespace: string
+  name: string
+  /** ReplicaSet, StatefulSet, DaemonSet, Job, Node (a static pod), or '' for a bare pod. */
+  ownerKind: string
+  ownerName: string
+  phase: string
+  /** True when this is a static pod mirrored onto the API server. */
+  mirror: boolean
+  /** Labels, for matching PodDisruptionBudget selectors. */
+  labels: Record<string, string>
+  /** How many emptyDir volumes the pod declares. */
+  emptyDirs: number
+}
+
+/** A PodDisruptionBudget, with the half of its selector we can evaluate. */
+export interface K8sPdb {
+  namespace: string
+  name: string
+  /** `.status.disruptionsAllowed`, or null when the field was absent. */
+  disruptionsAllowed: number | null
+  currentHealthy: number | null
+  desiredHealthy: number | null
+  expectedPods: number | null
+  matchLabels: Record<string, string>
+  /**
+   * True when the selector carries matchExpressions.
+   *
+   * The flag rather than the expressions themselves, because we do not
+   * evaluate them — we refuse. Storing a parsed form we never use would read
+   * as though we did.
+   */
+  hasMatchExpressions: boolean
+}
+
+/** The Ready pods behind one Service, unioned across its EndpointSlices. */
+export interface K8sServiceEndpoints {
+  namespace: string
+  service: string
+  /** Pod names that are Ready right now. */
+  readyPods: string[]
+  /**
+   * Ready endpoints with no `targetRef` — the API server's own Service has
+   * one. Counted separately because they keep a Service serving without being
+   * a pod anything here can evict.
+   */
+  readyWithoutPod: number
+}
+
+export interface K8sDrainNode {
+  name: string
+  unschedulable: boolean
+  /** 'True', 'False', 'Unknown', or '' when the condition was not read. */
+  ready: string
+}
+
+export type K8sDrainBlockerKind =
+  | 'bare-pod'
+  | 'pdb-exhausted'
+  | 'pdb-multiple'
+  | 'pdb-unreadable-selector'
+  | 'sole-ready-endpoint'
+  | 'local-storage'
+
+export interface K8sDrainBlocker {
+  kind: K8sDrainBlockerKind
+  namespace: string
+  /** The pod, PDB or Service this is about. */
+  subject: string
+  detail: string
+}
+
+/** A read that did not answer, and therefore a question nobody can say yes to. */
+export interface K8sDrainUnchecked {
+  /** Which read. */
+  read: 'node' | 'pods' | 'pdbs' | 'endpoints'
+  reason: K8sFailure
+  detail: string
+  /** What is now unknown, in the words the refusal will use. */
+  meaning: string
+}
+
+export interface K8sDrainAssessment {
+  node: string
+  nodeState: K8sDrainNode | null
+  /** Pods a drain would actually evict: not DaemonSet-owned, not static, not finished. */
+  evictable: K8sDrainPod[]
+  /** Set aside by `--ignore-daemonsets`. */
+  daemonSetPods: K8sDrainPod[]
+  /** Static pods. A drain cannot evict them and the kubelet keeps running them. */
+  mirrorPods: K8sDrainPod[]
+  /** Succeeded or Failed. Nothing to evict. */
+  finishedPods: K8sDrainPod[]
+  blockers: K8sDrainBlocker[]
+  unchecked: K8sDrainUnchecked[]
+  /**
+   * True only when every read answered AND nothing blocks.
+   *
+   * Deliberately not "no blockers": a preflight that could not list
+   * PodDisruptionBudgets has no blockers either, and that is the failure this
+   * whole module is shaped to refuse.
+   */
+  safe: boolean
+}
+
+const DRAIN_PODS_JSONPATH =
+  `'jsonpath={range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}` +
+  `{.metadata.ownerReferences[0].kind}{"|"}{.metadata.ownerReferences[0].name}{"|"}` +
+  `{.status.phase}{"|"}{.metadata.annotations.kubernetes\\.io/config\\.mirror}{"|"}` +
+  `{.metadata.labels}{"|"}{.spec.volumes[*].emptyDir}{"\\n"}{end}'`
+
+const DRAIN_PDB_JSONPATH =
+  `'jsonpath={range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}` +
+  `{.status.disruptionsAllowed}{"|"}{.status.currentHealthy}{"|"}{.status.desiredHealthy}{"|"}` +
+  `{.status.expectedPods}{"|"}{.spec.selector.matchLabels}{"|"}` +
+  `{.spec.selector.matchExpressions}{"\\n"}{end}'`
+
+// The nested `range` is what makes this safe. A flat
+// `{.endpoints[*].targetRef.name}` and `{.endpoints[*].conditions.ready}` are
+// two independently joined lists, and an endpoint with no targetRef — the
+// `default/kubernetes` Service has exactly one — shortens the first list and
+// silently shifts every readiness flag onto the wrong pod. Pairing them inside
+// one range means the two halves can never come apart.
+const DRAIN_SLICE_JSONPATH =
+  `'jsonpath={range .items[*]}{.metadata.namespace}{"|"}` +
+  `{.metadata.labels.kubernetes\\.io/service-name}{"|"}` +
+  `{range .endpoints[*]}{.targetRef.name}{"="}{.conditions.ready}{","}{end}{"\\n"}{end}'`
+
+const DRAIN_NODE_JSONPATH =
+  `'jsonpath={.metadata.name}{"|"}{.spec.unschedulable}{"|"}` +
+  `{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\\n"}'`
+
+/**
+ * Everything the drain decision is made from, in one round trip.
+ *
+ * One trip rather than four because the four are one question asked at one
+ * moment. Endpoint readiness in particular is only true of the instant it was
+ * read, and four sequential SSH round trips through a bastion would spread
+ * that instant over several seconds of a cluster that is, by hypothesis,
+ * about to be changed.
+ *
+ * Every field is read as jsonpath rather than custom-columns, which is a
+ * departure from the rest of this file and a deliberate one: labels and PDB
+ * selectors are MAPS, and kubectl renders a map in custom-columns as Go's
+ * `map[a:1 b:2]` — spaces and all — which a column-splitting parser cannot
+ * take apart. jsonpath prints compact JSON with no spaces, and `|` is not a
+ * legal character in any Kubernetes name or label value, so the delimiter
+ * cannot appear inside a field.
+ */
+export function buildK8sDrainPreflightCommand(node: string, context?: string): string {
+  if (!validateNodeName(node)) {
+    throw new Error('refusing to build a command from an invalid node name')
+  }
+  const ctx = context && validateContext(context) ? ` --context=${context}` : ''
+  return [
+    k8sResolve(),
+    call('DNODE', `get node ${node} -o ${DRAIN_NODE_JSONPATH}${ctx}`),
+    call(
+      'DPODS',
+      `get pods --all-namespaces --field-selector spec.nodeName=${node} -o ${DRAIN_PODS_JSONPATH}${ctx}`
+    ),
+    // Cluster-wide rather than per namespace: the pods on one node can belong
+    // to any namespace, and asking per namespace would need a list of
+    // namespaces this token may well not be allowed to read either.
+    call('DPDB', `get poddisruptionbudgets --all-namespaces -o ${DRAIN_PDB_JSONPATH}${ctx}`),
+    // EndpointSlice, not Endpoints. `kubectl get endpoints` on 1.33 prints
+    // `Warning: v1 Endpoints is deprecated in v1.33+` onto stderr, which the
+    // builders redirect into the data block — and on a later server it stops
+    // answering at all.
+    call('DEPS', `get endpointslices --all-namespaces -o ${DRAIN_SLICE_JSONPATH}${ctx}`)
+  ].join('; ')
+}
+
+/** `{"a":"b"}` from jsonpath, or `{}` for a field that was absent. */
+function parseLabelJson(raw: string): Record<string, string> {
+  const t = raw.trim()
+  if (t === '' || t === '{}' || t === '<none>') return {}
+  try {
+    const v: unknown = JSON.parse(t)
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return {}
+    const out: Record<string, string> = {}
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof val === 'string') out[k] = val
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+const intOrNull = (raw: string): number | null => {
+  const t = raw.trim()
+  if (t === '') return null
+  const n = Number(t)
+  return Number.isFinite(n) ? n : null
+}
+
+const DRAIN_POD_FIELDS = 8
+
+function parseDrainPods(text: string): K8sDrainPod[] {
+  const pods: K8sDrainPod[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || NO_RESOURCES.test(line)) continue
+    const f = line.split('|')
+    // Shape, never content — the rule the pod and event parsers already
+    // follow. An RBAC error sentence has no `|` in it at all, so it cannot
+    // reach eight fields, and a namespace called `error-reporting` still can.
+    if (f.length < DRAIN_POD_FIELDS) continue
+    const [ns, name, ownerKind, ownerName, phase, mirror, labels] = f
+    if (!validateNamespace(ns) || !validatePodName(name)) continue
+    const emptyDirBlob = f.slice(DRAIN_POD_FIELDS - 1).join('|').trim()
+    pods.push({
+      namespace: ns,
+      name,
+      ownerKind: ownerKind.trim(),
+      ownerName: ownerName.trim(),
+      phase: phase.trim(),
+      mirror: mirror.trim() !== '',
+      labels: parseLabelJson(labels),
+      // jsonpath joins repeated matches with a SPACE — recorded from a pod with
+      // two emptyDir volumes, which printed `{} {"sizeLimit":"1Gi"}`. Counting
+      // the `{` is what survives that; splitting on whitespace would report one.
+      emptyDirs: (emptyDirBlob.match(/\{/g) ?? []).length
+    })
+  }
+  return pods
+}
+
+const DRAIN_PDB_FIELDS = 8
+
+function parseDrainPdbs(text: string): K8sPdb[] {
+  const out: K8sPdb[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || NO_RESOURCES.test(line)) continue
+    const f = line.split('|')
+    if (f.length < DRAIN_PDB_FIELDS) continue
+    const [ns, name, allowed, healthy, desired, expected, matchLabels] = f
+    if (!validateNamespace(ns) || !validatePodName(name)) continue
+    const expr = f.slice(DRAIN_PDB_FIELDS - 1).join('|').trim()
+    out.push({
+      namespace: ns,
+      name,
+      disruptionsAllowed: intOrNull(allowed),
+      currentHealthy: intOrNull(healthy),
+      desiredHealthy: intOrNull(desired),
+      expectedPods: intOrNull(expected),
+      matchLabels: parseLabelJson(matchLabels),
+      hasMatchExpressions: expr !== '' && expr !== '<none>'
+    })
+  }
+  return out
+}
+
+function parseDrainEndpoints(text: string): K8sServiceEndpoints[] {
+  // Keyed so several EndpointSlices for one Service are unioned. A Service
+  // with more than a hundred endpoints gets more than one slice, and reading
+  // each slice as its own Service would report a pod as the sole endpoint of a
+  // Service that has ninety-nine others.
+  const byService = new Map<string, K8sServiceEndpoints>()
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || NO_RESOURCES.test(line)) continue
+    const f = line.split('|')
+    if (f.length < 3) continue
+    const [ns, service] = f
+    if (!validateNamespace(ns) || service.trim() === '') continue
+    const key = `${ns}/${service}`
+    const entry = byService.get(key) ?? {
+      namespace: ns,
+      service: service.trim(),
+      readyPods: [],
+      readyWithoutPod: 0
+    }
+    for (const pair of f.slice(2).join('|').split(',')) {
+      if (pair.trim() === '') continue
+      const eq = pair.lastIndexOf('=')
+      if (eq < 0) continue
+      const pod = pair.slice(0, eq).trim()
+      const ready = pair.slice(eq + 1).trim()
+      if (ready !== 'true') continue
+      if (pod === '') entry.readyWithoutPod += 1
+      else if (!entry.readyPods.includes(pod)) entry.readyPods.push(pod)
+    }
+    byService.set(key, entry)
+  }
+  return [...byService.values()]
+}
+
+function parseDrainNode(text: string): K8sDrainNode | null {
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '') continue
+    const f = line.split('|')
+    if (f.length < 3) continue
+    if (!validateNodeName(f[0])) continue
+    return {
+      name: f[0].trim(),
+      // Absent when the node is schedulable — the field only exists once
+      // something has set it — so "not the string true" is the test.
+      unschedulable: f[1].trim() === 'true',
+      ready: f[2].trim()
+    }
+  }
+  return null
+}
+
+/** Does this PDB's matchLabels selector cover this pod? */
+function pdbCovers(pdb: K8sPdb, pod: K8sDrainPod): boolean {
+  if (pdb.namespace !== pod.namespace) return false
+  const keys = Object.keys(pdb.matchLabels)
+  // An EMPTY selector is not "matches nothing" — in Kubernetes a PDB with
+  // `selector: {}` matches EVERY pod in its namespace. Reading it the other
+  // way round is the single most dangerous mistake available here: it would
+  // silently clear a drain against a budget covering the whole namespace.
+  if (keys.length === 0) return true
+  return keys.every((k) => pod.labels[k] === pdb.matchLabels[k])
+}
+
+const DAEMONSET_KINDS = /^DaemonSet$/
+const FINISHED_PHASES = /^(Succeeded|Failed)$/
+
+/**
+ * Decide whether this node can be drained, from a preflight and nothing else.
+ *
+ * Pure, so the same decision can be tested against recorded cluster output and
+ * re-derived in the main process from a fresh read. The renderer's copy is a
+ * preview; the one that matters is taken again immediately before the drain
+ * command is built.
+ */
+export function assessK8sDrain(
+  node: string,
+  input: {
+    nodeState: K8sRead<K8sDrainNode>
+    pods: K8sRead<K8sDrainPod>
+    pdbs: K8sRead<K8sPdb>
+    endpoints: K8sRead<K8sServiceEndpoints>
+  }
+): K8sDrainAssessment {
+  const unchecked: K8sDrainUnchecked[] = []
+  const push = (
+    read: K8sDrainUnchecked['read'],
+    r: { ok: false; reason: K8sFailure; detail: string },
+    meaning: string
+  ): void => {
+    unchecked.push({ read, reason: r.reason, detail: r.detail, meaning })
+  }
+
+  if (!input.nodeState.ok) {
+    push('node', input.nodeState, 'whether this node exists, and whether it is already cordoned')
+  }
+  if (!input.pods.ok) {
+    push('pods', input.pods, 'what is running on this node at all')
+  }
+  if (!input.pdbs.ok) {
+    push(
+      'pdbs',
+      input.pdbs,
+      'whether a PodDisruptionBudget would reject these evictions — an empty budget list from a denied read looks exactly like a cluster that has none'
+    )
+  }
+  if (!input.endpoints.ok) {
+    push(
+      'endpoints',
+      input.endpoints,
+      'whether any of these pods is the last Ready endpoint behind a Service'
+    )
+  }
+
+  const allPods = input.pods.ok ? input.pods.items : []
+  const daemonSetPods = allPods.filter((p) => DAEMONSET_KINDS.test(p.ownerKind))
+  const mirrorPods = allPods.filter((p) => p.mirror && !DAEMONSET_KINDS.test(p.ownerKind))
+  const finishedPods = allPods.filter(
+    (p) =>
+      FINISHED_PHASES.test(p.phase) && !DAEMONSET_KINDS.test(p.ownerKind) && !p.mirror
+  )
+  const evictable = allPods.filter(
+    (p) => !DAEMONSET_KINDS.test(p.ownerKind) && !p.mirror && !FINISHED_PHASES.test(p.phase)
+  )
+
+  const blockers: K8sDrainBlocker[] = []
+  const pdbs = input.pdbs.ok ? input.pdbs.items : []
+  const namespacesInPlay = new Set(evictable.map((p) => p.namespace))
+
+  // 4, first: an unreadable selector in a namespace whose pods are about to
+  // move. Reported per PDB rather than per pod, because the thing nobody can
+  // evaluate is the budget, and naming it is what lets somebody go and read it.
+  for (const pdb of pdbs) {
+    if (!pdb.hasMatchExpressions) continue
+    if (!namespacesInPlay.has(pdb.namespace)) continue
+    blockers.push({
+      kind: 'pdb-unreadable-selector',
+      namespace: pdb.namespace,
+      subject: pdb.name,
+      detail:
+        `this PodDisruptionBudget selects pods with matchExpressions, which a list read cannot evaluate. ` +
+        `Whether it covers the pods on ${node} is unknown, and an unknown budget is not a permission.`
+    })
+  }
+
+  for (const pod of evictable) {
+    if (pod.ownerKind === '') {
+      blockers.push({
+        kind: 'bare-pod',
+        namespace: pod.namespace,
+        subject: pod.name,
+        detail:
+          'nothing owns this pod, so nothing recreates it. Draining the node deletes it for good.'
+      })
+    }
+    if (pod.emptyDirs > 0) {
+      blockers.push({
+        kind: 'local-storage',
+        namespace: pod.namespace,
+        subject: pod.name,
+        detail:
+          `this pod has ${pod.emptyDirs} emptyDir volume(s). kubectl refuses to evict it without ` +
+          `--delete-emptydir-data, and that flag deletes the data rather than moving it.`
+      })
+    }
+
+    const covering = pdbs.filter((b) => pdbCovers(b, pod))
+    if (covering.length > 1) {
+      blockers.push({
+        kind: 'pdb-multiple',
+        namespace: pod.namespace,
+        subject: pod.name,
+        detail:
+          `covered by ${covering.length} PodDisruptionBudgets (${covering.map((b) => b.name).join(', ')}). ` +
+          `The eviction subresource refuses a pod with more than one budget outright, whatever either one allows.`
+      })
+    }
+    for (const b of covering) {
+      if (b.disruptionsAllowed !== null && b.disruptionsAllowed <= 0) {
+        blockers.push({
+          kind: 'pdb-exhausted',
+          namespace: pod.namespace,
+          subject: pod.name,
+          detail:
+            `PodDisruptionBudget ${b.name} allows ${b.disruptionsAllowed} disruptions right now ` +
+            `(${b.currentHealthy ?? '?'} healthy, ${b.desiredHealthy ?? '?'} required). The API server ` +
+            `will reject this eviction and kubectl will retry it until the timeout.`
+        })
+      }
+    }
+
+    for (const svc of input.endpoints.ok ? input.endpoints.items : []) {
+      if (svc.namespace !== pod.namespace) continue
+      if (!svc.readyPods.includes(pod.name)) continue
+      if (svc.readyPods.length + svc.readyWithoutPod > 1) continue
+      blockers.push({
+        kind: 'sole-ready-endpoint',
+        namespace: pod.namespace,
+        subject: pod.name,
+        detail:
+          `this pod is the only Ready endpoint behind Service ${svc.service}. Its owner will recreate it, ` +
+          `and between the eviction and the replacement becoming Ready that Service has nowhere to send traffic.`
+      })
+    }
+  }
+
+  return {
+    node,
+    nodeState: input.nodeState.ok ? (input.nodeState.items[0] ?? null) : null,
+    evictable,
+    daemonSetPods,
+    mirrorPods,
+    finishedPods,
+    blockers,
+    unchecked,
+    safe: blockers.length === 0 && unchecked.length === 0
+  }
+}
+
+export function parseK8sDrainPreflight(
+  node: string,
+  output: string,
+  exitCode: number | null
+): K8sDrainAssessment {
+  return assessK8sDrain(node, {
+    nodeState: readBlock(section(output, 'DNODE'), (t) => {
+      const n = parseDrainNode(t)
+      return n === null ? [] : [n]
+    }, exitCode),
+    pods: readBlock(section(output, 'DPODS'), parseDrainPods, exitCode),
+    pdbs: readBlock(section(output, 'DPDB'), parseDrainPdbs, exitCode),
+    endpoints: readBlock(section(output, 'DEPS'), parseDrainEndpoints, exitCode)
+  })
+}
+
+/**
+ * How long kubectl will keep retrying evictions before giving up.
+ *
+ * Bounded, and not optional. Without `--timeout` a drain blocked by a
+ * PodDisruptionBudget retries every five seconds forever, holding the SSH exec
+ * open past every timeout this app has. Two minutes is long enough for a
+ * rolling replacement to become Ready and short enough that the user gets an
+ * answer.
+ */
+export const K8S_DRAIN_TIMEOUT_SECONDS = 120
+
+/**
+ * The drain itself.
+ *
+ * Three flags and no more:
+ *  - `--ignore-daemonsets`, because a DaemonSet pod is recreated on the same
+ *    node by definition and refusing to drain over one means never draining.
+ *  - `--timeout`, see above.
+ *  - `--delete-emptydir-data=false` and `--force=false` written EXPLICITLY
+ *    rather than left to kubectl's defaults. They are the two flags that turn
+ *    a blocked drain into a successful one by destroying what blocked it, a
+ *    future kubectl could change either default, and a reader auditing this
+ *    line should be able to see the answer rather than have to know it.
+ */
+export function buildK8sDrainCommand(node: string, context?: string): string {
+  if (!validateNodeName(node)) {
+    throw new Error('refusing to build a command from an invalid node name')
+  }
+  const ctx = context && validateContext(context) ? ` --context=${context}` : ''
+  return [
+    k8sResolve(),
+    call(
+      'DRAIN',
+      `drain ${node} --ignore-daemonsets --force=false --delete-emptydir-data=false ` +
+        `--timeout=${K8S_DRAIN_TIMEOUT_SECONDS}s${ctx}`
+    ),
+    call('NODE', `get node ${node} --no-headers${ctx}`)
+  ].join('; ')
+}
+
+export interface K8sDrainResult {
+  ok: boolean
+  node: string
+  /** Pods kubectl reported as evicted, in the order it reported them. */
+  evicted: string[]
+  /** Pods it was still trying to evict when it stopped. */
+  pending: string[]
+  /**
+   * Pods a PodDisruptionBudget is STILL holding, once the retries are read.
+   *
+   * Its own field because it is the one failure that means "try again later"
+   * rather than "something is wrong" — and because if the preflight cleared
+   * the drain and this is non-empty, the cluster changed between the check and
+   * the click, which is worth being able to see.
+   *
+   * Pods that were rejected and then evicted on a later retry are NOT here,
+   * and that is a correction the real recording forced: a drain of five pods
+   * printed a budget rejection for `search-698cd569f8-hhqrl` and then evicted
+   * it eight seconds later, once its sibling had come back Ready. Listing it
+   * as blocked would have named a pod that is already gone, next to the two
+   * that genuinely never moved.
+   */
+  pdbRejected: string[]
+  /**
+   * A drain that failed after evicting something.
+   *
+   * The field the recording forced: a real blocked drain moved one pod and
+   * then stalled on another. Rendering that as a plain failure tells the
+   * operator the node is untouched, which is how somebody reboots it.
+   */
+  partial: boolean
+  output: string
+  node_status: string
+  reason?: K8sFailure
+  detail?: string
+}
+
+const EVICTED_RE = /^pod\/(\S+) evicted$/
+const PDB_REJECT_RE = /error when evicting pods?\/"([^"]+)"/
+const EVICTING_RE = /^evicting pod (?:(\S+)\/)?(\S+)$/
+
+export function parseK8sDrainResult(
+  node: string,
+  output: string,
+  exitCode: number | null
+): K8sDrainResult {
+  const said = section(output, 'DRAIN')
+  const nodeRow = section(output, 'NODE').trim()
+  const status = nodeRow === '' || looksLikeError(nodeRow) ? '' : nodeRow
+
+  const evicted: string[] = []
+  const attempted: string[] = []
+  const pdbRejected: string[] = []
+  for (const raw of said.split('\n')) {
+    const line = raw.trim()
+    const ev = EVICTED_RE.exec(line)
+    if (ev) {
+      if (!evicted.includes(ev[1])) evicted.push(ev[1])
+      continue
+    }
+    const trying = EVICTING_RE.exec(line)
+    if (trying && !attempted.includes(trying[2])) attempted.push(trying[2])
+    // Matched anywhere in the line, not anchored: kubectl prints these both on
+    // their own and rolled up inside a bracketed list at the end.
+    if (/violate the pod's disruption budget/.test(line)) {
+      const who = PDB_REJECT_RE.exec(line)
+      if (who && !pdbRejected.includes(who[1])) pdbRejected.push(who[1])
+    }
+  }
+  const pending = attempted.filter((p) => !evicted.includes(p))
+  // See the field comment: a rejection that a later retry got past is not a
+  // pod the budget is holding.
+  const stillRejected = pdbRejected.filter((p) => !evicted.includes(p))
+
+  // kubectl's own summary line for a drain that did not finish. Decided on
+  // this rather than on the exit code alone, because the exec's exit code is
+  // the last command in the chain — the node read — not the drain.
+  const failed =
+    /^error: unable to drain node/m.test(said) ||
+    /There are pending nodes to be drained/.test(said) ||
+    said.trim() === ''
+  if (failed) {
+    const first =
+      said.split('\n').map((l) => l.trim()).find((l) => l !== '' && looksLikeError(l)) ?? said.trim()
+    return {
+      ok: false,
+      node,
+      evicted,
+      pending,
+      pdbRejected: stillRejected,
+      partial: evicted.length > 0,
+      output: said.trim(),
+      node_status: status,
+      reason: classifyK8sFailure(first, exitCode),
+      detail: first || 'kubectl returned nothing'
+    }
+  }
+  return {
+    ok: true,
+    node,
+    evicted,
+    pending,
+    pdbRejected: stillRejected,
+    partial: false,
+    output: said.trim(),
+    node_status: status
+  }
+}
+
+export interface K8sDrainPlan {
+  node: string
+  assessment: K8sDrainAssessment
+  risk: BroadcastRisk
+  confirmation: BroadcastConfirmation
+  reasons: string[]
+  caveats: string[]
+  /**
+   * Why this drain will not be run at all.
+   *
+   * Empty means it may be. Non-empty means the confirmation below is never
+   * shown — a refusal is not a scarier dialog, it is no dialog.
+   */
+  refusals: string[]
+}
+
+/** The word a drain makes you type. Never anything softer. */
+export const K8S_DRAIN_PHRASE = 'DRAIN'
+
+/**
+ * Whether this drain may be offered, and how hard the user has to press.
+ *
+ * `type-to-confirm` unconditionally, which is the opposite of the rollout's
+ * scaling rule and is right for the same reason the rollout's is: a rollout
+ * restart converges back to the workload's declared state, and a drain leaves
+ * every pod on some other node and the node itself out of the fleet until
+ * somebody uncordons it. There is no routine case to keep the typed word cheap
+ * for.
+ */
+export function planK8sDrain(assessment: K8sDrainAssessment): K8sDrainPlan {
+  const refusals = [
+    ...assessment.unchecked.map(
+      (u) =>
+        `the ${u.read} read did not answer (${u.reason}: ${u.detail}), so nobody can say ${u.meaning}`
+    ),
+    ...assessment.blockers.map((b) => `${b.namespace}/${b.subject}: ${b.detail}`)
+  ]
+  const reasons = [
+    `every pod on ${assessment.node} that a controller owns is evicted and rescheduled elsewhere`,
+    `${assessment.evictable.length} pod(s) move; ${assessment.daemonSetPods.length} DaemonSet pod(s) are left where they are`
+  ]
+  const caveats: string[] = [
+    'a drain cordons the node first and does not uncordon it afterwards — the node stays out of the fleet until somebody puts it back',
+    // The recorded behaviour, and the reason the result type carries `partial`.
+    'a drain that fails has still evicted whatever it got through before it stopped; it is not all-or-nothing'
+  ]
+  if (assessment.mirrorPods.length > 0) {
+    caveats.push(
+      `${assessment.mirrorPods.length} static pod(s) here cannot be evicted at all — the kubelet keeps running them from disk, whatever the API server says`
+    )
+  }
+  if (assessment.nodeState?.ready === 'False' || assessment.nodeState?.ready === 'Unknown') {
+    caveats.push(
+      'this node is not Ready, so its kubelet may never confirm the deletions and the drain can sit on pods that are already gone'
+    )
+  }
+
+  return {
+    node: assessment.node,
+    assessment,
+    risk: 'destructive',
+    confirmation: { kind: 'type-to-confirm', phrase: K8S_DRAIN_PHRASE },
+    reasons,
+    caveats,
+    refusals
   }
 }

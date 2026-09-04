@@ -852,6 +852,26 @@ describe('what must NOT be able to reach this', () => {
       'planK8sCordon',
       'parseK8sCordonResult',
       'k8s:cordon',
+      // The drain, which is the sharpest case in this block. It evicts every
+      // controller-owned pod on a machine and leaves the machine cordoned
+      // afterwards — and unlike everything else on this list, a drain that
+      // fails has still moved half the workloads, so there is no state an
+      // agent could leave behind that a human can simply undo.
+      //
+      // The preflight is on the list too, and that is deliberate rather than
+      // over-broad. It is a read, and it is the read that decides whether the
+      // drain is allowed; a caller holding the preflight and not the drain
+      // would be holding the safety check for an action it cannot take, which
+      // is only useful to something planning to take it another way.
+      'buildK8sDrainCommand',
+      'buildK8sDrainPreflightCommand',
+      'assessK8sDrain',
+      'planK8sDrain',
+      'parseK8sDrainResult',
+      'parseK8sDrainPreflight',
+      'K8S_DRAIN_PHRASE',
+      'k8s:drain',
+      'k8s:drain-preflight',
       // Already true before item 22 and asserted here now that the file has
       // company: the one older mutation, and the module itself.
       'buildK8sRolloutRestartCommand',
