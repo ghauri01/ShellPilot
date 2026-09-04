@@ -4,6 +4,9 @@ import {
   CRED_PROXY_LOOPBACK_NOTE,
   CRED_PROXY_TOKEN_HEADER,
   CRED_PROXY_TOKEN_NOTE,
+  CRED_PROXY_TOKEN_STATE_NOTE,
+  credProxyTokenState,
+  type CredProxyToken,
   credProxyBaseUrl,
   describeInjection
 } from '../../../../shared/credproxy'
@@ -82,7 +85,65 @@ export function CredProxyPanel(): React.JSX.Element {
   const [unavailable, setUnavailable] = useState(false)
   const [calls, setCalls] = useState<CredProxyCall[]>([])
   const [entries, setEntries] = useState<VaultEntry[]>([])
-  const [token, setToken] = useState<string | null>(null)
+  // `null` until read, like every other list in this app that says an absence.
+  const [tokens, setTokens] = useState<CredProxyToken[] | null>(null)
+  const [newTokenName, setNewTokenName] = useState('')
+  const [newTokenExpiry, setNewTokenExpiry] = useState('')
+
+  const loadTokens = useCallback(async (): Promise<void> => {
+    const list = await window.shellpilot?.credproxy?.tokens?.()
+    setTokens(list ?? [])
+  }, [])
+
+  const createToken = async (): Promise<void> => {
+    const res = await window.shellpilot?.credproxy?.createToken?.(
+      newTokenName.trim(),
+      // A date input gives a day, and a token should last to the END of the day
+      // it names rather than expiring at midnight as somebody starts work.
+      newTokenExpiry === '' ? null : new Date(`${newTokenExpiry}T23:59:59Z`).toISOString()
+    )
+    if (res?.ok && res.token) {
+      await navigator.clipboard?.writeText(res.token).catch(() => {})
+      setMsg({
+        tone: 'ok',
+        text: `Token for “${newTokenName.trim()}” created and copied. It is the only copy you need — ShellPilot keeps it too.`
+      })
+      setNewTokenName('')
+      setNewTokenExpiry('')
+      await loadTokens()
+    } else {
+      setMsg({ tone: 'danger', text: res?.error ?? 'Could not create the token.' })
+    }
+  }
+
+  const copyToken = async (id: string): Promise<void> => {
+    const value = await window.shellpilot?.credproxy?.tokenValue?.(id)
+    if (value) {
+      await navigator.clipboard?.writeText(value).catch(() => {})
+      setMsg({ tone: 'ok', text: 'Token copied.' })
+    } else {
+      setMsg({ tone: 'danger', text: 'That token’s value could not be read.' })
+    }
+  }
+
+  const revokeToken = async (id: string, name: string): Promise<void> => {
+    // Revoking is not reversible and stops whatever holds it, so it asks --
+    // and names the token, so the answer is to a question rather than a reflex.
+    if (
+      !window.confirm(
+        `Revoke “${name}”?\n\nAnything still using this token starts being refused immediately, and it cannot be un-revoked. Other tokens are unaffected.`
+      )
+    ) {
+      return
+    }
+    const res = await window.shellpilot?.credproxy?.revokeToken?.(id)
+    if (res?.ok) {
+      setMsg({ tone: 'ok', text: `“${name}” revoked.` })
+      await loadTokens()
+    } else {
+      setMsg({ tone: 'danger', text: res?.error ?? 'Could not revoke the token.' })
+    }
+  }
   const [draft, setDraft] = useState<Draft | null>(null)
   const [msg, setMsg] = useState<{ tone: Tone; text: string } | null>(null)
   const [portDraft, setPortDraft] = useState('')
@@ -105,7 +166,8 @@ export function CredProxyPanel(): React.JSX.Element {
 
   useEffect(() => {
     void refresh()
-  }, [refresh])
+    void loadTokens()
+  }, [refresh, loadTokens])
 
   // The vault list is read only to name entries in the picker. Its VALUES are
   // never used here — a rule stores an entry id, and main reads the credential
@@ -140,30 +202,7 @@ export function CredProxyPanel(): React.JSX.Element {
     if (!res.ok) setMsg({ tone: 'danger', text: res.error ?? 'The listener could not start.' })
   }
 
-  const revealToken = async (): Promise<void> => {
-    const res = await window.shellpilot?.credproxy?.token()
-    if (!res) return
-    if (res.ok && res.token) {
-      setToken(res.token)
-      void refresh()
-    } else {
-      setMsg({ tone: 'danger', text: res.error ?? 'Could not read the token.' })
-    }
-  }
 
-  const rotateToken = async (): Promise<void> => {
-    const res = await window.shellpilot?.credproxy?.rotateToken()
-    if (!res) return
-    if (res.ok && res.token) {
-      setToken(res.token)
-      setMsg({
-        tone: 'warn',
-        text: 'New token. Anything still using the old one will now be refused — update your scripts.'
-      })
-    } else {
-      setMsg({ tone: 'danger', text: res.error ?? 'Could not rotate the token.' })
-    }
-  }
 
   const save = async (): Promise<void> => {
     if (!draft) return
@@ -254,24 +293,84 @@ export function CredProxyPanel(): React.JSX.Element {
 
       <div className="setting-row">
         <div className="s-info">
-          <div className="s-title">Client token</div>
+          <div className="s-title">Tokens</div>
           <div className="s-desc">
-            Send it as <code>{CRED_PROXY_TOKEN_HEADER}</code> on every request. {CRED_PROXY_TOKEN_NOTE}
+            One per caller, sent as <code>{CRED_PROXY_TOKEN_HEADER}</code> on every request.{' '}
+            {CRED_PROXY_TOKEN_NOTE}
+            <br />
+            Give each script or agent its own, so revoking one does not stop the others.
           </div>
         </div>
         <div className="row-actions">
-          {token ? (
-            <input className="input" readOnly value={token} aria-label="Client token" style={{ width: 260 }} />
-          ) : (
-            <button className="btn" onClick={() => void revealToken()}>
-              Show token
-            </button>
-          )}
-          <button className="btn" onClick={() => void rotateToken()}>
-            Rotate
+          <input
+            className="input"
+            placeholder="What is it for"
+            aria-label="Token name"
+            value={newTokenName}
+            onChange={(e) => setNewTokenName(e.target.value)}
+            style={{ width: 190 }}
+          />
+          <input
+            className="input"
+            type="date"
+            aria-label="Token end date (optional)"
+            title="Optional end date. A token with no end date never expires."
+            value={newTokenExpiry}
+            onChange={(e) => setNewTokenExpiry(e.target.value)}
+            style={{ width: 150 }}
+          />
+          <button className="btn primary" disabled={newTokenName.trim() === ''} onClick={() => void createToken()}>
+            Create token
           </button>
         </div>
       </div>
+
+      {tokens === null ? (
+        <div className="s-note state-unknown">Reading the tokens…</div>
+      ) : tokens.length === 0 ? (
+        <div className="s-note">
+          No tokens, so every request is refused. Create one above and give it to the script that
+          needs it.
+        </div>
+      ) : (
+        <ul className="credproxy-rules">
+          {tokens.map((t) => {
+            const state = credProxyTokenState(t, Date.now())
+            return (
+              <li key={t.id} className="credproxy-rule">
+                <div>
+                  <div className="r-title">
+                    {t.name}{' '}
+                    <span className={clsx(state === 'active' ? 'ok' : 'state-unknown')}>· {state}</span>
+                  </div>
+                  <div className="r-sub">
+                    {t.expiresAt ? `Ends ${new Date(t.expiresAt).toLocaleDateString()}` : 'No end date'}
+                    {' · '}
+                    {/* The only thing that makes an unused token safe to revoke,
+                        and the only reason anybody ever does. */}
+                    {t.lastUsedAt
+                      ? `last used ${new Date(t.lastUsedAt).toLocaleString()}`
+                      : 'never used'}
+                  </div>
+                  <div className="r-sub faint">{CRED_PROXY_TOKEN_STATE_NOTE[state]}</div>
+                </div>
+                <div className="row-actions">
+                  {state === 'active' && (
+                    <>
+                      <button className="btn sm" onClick={() => void copyToken(t.id)}>
+                        Copy
+                      </button>
+                      <button className="btn sm danger" onClick={() => void revokeToken(t.id, t.name)}>
+                        Revoke
+                      </button>
+                    </>
+                  )}
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
 
       {msg && (
         <div className={clsx('s-note', msg.tone)} role="status">
