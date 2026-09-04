@@ -1,0 +1,2 @@
+===SHELLPILOT-HELM===
+/opt/homebrew/bin/bash: line 1: helm: command not found

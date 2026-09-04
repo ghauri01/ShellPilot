@@ -888,6 +888,21 @@ describe('what must NOT be able to reach this', () => {
       'K8S_EXEC_PHRASE',
       'k8s:exec',
       'k8s:exec-plan',
+      // And the reads. Read-only is not the argument it sounds like — the same
+      // point posture and drift make on this list, one step sharper here.
+      // `k8s:resources` lists which secrets exist and every RBAC binding in the
+      // cluster: it does not read a secret's value, and "which service account
+      // is bound to cluster-admin, and what is the name of the secret holding
+      // its token" is a map of how to escalate, assembled and kept fresh. An
+      // agent asking that for one cluster could ask it for every cluster every
+      // host in the estate can reach.
+      'buildK8sResourcesCommand',
+      'parseK8sResources',
+      'buildK8sApiScanCommand',
+      'buildK8sHelmListCommand',
+      'k8s:resources',
+      'k8s:api-scan',
+      'k8s:helm',
       // Already true before item 22 and asserted here now that the file has
       // company: the one older mutation, and the module itself.
       'buildK8sRolloutRestartCommand',

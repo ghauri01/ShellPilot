@@ -8,6 +8,13 @@
 // WHAT THIS DOES: reads the current context, lists contexts and namespaces,
 // lists pods with their real state, and reads a pod's logs.
 //
+// It reads the things that are cheap and were missing: PVC capacity (both the
+// request and the capacity, because a Pending claim has one and not the other),
+// ingress hosts and TLS secret NAMES, RBAC bindings including the cluster-wide
+// ones, which secrets EXIST and what their keys are called but never a value,
+// a deprecated-API scan that reports what it could not check, and a Helm
+// release list on the hosts that have helm.
+//
 // It also does the things an operator reaches for during an incident, because
 // the first version of this file was reconnaissance rather than operations —
 // it could tell you a pod was in CrashLoopBackOff and then had nothing further
@@ -2557,5 +2564,489 @@ export function planK8sExec(target: K8sExecTarget): K8sExecPlan {
     confirmation: { kind: 'type-to-confirm', phrase: K8S_EXEC_PHRASE },
     reasons,
     caveats
+  }
+}
+
+// =========================================================================
+// THE READS THAT WERE MISSING, AND ARE CHEAP
+// =========================================================================
+//
+// PVC capacity, ingress, RBAC bindings, secret EXISTENCE, a deprecated-API
+// scan and a Helm release list. All read-only, all one round trip each, and
+// each one is here because its absence made the panel lie by omission about
+// something an operator was already looking for.
+//
+// SECRETS ARE THE ONE WITH A RULE. This lists which secrets exist and what
+// their KEYS are called, and it never reads a value. That is not a policy
+// bolted on afterwards, it is the shape of the query: `kubectl get secret -o
+// custom-columns=...:.data` renders the whole map, base64 and all, and every
+// jsonpath that reaches a key also reaches its value. The go-template below
+// iterates `$k, $v` and emits only `$k`, which is the one form that CANNOT
+// emit a value — and `tests/kubernetesReads.test.ts` asserts, against a
+// fixture recorded from a cluster with known secret values in it, that those
+// values appear nowhere in the output.
+
+export interface K8sPvc {
+  namespace: string
+  name: string
+  /** Bound, Pending, Lost. */
+  status: string
+  /** The PV behind it, or '' while Pending. */
+  volume: string
+  /** What the claim ASKED for. Present even while Pending. */
+  requested: string
+  /**
+   * What it actually GOT, or '' while Pending.
+   *
+   * Both are carried, and that is the point of this read rather than a
+   * simplification of it. A Pending claim has a request and no capacity — the
+   * recorded fixture has exactly one, waiting on a WaitForFirstConsumer
+   * StorageClass — so a panel showing only `.status.capacity` renders a blank
+   * where a 2Gi request is, which reads as a volume with no size rather than a
+   * volume that was never provisioned.
+   */
+  capacity: string
+  accessModes: string
+  storageClass: string
+}
+
+export interface K8sIngress {
+  namespace: string
+  name: string
+  className: string
+  /** The load balancer address, or '' when no controller has claimed it. */
+  address: string
+  /** Names of the TLS secrets it references. Not their contents. */
+  tlsSecrets: string[]
+  /** One per rule: `host /path->service:port /path2->service2:port`. */
+  rules: string[]
+}
+
+export interface K8sRoleBinding {
+  /** '' for a ClusterRoleBinding. */
+  namespace: string
+  name: string
+  /** Role or ClusterRole. */
+  roleKind: string
+  roleName: string
+  /** `Kind:namespace/name`, as read. */
+  subjects: string[]
+  clusterScoped: boolean
+}
+
+export interface K8sSecretRef {
+  namespace: string
+  name: string
+  /** Opaque, kubernetes.io/tls, helm.sh/release.v1, … */
+  type: string
+  /** The KEY NAMES only. Never a value; see the section header. */
+  keys: string[]
+  created: string
+}
+
+export interface K8sResources {
+  pvcs: K8sRead<K8sPvc>
+  ingresses: K8sRead<K8sIngress>
+  roleBindings: K8sRead<K8sRoleBinding>
+  secrets: K8sRead<K8sSecretRef>
+}
+
+const PVC_COLS =
+  'custom-columns=NS:.metadata.namespace,NAME:.metadata.name,STATUS:.status.phase,' +
+  'VOL:.spec.volumeName,REQ:.spec.resources.requests.storage,CAP:.status.capacity.storage,' +
+  'MODES:.status.accessModes,SC:.spec.storageClassName'
+
+const INGRESS_JSONPATH =
+  `'jsonpath={range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}` +
+  `{.spec.ingressClassName}{"|"}{range .status.loadBalancer.ingress[*]}{.ip}{.hostname}{";"}{end}{"|"}` +
+  `{range .spec.tls[*]}{.secretName}{";"}{end}{"|"}` +
+  `{range .spec.rules[*]}{.host}{range .http.paths[*]}{" "}{.path}{"->"}` +
+  `{.backend.service.name}{":"}{.backend.service.port.number}{end}{";"}{end}{"\\n"}{end}'`
+
+const RBAC_JSONPATH =
+  `'jsonpath={range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"|"}` +
+  `{.roleRef.kind}{"|"}{.roleRef.name}{"|"}` +
+  `{range .subjects[*]}{.kind}{":"}{.namespace}{"/"}{.name}{";"}{end}{"\\n"}{end}'`
+
+// go-template rather than jsonpath, and this is the security-relevant line in
+// the file. `range $k, $v := .data` is the only kubectl output form that can
+// enumerate a secret's keys WITHOUT being able to reach its values: jsonpath
+// has no key-enumeration operator, so every jsonpath that names `.data` prints
+// the map, base64 values included. `$v` appears nowhere below, deliberately.
+const SECRET_TEMPLATE =
+  `'{{range .items}}{{.metadata.namespace}}|{{.metadata.name}}|{{.type}}|` +
+  `{{range $k,$v := .data}}{{$k}},{{end}}|{{.metadata.creationTimestamp}}{{"\\n"}}{{end}}'`
+
+/**
+ * The four reads the panel was missing, in one round trip.
+ *
+ * Namespace-scoped or cluster-wide by the same `scope()` rule as the overview,
+ * except the ClusterRoleBinding read, which is cluster-scoped by definition and
+ * would be a lie about what is being read if it took a namespace.
+ */
+export function buildK8sResourcesCommand(context?: string, namespace?: string): string {
+  const { ctx, ns } = scope(context, namespace)
+  return [
+    k8sResolve(),
+    call('PVC', `get pvc${ns} --no-headers -o ${PVC_COLS}${ctx}`),
+    call('ING', `get ingress${ns} -o ${INGRESS_JSONPATH}${ctx}`),
+    call('RB', `get rolebindings${ns} -o ${RBAC_JSONPATH}${ctx}`),
+    call('CRB', `get clusterrolebindings -o ${RBAC_JSONPATH}${ctx}`),
+    // `-o go-template` and NOT `-o custom-columns` or jsonpath. See the comment
+    // on SECRET_TEMPLATE: this is the only form that cannot print a value.
+    call('SEC', `get secrets${ns} -o go-template=${SECRET_TEMPLATE}${ctx}`)
+  ].join('; ')
+}
+
+// A PVC row is recognised by its PHASE, the way an event row is recognised by
+// its type — and for the same reason, discovered the same way.
+//
+// The first version tested `fields >= 8` and validated the first two as names,
+// which a real Forbidden sentence passes: it has far more than eight
+// whitespace-separated tokens, `Error` is a valid RFC 1123 name and so is
+// `from`. The recorded denial parsed as a PersistentVolumeClaim called `from`
+// in a namespace called `Error`, and the read reported OK — a permissions
+// failure rendered as data, which is the exact inversion this module exists to
+// prevent. Nothing kubectl writes as an error has `Bound`, `Pending` or `Lost`
+// as its third token.
+const PVC_PHASE_RE = /^(Bound|Pending|Lost)$/
+
+function parsePvcs(text: string): K8sPvc[] {
+  const out: K8sPvc[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || NO_RESOURCES.test(line)) continue
+    const f = line.split(/\s+/)
+    // EXACTLY eight. The custom-columns above emit eight and a row with more
+    // tokens is a sentence, not a row.
+    if (f.length !== 8) continue
+    if (!PVC_PHASE_RE.test(f[2])) continue
+    if (!validateNamespace(f[0]) || !validatePodName(f[1])) continue
+    out.push({
+      namespace: f[0],
+      name: f[1],
+      status: cleanCell(f[2]),
+      volume: cleanCell(f[3]),
+      requested: cleanCell(f[4]),
+      capacity: cleanCell(f[5]),
+      accessModes: cleanCell(f[6]),
+      storageClass: cleanCell(f[7])
+    })
+  }
+  return out
+}
+
+const splitList = (s: string): string[] =>
+  s.split(';').map((v) => v.trim()).filter((v) => v !== '')
+
+function parseIngresses(text: string): K8sIngress[] {
+  const out: K8sIngress[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || NO_RESOURCES.test(line)) continue
+    const f = line.split('|')
+    if (f.length < 6) continue
+    if (!validateNamespace(f[0]) || !validatePodName(f[1])) continue
+    out.push({
+      namespace: f[0],
+      name: f[1],
+      className: f[2].trim(),
+      address: splitList(f[3]).join(', '),
+      tlsSecrets: splitList(f[4]),
+      rules: splitList(f.slice(5).join('|'))
+    })
+  }
+  return out
+}
+
+function parseRoleBindings(text: string, clusterScoped: boolean): K8sRoleBinding[] {
+  const out: K8sRoleBinding[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || NO_RESOURCES.test(line)) continue
+    const f = line.split('|')
+    if (f.length < 5) continue
+    // Names are NOT validated here, and that is not an oversight. RBAC objects
+    // are routinely called things like `kubeadm:bootstrap-signer-clusterinfo`
+    // and `system::extension-apiserver-authentication-reader`, which no RFC
+    // 1123 test accepts — running one against them would silently drop most of
+    // a cluster's real bindings. Shape is the test, as everywhere else here.
+    if (f[1].trim() === '') continue
+    if (f[0] !== '' && !validateNamespace(f[0])) continue
+    out.push({
+      namespace: f[0].trim(),
+      name: f[1].trim(),
+      roleKind: f[2].trim(),
+      roleName: f[3].trim(),
+      subjects: splitList(f.slice(4).join('|')),
+      clusterScoped
+    })
+  }
+  return out
+}
+
+function parseSecretRefs(text: string): K8sSecretRef[] {
+  const out: K8sSecretRef[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || NO_RESOURCES.test(line)) continue
+    const f = line.split('|')
+    if (f.length < 5) continue
+    if (!validateNamespace(f[0]) || f[1].trim() === '') continue
+    out.push({
+      namespace: f[0],
+      name: f[1].trim(),
+      type: f[2].trim(),
+      keys: f[3].split(',').map((k) => k.trim()).filter((k) => k !== ''),
+      created: f[4].trim()
+    })
+  }
+  return out
+}
+
+export function parseK8sResources(output: string, exitCode: number | null): K8sResources {
+  const rb = readBlock(section(output, 'RB'), (t) => parseRoleBindings(t, false), exitCode)
+  const crb = readBlock(section(output, 'CRB'), (t) => parseRoleBindings(t, true), exitCode)
+  return {
+    pvcs: readBlock(section(output, 'PVC'), parsePvcs, exitCode),
+    ingresses: readBlock(section(output, 'ING'), parseIngresses, exitCode),
+    // Merged, but a denial on EITHER half fails the whole read rather than
+    // being quietly dropped: a token that can list RoleBindings and not
+    // ClusterRoleBindings would otherwise show a namespace's bindings and
+    // silently omit the cluster-admin grant, which is the single most
+    // important row in this table.
+    roleBindings: !rb.ok
+      ? rb
+      : !crb.ok
+        ? crb
+        : { ok: true, items: [...rb.items, ...crb.items] },
+    secrets: readBlock(section(output, 'SEC'), parseSecretRefs, exitCode)
+  }
+}
+
+// ------------------------------------------------- deprecated API scan
+
+/**
+ * API groupVersions Kubernetes has removed, or announced it will.
+ *
+ * A SNAPSHOT, and stated as one. It is accurate as of Kubernetes 1.33 and it
+ * will go stale; a scan that quietly reports "nothing deprecated" from a table
+ * three releases old is the failure mode, which is why `K8sApiScan` carries
+ * what the scan could not check rather than only what it found.
+ */
+export interface K8sDeprecatedApi {
+  groupVersion: string
+  /** Minor release it was removed in, or will be. */
+  removedIn: string
+  /** What replaced it. */
+  replacement: string
+}
+
+export const K8S_DEPRECATED_APIS: readonly K8sDeprecatedApi[] = [
+  { groupVersion: 'extensions/v1beta1', removedIn: '1.22', replacement: 'apps/v1 and networking.k8s.io/v1' },
+  { groupVersion: 'apps/v1beta1', removedIn: '1.16', replacement: 'apps/v1' },
+  { groupVersion: 'apps/v1beta2', removedIn: '1.16', replacement: 'apps/v1' },
+  { groupVersion: 'networking.k8s.io/v1beta1', removedIn: '1.22', replacement: 'networking.k8s.io/v1' },
+  { groupVersion: 'rbac.authorization.k8s.io/v1beta1', removedIn: '1.22', replacement: 'rbac.authorization.k8s.io/v1' },
+  { groupVersion: 'apiextensions.k8s.io/v1beta1', removedIn: '1.22', replacement: 'apiextensions.k8s.io/v1' },
+  { groupVersion: 'admissionregistration.k8s.io/v1beta1', removedIn: '1.22', replacement: 'admissionregistration.k8s.io/v1' },
+  { groupVersion: 'certificates.k8s.io/v1beta1', removedIn: '1.22', replacement: 'certificates.k8s.io/v1' },
+  { groupVersion: 'coordination.k8s.io/v1beta1', removedIn: '1.22', replacement: 'coordination.k8s.io/v1' },
+  { groupVersion: 'storage.k8s.io/v1beta1', removedIn: '1.22', replacement: 'storage.k8s.io/v1' },
+  { groupVersion: 'policy/v1beta1', removedIn: '1.25', replacement: 'policy/v1 (and PodSecurityPolicy has no replacement — see Pod Security Admission)' },
+  { groupVersion: 'batch/v1beta1', removedIn: '1.25', replacement: 'batch/v1' },
+  { groupVersion: 'discovery.k8s.io/v1beta1', removedIn: '1.25', replacement: 'discovery.k8s.io/v1' },
+  { groupVersion: 'events.k8s.io/v1beta1', removedIn: '1.25', replacement: 'events.k8s.io/v1' },
+  { groupVersion: 'node.k8s.io/v1beta1', removedIn: '1.25', replacement: 'node.k8s.io/v1' },
+  { groupVersion: 'autoscaling/v2beta1', removedIn: '1.25', replacement: 'autoscaling/v2' },
+  { groupVersion: 'autoscaling/v2beta2', removedIn: '1.26', replacement: 'autoscaling/v2' },
+  { groupVersion: 'flowcontrol.apiserver.k8s.io/v1beta1', removedIn: '1.29', replacement: 'flowcontrol.apiserver.k8s.io/v1' },
+  { groupVersion: 'flowcontrol.apiserver.k8s.io/v1beta2', removedIn: '1.29', replacement: 'flowcontrol.apiserver.k8s.io/v1' },
+  { groupVersion: 'flowcontrol.apiserver.k8s.io/v1beta3', removedIn: '1.32', replacement: 'flowcontrol.apiserver.k8s.io/v1' }
+]
+
+export interface K8sApiFinding {
+  groupVersion: string
+  removedIn: string
+  replacement: string
+  /**
+   * True when this server has ALREADY passed the removal release and is still
+   * serving it — which does happen, on a distribution that carries patches.
+   */
+  pastRemoval: boolean
+}
+
+export interface K8sApiScan {
+  /** The SERVER's version, not the client's. */
+  serverVersion: string | null
+  served: K8sRead<string>
+  findings: K8sApiFinding[]
+  /**
+   * What this scan did not and could not look at.
+   *
+   * Not a disclaimer. This scan reads what the API SERVER SERVES, and that is
+   * a different question from the one people think they are asking, which is
+   * "will my manifests still apply next release". The gap is large enough that
+   * reporting only the findings would be the same lie as an empty pod list
+   * from a denied read, so it is carried in the result and rendered with it.
+   */
+  notChecked: string[]
+}
+
+export function buildK8sApiScanCommand(context?: string): string {
+  const ctx = context && validateContext(context) ? ` --context=${context}` : ''
+  return [
+    k8sResolve(),
+    call('SRVVER', `version -o json${ctx}`),
+    call('APIVER', `api-versions${ctx}`)
+  ].join('; ')
+}
+
+const MINOR_RE = /^v?(\d+)\.(\d+)/
+
+/** Is `a` at or past `b`, as Kubernetes minor releases? */
+function atOrPast(a: string, b: string): boolean {
+  const ma = MINOR_RE.exec(a)
+  const mb = MINOR_RE.exec(b)
+  if (!ma || !mb) return false
+  const [, aMaj, aMin] = ma
+  const [, bMaj, bMin] = mb
+  return Number(aMaj) > Number(bMaj) || (aMaj === bMaj && Number(aMin) >= Number(bMin))
+}
+
+/**
+ * The four things this scan cannot see, in the words it reports them in.
+ *
+ * Exported so the panel and the test name the same list; they are properties
+ * of the method, not of any particular cluster.
+ */
+export const K8S_API_SCAN_BLIND_SPOTS: readonly string[] = [
+  'what your manifests and Helm charts DECLARE. An object written as policy/v1beta1 is stored once and served back under policy/v1, so nothing readable from the API says which version a chart still sends. This scan reads the server, not your repository.',
+  'CustomResourceDefinitions and aggregated APIs. Their versions are the operator author’s to deprecate and are not in the table below.',
+  'controllers and webhooks that CALL a removed API. Those break at the client, and nothing on the server records that they were going to.',
+  'anything the table has not caught up with. It is a snapshot taken at Kubernetes 1.33 and it will go stale — a scan that reports nothing from a table three releases old looks exactly like a cluster with nothing wrong.'
+]
+
+export function parseK8sApiScan(output: string, exitCode: number | null): K8sApiScan {
+  const verBlock = section(output, 'SRVVER')
+  let serverVersion: string | null = null
+  try {
+    const j = JSON.parse(verBlock.trim()) as { serverVersion?: { gitVersion?: string } }
+    serverVersion = j.serverVersion?.gitVersion ?? null
+  } catch {
+    // kubectl printed something that is not JSON — an error, most likely. The
+    // version stays null and the served read below carries the reason.
+    serverVersion = null
+  }
+  const served = readBlock(
+    section(output, 'APIVER'),
+    (t) =>
+      t
+        .split('\n')
+        .map((l) => l.trim())
+        // Shape: a groupVersion is one token with no spaces. kubectl's error
+        // sentences all have spaces in them.
+        .filter((l) => l !== '' && !/\s/.test(l) && !NO_RESOURCES.test(l)),
+    exitCode
+  )
+  const findings: K8sApiFinding[] = []
+  if (served.ok) {
+    for (const gv of served.items) {
+      const hit = K8S_DEPRECATED_APIS.find((d) => d.groupVersion === gv)
+      if (!hit) continue
+      findings.push({
+        groupVersion: hit.groupVersion,
+        removedIn: hit.removedIn,
+        replacement: hit.replacement,
+        pastRemoval: serverVersion !== null && atOrPast(serverVersion, hit.removedIn)
+      })
+    }
+  }
+  const notChecked = [...K8S_API_SCAN_BLIND_SPOTS]
+  if (!served.ok) {
+    // The read itself failed, so "no findings" means nothing at all. First in
+    // the list because it is the only entry that is about THIS run.
+    notChecked.unshift(
+      `the served API list could not be read (${served.reason}: ${served.detail}), so the findings below are empty because nothing was looked at`
+    )
+  }
+  if (serverVersion === null) {
+    notChecked.unshift(
+      'the server version could not be read, so nothing here can say whether this cluster is already past a removal release'
+    )
+  }
+  return { serverVersion, served, findings, notChecked }
+}
+
+// ------------------------------------------------- helm
+
+export interface K8sHelmRelease {
+  name: string
+  namespace: string
+  revision: string
+  status: string
+  chart: string
+  appVersion: string
+  updated: string
+}
+
+export type K8sHelmList =
+  | { ok: true; releases: K8sHelmRelease[] }
+  | { ok: false; reason: 'not-installed' | 'failed'; detail: string }
+
+/**
+ * `helm list -A`, on a host that may well not have helm.
+ *
+ * Its own command and its own result type, for the reason `kubectl top` has
+ * both: helm is absent from most hosts, and folding it into a read that
+ * usually succeeds would make the common case wait on a call that usually
+ * fails — and would tempt the panel into showing an empty release table, which
+ * reads as "nothing is installed by Helm" rather than "helm is not here".
+ *
+ * `resolveBinary` is reused: helm is very often in /usr/local/bin, which an
+ * `ssh host cmd` non-login shell does not have on its PATH.
+ */
+export function buildK8sHelmListCommand(context?: string): string {
+  const ctx = context && validateContext(context) ? ` --kube-context=${context}` : ''
+  return [
+    resolveBinary('helm', ['/usr/local/bin/helm', '/snap/bin/helm']),
+    'echo "===SHELLPILOT-HELM==="',
+    `"$SP_BIN" list --all-namespaces --output json${ctx} 2>&1`
+  ].join('; ')
+}
+
+const HELM_MISSING_RE = /(^|:\s)(command not found|helm: not found)|no such file or directory/i
+
+export function parseK8sHelmList(output: string, exitCode: number | null): K8sHelmList {
+  const said = section(output, 'HELM').trim()
+  if (said === '') {
+    return { ok: false, reason: 'failed', detail: 'helm returned nothing' }
+  }
+  if (HELM_MISSING_RE.test(said) || exitCode === 127) {
+    return {
+      ok: false,
+      reason: 'not-installed',
+      detail:
+        'No helm on this host. That is not a statement about the cluster — releases installed from somewhere else are still there, this host just cannot list them.'
+    }
+  }
+  try {
+    const rows = JSON.parse(said) as Record<string, unknown>[]
+    if (!Array.isArray(rows)) return { ok: false, reason: 'failed', detail: said.split('\n')[0] }
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+    return {
+      ok: true,
+      releases: rows.map((r) => ({
+        name: str(r.name),
+        namespace: str(r.namespace),
+        revision: str(r.revision),
+        status: str(r.status),
+        chart: str(r.chart),
+        appVersion: str(r.app_version),
+        updated: str(r.updated)
+      }))
+    }
+  } catch {
+    return { ok: false, reason: 'failed', detail: said.split('\n')[0] }
   }
 }

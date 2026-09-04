@@ -68,6 +68,9 @@ import type {
   K8sExecPlan,
   K8sExecResult,
   K8sExecTarget,
+  K8sApiScan,
+  K8sHelmList,
+  K8sResources,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -524,6 +527,12 @@ const api = {
     // approval must be minted against, so the renderer cannot approve one
     // thing and send another — `verifyApproval` in the main process compares
     // them and refuses when they differ.
+    resources: (cfg: unknown, context?: string, namespace?: string): Promise<K8sResources> =>
+      ipcRenderer.invoke('k8s:resources', cfg, context, namespace),
+    apiScan: (cfg: unknown, context?: string): Promise<K8sApiScan> =>
+      ipcRenderer.invoke('k8s:api-scan', cfg, context),
+    helm: (cfg: unknown, context?: string): Promise<K8sHelmList> =>
+      ipcRenderer.invoke('k8s:helm', cfg, context),
     execPlan: (target: K8sExecTarget): Promise<{ plan: K8sExecPlan; command: string }> =>
       ipcRenderer.invoke('k8s:exec-plan', target),
     exec: (cfg: unknown, target: K8sExecTarget, approval: unknown): Promise<K8sExecResult> =>

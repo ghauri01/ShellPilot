@@ -1935,6 +1935,17 @@ ipcMain.handle(
 // was answered for" is what has to be checked. The record is minted in the
 // renderer at the moment the human types the phrase and verified here against
 // a fresh re-derivation; see KubernetesReader.exec.
+// Reads, all four of them, needing no confirmation. The secret read lists
+// which secrets exist and what their keys are called and never a value — see
+// the SECRET_TEMPLATE comment in shared/kubernetes.ts for why that is a
+// property of the query rather than a rule applied afterwards.
+ipcMain.handle('k8s:resources', (_e, cfg: unknown, context?: string, namespace?: string) =>
+  k8sReader.resources(cfg, context, namespace)
+)
+ipcMain.handle('k8s:api-scan', (_e, cfg: unknown, context?: string) =>
+  k8sReader.apiScan(cfg, context)
+)
+ipcMain.handle('k8s:helm', (_e, cfg: unknown, context?: string) => k8sReader.helm(cfg, context))
 ipcMain.handle('k8s:exec-plan', (_e, target: K8sExecTarget) => k8sReader.execPlan(target))
 ipcMain.handle('k8s:exec', (_e, cfg: unknown, target: K8sExecTarget, approval: unknown) =>
   k8sReader.exec(cfg, target, approval)

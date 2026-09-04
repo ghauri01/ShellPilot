@@ -1,0 +1,22 @@
+===SHELLPILOT-PVC===
+shop   catalog-data   Pending   <none>   2Gi   <none>   <none>   standard
+===SHELLPILOT-ING===
+shop|shop-public|nginx||shop-tls;|shop.example.com /checkout->checkout:80 /catalog->catalog:80;
+===SHELLPILOT-RB===
+kube-public|kubeadm:bootstrap-signer-clusterinfo|Role|kubeadm:bootstrap-signer-clusterinfo|User:/system:anonymous;
+kube-public|system:controller:bootstrap-signer|Role|system:controller:bootstrap-signer|ServiceAccount:kube-system/bootstrap-signer;
+kube-system|kube-proxy|Role|kube-proxy|Group:/system:bootstrappers:kubeadm:default-node-token;
+kube-system|kubeadm:kubelet-config|Role|kubeadm:kubelet-config|Group:/system:nodes;Group:/system:bootstrappers:kubeadm:default-node-token;
+kube-system|kubeadm:nodes-kubeadm-config|Role|kubeadm:nodes-kubeadm-config|Group:/system:bootstrappers:kubeadm:default-node-token;Group:/system:nodes;
+kube-system|system::extension-apiserver-authentication-reader|Role|extension-apiserver-authentication-reader|User:/system:kube-controller-manager;User:/system:kube-scheduler;
+kube-system|system::leader-locking-kube-controller-manager|Role|system::leader-locking-kube-controller-manager|User:/system:kube-controller-manager;ServiceAccount:kube-system/kube-controller-manager;ServiceAccount:kube-system/leader-election-controller;
+kube-system|system::leader-locking-kube-scheduler|Role|system::leader-locking-kube-scheduler|User:/system:kube-scheduler;ServiceAccount:kube-system/kube-scheduler;
+kube-system|system:controller:bootstrap-signer|Role|system:controller:bootstrap-signer|ServiceAccount:kube-system/bootstrap-signer;
+kube-system|system:controller:cloud-provider|Role|system:controller:cloud-provider|ServiceAccount:kube-system/cloud-provider;
+kube-system|system:controller:token-cleaner|Role|system:controller:token-cleaner|ServiceAccount:kube-system/token-cleaner;
+local-path-storage|local-path-provisioner-bind|Role|local-path-provisioner-role|ServiceAccount:local-path-storage/local-path-provisioner-service-account;
+shop|deployer-reads-pods|Role|pod-reader|ServiceAccount:shop/deployer;
+===SHELLPILOT-CRB===
+Error from server (Forbidden): clusterrolebindings.rbac.authorization.k8s.io is forbidden: User "system:serviceaccount:shop:auditor" cannot list resource "clusterrolebindings" in API group "rbac.authorization.k8s.io" at the cluster scope
+===SHELLPILOT-SEC===
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:shop:auditor" cannot list resource "secrets" in API group "" at the cluster scope

@@ -6,6 +6,9 @@ import type {
   K8sDrainResult,
   K8sExecResult,
   K8sExecTarget,
+  K8sApiScan,
+  K8sHelmList,
+  K8sResources,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -20,7 +23,10 @@ import {
   buildK8sDiagnoseCommand,
   buildK8sDrainCommand,
   buildK8sDrainPreflightCommand,
+  buildK8sApiScanCommand,
   buildK8sExecCommand,
+  buildK8sHelmListCommand,
+  buildK8sResourcesCommand,
   buildK8sOverviewCommand,
   buildK8sReadCommand,
   buildK8sRolloutRestartCommand,
@@ -30,7 +36,10 @@ import {
   assessK8sDrain,
   parseK8sDrainPreflight,
   parseK8sDrainResult,
+  parseK8sApiScan,
   parseK8sExecResult,
+  parseK8sHelmList,
+  parseK8sResources,
   parseK8sOutput,
   parseK8sOverview,
   parseK8sRolloutResult,
@@ -441,6 +450,73 @@ export class KubernetesReader {
         reason: 'unknown',
         detail: e instanceof Error ? e.message : String(e)
       }
+    }
+  }
+
+  /** PVCs, ingresses, RBAC bindings and which secrets exist. */
+  async resources(cfg: unknown, context?: string, namespace?: string): Promise<K8sResources> {
+    const fail = (detail: string): K8sResources => {
+      const f = { ok: false, reason: 'unknown', detail } as const
+      return { pvcs: f, ingresses: f, roleBindings: f, secrets: f }
+    }
+    try {
+      // 45s: five kubectl calls at up to 10s each, the same arithmetic as the
+      // overview.
+      const r = await this.deps.exec(cfg, buildK8sResourcesCommand(context, namespace), 45_000)
+      if (!r.ok) return fail(r.error ?? 'could not reach the host')
+      return parseK8sResources(merge(r), r.code ?? null)
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Which deprecated APIs this server still serves, and what the scan could
+   * not look at.
+   *
+   * The second half is not a disclaimer — see K8S_API_SCAN_BLIND_SPOTS. A
+   * transport failure makes the whole scan unknown, and it says so rather than
+   * reporting an empty finding list, which is the same lie as "no pods" for a
+   * denied read.
+   */
+  async apiScan(cfg: unknown, context?: string): Promise<K8sApiScan> {
+    try {
+      const r = await this.deps.exec(cfg, buildK8sApiScanCommand(context), 25_000)
+      if (!r.ok) return this.unscanned(r.error ?? 'could not reach the host')
+      return parseK8sApiScan(merge(r), r.code ?? null)
+    } catch (e) {
+      return this.unscanned(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * A scan that did not happen, with the reason at the top of what it could
+   * not check.
+   *
+   * Rather than an empty `findings` list and nothing else, which is the shape
+   * that reads as "this cluster serves no deprecated APIs".
+   */
+  private unscanned(detail: string): K8sApiScan {
+    const empty = parseK8sApiScan('', null)
+    return {
+      ...empty,
+      notChecked: [`the scan did not run at all (${detail})`, ...empty.notChecked]
+    }
+  }
+
+  /** `helm list -A`, on a host that probably does not have helm. */
+  async helm(cfg: unknown, context?: string): Promise<K8sHelmList> {
+    try {
+      const r = await this.deps.exec(cfg, buildK8sHelmListCommand(context), 25_000)
+      if (!r.ok) {
+        // NOT `not-installed`. A host we could not reach has told us nothing
+        // about whether helm is on it, and the two have completely different
+        // fixes.
+        return { ok: false, reason: 'failed', detail: r.error ?? 'could not reach the host' }
+      }
+      return parseK8sHelmList(merge(r), r.code ?? null)
+    } catch (e) {
+      return { ok: false, reason: 'failed', detail: e instanceof Error ? e.message : String(e) }
     }
   }
 

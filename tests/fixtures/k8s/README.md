@@ -121,6 +121,25 @@ are asserted in `tests/kubernetesExec.test.ts`:
    characters. The recorded failure was
    `line 0: echo "it's $HOME and \`date\` and 'quoted'"; id: not found`.
 
+### The cheap reads
+
+| File | Recorded from |
+|---|---|
+| `resources.txt` | One run of `buildK8sResourcesCommand('kind-spk8s')` across all namespaces: PVCs, Ingresses, RoleBindings, ClusterRoleBindings and the secret listing. It contains the recording cluster's real `shop/checkout-stripe` secret row — **and `tests/kubernetesReads.test.ts` asserts that neither planted value appears in it, raw or base64**. The PVC in it is `Pending` with a 2Gi request and no capacity, which is what a `WaitForFirstConsumer` StorageClass looks like when nothing has mounted the claim. |
+| `resources-forbidden.txt` | The same command as `deployer`. All five blocks denied. |
+| `resources-crb-denied.txt` | The same command as a ServiceAccount granted `rolebindings`, `persistentvolumeclaims` and `ingresses` and **not** `clusterrolebindings` or `secrets`. The case that decided the RBAC merge: a merge that dropped the failed half would have shown a namespace's bindings and silently omitted the `cluster-admin` grant. |
+| `api-scan.txt` | `buildK8sApiScanCommand('kind-spk8s')`. Note that the client is **v1.33.2** and the API server is **v1.33.1** — the scan reads the server's, and the test asserts both. A 1.33 server serves nothing in the deprecation table, which is the correct and uninteresting answer; the interesting half is `notChecked`. |
+| `helm-missing.txt` | `buildK8sHelmListCommand('kind-spk8s')` on a machine with no helm. |
+
+Recording these found a bug of exactly the class this module exists to prevent: the
+first PVC parser tested `fields >= 8` and validated the first two as RFC 1123 names,
+and a real `Error from server (Forbidden): persistentvolumeclaims is forbidden: …`
+sentence passes both — `Error` is a valid name, so is `from`, and the sentence has
+far more than eight tokens. The denial parsed as a PersistentVolumeClaim called
+`from` in a namespace called `Error`, and the read reported OK. A PVC row is now
+recognised by its `Bound|Pending|Lost` phase, the way an event row is recognised by
+its type.
+
 ## What could not be captured
 
 - **A multi-node drain in anger.** `kind` nodes are containers on one host; every
