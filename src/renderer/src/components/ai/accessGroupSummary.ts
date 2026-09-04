@@ -46,6 +46,13 @@ const PHRASING: Record<AiCapability, Phrasing> = {
     verb: 'read the host inventory and its pending security updates',
     gerund: 'reading the host inventory and its pending security updates'
   },
+  // "collect", not "read": no agent can read these at all, and the verb has to
+  // survive being read quickly. What the grant does is let ShellPilot's own
+  // hourly posture probe ASK the host for its rule lines.
+  firewallRules: {
+    verb: 'collect this host’s firewall rule list',
+    gerund: 'collecting this host’s firewall rule list'
+  },
   manageServers: { verb: 'add servers to the workspace', gerund: 'adding servers to the workspace' },
   vpnControl: { verb: 'control VPNs and reverse proxies', gerund: 'controlling VPNs and reverse proxies' }
 }
@@ -247,7 +254,7 @@ export interface AccessGroupSummary {
 /**
  * A plain-English description of what an access group permits.
  *
- * Deliberately complete rather than abbreviated: there are only twelve
+ * Deliberately complete rather than abbreviated: there are only a dozen or so
  * capabilities, and "and 3 more" in a security summary invites exactly the
  * distrust this screen is trying to remove.
  *

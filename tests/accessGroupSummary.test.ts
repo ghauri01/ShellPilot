@@ -28,6 +28,10 @@ function allowAll(overrides: Partial<AiCapabilityPolicy> = {}): AiCapabilityPoli
     // it is a patch-status report rather than a health check. See its entry in
     // AI_CAPABILITIES.
     hostFacts: 'deny',
+    // Seeded at deny on every group too, and for hostFacts' reason one step
+    // further along: it is the list of addresses and ports the host accepts
+    // traffic on. Roadmap item 31.
+    firewallRules: 'deny',
     manageServers: 'deny',
     vpnControl: 'deny',
     ...overrides
@@ -74,9 +78,9 @@ describe('summariseAccessGroup — built-in groups', () => {
     )
     expect(s.sentence).toBe(
       'Can see server details, run commands, read files, download files, query databases, and read server metrics without asking. ' +
-        'Cannot use sudo, add servers to the workspace, control VPNs and reverse proxies, write files, upload files, open SSH tunnels, or read the host inventory and its pending security updates.'
+        'Cannot use sudo, add servers to the workspace, control VPNs and reverse proxies, write files, upload files, open SSH tunnels, read the host inventory and its pending security updates, or collect this host’s firewall rule list.'
     )
-    expect(s.counts).toEqual({ allow: 6, ask: 0, deny: 7 })
+    expect(s.counts).toEqual({ allow: 6, ask: 0, deny: 8 })
     expect(s.elevated).toEqual([])
   })
 
@@ -99,7 +103,9 @@ describe('summariseAccessGroup — built-in groups', () => {
     expect(s.clauses[1]).toBe(
       'Asks you first before adding servers to the workspace, controlling VPNs and reverse proxies, writing files, uploading files, and opening SSH tunnels.'
     )
-    expect(s.clauses[2]).toBe('Cannot use sudo or read the host inventory and its pending security updates.')
+    expect(s.clauses[2]).toBe(
+      'Cannot use sudo, read the host inventory and its pending security updates, or collect this host’s firewall rule list.'
+    )
     expect(s.elevated).toEqual([])
   })
 
@@ -121,10 +127,12 @@ describe('summariseAccessGroup — built-in groups', () => {
     // Not "denies nothing" any more. hostFacts is seeded at deny on every group
     // including this one, because a count of unpatched security updates is a
     // vulnerability report rather than a health check — see AI_CAPABILITIES.
-    expect(s.clauses[2]).toBe('Cannot read the host inventory and its pending security updates.')
+    expect(s.clauses[2]).toBe(
+      'Cannot read the host inventory and its pending security updates or collect this host’s firewall rule list.'
+    )
     // Asking is not granting: nothing here happens without a human.
     expect(s.elevated).toEqual([])
-    expect(s.counts).toEqual({ allow: 6, ask: 6, deny: 1 })
+    expect(s.counts).toEqual({ allow: 6, ask: 6, deny: 2 })
   })
 
   it('Full Access still gates the three dangerous capabilities behind a prompt', () => {
@@ -165,7 +173,7 @@ describe('summariseAccessGroup — edge cases', () => {
   it('says so plainly when everything is denied', () => {
     const s = summariseAccessGroup(group(everything('deny')))
     expect(s.sentence).toBe('Allows nothing — every AI request against the server is refused.')
-    expect(s.counts).toEqual({ allow: 0, ask: 0, deny: 13 })
+    expect(s.counts).toEqual({ allow: 0, ask: 0, deny: 14 })
     expect(s.elevated).toEqual([])
   })
 
@@ -294,6 +302,9 @@ function seededFilePolicies(): AccessGroup['filePolicies'] {
 // only reached when nothing matched. So a path rule outranks the capability in
 // both directions, and these are the cases where a flat clause would lie.
 const HF = 'read the host inventory and its pending security updates'
+// Denied on every seeded group too, and last in declaration order among the
+// denials, so it is the tail of every flat "Cannot" clause below.
+const FW = 'collect this host’s firewall rule list'
 
 describe('summariseAccessGroup — path rules outrank the capability', () => {
   it('does not claim a group cannot read files when a rule allows a path', () => {
@@ -305,7 +316,9 @@ describe('summariseAccessGroup — path rules outrank the capability', () => {
     expect(s.sentence).toContain('Cannot read files — except 1 path rule that allows it.')
     expect(s.overriddenByPath).toEqual(['readFiles'])
     // and it is not left sitting in the flat "Cannot" list as an absolute
-    expect(s.clauses).toContain(`Cannot add servers to the workspace, control VPNs and reverse proxies, or ${HF}.`)
+    expect(s.clauses).toContain(
+      `Cannot add servers to the workspace, control VPNs and reverse proxies, ${HF}, or ${FW}.`
+    )
   })
 
   it('does not claim a group can read files freely when a rule blocks a path', () => {
@@ -345,10 +358,10 @@ describe('summariseAccessGroup — path rules outrank the capability', () => {
     )
     expect(s.overriddenByPath).toEqual(['writeFiles'])
     // readFiles has no rule touching it, so it stays in the flat clause. It is
-    // no longer last in that clause — hostFacts is denied on every seeded group
-    // and sorts after it — so the assertion names the item rather than the
-    // sentence ending.
-    expect(s.sentence).toContain('read files, or ' + HF + '.')
+    // no longer last in that clause — hostFacts and firewallRules are denied on
+    // every seeded group and sort after it — so the assertion names the item
+    // rather than the sentence ending.
+    expect(s.sentence).toContain('read files, ' + HF + ', or ' + FW + '.')
   })
 
   it('treats an explicit null on a rule the way evaluateFilePath does', () => {
@@ -371,12 +384,12 @@ describe('summariseAccessGroup — path rules outrank the capability', () => {
     )
     expect(s.clauses).toEqual([
       'Can see server details, run commands, download files, query databases, and read server metrics without asking.',
-      'Cannot use sudo, add servers to the workspace, control VPNs and reverse proxies, upload files, open SSH tunnels, or read the host inventory and its pending security updates.',
+      `Cannot use sudo, add servers to the workspace, control VPNs and reverse proxies, upload files, open SSH tunnels, ${HF}, or ${FW}.`,
       'Can read files without asking — except 19 path rules that block it.',
       'Cannot write files — except 2 path rules that ask you first.'
     ])
     // The grid still shows what the grid shows; the rules qualify it.
-    expect(s.counts).toEqual({ allow: 6, ask: 0, deny: 7 })
+    expect(s.counts).toEqual({ allow: 6, ask: 0, deny: 8 })
     expect(s.overriddenByPath).toEqual(['readFiles', 'writeFiles'])
   })
 

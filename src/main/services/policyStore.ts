@@ -46,6 +46,19 @@ function allowAll(overrides: Partial<AccessGroup['capabilities']> = {}): AccessG
     // the same posture the optional modules ship with and is the intended one
     // for the most attacker-useful thing the bridge can return.
     hostFacts: 'deny',
+    // Denied on every seeded group too, and nothing below opts in — the second
+    // capability of which that is true, for hostFacts' reason one step further
+    // along. This one is the firewall RULE LIST: the addresses and ports the
+    // host accepts traffic on, which is the map an attacker would otherwise
+    // have to scan for. Roadmap item 31 settled it the same way item C settled
+    // hostFacts: a new capability backfills to DENY for every existing group,
+    // and seeding it at 'ask' on the permissive groups would hand upgraded
+    // installs an 'ask' instead.
+    //
+    // 'ask' would be meaningless here in a way it is not for the others. What
+    // this gates is an unattended hourly collection with nobody at the screen,
+    // so there is no prompt an 'ask' could raise; only 'allow' collects.
+    firewallRules: 'deny',
     // Not 'allow', despite the name. Every other capability here is an action
     // performed ON a server the user already added; this one edits ShellPilot's
     // own connection list and stores a credential. Groups that predate it never

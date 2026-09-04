@@ -84,6 +84,21 @@ describe('upgrading a policy file written before a capability existed', () => {
     expect(evaluateCapability(getGroup('grp-full'), 'hostFacts').decision).toBe('deny')
   })
 
+  it('backfills firewallRules to DENY on every group, built-in ones included', () => {
+    // Roadmap item 31, and the second capability of which this is true — the
+    // first being hostFacts, for the same reason one step further along. This
+    // one is the list of addresses and ports the host accepts traffic on: the
+    // map an attacker would otherwise have to assemble by scanning. No seeded
+    // group opts in at 'ask' either, because there is nothing an 'ask' could
+    // prompt — the collection happens on an unattended hourly sweep with
+    // nobody at the screen, so anything short of 'allow' means "do not read
+    // it", and an upgraded install has to match a fresh one in that.
+    for (const g of listGroups()) {
+      expect(g.capabilities.firewallRules, g.name).toBe('deny')
+    }
+    expect(evaluateCapability(getGroup('grp-full'), 'firewallRules').decision).toBe('deny')
+  })
+
   it('denies a new capability on a custom group, which has no intent on record', () => {
     expect(getGroup('grp-custom')?.capabilities.manageServers).toBe('deny')
     // Especially this one: a group written before VPNs existed cannot have
