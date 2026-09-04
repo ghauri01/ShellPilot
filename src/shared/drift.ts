@@ -222,7 +222,8 @@ export const DRIFT_RULES: DriftRule[] = [
   {
     id: 'blank-lines',
     label: 'Blank lines',
-    detail: 'Drops lines that are empty or contain only whitespace.',
+    detail:
+      "Drops lines that are empty or contain only whitespace. A file's final newline is its terminator rather than a blank line, so whether a file ends with one stops being a difference — and this rule does not report itself as having done work merely because a file ended properly.",
     example: { before: '(an empty line)', after: '(line removed)' }
   },
   {
@@ -497,6 +498,12 @@ export function normaliseConfig(
 
   if (on.has('blank-lines')) {
     const before = body.split('\n')
+    // A file's final newline produces one empty trailing element, and that is
+    // the file TERMINATOR rather than a blank line. Counting it would make this
+    // rule report itself as having done work on almost every file that exists,
+    // and `ignoredBy` — the list an operator reads to find out why two files
+    // were called the same — would be noise on every row.
+    if (before.length > 0 && before[before.length - 1] === '') before.pop()
     const kept = before.filter((l) => l.trim() !== '')
     if (kept.length !== before.length) applied.push('blank-lines')
     body = kept.join('\n')

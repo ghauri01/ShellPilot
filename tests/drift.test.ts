@@ -83,9 +83,17 @@ describe('normalising a file says which rules did the work', () => {
     // The distinction the whole "ignored difference" verdict rests on. A rule
     // that is enabled and finds nothing to do must not be quoted as the reason
     // two files matched.
-    const r = normaliseConfig('a = 1\nb = 2\n', ['trailing-space', 'comments', 'blank-lines'], {})
+    const r = normaliseConfig('a = 1\n\nb = 2\n', ['trailing-space', 'comments', 'blank-lines'], {})
     expect(r.applied).toEqual(['blank-lines'])
     expect(r.text).toBe('a = 1\nb = 2')
+  })
+
+  it('does not call a file ending in a newline a file with a blank line in it', () => {
+    // Otherwise this rule reports itself as having done work on almost every
+    // file that exists, and `ignoredBy` — the list an operator reads to find
+    // out why two files were called the same — is noise on every row.
+    const r = normaliseConfig('a = 1\n', ['blank-lines'], {})
+    expect(r.applied).toEqual([])
   })
 
   it('collapses runs of spaces between tokens and leaves indentation alone', () => {
