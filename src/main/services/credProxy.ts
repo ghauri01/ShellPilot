@@ -2,6 +2,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { timingSafeEqual } from 'node:crypto'
 import {
+  credProxyTokenState,
+  credProxyTokenUsable,
+  type CredProxyToken,
   CRED_PROXY_TOKEN_HEADER,
   HOP_BY_HOP_HEADERS,
   REFUSAL_REASONS,
@@ -83,6 +86,11 @@ export interface CredProxyFile {
   enabled: boolean
   port: number
   rules: unknown[]
+  /** Token RECORDS only. The values live in the OS keychain, keyed by id, so
+   *  this file can be read without yielding a credential -- which is why it
+   *  can also be backed up and diffed. Absent in files written before per-agent
+   *  tokens existed, and read as an empty list rather than as a missing key. */
+  tokens?: CredProxyToken[]
 }
 
 export interface CredProxyDeps {
@@ -94,8 +102,15 @@ export interface CredProxyDeps {
    *  cached here: the value lives as long as one request and no longer, so
    *  nothing in this module holds a copy of a key after the vault re-locks. */
   resolveCredential(ref: CredProxyCredentialRef): CredentialResolution
-  /** The client token a caller must present, or null when none is minted. */
-  clientToken(): string | null
+  /** Every token that exists, revoked and expired ones included. The records
+   *  are kept after revocation so the call log can still name them. */
+  tokens(): CredProxyToken[]
+  /** One token's value, from the OS keychain. Separate from the record so the
+   *  rules file never holds a secret. */
+  tokenSecret(id: string): string | null
+  /** Stamps `lastUsedAt`. What makes an unused token safe to revoke, and the
+   *  only reason anybody ever does. */
+  markTokenUsed(id: string, at: string): void
   /** Durable audit. Called once per call, refusals included. */
   recordCall(call: CredProxyCall): void
   /** Injected so a test can point the proxy at a real `node:http` upstream
@@ -143,6 +158,34 @@ function tokenEquals(a: string, b: string): boolean {
     return false
   }
   return timingSafeEqual(ba, bb)
+}
+
+/**
+ * Which token, if any, this value is.
+ *
+ * Walks every token and compares in constant time, including the ones already
+ * revoked or expired -- because the answer "this is Bob's revoked token" is
+ * worth more to an operator than "wrong token", and because stopping early on
+ * the first match would otherwise depend on list order.
+ *
+ * A value matching NOTHING is `unauthenticated` and says no more than that.
+ */
+function matchToken(
+  presented: string,
+  tokens: readonly CredProxyToken[],
+  secretOf: (id: string) => string | null,
+  now: number
+): { outcome: 'ok'; token: CredProxyToken } | { outcome: 'unauthenticated' | 'token-expired' | 'token-revoked' } {
+  if (presented === '') return { outcome: 'unauthenticated' }
+  let matched: CredProxyToken | null = null
+  for (const t of tokens) {
+    const secret = secretOf(t.id)
+    if (secret === null || secret === '') continue
+    if (tokenEquals(presented, secret)) matched = t
+  }
+  if (matched === null) return { outcome: 'unauthenticated' }
+  if (credProxyTokenUsable(matched, now)) return { outcome: 'ok', token: matched }
+  return { outcome: credProxyTokenState(matched, now) === 'revoked' ? 'token-revoked' : 'token-expired' }
 }
 
 /** Whether a socket's peer address is this machine.
@@ -257,7 +300,10 @@ export class CredProxy {
       port: this.file.port,
       listening: this.server !== null && this.server.listening,
       address: addr && typeof addr === 'object' ? `${addr.address}:${addr.port}` : null,
-      hasToken: this.deps.clientToken() !== null,
+      // "Is there a token that would work right now", not "does a record
+      // exist" -- a panel that says a token is present while every one of them
+      // is expired is telling the operator the opposite of what they need.
+      hasToken: this.deps.tokens().some((t) => credProxyTokenUsable(t, Date.now())),
       ruleCount: this.ruleCache.length,
       ...(this.lastError ? { error: this.lastError } : {}),
       ...(this.parked ? { parked: this.parked } : {})
@@ -358,6 +404,12 @@ export class CredProxy {
   }
 
   /** Refuses, with the reason, and never by forwarding. */
+  private authenticate(
+    presented: string
+  ): { outcome: 'ok'; token: CredProxyToken } | { outcome: 'unauthenticated' | 'token-expired' | 'token-revoked' } {
+    return matchToken(presented, this.deps.tokens(), (id) => this.deps.tokenSecret(id), Date.now())
+  }
+
   private refuse(
     res: ServerResponse,
     reason: Exclude<CredProxyOutcome, 'forwarded'>,
@@ -406,13 +458,17 @@ export class CredProxy {
     // AUTHENTICATION BEFORE ROUTING, deliberately. A caller with no token
     // learns nothing about which destinations have rules — not even by the
     // difference between a 401 and a 403.
-    const expected = this.deps.clientToken()
     const raw = req.headers[CRED_PROXY_TOKEN_HEADER]
     const presented = Array.isArray(raw) ? (raw[0] ?? '') : (raw ?? '')
-    if (expected === null || presented === '' || !tokenEquals(presented, expected)) {
-      this.refuse(res, 'unauthenticated', started, unknownCtx)
+    const auth = this.authenticate(presented)
+    if (auth.outcome !== 'ok') {
+      // `token-expired` and `token-revoked` are only reachable once the VALUE
+      // matched, so a caller who does not hold a real token still gets the
+      // same flat `unauthenticated` and learns nothing from the difference.
+      this.refuse(res, auth.outcome, started, unknownCtx)
       return
     }
+    this.deps.markTokenUsed(auth.token.id, new Date().toISOString())
 
     const parsed = parseProxyTarget(req.url ?? '')
     if (!parsed.ok) {
@@ -657,5 +713,100 @@ export function appendCredProxyAudit(path: string, call: CredProxyCall): void {
     appendFileSync(path, `${JSON.stringify(call)}\n`, { mode: 0o600 })
   } catch (err) {
     console.error('[credproxy] failed to append an audit row:', err)
+  }
+}
+
+// ---------------------------------------------------------------- token store
+//
+// Records in the rules file, values in the OS keychain, and never the two in
+// one place.
+
+/** Where one token's value lives. The ORIGINAL single token kept the id
+ *  `credproxy.client.token`, and migration reuses it rather than minting a new
+ *  value — so every script that already holds that token keeps working. An
+ *  upgrade that silently invalidates a credential is an outage. */
+export function credProxyTokenSecretId(tokenId: string): string {
+  return tokenId === LEGACY_TOKEN_ID ? LEGACY_TOKEN_SECRET_ID : `credproxy.token.${tokenId}`
+}
+
+const LEGACY_TOKEN_ID = 'legacy'
+const LEGACY_TOKEN_SECRET_ID = 'credproxy.client.token'
+
+/**
+ * The token that existed before this feature, promoted to a record.
+ *
+ * Called with whether the old secret is actually present, so a fresh install
+ * does not grow a phantom token for a value that was never minted.
+ */
+export function migrateLegacyToken(
+  file: CredProxyFile,
+  legacyExists: boolean,
+  now: string
+): CredProxyFile {
+  const tokens = file.tokens ?? []
+  if (!legacyExists) return { ...file, tokens }
+  if (tokens.some((t) => t.id === LEGACY_TOKEN_ID)) return { ...file, tokens }
+  return {
+    ...file,
+    tokens: [
+      {
+        id: LEGACY_TOKEN_ID,
+        // Named for what it is, so the first thing an operator sees in the list
+        // is the one they cannot account for.
+        name: 'Original token (before per-agent tokens)',
+        createdAt: now,
+        expiresAt: null,
+        revokedAt: null,
+        lastUsedAt: null
+      },
+      ...tokens
+    ]
+  }
+}
+
+export function credProxyTokens(path: string): CredProxyToken[] {
+  const f = readCredProxyFile(path) as CredProxyFile
+  return Array.isArray(f?.tokens) ? f.tokens : []
+}
+
+/** Stamps `lastUsedAt`. Read-modify-write on a small file, on the accepted
+ *  path only — a refusal must not tell the file anything, or a wrong token
+ *  would leave a trail that looks like use. */
+export function markCredProxyTokenUsed(path: string, id: string, at: string): void {
+  try {
+    const f = readCredProxyFile(path) as CredProxyFile
+    const tokens = Array.isArray(f?.tokens) ? f.tokens : []
+    const next = tokens.map((t) => (t.id === id ? { ...t, lastUsedAt: at } : t))
+    writeCredProxyFile(path, { ...f, tokens: next })
+  } catch (err) {
+    // Never fail a call because the bookkeeping failed. The credential was
+    // already resolved and the request is the user's; losing a timestamp is
+    // not a reason to refuse it.
+    console.error('[credproxy] could not stamp token use:', err)
+  }
+}
+
+/** Adds a record. Newest first, because the one just created is the one being
+ *  looked for. */
+export function addCredProxyToken(file: CredProxyFile, token: CredProxyToken): CredProxyFile {
+  return { ...file, tokens: [token, ...(file.tokens ?? [])] }
+}
+
+/**
+ * Marks a token revoked. The record is KEPT.
+ *
+ * Deleting it would be tidier and wrong: the call log names tokens by id, and a
+ * deleted record turns every past line into an unattributable one. "Who used
+ * this key last month" is exactly the question revocation gets asked after.
+ *
+ * Re-revoking is a no-op rather than a re-stamp, so the date stays the date it
+ * actually happened.
+ */
+export function revokeCredProxyToken(file: CredProxyFile, id: string, at: string): CredProxyFile {
+  return {
+    ...file,
+    tokens: (file.tokens ?? []).map((t) =>
+      t.id === id && t.revokedAt === null ? { ...t, revokedAt: at } : t
+    )
   }
 }

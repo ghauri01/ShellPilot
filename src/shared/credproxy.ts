@@ -118,6 +118,13 @@ export type CredProxyOutcome =
   | 'no-rule'
   | 'rule-disabled'
   | 'unauthenticated'
+  /** The presented value matched a real token that is past its end date, or
+   *  that was revoked. Distinct from `unauthenticated` ON PURPOSE, and only
+   *  reachable AFTER the value matched: somebody who does not hold a token
+   *  still learns nothing, and somebody who does gets told why their script
+   *  stopped at 3am rather than being sent to check for a typo. */
+  | 'token-expired'
+  | 'token-revoked'
   | 'not-loopback'
   | 'vault-locked'
   | 'credential-missing'
@@ -136,6 +143,12 @@ export const REFUSAL_REASONS: Record<Exclude<CredProxyOutcome, 'forwarded'>, str
     'No rule covers that destination, so nothing was sent. This proxy never forwards a request ' +
     'it has no rule for — not without the credential, not at all.',
   'rule-disabled': 'A rule covers that destination but it is switched off.',
+  'token-expired':
+    'That token has passed its end date. Nothing was sent. Create a new token in ShellPilot’s ' +
+    'API credential proxy panel — the old one is not extended, deliberately.',
+  'token-revoked':
+    'That token was revoked. Nothing was sent, and it will not start working again. If this is ' +
+    'a script that should still run, give it a token of its own.',
   unauthenticated:
     'Missing or wrong client token. Copy the token from ShellPilot’s API credential proxy ' +
     `settings and send it as ${CRED_PROXY_TOKEN_HEADER}.`,
@@ -157,6 +170,11 @@ export const REFUSAL_STATUS: Record<Exclude<CredProxyOutcome, 'forwarded'>, numb
   'no-rule': 403,
   'rule-disabled': 403,
   unauthenticated: 401,
+  // 401, not 403. The caller held a real token and the fix is a new one, which
+  // is an authentication problem — 403 would say the token was fine and the
+  // destination was not, and send them to the rules list instead.
+  'token-expired': 401,
+  'token-revoked': 401,
   'not-loopback': 403,
   'vault-locked': 409,
   'credential-missing': 409,
@@ -449,4 +467,72 @@ export interface CredProxyStatus {
  *  cannot disagree about the shape. */
 export function credProxyBaseUrl(port: number, upstreamOrigin: string): string {
   return `http://127.0.0.1:${port}/${upstreamOrigin}`
+}
+
+// ------------------------------------------------------------------- tokens
+//
+// PER-AGENT TOKENS, replacing the single shared one.
+//
+// The proxy shipped with one static token, minted once and valid until somebody
+// thought to rotate it. That is the shape every secrets product eventually
+// regrets: it names nobody, expires never, and revoking it stops every caller
+// at once — so in practice it never gets revoked, because the person who would
+// do it cannot tell what they would break.
+//
+// A token now belongs to a caller, says who, and can be given an end date. The
+// point is not cryptography, it is BLAST RADIUS: when one script's token leaks,
+// the answer should be revoking that script, not every script.
+//
+// Values stay in the OS keychain via the secrets store, keyed by token id,
+// exactly where the single token already lived. They are not put in the rules
+// file and not hashed: hashing would buy nothing here, because the file never
+// held the value in the first place, and it would cost the ability to re-copy a
+// token — which on a single-user desktop turns a small mistake into a rotation.
+
+export interface CredProxyToken {
+  id: string
+  /** What this token is for, in the operator's words. Required, because a list
+   *  of tokens nobody can tell apart is a list nobody will ever revoke from. */
+  name: string
+  createdAt: string
+  /** ISO date, or null for a token that does not expire. Null is allowed and
+   *  is not the default the UI offers. */
+  expiresAt: string | null
+  /** Set when revoked. The record is KEPT rather than deleted, so the call log
+   *  can still say which token made a call last week. */
+  revokedAt: string | null
+  /** Updated on every accepted call. What makes an unused token safe to
+   *  revoke, and the only reason anyone ever does. */
+  lastUsedAt: string | null
+}
+
+export type CredProxyTokenState = 'active' | 'expired' | 'revoked'
+
+/**
+ * Whether a token may be used, right now.
+ *
+ * Revocation beats expiry: a token revoked before it expired is revoked, and
+ * saying "expired" about it would send someone to change the date rather than
+ * to notice it was taken away.
+ */
+export function credProxyTokenState(t: CredProxyToken, now: number): CredProxyTokenState {
+  if (t.revokedAt !== null) return 'revoked'
+  if (t.expiresAt === null) return 'active'
+  const at = Date.parse(t.expiresAt)
+  // An unparseable expiry is treated as EXPIRED, not as "no expiry". A date we
+  // cannot read is not permission to keep going: the safe reading of a broken
+  // record is the one that stops.
+  if (!Number.isFinite(at)) return 'expired'
+  return now >= at ? 'expired' : 'active'
+}
+
+export function credProxyTokenUsable(t: CredProxyToken, now: number): boolean {
+  return credProxyTokenState(t, now) === 'active'
+}
+
+/** Why a presented token was refused, for the call log and the panel. */
+export const CRED_PROXY_TOKEN_STATE_NOTE: Record<CredProxyTokenState, string> = {
+  active: 'Usable.',
+  expired: 'Past its end date. Create a new token rather than extending this one.',
+  revoked: 'Revoked. It is kept here so the call log can still name it.'
 }

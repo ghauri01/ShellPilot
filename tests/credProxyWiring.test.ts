@@ -34,14 +34,18 @@ describe('the channels main serves and the channels preload calls are the same s
   // channel added on one side and forgotten on the other.
   const CHANNELS = [
     'credproxy:calls',
+    'credproxy:create-token',
     'credproxy:remove-rule',
+    'credproxy:revoke-token',
     'credproxy:rotate-token',
     'credproxy:rules',
     'credproxy:save-rule',
     'credproxy:start',
     'credproxy:status',
     'credproxy:stop',
-    'credproxy:token'
+    'credproxy:token',
+    'credproxy:token-value',
+    'credproxy:tokens'
   ]
 
   it('main handles exactly these', () => {

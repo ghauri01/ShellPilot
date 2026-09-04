@@ -95,7 +95,7 @@ import type {
   WebhookDeliveryStatus,
   WebhookTestResult
 } from '../shared/webhook'
-import type { CredProxyCall, CredProxyRule, CredProxyStatus } from '../shared/credproxy'
+import type { CredProxyCall, CredProxyRule, CredProxyStatus , CredProxyToken } from '../shared/credproxy'
 import type {
   LocalCloseInfo,
   LocalConnectConfig,
@@ -397,6 +397,16 @@ const api = {
     start: (port?: number): Promise<{ ok: boolean; error?: string; status: CredProxyStatus }> =>
       ipcRenderer.invoke('credproxy:start', port),
     stop: (): Promise<CredProxyStatus> => ipcRenderer.invoke('credproxy:stop'),
+    tokens: (): Promise<CredProxyToken[]> => ipcRenderer.invoke('credproxy:tokens'),
+    createToken: (
+      name: string,
+      expiresAt: string | null
+    ): Promise<{ ok: boolean; id?: string; token?: string; error?: string }> =>
+      ipcRenderer.invoke('credproxy:create-token', name, expiresAt),
+    revokeToken: (id: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('credproxy:revoke-token', id),
+    tokenValue: (id: string): Promise<string | null> =>
+      ipcRenderer.invoke('credproxy:token-value', id),
     token: (): Promise<{ ok: boolean; token?: string; error?: string }> =>
       ipcRenderer.invoke('credproxy:token'),
     rotateToken: (): Promise<{ ok: boolean; token?: string; error?: string }> =>

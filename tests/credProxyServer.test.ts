@@ -108,7 +108,19 @@ async function harness(rules: CredProxyRule[], over: Partial<CredProxyDeps> = {}
       file = f
     },
     resolveCredential: () => ({ ok: true, value: SECRET }),
-    clientToken: () => TOKEN,
+    // One active token, which is what the single `clientToken` used to be.
+    tokens: () => [
+      {
+        id: 'tok',
+        name: 'test',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        expiresAt: null,
+        revokedAt: null,
+        lastUsedAt: null
+      }
+    ],
+    tokenSecret: () => TOKEN,
+    markTokenUsed: () => {},
     recordCall: (c) => audit.push(c),
     ...over
   }
@@ -365,7 +377,7 @@ describe('a caller on loopback is not automatically trusted', () => {
   it('refuses everything when no token has been minted at all', async () => {
     const up = await upstream()
     cleanups.push(up.close)
-    const h = await harness([rule({ origin: up.origin })], { clientToken: () => null })
+    const h = await harness([rule({ origin: up.origin })], { tokens: () => [] })
 
     const res = await call(h, `${up.origin}/v1/x`)
 
@@ -747,5 +759,81 @@ describe('saving a rule', () => {
     expect(res.status).toBe(403)
     expect(up.hits).toEqual([])
     expect(h.written()?.rules).toEqual([])
+  })
+})
+
+const tokenRec = (over: Record<string, unknown> = {}) => ({
+  id: 'tok',
+  name: 'test',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  expiresAt: null,
+  revokedAt: null,
+  lastUsedAt: null,
+  ...over
+})
+
+describe('per-agent tokens', () => {
+  it('refuses an expired token, and says so rather than saying it is wrong', async () => {
+    // Only reachable once the VALUE matched. A script that stopped at 3am is
+    // told its token ended, not sent looking for a typo.
+    const up = await upstream()
+    cleanups.push(up.close)
+    const h = await harness([rule({ origin: up.origin })], {
+      tokens: () => [tokenRec({ expiresAt: '2020-01-01T00:00:00.000Z' })] as never
+    })
+
+    const res = await call(h, `${up.origin}/v1/x`)
+    expect(res.status).toBe(401)
+    expect(await res.text()).toMatch(/passed its end date/)
+  })
+
+  it('refuses a revoked token, and says it will not start working again', async () => {
+    const up = await upstream()
+    cleanups.push(up.close)
+    const h = await harness([rule({ origin: up.origin })], {
+      tokens: () => [tokenRec({ revokedAt: '2026-01-02T00:00:00.000Z' })] as never
+    })
+
+    const res = await call(h, `${up.origin}/v1/x`)
+    expect(res.status).toBe(401)
+    expect(await res.text()).toMatch(/was revoked/)
+  })
+
+  it('tells a caller holding NO real token nothing at all', async () => {
+    // The line that must not move. Expired and revoked are distinguishable
+    // only to somebody who already holds a real token; anyone else gets the
+    // same flat refusal and learns nothing about which tokens exist.
+    const up = await upstream()
+    cleanups.push(up.close)
+    const h = await harness([rule({ origin: up.origin })], {
+      tokens: () => [tokenRec({ expiresAt: '2020-01-01T00:00:00.000Z' })] as never
+    })
+
+    const res = await call(h, `${up.origin}/v1/x`, {
+      headers: { [CRED_PROXY_TOKEN_HEADER]: 'not-the-token' }
+    })
+    expect(res.status).toBe(401)
+    expect(await res.text()).toMatch(/Missing or wrong client token/)
+    expect(await Promise.resolve(res.statusText)).not.toMatch(/expired/)
+  })
+
+  it('stamps last-used on an accepted call and not on a refused one', async () => {
+    // What makes an unused token safe to revoke. A refusal must leave no
+    // trail, or a wrong token would look like use.
+    const up = await upstream()
+    cleanups.push(up.close)
+    const used: string[] = []
+    const h = await harness([rule({ origin: up.origin })], {
+      tokens: () => [tokenRec()] as never,
+      markTokenUsed: (id: string) => used.push(id)
+    } as never)
+
+    await call(h, `${up.origin}/v1/x`)
+    expect(used).toEqual(['tok'])
+
+    await call(h, `${up.origin}/v1/x`, {
+      headers: { [CRED_PROXY_TOKEN_HEADER]: 'wrong' }
+    })
+    expect(used).toEqual(['tok'])
   })
 })

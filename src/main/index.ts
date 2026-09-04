@@ -247,7 +247,13 @@ import {
   CredProxy,
   appendCredProxyAudit,
   readCredProxyFile,
-  writeCredProxyFile
+  writeCredProxyFile,
+  type CredProxyFile,
+  addCredProxyToken,
+  revokeCredProxyToken,
+  credProxyTokenSecretId,
+  markCredProxyTokenUsed,
+  migrateLegacyToken
 } from './services/credProxy'
 import {
   ProcessService,
@@ -257,7 +263,7 @@ import {
 import type { ProcessDraft, ProcessLogLine, ProcessStatus } from '../shared/processes'
 import { Supervisor } from './services/vpn/supervisor'
 import { DEFAULT_CRED_PROXY_PORT } from '../shared/credproxy'
-import type { CredProxyCall, CredProxyStatus } from '../shared/credproxy'
+import type { CredProxyCall, CredProxyStatus, CredProxyToken } from '../shared/credproxy'
 import {
   refreshMcpDataCache,
   listCachedWorkspaces,
@@ -2359,8 +2365,33 @@ ipcMain.handle('webhook:notify', (_e, payload: AlertPayload) => {
 // names, which is what keeps that true without anyone having to remember it.
 const CRED_PROXY_TOKEN_SECRET_ID = 'credproxy.client.token'
 
+/** Module level, because the token IPC below reads and writes the same file the
+ *  proxy does and two paths would eventually be two files. */
+const credProxyRulesPath = join(app.getPath('userData'), 'shellpilot-credproxy.json')
+
+/**
+ * The token records, with the pre-existing single token promoted on the way.
+ *
+ * Migration happens on READ rather than at startup, so it also covers an app
+ * upgraded while the proxy was switched off, and it reuses the old secret id --
+ * an upgrade that quietly invalidates a working credential is an outage, not a
+ * migration.
+ */
+function credProxyTokenList(): CredProxyToken[] {
+  const before = readCredProxyFile(credProxyRulesPath) as CredProxyFile
+  const after = migrateLegacyToken(
+    before,
+    getSecret(CRED_PROXY_TOKEN_SECRET_ID) !== null,
+    new Date().toISOString()
+  )
+  if ((before.tokens?.length ?? 0) !== (after.tokens?.length ?? 0)) {
+    writeCredProxyFile(credProxyRulesPath, after)
+  }
+  return after.tokens ?? []
+}
+
 const credProxy = ((): CredProxy => {
-  const rulesPath = join(app.getPath('userData'), 'shellpilot-credproxy.json')
+  const rulesPath = credProxyRulesPath
   const auditPath = join(app.getPath('userData'), 'shellpilot-credproxy-audit.jsonl')
   return new CredProxy(
     {
@@ -2383,7 +2414,9 @@ const credProxy = ((): CredProxy => {
           return { ok: false, reason: 'credential-missing' }
         }
       },
-      clientToken: () => getSecret(CRED_PROXY_TOKEN_SECRET_ID),
+      tokens: () => credProxyTokenList(),
+      tokenSecret: (id) => getSecret(credProxyTokenSecretId(id)),
+      markTokenUsed: (id, at) => markCredProxyTokenUsed(rulesPath, id, at),
       recordCall: (call) => appendCredProxyAudit(auditPath, call)
     },
     DEFAULT_CRED_PROXY_PORT
@@ -2425,6 +2458,61 @@ ipcMain.handle('credproxy:token', (): { ok: boolean; token?: string; error?: str
   return mintCredProxyToken()
 })
 ipcMain.handle('credproxy:rotate-token', () => mintCredProxyToken())
+
+// ---- Per-agent tokens ----
+ipcMain.handle('credproxy:tokens', (): CredProxyToken[] => credProxyTokenList())
+type CredProxyMintResult = { ok: boolean; id?: string; token?: string; error?: string }
+
+// The channel name stays on this line on purpose: tests/credProxyWiring.test.ts
+// greps main for every `ipcMain.handle('credproxy:…'` and compares the set
+// against preload's. Wrapping the argument hides the channel from that check,
+// which is how a handler with no caller (or a caller with no handler) survives.
+ipcMain.handle('credproxy:create-token', (_e, name: unknown, expiresAt: unknown): CredProxyMintResult => {
+    const label = String(name ?? '').trim()
+    // A token nobody can account for is a token nobody will ever revoke, so
+    // the name is required rather than defaulted to "token 3".
+    if (label === '') return { ok: false, error: 'Give the token a name — what is it for.' }
+    const iso = expiresAt === null || expiresAt === undefined ? null : String(expiresAt)
+    if (iso !== null && !Number.isFinite(Date.parse(iso))) {
+      return { ok: false, error: 'That end date could not be read.' }
+    }
+    const id = randomUUID()
+    const value = randomBytes(32).toString('base64url')
+    try {
+      setSecret(credProxyTokenSecretId(id), value)
+      const file = readCredProxyFile(credProxyRulesPath) as CredProxyFile
+      writeCredProxyFile(
+        credProxyRulesPath,
+        addCredProxyToken(file, {
+          id,
+          name: label.slice(0, 80),
+          createdAt: new Date().toISOString(),
+          expiresAt: iso,
+          revokedAt: null,
+          lastUsedAt: null
+        })
+      )
+      return { ok: true, id, token: value }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+  }
+})
+ipcMain.handle('credproxy:revoke-token', (_e, id: unknown): { ok: boolean; error?: string } => {
+  try {
+    const file = readCredProxyFile(credProxyRulesPath) as CredProxyFile
+    writeCredProxyFile(credProxyRulesPath, revokeCredProxyToken(file, String(id), new Date().toISOString()))
+    // The VALUE goes now. The record stays so the call log can still name it,
+    // but nothing should be able to present this token again even if the
+    // record were later edited by hand.
+    deleteSecret(credProxyTokenSecretId(String(id)))
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
+})
+ipcMain.handle('credproxy:token-value', (_e, id: unknown): string | null =>
+  getSecret(credProxyTokenSecretId(String(id)))
+)
 
 // ---- Supervised local processes ----
 //
