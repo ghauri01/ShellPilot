@@ -4,7 +4,8 @@ import type { FleetTarget } from '../src/shared/fleet'
 import { HOST_FACTS_INTERVAL_MS } from '../src/shared/hostFacts'
 import { POSTURE_FACT_PREFIX, POSTURE_STATUS_MARKER, parsePosture } from '../src/shared/posture'
 import type { HostPosture } from '../src/shared/posture'
-import { PostureReader } from '../src/main/services/posture'
+import { PostureReader, firewallRulesGranted } from '../src/main/services/posture'
+import type { AccessGroup, AiCapabilityPolicy, PermissionValue } from '../src/shared/mcp'
 
 // The security posture probe's place in the sweep — roadmap item 24.
 //
@@ -406,5 +407,68 @@ describe('the reader tells three failures apart', () => {
     expect(p.ok).toBe(true)
     if (!p.ok) throw new Error('unreachable')
     expect(p.posture.firewall).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Who may have the rule lines — roadmap item 31
+// ---------------------------------------------------------------------------
+//
+// The decision itself, kept out of main/index.ts so it can be asserted rather
+// than reviewed. What main adds around it is the group resolution the MCP
+// bridge already does: the assignment on the server, else the one on its
+// workspace.
+
+const capabilities = (firewallRules: PermissionValue): AiCapabilityPolicy =>
+  ({ firewallRules }) as unknown as AiCapabilityPolicy
+
+const withRules = (firewallRules: PermissionValue): AccessGroup => ({
+  id: 'g',
+  name: 'G',
+  builtIn: false,
+  capabilities: capabilities(firewallRules),
+  filePolicies: []
+})
+
+describe('firewallRulesGranted', () => {
+  it('collects only on allow, because an hourly sweep has nobody to ask', () => {
+    expect(firewallRulesGranted(withRules('allow'))).toBe(true)
+    // 'ask' is not a maybe here. There is no screen and no human in a
+    // background sweep, so treating it as a yes invents a consent and raising
+    // a prompt queues an approval against work nobody started.
+    expect(firewallRulesGranted(withRules('ask'))).toBe(false)
+    expect(firewallRulesGranted(withRules('deny'))).toBe(false)
+  })
+
+  it('fails closed on a server with no group, and on a group that predates it', () => {
+    // No assignment at all is "No AI Access", which is the strictest answer
+    // the policy layer has and must not become the loosest one here.
+    expect(firewallRulesGranted(null)).toBe(false)
+    // A group saved before the capability existed has no key for it.
+    // `backfillCapabilities` fills it in at deny on load; this is what happens
+    // in the window before it does, and in any test or caller that skips it.
+    const stale = withRules('allow')
+    delete (stale.capabilities as Partial<AiCapabilityPolicy>).firewallRules
+    expect(firewallRulesGranted(stale)).toBe(false)
+  })
+
+  it('reads nothing but the capability, so no other grant can widen it', () => {
+    // A group that may do everything else on a server still may not have this
+    // unless it says so. serverMetrics is the one that would have been widened
+    // if this had ridden in on something broader, which is the 0.8.0 finding.
+    const permissive = {
+      id: 'g',
+      name: 'G',
+      builtIn: false,
+      capabilities: {
+        terminal: 'allow',
+        sudo: 'allow',
+        serverMetrics: 'allow',
+        hostFacts: 'allow',
+        firewallRules: 'deny'
+      } as unknown as AiCapabilityPolicy,
+      filePolicies: []
+    }
+    expect(firewallRulesGranted(permissive)).toBe(false)
   })
 })

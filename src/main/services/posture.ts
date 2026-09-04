@@ -1,5 +1,6 @@
 import type { HostPosture, PostureCollectOptions } from '../../shared/posture'
 import { POSTURE_STATUS_MARKER, buildPostureCommand, parsePosture } from '../../shared/posture'
+import type { AccessGroup } from '../../shared/mcp'
 
 // Reading a host's security posture over SSH — roadmap item 24, main half.
 //
@@ -32,6 +33,33 @@ import { POSTURE_STATUS_MARKER, buildPostureCommand, parsePosture } from '../../
 // which is the whole point of the item. Collapsing the first into the third
 // would put "this host has no firewall rules" in front of somebody running a
 // security review over a machine nobody managed to connect to.
+
+/**
+ * Whether a server's firewall RULE LINES may be collected — roadmap item 31.
+ *
+ * The decision, on its own, so it can be asserted in a test rather than
+ * reviewed in main/index.ts. What main puts around it is the group resolution
+ * the MCP bridge already does — the assignment on the server, else the one on
+ * its workspace — and nothing else.
+ *
+ * ONLY `allow`. Everywhere else in this app an `ask` means "raise a prompt",
+ * and there is no prompt to raise here: this runs on an unattended hourly
+ * sweep with nobody at the screen. Treating `ask` as a yes would invent a
+ * consent nobody gave, and queueing an approval would put a dialog in front of
+ * a person for work they did not start.
+ *
+ * FAILS CLOSED on everything else. No group is "No AI Access", which is the
+ * strictest answer the policy layer has and must not become the loosest one
+ * here; a group saved before the capability existed has no key for it and is
+ * read as deny, exactly as `evaluateCapability` reads it.
+ *
+ * It reads the capability and nothing else. No other grant widens it — that
+ * is the whole point of it having its own line in the grid, and the 0.8.0
+ * finding was precisely a consent that had drifted wider than its label.
+ */
+export function firewallRulesGranted(group: AccessGroup | null): boolean {
+  return group?.capabilities?.firewallRules === 'allow'
+}
 
 /**
  * The exec shape this reader needs. Structural rather than an import of
