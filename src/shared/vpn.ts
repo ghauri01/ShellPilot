@@ -117,6 +117,43 @@ export interface FrpProxy {
   acknowledgedExposure: boolean
 }
 
+/**
+ * Where a service published through this frp client actually appears.
+ *
+ * ShellPilot does not own a public endpoint and this record is the whole
+ * reason it never has to pretend otherwise. ngrok can hand out a URL because
+ * ngrok runs the server the name resolves to; frp cannot, so somebody pointed
+ * `*.<baseDomain>` at an frp server they control, and this is that somebody's
+ * answer written down. Every published URL is derived from it rather than
+ * invented, which means a URL is only ever shown once there is a real domain
+ * behind it.
+ *
+ * Absent means the one-click publish flow refuses and explains, rather than
+ * composing a plausible-looking address out of the frp server's own hostname.
+ */
+export interface FrpPublicHost {
+  /** The wildcard-delegated zone, without a leading dot: `tunnel.example.com`
+   *  when `*.tunnel.example.com` resolves to the frp server. */
+  baseDomain: string
+  /** How the names are served in front of the frp server. `https` only when
+   *  something actually terminates TLS for `*.<baseDomain>` — frp itself does
+   *  not do that for a plain local HTTP service, and a URL whose scheme is a
+   *  wish fails in the browser rather than in this app. */
+  scheme: 'http' | 'https'
+  /** frps `vhostHTTPPort`, when the URL has to carry it. Absent, or the
+   *  scheme's default, means the URL carries no port at all. */
+  port?: number
+  /**
+   * Epoch ms of the moment the operator said the DNS record exists.
+   *
+   * Its presence is what stops the guided setup asking again — the roadmap's
+   * "a guided one-time thing and then never mentioned again" is this field.
+   * It records a claim, not a measurement: ShellPilot never resolves the name,
+   * so this says the operator told us, and nothing stronger.
+   */
+  confirmedAt: number
+}
+
 export interface FrpVisitor {
   name: string
   type: 'stcp' | 'sudp' | 'xtcp'
@@ -149,6 +186,11 @@ export interface FrpSpec {
   }
   proxies: FrpProxy[]
   visitors: FrpVisitor[]
+  // Set by the guided setup, and by nothing else. An imported frpc.toml never
+  // carries it: the file says where the client dials, not which domain its
+  // operator pointed at that server, and guessing would be exactly the lie
+  // this field exists to avoid.
+  publicHost?: FrpPublicHost
   strippedDirectives?: StrippedDirective[]
   // Choices the user has explicitly accepted, each of which validation
   // otherwise treats as an error.
