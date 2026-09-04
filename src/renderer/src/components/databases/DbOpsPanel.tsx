@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, HelpCircle, Loader2, Lock, RefreshCw, ShieldAlert } from 'lucide-react'
 import {
   DB_ANSWER_HELP,
+  DB_QUESTIONS_BY_ENGINE,
   DB_QUESTION_LABEL,
   DB_QUESTION_WHY,
   formatBytes,
@@ -12,6 +13,14 @@ import {
   type DbAnswerStatus,
   type DbOpsReport,
   type DbVerdictLevel,
+  isMongoClientOp,
+  supportsDbOps,
+  type DbOpsEngine,
+  type MongoCurrentOpValue,
+  type MongoIndexesValue,
+  type MongoOplogValue,
+  type MongoReplicationValue,
+  type MongoSizesValue,
   type MysqlBinlogsValue,
   type MysqlProcesslistValue,
   type MysqlReplicationChannel,
@@ -21,21 +30,32 @@ import {
   type PgReplicationValue,
   type PgSizesValue,
   type PgStatementsValue,
-  type PgVacuumValue
+  type PgVacuumValue,
+  type RedisKeyspaceValue,
+  type RedisMemoryValue,
+  type RedisReplicationValue,
+  type RedisSlowlogValue
 } from '../../../../shared/dbOps'
 import type { DbConnectConfig, DbKind } from '../../../../shared/db'
 
 /**
  * The operations panel.
  *
- * Eight questions, each rendered as a SENTENCE first and a table second. That
- * ordering is the whole editorial point of roadmap item 18: "replication is 4h
- * 12m behind" is a judgement someone can act on, and a cell containing 15120 in
- * a tab nobody has open is not.
+ * Eight or nine questions depending on the engine, each rendered as a SENTENCE
+ * first and a table second. That ordering is the whole editorial point of
+ * roadmap item 18: "replication is 4h 12m behind" is a judgement someone can
+ * act on, and a cell containing 15120 in a tab nobody has open is not.
  *
  * The panel has no buttons that change anything. Every control here re-reads.
  * See the refusal at the top of src/shared/dbOps.ts for why there is no "kill
- * this blocking query" and no "vacuum this table".
+ * this blocking query", no "vacuum this table", no "drop this unused index" and
+ * no "raise maxmemory".
+ *
+ * Four engines now, and the tables below are per engine because the same
+ * question id means different rows: `replication` is walsenders on Postgres,
+ * channels on MySQL, members on MongoDB and a link on Redis. The engine comes
+ * from the REPORT and not from the connection's kind, so a report can never be
+ * rendered with the wrong engine's columns.
  */
 
 const LEVEL_ICON: Record<DbVerdictLevel, typeof CheckCircle2> = {
@@ -136,8 +156,192 @@ function Table({ columns, rows }: { columns: string[]; rows: (string | number | 
 
 /** The numbers behind each judgement. Deliberately below it, and deliberately
  *  short — a table long enough to scroll is a table nobody reads. */
-function Detail({ answer, engine }: { answer: DbAnswer<unknown>; engine: 'postgres' | 'mysql' }): React.JSX.Element | null {
+function Detail({ answer, engine }: { answer: DbAnswer<unknown>; engine: DbOpsEngine }): React.JSX.Element | null {
   if (answer.value === undefined || answer.value === null) return null
+
+  // ---- MongoDB -----------------------------------------------------------
+
+  if (answer.id === 'replication' && engine === 'mongodb') {
+    const v = answer.value as MongoReplicationValue
+    if (v.members.length === 0) return null
+    return (
+      <Table
+        columns={['member', 'state', 'health', 'behind primary', 'ping']}
+        rows={v.members.map((m) => [
+          m.name,
+          m.stateStr,
+          m.health === 1 ? 'up' : 'DOWN',
+          // Never a zero here. A member that did not report an optime says so
+          // in words; the epoch it actually sends is not a position.
+          m.optimeIsEpoch ? 'did not report' : m.lagSeconds === null ? null : formatSeconds(m.lagSeconds),
+          // And a round trip that was never made is not 0 ms.
+          m.pingMs === null ? null : `${m.pingMs} ms`
+        ])}
+      />
+    )
+  }
+
+  if (answer.id === 'oplog') {
+    const v = answer.value as MongoOplogValue
+    if (!v.present) return null
+    return (
+      <Table
+        columns={['window', 'member uptime', 'has it rolled?', 'entries', 'configured max']}
+        rows={[[
+          formatSeconds(v.windowSeconds),
+          formatSeconds(v.uptimeSeconds),
+          // The distinction the question exists for, in the table as well as in
+          // the sentence.
+          v.neverRolled === null ? null : v.neverRolled ? 'not yet — the window is still growing' : 'yes — this is the real window',
+          formatCount(v.count),
+          formatBytes(v.maxSizeBytes)
+        ]]}
+      />
+    )
+  }
+
+  if (answer.id === 'indexes') {
+    const v = answer.value as MongoIndexesValue
+    if (v.indexes.length === 0) return null
+    return (
+      <Table
+        columns={['index', 'reads', 'counting since', 'size']}
+        rows={v.indexes.slice(0, 8).map((i) => [
+          `${i.collection}.${i.name}`,
+          formatCount(i.ops),
+          // Shown beside every row, because "0 reads" without it is a claim
+          // about a window nobody stated.
+          i.sinceMs === null ? null : new Date(i.sinceMs).toISOString().replace('T', ' ').slice(0, 16),
+          i.sizeBytes === null ? null : formatBytes(i.sizeBytes)
+        ])}
+      />
+    )
+  }
+
+  if (answer.id === 'currentop') {
+    const v = answer.value as MongoCurrentOpValue
+    const client = v.operations.filter(isMongoClientOp)
+    if (client.length === 0) return null
+    return (
+      <Table
+        columns={['op', 'namespace', 'running', 'plan', 'waiting for lock']}
+        rows={client.slice(0, 8).map((o) => [
+          o.op,
+          o.ns,
+          formatSeconds(o.secondsRunning),
+          o.planSummary,
+          o.waitingForLock === null ? null : o.waitingForLock ? 'yes' : 'no'
+        ])}
+      />
+    )
+  }
+
+  if (answer.id === 'sizes' && engine === 'mongodb') {
+    const v = answer.value as MongoSizesValue
+    return (
+      <>
+        {v.databases.length > 0 && (
+          <Table
+            columns={['database', 'on disk']}
+            rows={v.databases.slice(0, 8).map((d) => [d.name, formatBytes(d.sizeOnDiskBytes)])}
+          />
+        )}
+        {v.collections.length > 0 && (
+          <Table
+            columns={['collection', 'documents', 'data', 'storage', 'indexes']}
+            rows={v.collections.slice(0, 8).map((c) => [
+              c.name,
+              formatCount(c.documents),
+              formatBytes(c.dataBytes),
+              formatBytes(c.storageBytes),
+              formatBytes(c.indexBytes)
+            ])}
+          />
+        )}
+      </>
+    )
+  }
+
+  // ---- Redis -------------------------------------------------------------
+
+  if (answer.id === 'memory') {
+    const v = answer.value as RedisMemoryValue
+    return (
+      <Table
+        columns={['used', 'limit', 'policy', 'fragmentation']}
+        rows={[[
+          formatBytes(v.usedBytes),
+          // Three different cells for three different facts, and none of them
+          // is a blank a reader would fill in as zero.
+          !v.maxmemoryReported ? 'not reported' : v.maxmemoryBytes === 0 ? 'none — unlimited' : formatBytes(v.maxmemoryBytes),
+          v.policy,
+          v.fragmentationRatio === null ? null : v.fragmentationRatio.toFixed(2)
+        ]]}
+      />
+    )
+  }
+
+  if (answer.id === 'replication' && engine === 'redis') {
+    const v = answer.value as RedisReplicationValue
+    if (v.role === 'slave' || v.role === 'replica') {
+      return (
+        <Table
+          columns={['master', 'link', 'last heard from', 'down for', 'offset']}
+          rows={[[
+            v.masterHost,
+            v.masterLinkStatus,
+            // -1 is Redis's sentinel and never reaches this cell as a number.
+            v.masterLastIoSentinel ? 'no measurement' : v.masterLastIoSeconds === null ? null : `${formatSeconds(v.masterLastIoSeconds)} ago`,
+            v.linkDownSeconds === null ? null : formatSeconds(v.linkDownSeconds),
+            formatCount(v.replicaReplOffset)
+          ]]}
+        />
+      )
+    }
+    if (v.replicas.length === 0) return null
+    return (
+      <Table
+        columns={['replica', 'state', 'offset', 'lag']}
+        rows={v.replicas.map((r) => [r.ip ? `${r.ip}:${r.port ?? '?'}` : null, r.state, formatCount(r.offsetBytes), r.lagSeconds === null ? null : formatSeconds(r.lagSeconds)])}
+      />
+    )
+  }
+
+  if (answer.id === 'slowlog' && engine === 'redis') {
+    const v = answer.value as RedisSlowlogValue
+    if (v.entries.length === 0) return null
+    return (
+      <Table
+        columns={['command', 'arguments', 'took', 'when', 'client']}
+        rows={v.entries.slice(0, 8).map((e) => [
+          // The command NAME. The argument values are not carried this far —
+          // see parseRedisSlowlog for why.
+          e.command,
+          e.argumentCount,
+          e.microseconds === null ? null : `${(e.microseconds / 1000).toFixed(1)} ms`,
+          e.atMs === null ? null : new Date(e.atMs).toISOString().replace('T', ' ').slice(0, 19),
+          e.clientAddr
+        ])}
+      />
+    )
+  }
+
+  if (answer.id === 'keyspace') {
+    const v = answer.value as RedisKeyspaceValue
+    if (v.databases.length === 0) return null
+    return (
+      <Table
+        columns={['database', 'keys', 'with an expiry', 'never expire']}
+        rows={v.databases.map((d) => [
+          d.name,
+          formatCount(d.keys),
+          formatCount(d.expires),
+          d.keys === null || d.expires === null ? null : formatCount(d.keys - d.expires)
+        ])}
+      />
+    )
+  }
+
 
   if (answer.id === 'replication' && engine === 'postgres') {
     const v = answer.value as PgReplicationValue
@@ -382,7 +586,9 @@ export function DbOpsPanel({ cfg, kind, onVerdict }: Props): React.JSX.Element {
     setLoading(false)
   }, [cfg.id])
 
-  const engine = kind === 'postgres' ? 'postgres' : 'mysql'
+  // From the report and not from `kind`, so the tables can never be drawn with
+  // another engine's columns while a stale report is still on screen.
+  const engine = report?.engine ?? null
 
   return (
     <div style={{ padding: 12, overflowY: 'auto', flex: 1, minHeight: 0 }}>
@@ -399,8 +605,9 @@ export function DbOpsPanel({ cfg, kind, onVerdict }: Props): React.JSX.Element {
       </div>
 
       <div className="faint" style={{ fontSize: 11, marginBottom: 10 }}>
-        Read-only. Every statement here is a SELECT or a SHOW — nothing on this page changes the
-        server, and there is no control that kills a session, vacuums a table or purges a log.
+        Read-only. Every statement here is a SELECT, a SHOW, a MongoDB read command or a Redis
+        INFO — nothing on this page changes the server, and there is no control that kills a
+        session or an operation, vacuums a table, purges a log, drops an index or sets a config.
       </div>
 
       {error && (
@@ -411,15 +618,20 @@ export function DbOpsPanel({ cfg, kind, onVerdict }: Props): React.JSX.Element {
 
       {!report && !loading && !error && (
         <div className="faint" style={{ fontSize: 12 }}>
-          Nothing has been read yet.
+          Nothing has been read yet.{' '}
+          {supportsDbOps(kind) &&
+            `${DB_QUESTIONS_BY_ENGINE[kind].length} questions will be asked: ${DB_QUESTIONS_BY_ENGINE[kind]
+              .map((id) => DB_QUESTION_LABEL[id].toLowerCase())
+              .join(', ')}.`}
         </div>
       )}
 
-      {report?.answers.map((a) => (
-        <Card key={a.id} answer={a}>
-          <Detail answer={a} engine={engine} />
-        </Card>
-      ))}
+      {report && engine &&
+        report.answers.map((a) => (
+          <Card key={a.id} answer={a}>
+            <Detail answer={a} engine={engine} />
+          </Card>
+        ))}
     </div>
   )
 }
