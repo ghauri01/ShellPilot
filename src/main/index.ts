@@ -52,6 +52,13 @@ import {
 import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/metrics'
 import { HostFactsReader } from './services/hostFacts'
 import { FleetSampler, fleetCached, setActiveFleetSampler } from './services/fleetSampler'
+import type { AutoStartSettings, AutoStartState } from '../shared/autostart'
+import {
+  AUTOSTART_UNSUPPORTED_REASON,
+  autoStartRequest,
+  autoStartSupported,
+  hiddenLaunchSupported
+} from '../shared/autostart'
 import {
   RETENTION_FULL_DAYS,
   RETENTION_HOURLY_DAYS,
@@ -493,6 +500,33 @@ ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false)
 
 ipcMain.handle('app:platform', () => process.platform)
 ipcMain.handle('app:version', () => app.getVersion())
+
+// Autostart. `app.setLoginItemSettings` is a no-op on Linux, so this reports
+// what it can actually do rather than accepting a setting it will not honour.
+const autoStartState = (): AutoStartState => {
+  if (!autoStartSupported(process.platform)) {
+    return {
+      openAtLogin: false,
+      openAsHidden: false,
+      supported: false,
+      hiddenSupported: false,
+      reason: AUTOSTART_UNSUPPORTED_REASON
+    }
+  }
+  const s = app.getLoginItemSettings()
+  return {
+    openAtLogin: s.openAtLogin,
+    openAsHidden: hiddenLaunchSupported(process.platform) && s.openAsHidden === true,
+    supported: true,
+    hiddenSupported: hiddenLaunchSupported(process.platform)
+  }
+}
+ipcMain.handle('app:autoStart', (): AutoStartState => autoStartState())
+ipcMain.handle('app:setAutoStart', (_e, next: AutoStartSettings): AutoStartState => {
+  if (!autoStartSupported(process.platform)) return autoStartState()
+  app.setLoginItemSettings(autoStartRequest(process.platform, next))
+  return autoStartState()
+})
 
 ipcMain.handle('theme:set', (_e, mode: unknown) => {
   if (mode === 'dark' || mode === 'light' || mode === 'system') {

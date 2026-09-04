@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { AutoStartSettings, AutoStartState } from '../../../../shared/autostart'
 import {
   Sliders,
   Palette,
@@ -93,6 +94,65 @@ function SettingSwitch({
       </div>
       <span className={clsx('switch', checked && 'on')} onClick={() => onChange(!checked)} />
     </div>
+  )
+}
+
+/**
+ * Starting with the machine.
+ *
+ * This pairs with background checking rather than being a cosmetic preference:
+ * the fleet poll runs from the app root, so a ShellPilot that starts at login
+ * is a fleet watched from login. Without it, "background checking" only means
+ * background of whenever somebody last opened the app.
+ *
+ * Reads its own state from the OS rather than from our settings file, because
+ * the login item is the OS's record and a user can remove it from System
+ * Settings without telling us. A stored boolean would then be a claim that
+ * disagreed with the machine.
+ */
+function AutoStartSetting(): React.JSX.Element | null {
+  const [state, setState] = useState<AutoStartState | null>(null)
+
+  useEffect(() => {
+    void window.shellpilot!.autoStart.get().then(setState)
+  }, [])
+
+  if (!state) return null
+
+  if (!state.supported) {
+    return (
+      <div className="setting-row">
+        <div className="s-info">
+          <div className="s-title">Start when I log in</div>
+          <div className="s-desc">{state.reason}</div>
+        </div>
+      </div>
+    )
+  }
+
+  const set = (next: Partial<AutoStartSettings>): void => {
+    void window.shellpilot!.autoStart
+      .set({ openAtLogin: state.openAtLogin, openAsHidden: state.openAsHidden, ...next })
+      .then(setState)
+  }
+
+  return (
+    <>
+      <SettingSwitch
+        label="Start when I log in"
+        desc="Launch ShellPilot with your machine, so background checking and alerts run from login rather than from whenever you next open the app."
+        checked={state.openAtLogin}
+        onChange={(v) => set({ openAtLogin: v })}
+      />
+      {state.openAtLogin && state.hiddenSupported && (
+        <SettingSwitch
+          label="Start in the background"
+          desc="Launch without opening a window. Checks still run and alerts still fire — ShellPilot is waiting in the Dock rather than in front of you."
+          checked={state.openAsHidden}
+          onChange={(v) => set({ openAsHidden: v })}
+        />
+      )}
+    </>
   )
 }
 
@@ -357,6 +417,7 @@ export function Settings(): React.JSX.Element {
                   ))}
                 </div>
               </div>
+              <AutoStartSetting />
               <SettingSwitch
                 label="Compact density"
                 desc="Tighter rows and padding across trees, lists and the docked monitor. Font sizes are unchanged."

@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, clipboard, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
+import type { AutoStartSettings, AutoStartState } from '../shared/autostart'
 import type {
   SshConnectConfig,
   SshStatus,
@@ -202,6 +203,11 @@ const jobsBridge: JobsBridge = {
 const api = {
   platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke('app:platform'),
   getVersion: (): Promise<string> => ipcRenderer.invoke('app:version'),
+  autoStart: {
+    get: (): Promise<AutoStartState> => ipcRenderer.invoke('app:autoStart'),
+    set: (next: AutoStartSettings): Promise<AutoStartState> =>
+      ipcRenderer.invoke('app:setAutoStart', next)
+  },
   window: {
     control: (action: WindowAction): Promise<void> =>
       ipcRenderer.invoke('window:control', action),
