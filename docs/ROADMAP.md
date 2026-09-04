@@ -1346,7 +1346,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 |---|---|---|---|---|---|---|---|---|---|
 | 19a | ~~**Disk alert**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | — | Done |
 | 21a | ~~**Docker itemised disk view**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
-| 21b | **Docker reclaim by id** | 60% | monthly | 3 | some | **5** | 1.5–2 wk | podman fixtures | Deferred |
+| 21b | ~~**Docker reclaim by id**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | podman untested | Done |
 | C | ~~**Host facts**~~ | 100% | continuous | 4 | strong | **3 / 21** | **SHIPPED** | — | Done |
 | A | ~~**Durable store**~~ | — | — | — | — | **0 / 30** | **SHIPPED** | — | Done |
 | B | ~~**Job engine B1+B2+B3**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | B4 remains | Part done |
@@ -1360,13 +1360,13 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 24 | ~~**Security posture**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 26 | ~~**Capacity trends**~~ | 70% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 27 | ~~**Rule engine**~~ | 40% | continuous | 3 | some | **5** | **SHIPPED** | — | Done |
-| 22 | **Kubernetes lifecycle** | 25% | weekly | 4 | weak | **5** | 4 wk | B | Defer |
+| 22 | ~~**Kubernetes lifecycle**~~ | 25% | weekly | 4 | weak | **5** | **SHIPPED** | — | Done |
 | 7 | ~~**Credential proxy**~~ | 30% | daily | 3 | very strong | **5** | **SHIPPED** | — | Done |
 | 25 | ~~**Configuration drift**~~ | 50% | rare | 4 | strong | **4** | **SHIPPED** | — | Done |
 | 28 | ~~**Runbooks on alerts**~~ | 40% | per-incident | 3 | some | **4** | **SHIPPED** | — | Done |
 | 14 | ~~**Change log**~~ | 30% solo | per-incident | 3 | strong | **4** / **8** team | **SHIPPED** | — | Done |
-| 1 | **pm2 supervision** | 25% | daily | 3 | some | **4** | 2.5 wk local | — | Defer |
-| 2 | **frp ngrok UX** | 20% | rare | 2 | some | **3** | 2.5 wk | — | Defer |
+| 1 | ~~**pm2 supervision**~~ | 25% | daily | 3 | some | **4** | **SHIPPED** (local) | remote refused | Done |
+| 2 | ~~**frp ngrok UX**~~ | 20% | rare | 2 | some | **3** | **SHIPPED** | — | Done |
 | 8 | ~~**Ghostty snapshot**~~ | — | — | — | — | — | **CUT** | — | Not building |
 | 10 | ~~**Tauri**~~ | — | — | — | — | — | **CUT** | — | Not building |
 
