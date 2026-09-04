@@ -13,3 +13,7 @@
 if (typeof window !== 'undefined') {
   await import('./renderer')
 }
+
+// Top-level `await` is only legal in a module, and a file with no import or
+// export is a script. The dynamic import above does not count as one.
+export {}

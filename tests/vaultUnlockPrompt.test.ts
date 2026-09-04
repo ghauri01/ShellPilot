@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import type { Mock } from 'vitest'
 import { useVaultPrompt } from '../src/renderer/src/store/vaultPrompt'
 import { isVaultLocked, withVaultUnlock } from '../src/renderer/src/lib/withVaultUnlock'
 import { VaultLockedError, VAULT_LOCKED } from '../src/main/services/credentialResolver'
@@ -186,8 +187,15 @@ describe('several operations at once', () => {
   it('asks once and answers all of them', async () => {
     // Opening three tabs against vault-backed servers should not stack three
     // identical dialogs.
-    const make = (): ReturnType<typeof vi.fn> =>
-      vi.fn().mockRejectedValueOnce(asIpcError(new VaultLockedError())).mockResolvedValueOnce('ok')
+    // `ReturnType<typeof vi.fn>` is the un-parameterised `Mock`, whose call
+    // signature is `Procedure | Constructable` — not something `withVaultUnlock`
+    // can accept. Naming the signature the mock stands for is what lets the
+    // three of them be passed to it.
+    const make = (): Mock<() => Promise<unknown>> =>
+      vi
+        .fn<() => Promise<unknown>>()
+        .mockRejectedValueOnce(asIpcError(new VaultLockedError()))
+        .mockResolvedValueOnce('ok')
     const runs = [make(), make(), make()]
     const all = Promise.all(runs.map((r) => withVaultUnlock('Connecting', r)))
 

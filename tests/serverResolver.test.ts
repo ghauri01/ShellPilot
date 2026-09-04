@@ -16,6 +16,11 @@ function server(partial: Partial<CachedServer> & { id: string; workspaceId: stri
     auth: 'key',
     os: 'Linux',
     route: [],
+    // Required on `CachedServer`, and `string | null` rather than optional: a
+    // server that rides no VPN says so, it does not stay silent. Left out, the
+    // spread of `Partial<CachedServer>` made the field `undefined`, which is
+    // the one value the type does not admit.
+    vpnProfileId: null,
     ...partial
   }
 }
