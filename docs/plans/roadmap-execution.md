@@ -660,3 +660,38 @@ One writer per file solves the working tree and does nothing for the index. The 
 actually holds is the one now in every brief — *do not `git add` until you are ready to
 commit* — and it only works if everyone follows it, which is exactly the property a shared
 mutable resource cannot guarantee.
+
+### An unreproduced flake in the access collector's status block
+
+`tests/access.test.ts > the collector, run against a host-shaped tree > always ends with a
+status block, whatever it did or did not find` fails roughly one full-suite run in four, and
+has never failed in isolation.
+
+**Worth chasing rather than muting**, because this session has investigated three flaky tests
+and all three were production bugs: a backup that wrote onto the file it was protecting and
+then reported a successful recovery from the zero-byte result; a VPN teardown that killed
+openvpn before it could close the tunnel, on every dismissed credential prompt; and a
+capacity test whose assertion ran before the write it was checking.
+
+**What has been ruled out.**
+- Not the cron wiring that was landing at the time: it fails at `HEAD` in a clean clone too.
+- Not CPU load: six spinners plus the file in isolation, 101 passing, four consecutive times.
+- Not deterministic ordering: three full verbose runs did not reproduce it.
+
+**What is suspected, and where to look first.** The assertion is on the exact list of source
+statuses, and one of them is `sudoers=partial` — which is `partial` *because the temp tree
+names accounts the machine does not have*, so `id -nG` answers for some and not others. That
+makes the expected value a function of the build machine's own user database. An earlier
+adversarial review flagged this file for exactly that: it "depends on whether root/ops/deploy
+exist on the build machine and how `id -nG` answers… false failures, not false passes, but
+they will fire in CI." That prediction has now come true, but the load-dependence is not
+explained by it, so there is a second factor.
+
+The next thing to try is a shared-resource collision: the harness builds a temp tree and
+executes real shell against it, and several other suites now do the same. A fixed path, a
+`TMPDIR` collision, or a file-descriptor ceiling under sixteen parallel workers would all
+produce exactly this shape — fine alone, occasionally wrong in company.
+
+**Not muted, not retried, not skipped.** All three would convert an unexplained failure into a
+test that no longer tests, and the record above exists so the next attempt starts from what is
+already excluded.
