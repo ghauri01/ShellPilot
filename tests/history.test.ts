@@ -636,12 +636,15 @@ describe('a retention horizon per event kind', () => {
       title: 'clear the journal',
       kind: 'command',
       spec: { kind: 'command', title: 'clear the journal', steps: [{ command: 'journalctl --vacuum-time=2d' }] },
-      risk: 'routine',
+      // `ordinary`, not `routine`: `BroadcastRisk` has never had a `routine`.
+      risk: 'ordinary',
       confirmation: { kind: 'none' },
       confirmedAt: null,
       approval: null,
       state: 'done',
-      targets: [{ serverId: 'web-1', serverName: 'WEB-1', ord: 0, state: 'done' }]
+      // `done` is a JobState, which is what the job row above carries. A TARGET
+      // row carries a JobHostState, and that set has no `done` in it.
+      targets: [{ serverId: 'web-1', serverName: 'WEB-1', ord: 0, state: 'ok' }]
     })
     s.recordEvent('alert', 'web-1', { kind: 'disk', event: 'raised' }, raised)
 
@@ -1430,12 +1433,12 @@ describe('jobsForHost', () => {
       title: `job ${id}`,
       kind: 'command',
       spec: { kind: 'command', title: `job ${id}`, steps: commands.map((command) => ({ command })) },
-      risk: 'routine',
+      risk: 'ordinary',
       confirmation: { kind: 'none' },
       confirmedAt: null,
       approval: null,
       state: 'done',
-      targets: hosts.map((h, i) => ({ serverId: h, serverName: h.toUpperCase(), ord: i, state: 'done' as const }))
+      targets: hosts.map((h, i) => ({ serverId: h, serverName: h.toUpperCase(), ord: i, state: 'ok' as const }))
     })
   }
 
@@ -1443,7 +1446,11 @@ describe('jobsForHost', () => {
     const s = await open()
     seed(s, 'j1', AT, ['journalctl --vacuum-time=2d'], ['a', 'b'])
     s.updateJobTarget('j1', 'a', { outcome: 'ok', exitCode: 0 })
-    s.updateJobTarget('j1', 'b', { outcome: 'failed', exitCode: 1, error: 'no space left on device' })
+    // `nonzero`, not `failed`: exit 1 means it RAN and came back non-zero, and
+    // `JobHostOutcome` has no `failed` member at all. The store writes and
+    // reads the column verbatim, so the old pair round-tripped a value nothing
+    // in the app can produce and no view knows how to label.
+    s.updateJobTarget('j1', 'b', { outcome: 'nonzero', exitCode: 1, error: 'no space left on device' })
 
     const forA = s.jobsForHost('a', AT - 1000, AT + 1000)
     expect(forA.length).toBe(1)
@@ -1454,7 +1461,7 @@ describe('jobsForHost', () => {
     expect(forA[0].host.exitCode).toBe(0)
 
     const forB = s.jobsForHost('b', AT - 1000, AT + 1000)
-    expect(forB[0].host.outcome).toBe('failed')
+    expect(forB[0].host.outcome).toBe('nonzero')
     expect(forB[0].host.error).toBe('no space left on device')
   })
 
