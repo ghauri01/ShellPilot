@@ -435,6 +435,14 @@ export interface CredProxyStatus {
   hasToken: boolean
   ruleCount: number
   error?: string
+  /** Set when a call could not be made because the credential could not be
+   *  read — the vault is locked, or the entry is gone.
+   *
+   *  It is a STATE, not a per-request error, because that is the difference
+   *  between an operator seeing "the vault is locked, 14 calls parked since
+   *  09:12" once and seeing fourteen unrelated-looking failures. Cleared by
+   *  the next call that resolves. */
+  parked?: { reason: 'vault-locked' | 'credential-missing'; since: string; calls: number }
 }
 
 /** The base URL a caller points at, built once so the panel and the docs
