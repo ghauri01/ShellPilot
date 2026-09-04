@@ -1221,6 +1221,8 @@ than a drift.
 | **Embedded n8n (item 9)** | Item 27 gets most of the value with full access to the policy engine, the vault and the audit log, and without a second database, a second auth model and a licence question. |
 | **A third-party extension API (item 15b)** | Unchanged and worth restating: a plugin that can call `credentialResolver` is a vault with no lock. `MODULE_FORBIDDEN_IMPORTS` and `MODULE_FORBIDDEN_BRIDGE` exist to make drifting into it impossible by accident. Not before the Tauri decision — an extension API is a compatibility promise, and rewriting the host underneath one is how migrations die. |
 | **Ticketing, on-call rotation, incident management** | Webhook out to the tool that already does it. |
+| **Ghostty (item 8)** | Cut by the owner. The feasibility study still stands and is worth keeping: libghostty-vt has no PTY at all — zero spawn symbols across its thirty public headers — so it could never replace node-pty, and the full renderer admits macOS and iOS only with an NSView surface, so it cannot be embedded here. The one real prize was `snapshot.h` for session restore, and it is not worth a hand-written FFI against an API whose authors say it will change without warning. |
+| **Tauri (item 10)** | Cut by the owner, and the case got weaker while this roadmap was executed rather than stronger. The port was always "rewrite the whole main process": SSH and SFTP over ssh2, five database drivers, the MCP server, the vault, the VPN subsystem with its privileged helpers, the supervisor, the policy engine. This work then added a job engine with detached remote execution, a SQLite store, a host-facts probe, a database-operations layer, an access collector and a posture collector — all of it main-process, none of it portable. Installer size was the prize; the price is now most of a year of rewriting things that work. |
 | **Documentation generation, diagrams, architecture prose** | Except item 28, which earns its place by being nearly free once item A exists. |
 | **Applying Kubernetes manifests** | Item 22. That is a pipeline's job. |
 | **Unattended auto-patching** | Item 17. Reporting and staging, yes. A desktop app quietly upgrading an estate is a promise about unattended correctness this app cannot keep. |
@@ -1267,19 +1269,19 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | OOM kills, cert expiry remain | Part done |
 | 23 | ~~**Fleet key management**~~ | 100% | quarterly | 5 | very strong | **7** | **READ SHIPPED** | write gated, needs a real host | Part done |
 | 20 | ~~**Compose**~~ | 60% | daily | 3 | some | **6** | **SHIPPED** | — | Done |
-| 6e | **Cron editing** | 80% | monthly | 3 | some | **5** | 2.5 wk | B | Invest |
+| 6e | ~~**Cron editing**~~ | 80% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 24 | ~~**Security posture**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 26 | ~~**Capacity trends**~~ | 70% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
-| 27 | **Rule engine** | 40% | continuous | 3 | some | **5** | 1.5 wk | A, B | Fill-in |
+| 27 | ~~**Rule engine**~~ | 40% | continuous | 3 | some | **5** | **SHIPPED** | — | Done |
 | 22 | **Kubernetes lifecycle** | 25% | weekly | 4 | weak | **5** | 4 wk | B | Defer |
 | 7 | **Credential proxy** | 30% | daily | 3 | very strong | **5** | 3.5 wk | — | Strategic |
 | 25 | **Configuration drift** | 50% | rare | 4 | strong | **4** | 2.5 wk | A, C | Fill-in |
 | 28 | **Runbooks on alerts** | 40% | per-incident | 3 | some | **4** | 1.5 wk | A | Fill-in |
-| 14 | **Change log** | 30% solo | per-incident | 3 | strong | **4** solo / **8** team | 2 wk | A | Conditional |
+| 14 | ~~**Change log**~~ | 30% solo | per-incident | 3 | strong | **4** / **8** team | **SHIPPED** | — | Done |
 | 1 | **pm2 supervision** | 25% | daily | 3 | some | **4** | 2.5 wk local | — | Defer |
 | 2 | **frp ngrok UX** | 20% | rare | 2 | some | **3** | 2.5 wk | — | Defer |
-| 8 | **Ghostty snapshot** | 100% | — | 2 | some | **3** | unknown | — | Experiment |
-| 10 | **Tauri** | 100% | — | 2 | none | **3** | quarters | — | Standing gate |
+| 8 | ~~**Ghostty snapshot**~~ | — | — | — | — | — | **CUT** | — | Not building |
+| 10 | ~~**Tauri**~~ | — | — | — | — | — | **CUT** | — | Not building |
 
 ### The four quadrants, and the trap in the middle
 
