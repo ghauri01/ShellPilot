@@ -2721,7 +2721,10 @@ details[open] > .disclosure-head .chev {
 }
 .bc-panel .chip.on {
   background: var(--accent);
-  color: #fff;
+  /* Was #fff, which is right in light theme by coincidence and wrong the
+     moment --accent stops being dark enough for white to sit on it. The token
+     exists precisely so the pair moves together. */
+  color: var(--accent-text);
   border-color: var(--accent);
 }
 .bc-confirm {
@@ -2858,7 +2861,9 @@ details[open] > .disclosure-head .chev {
 }
 .lt-pick:hover {
   background: var(--accent);
-  color: #fff;
+  /* Same fix as the broadcast chip: the token exists so text on the accent
+     moves with the accent instead of assuming it stays dark. */
+  color: var(--accent-text);
 }
 
 /* Inventory — roadmap item C.
