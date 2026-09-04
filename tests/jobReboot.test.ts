@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import { detachedJobExecutor, type JobRunResult } from '../src/main/services/jobDetached'
-import type { JobExecutor } from '../src/main/services/jobRunner'
+import type {
+  JobExecRequest,
+  JobExecUpdate,
+  JobExecutor
+} from '../src/main/services/jobRunner'
 import { JOB_CMD_PREFIX, classifyJobPoll, restartsTheMachine } from '../src/shared/jobs'
 import { REBOOT_BOOT_ID_MARK, buildRebootStep } from '../src/shared/patch'
 
@@ -229,9 +233,12 @@ function harness(host: FakeHost) {
   }
 }
 
-function request(over: Record<string, unknown> = {}) {
+function request(over: Partial<JobExecRequest> = {}) {
   const output: string[] = []
-  const states: { state?: string; error?: string }[] = []
+  // `JobExecUpdate` itself. The hand-copied `{ state?: string; error?: string }`
+  // it replaces named two of that interface's five fields and typed `state` as
+  // a bare string, so nothing here was checked against what the executor emits.
+  const states: JobExecUpdate[] = []
   return {
     output,
     states,
@@ -245,7 +252,7 @@ function request(over: Record<string, unknown> = {}) {
       step: 2,
       reboot: true,
       alive: () => true,
-      onState: (u: never) => states.push(u),
+      onState: (u: JobExecUpdate) => states.push(u),
       onOutput: (_s: 'out' | 'err', t: string) => output.push(t),
       ...over
     }
