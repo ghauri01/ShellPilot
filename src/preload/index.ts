@@ -58,6 +58,8 @@ import type {
   ComposeProjectRef
 } from '../shared/compose'
 import type {
+  K8sCordonResult,
+  K8sCordonTarget,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -492,7 +494,12 @@ const api = {
       target: K8sRolloutTarget,
       confirmed: boolean
     ): Promise<K8sRolloutResult> =>
-      ipcRenderer.invoke('k8s:rollout-restart', cfg, target, confirmed)
+      ipcRenderer.invoke('k8s:rollout-restart', cfg, target, confirmed),
+    cordon: (
+      cfg: unknown,
+      target: K8sCordonTarget,
+      confirmed: boolean
+    ): Promise<K8sCordonResult> => ipcRenderer.invoke('k8s:cordon', cfg, target, confirmed)
   },
   // `satisfies DockerBridge` so a channel added to the contract and forgotten
   // here is a compile error rather than a method the panel calls at runtime and

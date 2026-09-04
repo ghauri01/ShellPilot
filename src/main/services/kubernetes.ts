@@ -1,23 +1,29 @@
 import type {
+  K8sCordonResult,
+  K8sCordonTarget,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
   K8sRolloutResult,
   K8sRolloutTarget,
+  K8sSchedulingAction,
   K8sUsage,
   K8sWorkloadKind
 } from '../../shared/kubernetes'
 import {
+  buildK8sCordonCommand,
   buildK8sDiagnoseCommand,
   buildK8sOverviewCommand,
   buildK8sReadCommand,
   buildK8sRolloutRestartCommand,
   buildK8sTopCommand,
+  parseK8sCordonResult,
   parseK8sDiagnosis,
   parseK8sOutput,
   parseK8sOverview,
   parseK8sRolloutResult,
   parseK8sUsage,
+  planK8sCordon,
   planK8sRollout
 } from '../../shared/kubernetes'
 
@@ -208,8 +214,63 @@ export class KubernetesReader {
     }
   }
 
+  /**
+   * Cordon or uncordon one node.
+   *
+   * Shaped exactly like `rolloutRestart` and for the same reasons: `confirmed`
+   * must be literally true, the builder throws on a name it cannot prove safe,
+   * and the plan is re-derived here rather than trusted across IPC.
+   *
+   * A TRANSPORT FAILURE IS AN UNKNOWN STATE, not a failed cordon — the same
+   * reading as the restart. `cordon` is a one-field patch and it may well have
+   * reached the API server before the SSH connection died. Saying "the node
+   * was not cordoned" would be a guess, and the wrong guess sends someone to
+   * click again on a node that is already frozen, or worse, to start a reboot
+   * believing the freeze did not take.
+   */
+  async cordon(
+    cfg: unknown,
+    target: K8sCordonTarget,
+    confirmed: boolean
+  ): Promise<K8sCordonResult> {
+    const action = target.action as K8sSchedulingAction
+    const fail = (detail: string, reason: K8sCordonResult['reason'] = 'unknown'): K8sCordonResult => ({
+      ok: false,
+      action,
+      node: target.node,
+      alreadyInState: false,
+      output: '',
+      node_status: '',
+      reason,
+      detail
+    })
+    if (confirmed !== true) {
+      return fail(`refusing to ${action} a node without an explicit confirmation`)
+    }
+    try {
+      const cmd = buildK8sCordonCommand(target.node, action, target.context ?? undefined)
+      // 20s: two kubectl calls, each already bounded at 10s by
+      // --request-timeout, plus the SSH round trip. Neither waits on anything
+      // in the cluster — a cordon is a patch and the node read is a get.
+      const r = await this.deps.exec(cfg, cmd, 20_000)
+      if (!r.ok) {
+        return fail(
+          `${r.error ?? 'could not reach the host'} — the ${action} may or may not have been applied; re-read the node before retrying`
+        )
+      }
+      return parseK8sCordonResult(action, target.node, merge(r), r.code ?? null)
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   /** Exposed so the main process can log what was approved, in its own words. */
   plan(target: K8sRolloutTarget): ReturnType<typeof planK8sRollout> {
     return planK8sRollout(target)
+  }
+
+  /** The same, for a scheduling change. */
+  cordonPlan(target: K8sCordonTarget): ReturnType<typeof planK8sCordon> {
+    return planK8sCordon(target)
   }
 }

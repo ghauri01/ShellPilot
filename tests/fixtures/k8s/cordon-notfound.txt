@@ -1,0 +1,4 @@
+===SHELLPILOT-CORDON===
+Error from server (NotFound): nodes "spk8s-nope" not found
+===SHELLPILOT-NODE===
+Error from server (NotFound): nodes "spk8s-nope" not found

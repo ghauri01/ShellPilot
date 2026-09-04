@@ -114,7 +114,7 @@ import type { ComposeImageWriteRequest, ComposeProjectRef } from '../shared/comp
 const DOCKER_SOCKET_REFUSED = /permission denied while trying to connect|got permission denied.*docker/i
 import { KubernetesReader } from './services/kubernetes'
 import { buildK8sLogsCommand } from '../shared/kubernetes'
-import type { K8sRolloutTarget } from '../shared/kubernetes'
+import type { K8sCordonTarget, K8sRolloutTarget } from '../shared/kubernetes'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import { planBroadcast, verifyApproval } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
@@ -1873,6 +1873,14 @@ ipcMain.handle(
   'k8s:rollout-restart',
   (_e, cfg: unknown, target: K8sRolloutTarget, confirmed: unknown) =>
     k8sReader.rolloutRestart(cfg, target, confirmed === true)
+)
+// Node scheduling. A cordon evicts nothing — see the header of
+// shared/kubernetes.ts — which is why it is a plain confirm and why it ships
+// ahead of drain.
+ipcMain.handle(
+  'k8s:cordon',
+  (_e, cfg: unknown, target: K8sCordonTarget, confirmed: unknown) =>
+    k8sReader.cordon(cfg, target, confirmed === true)
 )
 
 ipcMain.handle('docker:list', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>

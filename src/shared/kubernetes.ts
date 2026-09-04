@@ -45,15 +45,24 @@
 //    remediation through the controller, gradually and reversibly, so the
 //    delete button buys a narrow "this one pod is wedged" case at the price of
 //    a control that is unrecoverable when it is wrong. Not worth it.
-//  - Apply, scale, drain, cordon, or edit. Scale and drain in particular read
-//    like the same class of action as a restart and are not: a rollout restart
-//    converges back to the workload's own declared state, and scale and drain
-//    leave the cluster somewhere the user now has to remember to undo.
+//  - Apply a manifest, scale, or edit. Applying in particular is a GitOps
+//    pipeline's job: a manifest that reaches a cluster from a desktop button
+//    is a manifest with no review, no diff against what is in git, and no
+//    record anywhere but this app — which is how a staging manifest reaches
+//    prod. Scale and edit leave the cluster somewhere the user now has to
+//    remember to undo, unlike a rollout restart, which converges back to the
+//    workload's own declared state.
+//
 //  - Reach the MCP bridge. Nothing here is registered as an agent tool. The
 //    bridge gates `execute_command` per server against an access group; a
 //    cluster-wide restart primitive is a different risk with a different
 //    consent story, and it would arrive there by accident rather than by
 //    decision. `rollout restart` is a human clicking a confirm dialog.
+//
+// CORDON AND UNCORDON now ship, and they are the honest first step of the
+// node-lifecycle half: a cordon changes one boolean on the Node object and
+// evicts nothing, so the worst case is that pods stop landing somewhere until
+// somebody notices. See buildK8sCordonCommand.
 //
 // RBAC is the part that makes Kubernetes different from Docker, and the honest
 // position is that we cannot predict it: a token may list pods in one namespace
@@ -234,6 +243,14 @@ const CONTEXT_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,252}$/
 export const validatePodName = (v: string): boolean => NAME_RE.test(v.trim())
 export const validateNamespace = (v: string): boolean => NAME_RE.test(v.trim())
 export const validateContext = (v: string): boolean => CONTEXT_RE.test(v.trim())
+/**
+ * Node names are RFC 1123 too, and this is a separate export rather than a
+ * reuse of `validatePodName` because of what it guards: every node-lifecycle
+ * builder below writes this straight into a `kubectl cordon`/`drain` argument,
+ * and a reader checking that path should find a function whose name says
+ * "node" rather than one whose name says "pod".
+ */
+export const validateNodeName = (v: string): boolean => NAME_RE.test(v.trim())
 
 
 /**
@@ -1280,4 +1297,192 @@ export function readsAfterNamespaceChange(view: 'pods' | 'cluster' | 'usage'): {
   usage: boolean
 } {
   return { pods: true, overview: view === 'cluster', usage: view === 'usage' }
+}
+
+// =========================================================================
+// NODE LIFECYCLE, PART 1: CORDON AND UNCORDON
+// =========================================================================
+//
+// The honest first step. `kubectl cordon` sets `.spec.unschedulable = true`
+// on one Node object and does nothing else: no pod is evicted, no pod is
+// moved, nothing that is currently serving stops serving. The only thing that
+// changes is where the SCHEDULER is willing to put pods it has not placed yet.
+//
+// That is why this ships ahead of drain rather than with it. The failure mode
+// of a wrong cordon is that a node quietly stops taking work and somebody
+// notices an hour later that capacity is short; the failure mode of a wrong
+// drain is an outage in the next ten seconds. They are not the same control
+// and they do not deserve the same dialog.
+//
+// UNCORDON IS STILL CONFIRMED, which looks like the guard-that-nags this
+// project warns about, and is not. A node is cordoned because a human decided
+// it should be — usually because it is about to be rebooted, reimaged or
+// pulled from the fleet — and that decision is not written down anywhere the
+// app can read. Undoing it puts fresh pods onto a machine that is halfway
+// through maintenance, and the person who gets paged is the one who cordoned
+// it. One click that says which node is the whole cost.
+
+export type K8sSchedulingAction = 'cordon' | 'uncordon'
+
+export const K8S_SCHEDULING_ACTIONS: readonly K8sSchedulingAction[] = ['cordon', 'uncordon']
+
+/**
+ * Cordon or uncordon one node.
+ *
+ * The action is an allowlist rather than free text for the same reason the
+ * rollout builder's `kind` is: there is no case where it should be anything
+ * else, and `kubectl` has a great many subcommands that take a node name.
+ */
+export function buildK8sCordonCommand(
+  node: string,
+  action: K8sSchedulingAction,
+  context?: string
+): string {
+  if (!K8S_SCHEDULING_ACTIONS.includes(action)) {
+    throw new Error('refusing to run a scheduling action this module does not know')
+  }
+  if (!validateNodeName(node)) {
+    throw new Error('refusing to build a command from an invalid node name')
+  }
+  const ctx = context && validateContext(context) ? ` --context=${context}` : ''
+  return [
+    k8sResolve(),
+    call('CORDON', `${action} ${node}${ctx}`),
+    // Re-read the node afterwards, in the same round trip. Without it the panel
+    // has to either believe its own optimistic update or fire a second SSH
+    // call, and the first of those is how a control ends up showing a state the
+    // cluster does not have — which for a maintenance freeze is the one lie
+    // that matters.
+    call('NODE', `get node ${node} --no-headers${ctx}`)
+  ].join('; ')
+}
+
+export interface K8sCordonResult {
+  ok: boolean
+  action: K8sSchedulingAction
+  node: string
+  /**
+   * kubectl said "already cordoned" / "already uncordoned".
+   *
+   * A distinct field rather than folded into `ok`, because it is the answer to
+   * a different question. The action succeeded — the node is in the state that
+   * was asked for — but nothing changed, and telling an operator "cordoned"
+   * when somebody else cordoned it an hour ago hides the fact that a
+   * maintenance window they do not know about is already open.
+   */
+  alreadyInState: boolean
+  /** What kubectl printed for the action. */
+  output: string
+  /** The node row read back afterwards, or '' when that read failed too. */
+  node_status: string
+  reason?: K8sFailure
+  detail?: string
+}
+
+const ALREADY_RE = /already (cordoned|uncordoned)/i
+
+export function parseK8sCordonResult(
+  action: K8sSchedulingAction,
+  node: string,
+  output: string,
+  exitCode: number | null
+): K8sCordonResult {
+  const said = section(output, 'CORDON').trim()
+  const nodeRow = section(output, 'NODE').trim()
+  const status = nodeRow === '' || looksLikeError(nodeRow) ? '' : nodeRow
+  // Decided on the presence of an error line rather than on kubectl's exact
+  // success sentence, the same way parseK8sRolloutResult is — the wording has
+  // moved between versions and a version bump must not turn a cordon that
+  // worked into a reported failure.
+  const failed =
+    said === '' || said.split('\n').every((l) => l.trim() === '' || looksLikeError(l))
+  if (failed) {
+    const first = said.split('\n').find((l) => looksLikeError(l)) ?? said
+    return {
+      ok: false,
+      action,
+      node,
+      alreadyInState: false,
+      output: said,
+      node_status: status,
+      reason: classifyK8sFailure(first, exitCode),
+      detail: first.trim() || 'kubectl returned nothing'
+    }
+  }
+  return {
+    ok: true,
+    action,
+    node,
+    alreadyInState: ALREADY_RE.test(said),
+    output: said,
+    node_status: status
+  }
+}
+
+export interface K8sCordonTarget {
+  node: string
+  action: K8sSchedulingAction
+  /**
+   * Pods currently running on this node, or null when it was not read.
+   *
+   * Only ever used to describe the blast radius in words. A cordon evicts none
+   * of them, and saying so with a number is what stops an operator believing
+   * it did.
+   */
+  podCount: number | null
+  context?: string | null
+}
+
+export interface K8sCordonPlan {
+  target: K8sCordonTarget
+  risk: BroadcastRisk
+  confirmation: BroadcastConfirmation
+  reasons: string[]
+  caveats: string[]
+}
+
+/**
+ * How hard the user has to press to change one node's schedulability.
+ *
+ * Never type-to-confirm, in either direction, and that is the point of having
+ * a separate plan function rather than reusing the rollout's. Nothing is
+ * evicted and nothing is deleted; the state is one boolean and the undo is the
+ * other button on the same row. Demanding a typed word here is how the typed
+ * word stops meaning anything by the time a drain asks for one.
+ */
+export function planK8sCordon(target: K8sCordonTarget): K8sCordonPlan {
+  const reasons: string[] = []
+  const caveats: string[] = []
+  const prodHit = [target.node, target.context ?? ''].find((v) => v && PROD_RE.test(v))
+
+  if (target.action === 'cordon') {
+    reasons.push('the scheduler stops placing new pods on this node')
+    reasons.push(
+      target.podCount === null
+        ? 'pods already running here keep running — a cordon evicts nothing'
+        : `the ${target.podCount} pod(s) already running here keep running — a cordon evicts nothing`
+    )
+    caveats.push(
+      'a cordon has no expiry: the node stays unschedulable until somebody uncordons it, and a rollout that needs to reschedule here will sit Pending instead'
+    )
+  } else {
+    reasons.push('the scheduler starts placing new pods on this node again')
+    caveats.push(
+      'a node is usually cordoned because somebody is working on it — reboot, reimage, or taking it out of the fleet — and that reason is not recorded anywhere this app can read'
+    )
+  }
+  if (prodHit) {
+    reasons.push(`"${prodHit}" reads as production`)
+  }
+
+  return {
+    target,
+    // `elevated` rather than `ordinary` even for uncordon: both directions move
+    // a machine in or out of a fleet's capacity, and neither is something to
+    // do while looking at something else.
+    risk: 'elevated',
+    confirmation: { kind: 'confirm' },
+    reasons,
+    caveats
+  }
 }

@@ -1,0 +1,4 @@
+===SHELLPILOT-CORDON===
+node/spk8s-worker uncordoned
+===SHELLPILOT-NODE===
+spk8s-worker   Ready   <none>   7m51s   v1.33.1

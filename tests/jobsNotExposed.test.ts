@@ -792,7 +792,33 @@ describe('what must NOT be able to reach this', () => {
       'credproxy:save-rule',
       'credproxy:remove-rule',
       'credproxy:token',
-      'credproxy:calls'
+      'credproxy:calls',
+      // Kubernetes node lifecycle — roadmap item 22. The mutating half, and it
+      // is STRICTLY MORE POWERFUL than the job engine this file exists to keep
+      // away from the bridge.
+      //
+      // A job runs a command on hosts a human picked. `kubectl cordon` takes a
+      // machine out of a cluster's schedulable capacity and `kubectl drain`
+      // evicts everything running on it — both against whatever cluster the
+      // kubeconfig on that host points at, which is a blast radius nobody
+      // chose per-server. `execute_command` gated per server against an access
+      // group is a consent story about ONE host and one command a human can
+      // read; "take this node out of the fleet" is a different question about a
+      // different system, and the answer is no — not "not yet".
+      //
+      // Not gated, not asked-for, NOT THERE.
+      'buildK8sCordonCommand',
+      'planK8sCordon',
+      'parseK8sCordonResult',
+      'k8s:cordon',
+      // Already true before item 22 and asserted here now that the file has
+      // company: the one older mutation, and the module itself.
+      'buildK8sRolloutRestartCommand',
+      'planK8sRollout',
+      'k8s:rollout-restart',
+      'shared/kubernetes',
+      'services/kubernetes',
+      'KubernetesReader'
     ]) {
       expect(mcp, forbidden).not.toContain(forbidden)
     }
