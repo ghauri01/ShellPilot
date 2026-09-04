@@ -32,7 +32,8 @@ import type { DbConnectConfig } from '../src/shared/db'
  */
 
 const openTransient = vi.fn()
-const mongoDbName = vi.fn(() => 'shop')
+// The parameter is declared so the mock has the arity the call site uses.
+const mongoDbName = vi.fn((_cfg: DbConnectConfig) => 'shop')
 vi.mock('../src/main/services/db', () => ({
   openTransient: (cfg: DbConnectConfig) => openTransient(cfg),
   mongoDbName: (cfg: DbConnectConfig) => mongoDbName(cfg)
@@ -146,8 +147,17 @@ function serveRedis(fx: Record<string, RedisCapture>): void {
   }))
 }
 
-const MONGO_CFG: DbConnectConfig = { id: 'db-mongo', kind: 'mongodb', host: 'h', port: 27017, database: 'shop' }
-const REDIS_CFG: DbConnectConfig = { id: 'db-redis', kind: 'redis', host: 'h', port: 6379 }
+// `username` is required on `DbConnectConfig` — a collector config with none
+// is not one the app can build.
+const MONGO_CFG: DbConnectConfig = {
+  id: 'db-mongo',
+  kind: 'mongodb',
+  host: 'h',
+  port: 27017,
+  username: 'app',
+  database: 'shop'
+}
+const REDIS_CFG: DbConnectConfig = { id: 'db-redis', kind: 'redis', host: 'h', port: 6379, username: 'app' }
 
 function byId(answers: DbAnswer<unknown>[], id: string): DbAnswer<unknown> {
   const a = answers.find((x) => x.id === id)

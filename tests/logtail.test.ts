@@ -13,7 +13,8 @@ import {
   validateLogSource,
   validateSince,
   buildLogFileListCommand,
-  buildUnitListCommand
+  buildUnitListCommand,
+  type LogSource
 } from '../src/shared/logtail'
 import { SUDO_PROBE } from '../src/shared/docker'
 

@@ -470,7 +470,10 @@ describeE2e('bundled openvpn', () => {
         askUser: async () => null,
         credentials: () => ({})
       },
-      { runDir: dir }
+      // `OpenVpnManagementOptions` has no `runDir`: the management channel
+      // picks its own socket path, and this was passing a property nothing
+      // read. `dir` is still the run directory for the config file below.
+      {}
     )
 
     const endpoint = await management.listen()
