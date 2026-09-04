@@ -28,6 +28,7 @@ import { UpdatePanel } from './UpdatePanel'
 import { useOnboarding } from '../../store/onboarding'
 import { SshSessions } from './SshSessions'
 import { WebhookAlertSettings } from './WebhookAlertSettings'
+import { CredProxyPanel } from './CredProxyPanel'
 import { alertCoverageText } from './alertCoverage'
 import { MODULES, moduleEnabled } from '../../../../shared/modules'
 import { useFleetStatus } from '../../store/fleetStatus'
@@ -673,6 +674,20 @@ export function Settings(): React.JSX.Element {
                 <input className="input" style={{ width: 80 }} defaultValue="15" />
               </div>
               <Toggle label="Confirm destructive commands" desc="Require confirmation for rm, systemctl stop, etc." initial />
+            </div>
+          )}
+
+          {/* Roadmap item 7. It sits under Security rather than Connections
+              because what it configures is where a stored credential is
+              allowed to go, which is the same question the vault above
+              answers for SSH. */}
+          {section === 'security' && (
+            <div className="settings-section">
+              <h2>API credential proxy</h2>
+              <div className="sub">
+                Let a script or an agent call a third-party API without ever holding the key.
+              </div>
+              <CredProxyPanel />
             </div>
           )}
 
