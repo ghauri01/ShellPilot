@@ -18,7 +18,10 @@ import {
   changeLogCoverageText,
   compareChangeLogEntries,
   mergeChangeLog,
-  type ChangeLogEntry
+  type ChangeLogCoverage,
+  type ChangeLogEntry,
+  type ChangeLogPage,
+  type ChangeLogSource
 } from '../src/shared/changelog'
 
 // Roadmap item 14 — the change log.
@@ -125,8 +128,22 @@ function deps(over: Partial<ChangeLogDeps> = {}): ChangeLogDeps {
   return { enabled: () => true, dir, history: () => null, ...over }
 }
 
-const coverageFor = (page: { coverage: { source: string }[] }, source: string): (typeof page.coverage)[number] =>
-  page.coverage.find((c) => c.source === source)!
+/**
+ * The coverage row for one source, or a failure naming the source that is
+ * missing.
+ *
+ * Typed against `ChangeLogPage` rather than a structural `{ coverage: { source
+ * }[] }`: the narrow shape erased every field but `source`, so the assertions
+ * below reached for `.state`, `.entries`, `.skipped`, `.bytesUnread` and
+ * `.rowsDropped` on a type that had none of them, and a rename of any one of
+ * those would have gone unnoticed. `source` being `ChangeLogSource` also turns
+ * a typo in a source name into a compile error rather than a `!` on undefined.
+ */
+const coverageFor = (page: ChangeLogPage, source: ChangeLogSource): ChangeLogCoverage => {
+  const row = page.coverage.find((c) => c.source === source)
+  if (!row) throw new Error(`no coverage row for ${source}; got ${page.coverage.map((c) => c.source).join(', ')}`)
+  return row
+}
 
 // ---------------------------------------------------------------------------
 
