@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { stubBridge } from './setup/renderer'
+import { useApp } from '../src/renderer/src/store/app'
 import { CapacityPanel } from '../src/renderer/src/components/monitor/CapacityPanel'
 import {
   CAPACITY_THRESHOLDS,
@@ -254,5 +255,42 @@ describe('when there is nothing to show', () => {
     stubBridge({ capacity: { trends: () => Promise.reject(new Error('nope')) } })
     render(<CapacityPanel servers={[ALPHA]} />)
     await waitFor(() => expect(screen.getByText(/Could not read the history store/)).toBeTruthy())
+  })
+})
+
+describe('before the saved servers have been read back', () => {
+  it('does not tell someone with servers that they have none', () => {
+    // Servers arrive from `await bridge.data.load()`, so the list is empty for
+    // the first moments of every launch. This panel rendered that emptiness as
+    // "No servers to chart." -- a confident answer to a question nobody had
+    // asked yet. The store now says whether it has looked.
+    stubBridge({ capacity: { trends: () => Promise.resolve(report(FILLING)) } })
+    useApp.setState({ hydrated: false })
+    render(<CapacityPanel servers={[]} />)
+
+    expect(screen.getByText(/Reading your servers/)).toBeTruthy()
+    expect(screen.queryByText('No servers to chart.')).toBeNull()
+  })
+
+  it('says so once the read has happened and there really are none', () => {
+    // The waiting state must not become a place to hide: an empty workspace is
+    // a real answer and has to be given.
+    stubBridge({ capacity: { trends: () => Promise.resolve(report(FILLING)) } })
+    useApp.setState({ hydrated: true })
+    render(<CapacityPanel servers={[]} />)
+
+    expect(screen.getByText('No servers to chart.')).toBeTruthy()
+    expect(screen.queryByText(/Reading your servers/)).toBeNull()
+  })
+
+  it('charts what it was given without waiting for the signal', () => {
+    // A list with something in it is its own proof. Gating the whole panel on
+    // hydration would put a spinner in front of an answer already on screen.
+    stubBridge({ capacity: { trends: () => Promise.resolve(report(FILLING)) } })
+    useApp.setState({ hydrated: false })
+    render(<CapacityPanel servers={[ALPHA]} />)
+
+    expect(screen.queryByText(/Reading your servers/)).toBeNull()
+    expect(screen.queryByText('No servers to chart.')).toBeNull()
   })
 })

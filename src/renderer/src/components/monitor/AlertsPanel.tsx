@@ -465,6 +465,7 @@ export function AlertsPanel(): React.JSX.Element {
   const globalThreshold = useApp((s) => s.settings.resourceAlertThreshold)
   const perHost = useApp((s) => s.settings.resourceAlertThresholds)
   const servers = useWorkspaceServers()
+  const hydrated = useApp((st) => st.hydrated)
   // What is in each threshold box while it is being typed in, which is not the
   // same thing as what is stored. See commitThreshold.
   const [draft, setDraft] = useState<Record<string, string>>({})
@@ -775,7 +776,13 @@ export function AlertsPanel(): React.JSX.Element {
             are the numbers the Fleet Monitor colours a bar at and lists a server under, and an alert
             firing at a different number from the screen it sends you to is worse than no alert.
           </div>
-          {servers.length === 0 ? (
+          {servers.length === 0 && !hydrated ? (
+            // Same reason as the capacity panel: saved servers arrive from an
+            // await, so an empty list at launch is "not read yet", not "none".
+            // Only the empty branch waits -- a list with something in it needs
+            // no confirmation.
+            <div className="alerts-quiet-line">Reading your servers…</div>
+          ) : servers.length === 0 ? (
             <div className="alerts-quiet-line">This workspace has no servers.</div>
           ) : (
             <table className="mini-table">

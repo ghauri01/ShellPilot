@@ -38,6 +38,24 @@ function monitorGroupsWithoutCollapsed(groups: MonitorGroup[]): Omit<MonitorGrou
 }
 
 export async function initPersistence(): Promise<void> {
+  try {
+    await hydrate()
+  } finally {
+    // Every exit, including the failures, and deliberately in a `finally`.
+    //
+    // Until this is set, panels hold off saying "no servers" -- because an
+    // empty list means "nobody has looked yet" as much as it means "there are
+    // none". The cases that must NOT be left pending are the unhappy ones: a
+    // build with no data bridge will never load anything, and a load that
+    // throws is not going to arrive later either. Both are definite answers,
+    // and leaving them false would trade a wrong claim for a screen that says
+    // "loading" until it is closed -- the same defect pointed the other way,
+    // which the rules panel already made once.
+    useApp.setState({ hydrated: true })
+  }
+}
+
+async function hydrate(): Promise<void> {
   const bridge = window.shellpilot
   if (!bridge?.data) return
 

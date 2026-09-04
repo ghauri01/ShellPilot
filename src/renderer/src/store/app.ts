@@ -227,6 +227,21 @@ interface AppState {
   // data
   workspaces: Workspace[]
   folders: Folder[]
+  /**
+   * Whether the saved data has been read back yet.
+   *
+   * NOT derivable from `servers.length`, and that is the whole point. Servers
+   * arrive from `await bridge.data.load()`, so for the first moments of every
+   * launch the list is empty because nobody has looked -- not because there are
+   * none. Panels that say "no servers" out loud were saying it about a fleet
+   * they had not been shown, which is the same mistake as a zero for an
+   * unmeasured reading.
+   *
+   * Set once, on every terminal path including the failures: a build with no
+   * data bridge and a load that throws are both DEFINITE answers, and leaving
+   * this false there would trade a wrong claim for a spinner that never stops.
+   */
+  hydrated: boolean
   servers: Server[]
   vpns: VpnProfile[]
   // Live status per profile id, straight off `vpn:status:<id>`. Kept beside the
@@ -639,6 +654,7 @@ export const useApp = create<AppState>((set, get) => ({
   workspaces: [DEFAULT_WORKSPACE],
   folders: [],
   monitorGroups: [],
+  hydrated: false,
   servers: [],
   vpns: [],
   vpnStatuses: {},

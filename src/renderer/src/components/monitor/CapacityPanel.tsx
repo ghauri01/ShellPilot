@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, RefreshCw, TrendingUp } from 'lucide-react'
 import { openSettings } from '../../store/nav'
+import { useApp } from '../../store/app'
 import { clsx } from '../../lib/format'
 import {
   CAPACITY_THRESHOLDS,
@@ -194,6 +195,7 @@ export function CapacityPanel({ servers }: { servers: Server[] }): React.JSX.Ele
   const [serverId, setServerId] = useState<string>(servers[0]?.id ?? '')
   const [days, setDays] = useState<number>(7)
   const [report, setReport] = useState<CapacityReport | null>(null)
+  const hydrated = useApp((st) => st.hydrated)
   const [loading, setLoading] = useState(false)
   const [failed, setFailed] = useState(false)
   /** Bumped by Refresh. A re-read of the SAME server and window has to be a
@@ -283,6 +285,19 @@ export function CapacityPanel({ servers }: { servers: Server[] }): React.JSX.Ele
       {typeof trends !== 'function' ? (
         <div className="panel-note is-alarm">
           This build’s preload does not expose capacity trends yet. Restart the app to rebuild it.
+        </div>
+      ) : servers.length === 0 && !hydrated ? (
+        // Saved servers arrive from an await, so the list is empty for the
+        // first moments of every launch -- and this panel used that emptiness
+        // to tell people they had no servers. It is not a claim worth making
+        // before the answer is in.
+        //
+        // Only the EMPTY branch waits. A list with something in it is its own
+        // proof that servers exist, whatever the flag says, and holding a chart
+        // back for a signal that would only confirm what is already on screen
+        // would be a spinner in front of an answer.
+        <div className="panel-empty">
+          <p className="panel-empty-title">Reading your servers…</p>
         </div>
       ) : servers.length === 0 ? (
         <div className="panel-empty">
