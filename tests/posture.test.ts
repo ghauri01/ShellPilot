@@ -891,6 +891,35 @@ describe.skipIf(process.platform === 'win32')('the collector, run against a host
     expect(r.firewall).toBeNull()
   })
 
+  it('lists what a firewalld zone lets in, and drops the empty fields', () => {
+    const h = host()
+    h.script(
+      'firewall-cmd',
+      [
+        'case "$1" in',
+        '--state) echo running ;;',
+        '--get-default-zone) echo public ;;',
+        "--get-active-zones) printf 'public\\n  interfaces: eth0\\n' ;;",
+        '--list-all) printf \'public (active)\\n  target: default\\n  services: dhcpv6-client ssh\\n' +
+          '  ports: 3306/tcp\\n  protocols:\\n  forward-ports:\\n  rich rules:\\n' +
+          '\\trule family="ipv4" source address="203.0.113.0/24" accept\\n\' ;;',
+        'esac'
+      ].join('\n')
+    )
+    const p = h.collect({ have: ['firewall-cmd'], firewallRules: true })
+    const front = p.firewall?.ruleLines.find((r) => r.from === 'front')
+    expect(front?.lines).toEqual([
+      'services: dhcpv6-client ssh',
+      'ports: 3306/tcp',
+      'rule family="ipv4" source address="203.0.113.0/24" accept'
+    ])
+    // `protocols:` and `forward-ports:` have nothing after them. A zone field
+    // with no value is not a rule, and listing it as one would pad the answer
+    // with lines that say nothing.
+    expect(front?.lines.some((l) => l.startsWith('protocols'))).toBe(false)
+    expect(front?.truncated).toBe(false)
+  })
+
   it('lists the kernel rules alongside the front end’s, not instead of them', () => {
     const h = host()
     h.script('ufw', "printf 'Status: inactive\\n'")
