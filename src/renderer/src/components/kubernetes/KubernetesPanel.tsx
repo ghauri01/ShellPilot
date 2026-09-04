@@ -244,6 +244,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
   // does not exist yet.
   const [execFor, setExecFor] = useState<K8sPod | null>(null)
   const [execCommand, setExecCommand] = useState('')
+  const [execContainer, setExecContainer] = useState('')
   const [execPhrase, setExecPhrase] = useState('')
   const [execBusy, setExecBusy] = useState(false)
   const [execResult, setExecResult] = useState<{ pod: string; r: K8sExecResult } | null>(null)
@@ -480,7 +481,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
         serverName: server.name,
         namespace: execFor.namespace,
         pod: execFor.name,
-        container: '',
+        container: execContainer.trim(),
         command: execCommand,
         context: context || (probe?.ok ? probe.currentContext : null)
       }
@@ -508,6 +509,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
       setExecResult({ pod: execFor.name, r: await b.exec(cfgFor(server), target, approval) })
       setExecFor(null)
       setExecCommand('')
+      setExecContainer('')
       setExecPhrase('')
     } catch (e) {
       setExecResult({
@@ -893,6 +895,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
                     onClick={() => {
                       setExecResult(null)
                       setExecCommand('')
+                      setExecContainer('')
                       setExecPhrase('')
                       setExecFor(p)
                     }}
@@ -1497,6 +1500,18 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
               autoFocus
             />
           </div>
+          {/* Optional, and typed rather than picked from a list: the pod read
+              does not carry container names, and a dropdown built from a guess
+              would be worse than a blank. Left empty, kubectl chooses the
+              default container and names it in the output. */}
+          <div className="input-group" style={{ marginTop: 6 }}>
+            <input
+              className="input mono"
+              placeholder="container (optional — kubectl picks the default and says which)"
+              value={execContainer}
+              onChange={(e) => setExecContainer(e.target.value)}
+            />
+          </div>
           {execCommand.trim() !== '' && (
             <>
               <div className="s-desc danger">
@@ -1531,6 +1546,7 @@ export function KubernetesPanel({ servers }: { servers: Server[] }): React.JSX.E
               onClick={() => {
                 setExecFor(null)
                 setExecCommand('')
+                setExecContainer('')
                 setExecPhrase('')
               }}
             >

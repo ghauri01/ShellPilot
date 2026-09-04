@@ -2564,6 +2564,17 @@ export function planK8sExec(target: K8sExecTarget): K8sExecPlan {
   ]
   const caveats = [
     'one command, no TTY and no stdin — this is not a shell session, and a program that waits for input will hang until the timeout rather than prompt',
+    ...(target.container === ''
+      ? [
+          // kubectl prints `Defaulted container "x" out of: x, y` onto stderr,
+          // which the builder redirects into the output block — so the answer
+          // says which container it ran in. Saying so up front is cheaper than
+          // reading a command's output and wondering why it found nothing: on a
+          // pod with a sidecar, the first container is very often the one you
+          // did not mean.
+          'no container was named, so kubectl runs this in the pod’s default container and says which one in its output — on a pod with a sidecar that is often not the one you meant'
+        ]
+      : []),
     'anything written to a path that is not a mounted volume is lost when the container restarts, and a crashlooping container may restart mid-command',
     `output is truncated at ${K8S_EXEC_OUTPUT_CAP} bytes`
   ]

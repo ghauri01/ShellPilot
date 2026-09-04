@@ -177,6 +177,19 @@ describe('how hard you have to press', () => {
     expect(planK8sExec(target()).reasons.join(' ')).toContain('its own RBAC subresource')
   })
 
+  it('warns that an unnamed container is kubectl’s choice, not the user’s', () => {
+    // On a pod with a sidecar, the default container is very often not the one
+    // you meant, and the symptom is a command that ran fine and found nothing.
+    expect(planK8sExec(target({ container: '' })).caveats.join(' ')).toContain(
+      'often not the one you meant'
+    )
+    // And the warning is absent once a container IS named, because then it is
+    // not true.
+    expect(planK8sExec(target({ container: 'shell' })).caveats.join(' ')).not.toContain(
+      'often not the one you meant'
+    )
+  })
+
   it('says this is not a shell session', () => {
     const c = planK8sExec(target()).caveats.join(' ')
     expect(c).toContain('no TTY and no stdin')
