@@ -1118,7 +1118,11 @@ describe('the questions', () => {
     // maxmemory omitted when the server never reported one, so a rule of the
     // shape "alert when maxmemory is 0" cannot fire on a server that did not say.
     const blind = parseRedisMemory(parseRedisInfo('# Memory\r\nused_memory:100\r\n'))
-    const mm = dbEventMetrics({ id: 'memory', status: 'unknown', value: blind, verdict: { level: 'unknown', headline: '' } })
+    // `status: 'ok'` — the INFO command was READ; `maxmemory` simply was not in
+    // what it returned. `unknown` is a member of the verdict's level, not of
+    // `DbAnswerStatus`, and the two were being conflated here. `dbEventMetrics`
+    // reads only `id` and `value`, so this changes nothing but the claim.
+    const mm = dbEventMetrics({ id: 'memory', status: 'ok', value: blind, verdict: { level: 'unknown', headline: '' } })
     expect(mm).not.toHaveProperty('maxmemoryBytes')
     expect(mm.usedBytes).toBe(100)
   })

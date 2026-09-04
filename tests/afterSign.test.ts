@@ -24,7 +24,10 @@ describe('the manifest describes what actually shipped', () => {
   })
   afterEach(() => rmSync(root, { recursive: true, force: true }))
 
-  const manifest = (): Record<string, { sha256: string; size?: number }> =>
+  // `version` too: `ManifestEntry` in src/main/services/vpn/binaries.ts carries
+  // one, and the third test below reads it. Without it that read had no member
+  // to resolve against.
+  const manifest = (): Record<string, { sha256: string; size?: number; version?: string }> =>
     JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')).binaries
 
   it('repoints an entry at the bytes on disk, and reports the change', () => {

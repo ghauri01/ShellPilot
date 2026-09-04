@@ -193,7 +193,11 @@ describe('a rule reads as a sentence about where a credential goes', () => {
   })
 
   it('sends the draft as a rule, with the injection the form chose', async () => {
-    const saveRule = vi.fn(async () => ({ ok: true, rule: rule() }))
+    // The parameter is declared, not just ignored: `vi.fn(async () => ...)`
+    // gives `mock.calls` an element type of `[]`, so `calls[0][0]` below was an
+    // index into an empty tuple — the draft it asserts on was untyped as well
+    // as unread.
+    const saveRule = vi.fn(async (_draft: unknown) => ({ ok: true, rule: rule() }))
     mount({ rules: [], saveRule, entries: [entry({ id: 'v1', name: 'Example live key' })] })
     const user = userEvent.setup()
 

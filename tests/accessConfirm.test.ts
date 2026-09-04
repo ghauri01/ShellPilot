@@ -331,7 +331,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 describe.skipIf(process.platform === 'win32')('the confirmation, run for real', () => {
   it('finds the staged change and then makes it permanent', async () => {
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
-    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c1', expectRemoved: 1, rollbackSeconds: 2 }))
+    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c1', rollbackSeconds: 2 }))
 
     const v = h.run(accessVerifyCommand('c1'))
     expect(v.code).toBe(0)
@@ -359,7 +359,7 @@ describe.skipIf(process.platform === 'win32')('the confirmation, run for real', 
     // verification fails on the host as well — two independent reasons a
     // confirmation cannot arrive after the fact.
     const h = fakeHome([`ssh-ed25519 ${A} alice@laptop`, `ssh-ed25519 ${B} bob@desktop`, ''])
-    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c3', expectRemoved: 1, rollbackSeconds: 1 }))
+    h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 'c3', rollbackSeconds: 1 }))
     expect(existsSync(accessBackupPath(h.file, 'c3'))).toBe(true)
     await sleep(2500)
     expect(h.read()).toContain(A)
