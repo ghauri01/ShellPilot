@@ -2212,7 +2212,24 @@ export interface DockerReclaimDiff {
   appeared: DockerReclaimItem[]
 }
 
-const keyOf = (i: { kind: string; id: string }): string => `${i.kind} ${i.id}`
+/**
+ * The identity of one item across two reads: its kind and its id, and nothing
+ * else.
+ *
+ * The separator is a space, and it is only a separator: a kind comes from a
+ * four-value allow-list and cannot contain one, so no id can forge another
+ * item's key by carrying the delimiter.
+ *
+ * Exported because the renderer keys its selection on exactly this. A selection
+ * keyed on anything else — the label, the row's position, the size — would
+ * survive a re-read that changed the thing it was keyed on, and the diff below
+ * would then be comparing an item against itself under a name that had moved.
+ */
+export function dockerReclaimKey(item: { kind: string; id: string }): string {
+  return `${item.kind} ${item.id}`
+}
+
+const keyOf = dockerReclaimKey
 
 /**
  * The selected set, against a listing taken a moment ago.
