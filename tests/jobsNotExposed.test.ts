@@ -717,6 +717,41 @@ describe('what must NOT be able to reach this', () => {
       'fleet:posture',
       'postureFor',
       'get_host_posture',
+      // The firewall RULE LIST — roadmap item 31, and the posture argument at
+      // its sharpest, because this is the one part of that collection that is
+      // not a count.
+      //
+      // Posture's scalars are a map of how to attack the estate. This is the
+      // map itself: the addresses and ports each host accepts traffic on, in
+      // the firewall's own words. It is the single most attacker-valuable
+      // thing this application holds, and reading it is indistinguishable from
+      // preparing to use it.
+      //
+      // GATED IS NOT AN ANSWER HERE, and this is the case where that has to be
+      // said out loud, because unlike everything else on this list the rule
+      // list HAS a capability of its own — `firewallRules`, item 31's line in
+      // the consent grid. That capability governs whether ShellPilot's own
+      // hourly probe may COLLECT the lines for a person to read. It is not an
+      // agent grant and no tool consults it, deliberately: an agent that can
+      // read one host's ruleset can read forty, and an agent that can read
+      // forty rulesets can put them somewhere. There is no value of a
+      // permission — not ASK, which a model can ask for in a plausible voice
+      // during work a human already approved — that survives that.
+      //
+      // The property holds today only by construction: nothing under
+      // src/main/services/mcpServer.ts names any of these. This is what makes
+      // that checkable in a diff rather than by remembering.
+      'FirewallRuleListing',
+      'FIREWALL_RULE_ORIGINS',
+      'FIREWALL_RULE_MAX_LINES',
+      'FIREWALL_RULE_LINE_CAP',
+      'FIREWALL_RULES_HOST_REPORTED_NOTE',
+      'ruleLines',
+      'rulesRequested',
+      'fw-rule-lines',
+      'fw-rule-collection',
+      'sp_rule',
+      'firewallRules',
       // Configuration drift — roadmap item 25. The posture argument, one step
       // sharper.
       //
