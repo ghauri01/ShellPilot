@@ -587,6 +587,235 @@ describe('retention', () => {
   })
 })
 
+// ===========================================================================
+// A retention horizon per event kind — roadmap item 32
+// ===========================================================================
+//
+// Job rows are kept for a year and events were kept for ninety days, so item
+// 28's runbook — "what was run between this alert being raised and it
+// clearing" — was bounded by the shorter of the two. A host with a quarterly
+// problem read "this has never fired here" while the job that fixed it in
+// January was still on disk: the evidence survived and the anchor that would
+// have found it did not.
+
+describe('a retention horizon per event kind', () => {
+  /** A store with a sample at `now`, so every pass below has a plausible clock
+   *  to check itself against rather than being refused as one. */
+  async function anchored(now: number): Promise<HistoryStore> {
+    const s = await open()
+    s.recordSamples('web-1', now - HOUR, { cpu: 5 })
+    return s
+  }
+
+  it('keeps an alert past the horizon that drops a fact event', async () => {
+    const now = 500 * DAY
+    const s = await anchored(now)
+    // Older than ninety days, younger than the alert horizon.
+    const at = now - 200 * DAY
+    s.recordEvent('alert', 'web-1', { kind: 'disk', event: 'raised' }, at)
+    s.recordEvent('fact-changed', 'web-1', { key: 'unit:nginx.service' }, at)
+
+    const result = s.retain(now)
+
+    expect(result.eventsDropped).toBe(1)
+    expect(s.readEvents().map((e) => e.kind)).toEqual(['alert'])
+  })
+
+  it('outlives the job rows it anchors, rather than expiring first', async () => {
+    // The defect, stated as an ordering: a raise and the job that answered it
+    // are written in the same hour, and the raise must not be the first of the
+    // two to go. A year and a day later the job row is gone and the alert is
+    // still there; only past the alert horizon is the alert gone too.
+    const raised = 0
+    const s = await open()
+    s.createJob({
+      id: 'j1',
+      createdAt: raised + HOUR,
+      workspaceId: null,
+      title: 'clear the journal',
+      kind: 'command',
+      spec: { kind: 'command', title: 'clear the journal', steps: [{ command: 'journalctl --vacuum-time=2d' }] },
+      risk: 'routine',
+      confirmation: { kind: 'none' },
+      confirmedAt: null,
+      approval: null,
+      state: 'done',
+      targets: [{ serverId: 'web-1', serverName: 'WEB-1', ord: 0, state: 'done' }]
+    })
+    s.recordEvent('alert', 'web-1', { kind: 'disk', event: 'raised' }, raised)
+
+    // A year and a day on. The job row is past its own horizon; the alert is
+    // not past the new one.
+    const later = raised + 366 * DAY
+    s.recordSamples('web-1', later - HOUR, { cpu: 5 })
+    s.jobRetain(later)
+    s.retain(later)
+    expect(s.counts().jobs).toBe(0)
+    expect(s.readEvents().map((e) => e.kind)).toEqual(['alert'])
+
+    // And it does eventually go: 400 days, not never.
+    const past = raised + 401 * DAY
+    s.recordSamples('web-1', past - HOUR, { cpu: 5 })
+    s.retain(past)
+    expect(s.readEvents()).toEqual([])
+  })
+
+  it('keeps every kind for exactly the horizon its tier names', async () => {
+    // Every kind this app writes, at one age past ninety days and inside the
+    // longest horizon. The survivors are a literal list rather than a filter
+    // over the policy: a kind that quietly changes tier has to fail here.
+    const now = 500 * DAY
+    const s = await anchored(now)
+    const at = now - 200 * DAY
+    const kinds = [
+      'alert',
+      'db-alarm',
+      'db-watch',
+      'job-started',
+      'job-ended',
+      'job-gate',
+      'job-refused',
+      'job-abandoned',
+      'job-disposed',
+      'job-reclaimed',
+      'job-approval-disagreed',
+      'job-retention-skipped',
+      'fact-added',
+      'fact-changed',
+      'fact-removed',
+      'host-unreachable',
+      'host-recovered',
+      'rule-fired',
+      'rule-suppressed',
+      'rule-refused',
+      'rule-events-skipped',
+      'retention-skipped',
+      'history-recovery'
+    ]
+    s.transaction(() => {
+      for (const kind of kinds) s.recordEvent(kind, 'web-1', { k: kind }, at)
+    })
+
+    s.retain(now)
+
+    expect(s.readEvents({ limit: 100 }).map((e) => e.kind).sort()).toEqual([
+      'alert',
+      'db-alarm',
+      'db-watch',
+      'job-abandoned',
+      'job-approval-disagreed',
+      'job-disposed',
+      'job-ended',
+      'job-gate',
+      'job-reclaimed',
+      'job-refused',
+      'job-retention-skipped',
+      'job-started'
+    ])
+  })
+
+  it('is idempotent: a second pass over the same rows drops nothing', async () => {
+    const now = 500 * DAY
+    const s = await anchored(now)
+    s.transaction(() => {
+      for (let i = 0; i < 50; i++) {
+        s.recordEvent('alert', 'web-1', { i }, now - (100 + i) * DAY)
+        s.recordEvent('job-ended', null, { i }, now - (100 + i) * DAY)
+        s.recordEvent('fact-changed', 'web-1', { i }, now - (100 + i) * DAY)
+      }
+    })
+    const first = s.retain(now)
+    expect(first.eventsDropped).toBe(50)
+    const after = s.counts()
+
+    const second = s.retain(now)
+    expect(second.eventsDropped).toBe(0)
+    expect(s.counts()).toEqual(after)
+  })
+
+  it('does not let a long-lived tier dilute the blast-radius guard', async () => {
+    // The guard's denominator used to be every hourly and event row in the
+    // store. With two horizons that is wrong in the dangerous direction: rows
+    // on the LONGER horizon are not at risk from this cutoff, and counting
+    // them makes a pass that would take a whole tier look like a small share
+    // of the table. 1,500 of 3,500 rows is 43% — under the old half-the-table
+    // check — and it is every event on the ninety-day horizon.
+    const now = 500 * DAY
+    const s = await anchored(now)
+    s.transaction(() => {
+      // Inside NINETY days as well as inside the alert horizon, so this pass
+      // does not put them at risk under either policy — which is what makes
+      // the ratio below the old check's blind spot rather than its usual case.
+      for (let i = 0; i < 2000; i++) s.recordEvent('alert', 'web-1', { i }, now - 50 * DAY)
+      // All of it past ninety days.
+      for (let i = 0; i < 1500; i++) s.recordEvent('fact-changed', 'web-1', { i }, now - 100 * DAY)
+    })
+
+    const result = s.retain(now)
+
+    expect(result.skipped).toBe('blast-radius')
+    expect(s.counts().events).toBe(3500)
+  })
+
+  it('still refuses a tier that would lose everything, and still allows steady state', async () => {
+    // The other half of the same check: a tier below the floor cannot refuse a
+    // pass on its own, or three stale alert rows would stop the hourly tier
+    // ageing out forever — the store becoming the disk pressure it reports.
+    const now = 500 * DAY
+    const s = await anchored(now)
+    s.transaction(() => {
+      for (let i = 0; i < 3; i++) s.recordEvent('alert', 'web-1', { i }, now - 450 * DAY)
+      for (let i = 0; i < 2000; i++) s.recordEvent('fact-changed', 'web-1', { i }, now - (i % 80) * DAY)
+    })
+
+    const result = s.retain(now)
+
+    expect(result.skipped).toBeUndefined()
+    // The three ancient alerts went; nothing on the ninety-day horizon was old
+    // enough to.
+    expect(result.eventsDropped).toBe(3)
+    expect(s.counts().events).toBe(2000)
+  })
+
+  it('reports what an event row costs, and what the second horizon adds', async () => {
+    // Measured, not estimated — the discipline the steady-state test above
+    // sets. The roadmap's number (7 days full + 83 hourly, ~16 MB primary for
+    // fifteen hosts) counts SAMPLES; this reports what the longer event
+    // horizons add on top of it.
+    const s = await open()
+    await expect(s.backupReady).resolves.toBe(true)
+    const now = 500 * DAY
+    const rows = 20_000
+    s.transaction(() => {
+      for (let i = 0; i < rows; i++) {
+        s.recordEvent('alert', 'web-1', { kind: 'disk', event: 'raised', value: 91.5 }, now - i * 60_000)
+      }
+    })
+    s.close()
+    const bytes = statSync(s.path).size
+    const perRow = bytes / rows
+    // The reference estate, stated so the arithmetic is checkable: fifteen
+    // hosts raising two alerts a week is ~4.3 alert rows a day, and a
+    // fifteen-host estate patched weekly is ~20 job events a week.
+    const addedAlerts = 4.3 * (400 - 90)
+    const addedJobEvents = (20 / 7) * (365 - 90)
+    console.log(
+      `[history] ${rows} event rows: ${(bytes / 1024 / 1024).toFixed(2)} MB in the primary, ` +
+        `${perRow.toFixed(1)} bytes/row. The two longer horizons add about ` +
+        `${Math.round(addedAlerts + addedJobEvents)} rows for the reference estate — ` +
+        `${(((addedAlerts + addedJobEvents) * perRow) / 1024).toFixed(0)} KB on a ~16 MB primary.`
+    )
+    // A band, not a ceiling: an event row is a timestamp, a kind, a host id and
+    // a small JSON payload. If one ever costs a kilobyte the horizons above
+    // stop being free and this has to be re-argued.
+    expect(perRow).toBeGreaterThan(20)
+    expect(perRow).toBeLessThan(200)
+    // The whole size argument for the change: the extra rows are kilobytes
+    // against a store measured in megabytes.
+    expect((addedAlerts + addedJobEvents) * perRow).toBeLessThan(1024 * 1024)
+  })
+})
+
 describe('corruption recovery', () => {
   it('restores from .bak when the primary is not a database', async () => {
     const first = await open()

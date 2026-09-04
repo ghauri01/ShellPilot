@@ -16,6 +16,7 @@ import { JOB_OUTPUT_RETENTION_DAYS, JOB_RECORD_RETENTION_DAYS, isJobDetachedHand
 import type { BroadcastConfirmation, BroadcastRisk, CommandApproval } from '../../shared/broadcast'
 import { isCommandApproval } from '../../shared/broadcast'
 import { CAPACITY_METRICS, type CapacityMetric } from '../../shared/capacity'
+import { ALERT_HISTORY_KIND, DB_ALERT_HISTORY_KINDS } from '../../shared/webhook'
 
 // A durable store for samples, events and facts — roadmap item A.
 //
@@ -355,6 +356,124 @@ export const RETENTION_FULL_DAYS = 7
 export const RETENTION_HOURLY_DAYS = 90
 
 // ---------------------------------------------------------------------------
+// Events: a horizon per KIND, not one number — roadmap item 32.
+// ---------------------------------------------------------------------------
+// Every event used to age out on RETENTION_HOURLY_DAYS, and item 28 found what
+// that costs at a boundary. A runbook is a join: the alert EVENT says when the
+// incident started, and the job ROW says what was run against it. Job rows are
+// kept for a year, so the join was bounded by the shorter side — a host with a
+// quarterly problem read "this has never fired here" while the job that fixed
+// it in January was still on disk. The evidence survived; the anchor did not.
+//
+// Item 28's author declined to fix that by quietly lengthening one rule, and
+// was right to: retention is the part of this store least able to afford an
+// exception added in passing. So it becomes a policy, stated once, in one
+// table, with a horizon per tier and a test that asserts which tier each kind
+// lands in.
+//
+// THREE TIERS, AND WHY EACH IS NOT THE OTHERS.
+//
+//  * ALERTS are anchors. They must outlive the job rows they anchor or the
+//    join breaks again, so the floor is JOB_RECORD_RETENTION_DAYS plus the
+//    response window — a raise at T can anchor a job created at T + 24h, whose
+//    row survives to T + 366 days. 400 is that floor with five weeks of
+//    headroom, and the headroom is the point rather than slack: at exactly a
+//    year the January incident disappears on its own anniversary, which is the
+//    week somebody is most likely to be looking for it. It is also the shortest
+//    horizon on which an ANNUAL problem is visible twice.
+//  * JOB EVENTS are a change log, and they describe rows kept for a year. At
+//    ninety days "what did we run in March" was answerable through jobsForHost
+//    and blank in the change log (changelog.ts reads these kinds), which is the
+//    same defect one table over. They get the job rows' own horizon so a job
+//    and the events naming it go together rather than the events going first.
+//  * EVERYTHING ELSE is chatter about a present state: facts appearing and
+//    changing, hosts going unreachable and coming back, rules firing, this
+//    module's own notes about refusing a pass. A flapping unit alone is tens of
+//    thousands of rows a quarter (see FLAP_WINDOW_MS, which exists because of
+//    it), and none of it answers a question about last year. Ninety days,
+//    unchanged.
+//
+// A kind matches at most one tier — asserted by 'keeps every kind for exactly
+// the horizon its tier names' in tests/history.test.ts — and anything
+// unmatched falls to the default, so a kind invented next month is retained
+// conservatively rather than forever.
+
+/**
+ * How long an alert event is kept. See the tier note above for why it is not
+ * 365: a raise must outlive the job row it anchors, which can be created 24
+ * hours after it and survives 365 days from ITS creation.
+ */
+export const RETENTION_ALERT_DAYS = 400
+
+/** How long a `job-` event is kept: exactly as long as the job row it names. */
+export const RETENTION_JOB_EVENT_DAYS = JOB_RECORD_RETENTION_DAYS
+
+/** Every other kind, unchanged from when there was only one number. */
+export const RETENTION_EVENT_DEFAULT_DAYS = RETENTION_HOURLY_DAYS
+
+/** One tier of the event policy: a horizon, and the kinds that get it. */
+export interface EventRetentionTier {
+  /** Names the tier in a refusal message and in a test. */
+  readonly id: string
+  readonly days: number
+  /** Kinds that are in this tier exactly. */
+  readonly kinds: readonly string[]
+  /** Kind PREFIXES in this tier, matched as a byte range rather than a LIKE —
+   *  see prefixUpperBound and the note above FACTS_PREFIX_QUERY. A family is a
+   *  prefix so that a kind added to jobRunner.ts next month gets the horizon
+   *  its siblings have rather than silently falling to the default. */
+  readonly prefixes: readonly string[]
+}
+
+/**
+ * The exceptions to RETENTION_EVENT_DEFAULT_DAYS, in one table.
+ *
+ * Both the SQL that does the deleting and `eventRetentionDays` below are
+ * DERIVED from this array, so the two cannot disagree about which tier a kind
+ * is in — the failure that a hand-written second copy of a list is for.
+ *
+ * `job-retention-skipped` rides along on the `job-` prefix and is kept for a
+ * year rather than a quarter. Deliberate: it is this store's own note that it
+ * declined to delete the change log, and it is worth exactly as long as the
+ * change log it declined to delete.
+ */
+export const EVENT_RETENTION_TIERS: readonly EventRetentionTier[] = [
+  {
+    id: 'alert',
+    days: RETENTION_ALERT_DAYS,
+    // ALERT_HISTORY_KIND and DB_ALERT_HISTORY_KINDS, imported rather than
+    // retyped. Item 18's database verdicts are alert rows written under their
+    // own kinds, they are in STORE_ALERT_KINDS, and isRunbookKind accepts
+    // them — a runbook for a replication alarm asks the same question about
+    // last quarter as one for a disk.
+    kinds: [ALERT_HISTORY_KIND, ...DB_ALERT_HISTORY_KINDS],
+    prefixes: []
+  },
+  {
+    id: 'job',
+    days: RETENTION_JOB_EVENT_DAYS,
+    kinds: [],
+    prefixes: ['job-']
+  }
+] as const
+
+/**
+ * How long one kind is kept, in days.
+ *
+ * Case-sensitive, exactly as the SQL derived from the same table is: SQLite's
+ * LIKE is ASCII case-insensitive and the prefix match below is a byte range
+ * for that reason, so `JOB-started` is the default tier in both places rather
+ * than one tier here and another there.
+ */
+export function eventRetentionDays(kind: string): number {
+  for (const tier of EVENT_RETENTION_TIERS) {
+    if (tier.kinds.includes(kind)) return tier.days
+    if (tier.prefixes.some((p) => kind.startsWith(p))) return tier.days
+  }
+  return RETENTION_EVENT_DEFAULT_DAYS
+}
+
+// ---------------------------------------------------------------------------
 // Two guards on the retention pass, because every horizon above is derived from
 // wall-clock `now` and a wrong clock is not a rare machine.
 //
@@ -385,6 +504,34 @@ export const RETENTION_GUARD_MIN_ROWS = 1000
  *  buckets is what the pass is FOR, and an app that has not run for a fortnight
  *  legitimately rolls up its whole full-resolution tier on the next launch. */
 export const RETENTION_MAX_DROP_FRACTION = 0.5
+
+// ---------------------------------------------------------------------------
+// What "half the table" means once rows expire on different schedules.
+//
+// The blast-radius guard was one ratio over every hourly and event row, and a
+// second horizon makes that denominator wrong in the DANGEROUS direction. Rows
+// on the longer horizon are not at risk from a cutoff that cannot reach them,
+// but they still count as table, so they dilute the ratio: a store that is 57%
+// alert rows can lose every single row on the ninety-day horizon and report it
+// as 43% of the table — under the line, permitted, silent. A per-kind policy
+// therefore makes this guard HARDER rather than easier, and both halves are
+// kept:
+//
+//   1. The original whole-table ratio, unchanged, with its floor.
+//   2. Plus: no TIER holding at least RETENTION_GUARD_MIN_ROWS rows of its own
+//      may lose more than the same share of itself.
+//
+// (2) alone is strictly stronger than (1) where it applies — if every tier is
+// under half then the sum is too — so the union only ever refuses more, never
+// less, than the pass did before this change.
+//
+// (2) is floored per tier for a reason that is not symmetry. Without a floor,
+// three stale alert rows out of three would refuse every pass forever, and the
+// hourly tier — the actual megabytes — would stop ageing out entirely. That is
+// the store becoming the disk pressure it reports, which is the one failure
+// the roadmap's sizing note says is not allowed. A tier too small to trip its
+// own check is still covered by (1).
+// ---------------------------------------------------------------------------
 
 /**
  * Steady-state row counts for a given estate, so a test can assert the
@@ -878,6 +1025,46 @@ const FACTS_PREFIX_QUERY =
 /** Read-only, for the same query-plan guard. */
 export const FACTS_PREFIX_QUERY_FOR_TESTS = FACTS_PREFIX_QUERY
 
+/**
+ * One tier's kinds as a parameterised predicate over `events.kind`.
+ *
+ * Built from EVENT_RETENTION_TIERS rather than typed out, so the SQL and
+ * `eventRetentionDays` cannot come to disagree about which tier a kind is in.
+ * Values are BOUND, not interpolated: these are our own constants today, and a
+ * predicate that interpolates is one refactor away from being handed a kind.
+ *
+ * A prefix is a byte range, not a LIKE, for FACTS_PREFIX_QUERY's reason —
+ * SQLite's LIKE is ASCII case-insensitive, so `LIKE 'job-%'` would put a
+ * `JOB-started` in the job tier here while `eventRetentionDays` left it in the
+ * default one, and a row would be kept or dropped by whichever asked.
+ */
+function tierPredicate(tier: EventRetentionTier): { sql: string; params: string[] } {
+  const parts: string[] = []
+  const params: string[] = []
+  if (tier.kinds.length > 0) {
+    parts.push(`kind IN (${tier.kinds.map(() => '?').join(', ')})`)
+    params.push(...tier.kinds)
+  }
+  for (const prefix of tier.prefixes) {
+    parts.push('(kind >= ? AND kind < ?)')
+    params.push(prefix, prefixUpperBound(prefix))
+  }
+  // A tier that names nothing matches nothing. Never true today; it is here so
+  // that emptying a tier's lists disables it rather than matching the table.
+  return { sql: parts.length === 0 ? '(1 = 0)' : `(${parts.join(' OR ')})`, params }
+}
+
+/** The default tier: everything the named tiers did not claim. `kind` is NOT
+ *  NULL, so the negation is total and the tiers partition the table. */
+function defaultTierPredicate(): { sql: string; params: string[] } {
+  const named = EVENT_RETENTION_TIERS.map(tierPredicate)
+  if (named.length === 0) return { sql: '(1 = 1)', params: [] }
+  return {
+    sql: named.map((p) => `NOT ${p.sql}`).join(' AND '),
+    params: named.flatMap((p) => p.params)
+  }
+}
+
 /** The exclusive upper bound of every key starting with `prefix`.
  *
  *  SQLite compares TEXT byte-wise by default and UTF-8 preserves code-point
@@ -1229,7 +1416,6 @@ function buildStore(
     ),
     dropFull: db.prepare('DELETE FROM samples WHERE ts < ?'),
     dropHourly: db.prepare('DELETE FROM samples_hourly WHERE ts < ?'),
-    dropEvents: db.prepare('DELETE FROM events WHERE ts < ?'),
     countSamples: db.prepare('SELECT count(*) AS n FROM samples'),
     countHourly: db.prepare('SELECT count(*) AS n FROM samples_hourly'),
     countEvents: db.prepare('SELECT count(*) AS n FROM events'),
@@ -1239,7 +1425,6 @@ function buildStore(
     newestSample: db.prepare('SELECT max(ts) AS n FROM samples'),
     newestHourly: db.prepare('SELECT max(ts) AS n FROM samples_hourly'),
     doomedHourly: db.prepare('SELECT count(*) AS n FROM samples_hourly WHERE ts < ?'),
-    doomedEvents: db.prepare('SELECT count(*) AS n FROM events WHERE ts < ?'),
 
     // ---- Jobs -------------------------------------------------------------
     jobInsert: db.prepare(
@@ -1325,6 +1510,35 @@ function buildStore(
     countJobs: db.prepare('SELECT count(*) AS n FROM job'),
     countJobOutput: db.prepare('SELECT count(*) AS n FROM job_output')
   }
+
+  /**
+   * The event tiers, as three prepared statements each — roadmap item 32.
+   *
+   * One DELETE per tier rather than one DELETE with a CASE over the cutoffs,
+   * because each of these keeps `ts < ?` as the leading term and so stays an
+   * index range on events_ts with the kind predicate as a filter. A CASE would
+   * make every pass a full scan of the table it is trying to bound.
+   *
+   * The count of statements is fixed at build time by EVENT_RETENTION_TIERS,
+   * so a pass is O(tiers) scans of a table that retention itself bounds — the
+   * property the roadmap's sizing note asks for, unchanged by the split.
+   *
+   * `params` is the tier's own bound values; the cutoff goes in front of them.
+   */
+  const eventTiers = [
+    ...EVENT_RETENTION_TIERS.map((tier) => ({ tier, pred: tierPredicate(tier) })),
+    {
+      tier: { id: 'default', days: RETENTION_EVENT_DEFAULT_DAYS, kinds: [], prefixes: [] },
+      pred: defaultTierPredicate()
+    }
+  ].map(({ tier, pred }) => ({
+    id: tier.id,
+    days: tier.days,
+    params: pred.params,
+    drop: db.prepare(`DELETE FROM events WHERE ts < ? AND ${pred.sql}`),
+    doomed: db.prepare(`SELECT count(*) AS n FROM events WHERE ts < ? AND ${pred.sql}`),
+    held: db.prepare(`SELECT count(*) AS n FROM events WHERE ${pred.sql}`)
+  }))
 
   const metricIds = new Map<Metric, number>(METRICS.map((m, i) => [m, i + 1]))
   /** The other direction, for the read that selects the metric column rather
@@ -1698,13 +1912,39 @@ function buildStore(
       // again as new buckets accumulate. Bailing out rather than deleting a
       // capped slice is the same choice: a cap that deletes a little every pass
       // still empties the store against a wrong clock, just over a day.
-      const doomed = num(st.doomedHourly.get(hourlyCutoff)) + num(st.doomedEvents.get(hourlyCutoff))
-      const base = num(st.countHourly.get()) + num(st.countEvents.get())
-      if (base >= RETENTION_GUARD_MIN_ROWS && doomed > base * RETENTION_MAX_DROP_FRACTION) {
+      //
+      // Counted PER TIER as well as in total, because rows on a longer horizon
+      // are not at risk from a cutoff that cannot reach them and would
+      // otherwise dilute the ratio until a whole tier could go unnoticed. See
+      // the note above RETENTION_MAX_DROP_FRACTION.
+      const tiers = [
+        {
+          id: 'hourly',
+          doomed: num(st.doomedHourly.get(hourlyCutoff)),
+          held: num(st.countHourly.get())
+        },
+        ...eventTiers.map((t) => ({
+          id: t.id,
+          doomed: num(t.doomed.get(now - t.days * DAY_MS, ...t.params)),
+          held: num(t.held.get(...t.params))
+        }))
+      ]
+      const doomed = tiers.reduce((n, t) => n + t.doomed, 0)
+      const base = tiers.reduce((n, t) => n + t.held, 0)
+      const overrun = tiers.find(
+        (t) => t.held >= RETENTION_GUARD_MIN_ROWS && t.doomed > t.held * RETENTION_MAX_DROP_FRACTION
+      )
+      const whole = base >= RETENTION_GUARD_MIN_ROWS && doomed > base * RETENTION_MAX_DROP_FRACTION
+      if (whole || overrun !== undefined) {
+        const pct = Math.round(RETENTION_MAX_DROP_FRACTION * 100)
+        const where =
+          overrun === undefined
+            ? `${doomed} of ${base} hourly and event rows`
+            : `${overrun.doomed} of ${overrun.held} rows in the '${overrun.id}' tier` +
+              ` (${doomed} of ${base} across the store)`
         console.error(
-          `[history] retention skipped: one pass would drop ${doomed} of ${base} hourly and event ` +
-            `rows (over ${Math.round(RETENTION_MAX_DROP_FRACTION * 100)}%). That is a wrong clock, ` +
-            `not a horizon — nothing was deleted.`
+          `[history] retention skipped: one pass would drop ${where} (over ${pct}%). ` +
+            `That is a wrong clock, not a horizon — nothing was deleted.`
         )
         return { ...nothing, skipped: 'blast-radius' }
       }
@@ -1718,10 +1958,18 @@ function buildStore(
         // written anywhere else.
         const rolledUp = Number(st.dropFull.run(fullCutoff).changes)
         const hourlyDropped = Number(st.dropHourly.run(hourlyCutoff).changes)
-        // Events age out on the same horizon. They are the record of what
-        // changed, not an audit trail — auditLog.ts is the audit trail and is
-        // deliberately untouched by any of this.
-        const eventsDropped = Number(st.dropEvents.run(hourlyCutoff).changes)
+        // Events age out on a horizon per KIND — see EVENT_RETENTION_TIERS.
+        // They are still the record of what changed and not an audit trail:
+        // auditLog.ts is the audit trail and is deliberately untouched by any
+        // of this, on any horizon.
+        //
+        // One DELETE per tier, each idempotent and each bounded by its own
+        // cutoff, so re-running the pass over the same rows deletes nothing and
+        // the tiers cannot double-count a row: they partition the table.
+        const eventsDropped = eventTiers.reduce(
+          (n, t) => n + Number(t.drop.run(now - t.days * DAY_MS, ...t.params).changes),
+          0
+        )
         return { rolledUp, hourlyRows: after - before, hourlyDropped, eventsDropped }
       })
     },
