@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SshConnectConfig } from '../src/shared/ssh'
 
 // Which VPN a connection rides is resolved in main from the saved record, not
 // sent by the renderer. That choice is what these tests are about: every call
@@ -29,17 +30,23 @@ beforeEach(() => {
   vpnIds.clear()
 })
 
-const sshCfg = (over: Record<string, unknown> = {}): never =>
-  ({
-    host: 'bastion.internal',
-    port: 22,
-    username: 'alice',
-    auth: 'key',
-    sessionId: 's',
-    cols: 80,
-    rows: 24,
-    ...over
-  }) as never
+// Typed as the config `withVpnTransport` takes, rather than cast to `never`.
+// The cast made the generic resolve to `never`, so every `out.vpnProfileId`,
+// `out.serverName`, `out.username` and `out.port` below was read off a type
+// with no members — which is what those five errors were, and it also meant
+// the fixture itself was never checked against `SshConnectConfig`.
+const sshCfg = (
+  over: Partial<SshConnectConfig & { serverId: string }> = {}
+): SshConnectConfig & { serverId?: string } => ({
+  host: 'bastion.internal',
+  port: 22,
+  username: 'alice',
+  auth: 'key',
+  sessionId: 's',
+  cols: 80,
+  rows: 24,
+  ...over
+})
 
 describe('SSH', () => {
   it('attaches the profile and the server name when the record names one', () => {
