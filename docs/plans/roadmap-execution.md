@@ -695,3 +695,36 @@ produce exactly this shape — fine alone, occasionally wrong in company.
 **Not muted, not retried, not skipped.** All three would convert an unexplained failure into a
 test that no longer tests, and the record above exists so the next attempt starts from what is
 already excluded.
+
+### The git rule that actually holds, after eight incidents
+
+Every safe-commit rule written on this branch turned out to be necessary and insufficient,
+and the sequence is worth keeping because each step looked like the answer at the time.
+
+1. `git add -A` swept another agent's work into a commit. **Rule: stage explicit paths.**
+2. Explicit paths still picked up a rename another agent had *already staged*, and shipped a
+   commit that did not build. **Rule: inspect the index first.**
+3. The index was inspected — for the committer's own paths. Five files belonging to somebody
+   else went in anyway. **Rule: read the whole index, no path argument.**
+4. An agent read the whole index, found it empty, staged, and was still swept — because
+   another agent ran `git add -A` and committed *in the window between those two steps*.
+
+Step 4 is the one that settles it. **Inspection cannot close a race.** No amount of looking
+before staging protects against a concurrent writer, because the index is shared mutable state
+and reading it is not atomic with acting on it.
+
+The form that actually holds is `git commit -- <paths>`, which commits exactly those paths and
+ignores whatever else the index contains. It is not a discipline that everyone has to follow;
+it is a property of the command, and it works even when the other agent is careless.
+
+So the rule for this branch, in order of strength:
+
+- **Commit with `git commit -- <paths>`.** Never a bare `git commit` after staging.
+- Never `git add -A` or `git add .` — it is the thing that makes everyone else's careful
+  staging worthless.
+- Still read `git diff --cached --name-only` before committing, because it catches the *slow*
+  version of the problem even though it cannot catch the fast one.
+
+The underlying lesson generalises past git: **when several writers share mutable state,
+protocols that depend on everyone behaving lose to mechanisms that do not.** Three rules here
+asked for good behaviour from every agent. The fourth asks for nothing from anyone.
