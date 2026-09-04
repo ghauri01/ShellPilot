@@ -563,6 +563,12 @@ describe('the AI permission model has no word for a job', () => {
     'sudo',
     'serverMetrics',
     'hostFacts',
+    // Roadmap item 31, reviewed here as well: it grants an agent nothing at
+    // all. What it gates is whether ShellPilot's own hourly posture read may
+    // collect a host's firewall rule LINES — the addresses and ports it
+    // accepts traffic on — for a person to look at. The bridge cannot reach
+    // them at any setting; section 4 below holds that by name.
+    'firewallRules',
     'manageServers',
     'vpnControl'
   ]

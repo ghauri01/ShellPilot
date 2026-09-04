@@ -265,12 +265,28 @@ describe('nothing an agent can reach imports the rule engine', () => {
 // ---------------------------------------------------------------------------
 
 describe('the AI permission model has no word for a rule', () => {
+  // The word "rule" is not owned by this file. A FIREWALL rule is a line in a
+  // packet filter on somebody else's machine; a ShellPilot rule is a standing
+  // consent record on this one, which is the thing below has no safe setting.
+  // `firewallRules` is reviewed and named here rather than let through by a
+  // looser regex, and rather than renamed to dodge one — a consent label that
+  // avoids the word an operator would search for, to satisfy a test, is a
+  // worse label. It is on this list on the strength of the OTHER two
+  // properties, both asserted elsewhere: no MCP tool reads a rule list at any
+  // setting (tests/jobsNotExposed.test.ts), and granting it schedules,
+  // triggers and automates nothing — it decides whether an hourly read that
+  // already runs may ask for one more thing.
+  //
+  // Anything else matching the pattern is the conversation this file exists to
+  // force. Adding a second entry means having it.
+  const REVIEWED_NON_AUTOMATION = ['firewallRules']
+
   it('grants no capability naming a rule, a trigger or an automation', () => {
     expect(AI_CAPABILITIES.length, 'AI_CAPABILITIES is empty — nothing was checked').toBeGreaterThan(0)
     const rx = /\brule|automat|trigger|when.?then/i
-    const offenders = AI_CAPABILITIES.filter((c) => rx.test(c.id) || rx.test(c.label)).map(
-      (c) => `${c.id} (${c.label})`
-    )
+    const offenders = AI_CAPABILITIES.filter(
+      (c) => !REVIEWED_NON_AUTOMATION.includes(c.id) && (rx.test(c.id) || rx.test(c.label))
+    ).map((c) => `${c.id} (${c.label})`)
     expect(
       offenders,
       `A capability that names a rule has appeared: ${offenders.join(', ')}. "let the agent set ` +
@@ -279,6 +295,20 @@ describe('the AI permission model has no word for a rule', () => {
         `that makes it safe, because what it grants is a consent record that outlives every ask ` +
         `and that the kill switch has no way to find.`
     ).toEqual([])
+  })
+
+  it('keeps the reviewed exemption to exactly the one capability that earned it', () => {
+    // An exemption list is a hole in a guard, so it is asserted rather than
+    // trusted: every entry must still exist, and nothing may be added to it
+    // without this expectation being edited in the same diff.
+    expect(REVIEWED_NON_AUTOMATION).toEqual(['firewallRules'])
+    for (const id of REVIEWED_NON_AUTOMATION) {
+      expect(
+        AI_CAPABILITIES.map((c) => c.id),
+        `${id} is exempted from the rule-vocabulary guard and is not a capability any more. ` +
+          `Remove the exemption rather than leaving the hole open.`
+      ).toContain(id)
+    }
   })
 })
 
