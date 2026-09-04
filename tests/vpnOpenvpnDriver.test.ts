@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { spawn as nodeSpawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import type {
   OpenVpnSpec,
   VpnEngineInfo,
+  VpnErrorCode,
   VpnLogLine,
   VpnProfile,
   VpnPrompt,
@@ -140,11 +141,16 @@ function makeHarness(o: HarnessOptions = {}): Harness {
   const promptLabels: string[] = []
   const answers = [...(o.answers ?? [])]
 
+  const drops: { reason: string; errorCode?: VpnErrorCode }[] = []
   const ctx: VpnDriverContext = {
     runDir,
     secrets,
     emit: (patch) => patches.push(patch),
     log: (text, stream) => logs.push({ at: Date.now(), stream, text }),
+    // The context had no `dropped`, so a driver calling it would have thrown
+    // rather than been observed — nothing below covers the drop path. Recorded
+    // so an assertion has something to reach for.
+    dropped: (reason, errorCode) => drops.push({ reason, errorCode }),
     askUser: async (p) => {
       prompts.push(p.kind)
       promptLabels.push(p.label)
@@ -172,6 +178,14 @@ function makeHarness(o: HarnessOptions = {}): Harness {
       ? elevatedLauncher({
           get method() {
             return elevator.method
+          },
+          // Forwarded, not defaulted. `elevatedLauncher` copies this straight
+          // onto the launcher, and the driver reads it to decide whether the
+          // config body goes down `/dev/stdin` or is written to a 0600 file —
+          // so a wrapper that dropped it silently forced every test in this
+          // file onto the file path.
+          get carriesStdin() {
+            return elevator.carriesStdin
           },
           probe: () => elevator.probe(),
           run: (req: ElevationRequest): Promise<ElevatedProcess> => {
@@ -597,13 +611,27 @@ describe('OpenVPN driver failure handling', () => {
 // ---------------------------------------------------------------- elevation
 
 describe('OpenVPN driver elevation', () => {
-  function stubElevator(exit: { code: number | null; declined: boolean }): Elevator & {
+  /**
+   * `carriesStdin` defaults to false to match `method: 'uac'`: ShellExecute has
+   * no stdin to redirect, which is exactly what `createWin32Elevator` declares.
+   *
+   * It was absent entirely, which is why this file did not type-check — and it
+   * mattered, because `undefined` is falsy and the driver's `viaStdin` test
+   * reads it directly. The test below named "does not use /dev/stdin when a
+   * helper stands between us and the engine" was therefore passing off a
+   * missing field rather than off a helper that declares it cannot carry one.
+   */
+  function stubElevator(
+    exit: { code: number | null; declined: boolean },
+    carriesStdin = false
+  ): Elevator & {
     runs: ElevationRequest[]
   } {
     const runs: ElevationRequest[] = []
     return {
       runs,
       method: 'uac',
+      carriesStdin,
       probe: async () => ({ available: true, method: 'uac' }),
       run: async (req: ElevationRequest): Promise<ElevatedProcess> => {
         runs.push(req)
@@ -645,9 +673,31 @@ describe('OpenVPN driver elevation', () => {
     expect(args[1]).toBe(join(h.runDir, 'p.ovpn'))
   })
 
+  it('does use /dev/stdin when the helper does carry one', async () => {
+    // The other half of the pair, and the reason the one above is worth
+    // anything. Without this, a driver that ignored `carriesStdin` and always
+    // wrote the file would pass every assertion in this describe block — the
+    // negative case cannot tell "honours the flag" from "never uses stdin".
+    // pkexec and sudo fork the engine, so the pipe survives and the config body
+    // — which carries the private key — never touches disk.
+    const elevator = stubElevator({ code: null, declined: true }, true)
+    const h = makeHarness({ elevator })
+
+    await expect(h.driver.start(h.profile, h.ctx)).rejects.toMatchObject({
+      code: 'elevation-declined'
+    })
+
+    const req = elevator.runs[0]
+    expect(req.args[0]).toBe('--config')
+    expect(req.args[1]).toBe('/dev/stdin')
+    expect(req.stdin).toContain('remote ')
+    expect(existsSync(join(h.runDir, 'p.ovpn'))).toBe(false)
+  })
+
   it('refuses to start when the machine cannot elevate at all', async () => {
     const elevator: Elevator = {
       method: 'none',
+      carriesStdin: false,
       probe: async () => ({ available: false, method: 'none', reason: 'no polkit here.' }),
       run: async () => {
         throw new Error('should not be reached')
