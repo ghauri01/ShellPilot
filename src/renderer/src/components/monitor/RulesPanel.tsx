@@ -161,13 +161,19 @@ function RuleCard({
 
       {/* A rule that cannot run says so here rather than at 3am. */}
       {!rule.verdict.ok && (
-        <div className="row danger" style={{ gap: 6, fontSize: 12, alignItems: 'flex-start' }}>
+        <div
+          className="row state-alarm"
+          style={{ gap: 6, fontSize: 12, alignItems: 'flex-start' }}
+        >
           <AlertTriangle size={14} />
           <span>This rule will not run: {rule.verdict.reason}</span>
         </div>
       )}
       {rule.verdict.ok && rule.status.refusal !== undefined && (
-        <div className="row warn" style={{ gap: 6, fontSize: 12, alignItems: 'flex-start' }}>
+        <div
+          className="row state-watch"
+          style={{ gap: 6, fontSize: 12, alignItems: 'flex-start' }}
+        >
           <AlertTriangle size={14} />
           <span>Last time it fired it was refused: {rule.status.refusal}</span>
         </div>
@@ -322,21 +328,24 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
 
   return (
     <div className="col" style={{ gap: 12 }}>
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <div className="col" style={{ gap: 2 }}>
-          <b>Rules</b>
-          <span className="faint" style={{ fontSize: 11 }}>
-            When an alert fires, run a job or post to the webhook. A rule runs the job it was
-            confirmed with, on the hosts it was confirmed for, and refuses if either has changed.
-          </span>
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <Zap size={14} />
+        </span>
+        <h2 className="ui-section-title">Rules</h2>
+        <p className="ui-note panel-head-purpose">
+          When an alert fires, run a job or post to the webhook. A rule runs the job it was
+          confirmed with, on the hosts it was confirmed for, and refuses if either has changed.
+        </p>
+        <div className="panel-head-actions">
+          <button className="btn primary" onClick={() => setOpen((v) => !v)}>
+            <Plus size={14} /> New rule
+          </button>
         </div>
-        <button className="btn" onClick={() => setOpen((v) => !v)}>
-          <Plus size={14} /> New rule
-        </button>
       </div>
 
       {error !== null && (
-        <div className="row danger" style={{ gap: 6, fontSize: 12 }}>
+        <div className="row state-alarm" style={{ gap: 6, fontSize: 12 }}>
           <AlertTriangle size={14} />
           {error}
         </div>
@@ -518,8 +527,16 @@ export function RulesPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
       )}
 
       {rules.length === 0 ? (
-        <div className="faint" style={{ fontSize: 12 }}>
-          No rules. Nothing runs on its own.
+        // Was one grey sentence with no next step. The sentence is kept —
+        // "nothing runs on its own" is the reassurance a rules screen owes the
+        // reader — and now it says what to do about it.
+        <div className="panel-empty">
+          <p className="panel-empty-title">No rules. Nothing runs on its own.</p>
+          <p className="panel-empty-body">
+            Press <b>New rule</b> to connect an alert to a job or to the webhook. Every rule is
+            confirmed once, against a specific job and specific hosts, and refuses to run if either
+            of those changes afterwards.
+          </p>
         </div>
       ) : (
         rules.map((r) => (

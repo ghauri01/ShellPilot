@@ -124,7 +124,7 @@ function SourceStatus({ sources }: { sources?: CronSourceReport[] }): React.JSX.
         </span>
       )}
       {incomplete.map((s) => (
-        <div key={s.id} className="warn" style={{ marginTop: 2 }}>
+        <div key={s.id} className="state-unknown" style={{ marginTop: 2 }}>
           <ShieldAlert size={11} /> {s.label}: {CRON_STATUS_HELP[s.status]}
           {s.detail ? ` (${s.detail})` : ''}
         </div>
@@ -170,7 +170,7 @@ function JobForm({
   // when a job runs is worse than none.
   const described = scheduleOk ? describeSchedule(draft.schedule) : null
   return (
-    <div className="s-desc" style={{ display: 'grid', gap: 6, marginTop: 6 }}>
+    <div className="panel-note" style={{ display: 'grid', gap: 6, marginTop: 6 }}>
       <div className="row" style={{ gap: 6, alignItems: 'center' }}>
         <input
           className="input mono"
@@ -405,7 +405,7 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
     const plan = planBroadcast(pending.reply.command, [ref])
     const needed = plan.confirmation.kind === 'type-to-confirm' ? plan.confirmation.phrase : null
     return (
-      <div className="s-desc" style={{ display: 'grid', gap: 6, marginTop: 6 }}>
+      <div className="panel-note" style={{ display: 'grid', gap: 6, marginTop: 6 }}>
         <div className="mono" style={{ fontSize: 12 }}>
           {pending.reply.summary}
         </div>
@@ -416,7 +416,7 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
           does not match, the copy goes straight back.
         </div>
         {pending.reply.addedFinalNewline && (
-          <div className="warn" style={{ fontSize: 11 }}>
+          <div className="state-watch" style={{ fontSize: 11 }}>
             <ShieldAlert size={11} /> This crontab has no newline at the end of its last line, so one
             is being added. Without it the new job would be glued onto the end of the previous one.
           </div>
@@ -461,35 +461,55 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <CalendarClock size={14} className="faint" />
-        <b className="grow">Scheduled jobs</b>
-        {rows && (
-          <input
-            className="input"
-            style={{ maxWidth: 220 }}
-            placeholder="Filter by command or file…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
-        )}
-        <button className="btn" disabled={loading || eligible.length === 0} onClick={() => void collect()}>
-          <RefreshCw size={13} className={clsx(loading && 'spin')} /> {rows ? 'Refresh' : 'Read schedules'}
-        </button>
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <CalendarClock size={14} />
+        </span>
+        <h2 className="ui-section-title">Scheduled jobs</h2>
+        <p className="ui-note panel-head-purpose">
+          Every crontab and systemd timer across the estate, and which of them this account was
+          actually allowed to read.
+        </p>
+        <div className="panel-head-actions">
+          {rows && (
+            <input
+              className="input"
+              style={{ maxWidth: 220 }}
+              placeholder="Filter by command or file…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          )}
+          <button
+            className="btn primary"
+            disabled={loading || eligible.length === 0}
+            onClick={() => void collect()}
+          >
+            <RefreshCw size={13} className={clsx(loading && 'spin')} /> {rows ? 'Refresh' : 'Read schedules'}
+          </button>
+        </div>
       </div>
 
       {!rows && !loading && (
-        <div className="s-desc">
-          Reads crontabs, /etc/crontab, /etc/cron.d, other accounts’ crontabs and systemd timers
-          from every online server, and says which of those it was actually allowed to read.
-          Sources that are root-only are retried with <span className="mono">sudo -n</span>, which
-          never prompts for a password. Nothing is written or changed — this only looks.
+        // Before anything has been read this IS the panel, so it is framed as
+        // an empty state rather than set at body weight beside the button.
+        <div className="panel-empty">
+          <p className="panel-empty-title">Nothing has been read yet.</p>
+          <p className="panel-empty-body">
+            Reads crontabs, /etc/crontab, /etc/cron.d, other accounts’ crontabs and systemd timers
+            from every online server, and says which of those it was actually allowed to read.
+            Sources that are root-only are retried with <span className="mono">sudo -n</span>, which
+            never prompts for a password. Nothing is written or changed — this only looks.
+          </p>
+          <p className="panel-empty-body">
+            Press <b>Read schedules</b> above to start.
+          </p>
         </div>
       )}
 
       {rows && (
         <>
-          <div className="row muted" style={{ fontSize: 11, marginTop: 8, gap: 12 }}>
+          <div className="panel-stats">
             <span>
               {total} job{total === 1 ? '' : 's'} across {visible.length - failed.length} host
               {visible.length - failed.length === 1 ? '' : 's'}
@@ -497,20 +517,20 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
             {/* Lines that looked like jobs but did not parse are counted, not
                 hidden. A schedule silently missing from this view is a command
                 running on a box that nobody knows about. */}
-            {unparsed > 0 && <span className="warn">{unparsed} line{unparsed === 1 ? '' : 's'} not understood</span>}
+            {unparsed > 0 && <span className="state-unknown">{unparsed} line{unparsed === 1 ? '' : 's'} not understood</span>}
             {/* Counted across the estate as well as per host: with a dozen
                 servers, a single host whose cron.d was refused is easy to
                 scroll past, and it is exactly the host you would want to look
                 at. */}
             {partial > 0 && (
-              <span className="warn">
+              <span className="state-unknown">
                 {partial} host{partial === 1 ? '' : 's'} only partly readable
               </span>
             )}
           </div>
 
           {failed.map((h) => (
-            <div key={h.serverId} className="s-desc danger">
+            <div key={h.serverId} className="panel-note is-alarm">
               {h.serverName}: {h.error}
             </div>
           ))}
@@ -519,7 +539,7 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
             .filter((h) => !h.error)
             .map((h) => (
               <div key={h.serverId} style={{ marginTop: 10 }}>
-                <div className="row s-title" style={{ gap: 8, alignItems: 'center' }}>
+                <div className="row panel-subtitle" style={{ gap: 8, alignItems: 'center' }}>
                   <span className="grow">
                     {h.serverName} <span className="faint">· {h.entries.length}</span>
                   </span>
@@ -545,7 +565,7 @@ export function CronPanel({ servers }: { servers: Server[] }): React.JSX.Element
                   </div>
                 )}
                 {note?.serverId === h.serverId && (
-                  <div className={clsx('s-desc', note.ok ? '' : 'danger')}>{note.text}</div>
+                  <div className={clsx('panel-note', note.ok ? '' : 'is-alarm')}>{note.text}</div>
                 )}
                 {draft?.serverId === h.serverId && draft.line === undefined && (
                   <JobForm

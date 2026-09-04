@@ -3,6 +3,7 @@ import { AlertTriangle, Ban, RefreshCw, ShieldQuestion, Wrench } from 'lucide-re
 import { useFleet } from '../../store/fleet'
 import { useApp } from '../../store/app'
 import { bridgeHas } from '../../lib/bridge'
+import { openSettings } from '../../store/nav'
 import { clsx } from '../../lib/format'
 import { sshHopsFor } from '../../lib/ssh'
 import {
@@ -324,9 +325,16 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <Wrench size={14} className="faint" />
-        <b className="grow">Patch and updates</b>
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <Wrench size={14} />
+        </span>
+        <h2 className="ui-section-title">Patch and updates</h2>
+        <p className="ui-note panel-head-purpose">
+          Choose the hosts to update, review the plan, then run it in waves. Nothing installs
+          until you confirm, and there is no unattended mode.
+        </p>
+        <div className="panel-head-actions">
         <button
           className="btn ghost sm"
           disabled={running || needy.length === 0}
@@ -356,32 +364,44 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
           </button>
         )}
         <button
-          className="btn"
+          className="btn primary"
           disabled={busy || servers.length === 0}
           onClick={() => void check()}
           title="Sweeps the estate now and re-reads what has already been collected. Nothing is installed and no package cache is refreshed by this."
         >
           <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
         </button>
+        </div>
       </div>
 
       {/* The refusal, on the screen and not only in the source. An operator who
           is looking for "patch everything nightly" deserves to be told it is not
           here and why, in the place they went looking for it. */}
-      <div className="s-desc" data-testid="patch-no-automation">
+      <div className="panel-note" data-testid="patch-no-automation">
         {PATCH_NO_AUTOMATION_NOTE}
       </div>
 
       {summary.withFacts === 0 ? (
-        <div className="s-desc">
-          <b>No host facts have been collected yet.</b> Update counts come from the same hourly
-          sweep the inventory reads. Press <b>Check now</b>, and make sure background checking is
-          on in Settings.
+        <div className="panel-empty">
+          <p className="panel-empty-title">No host facts have been collected yet.</p>
+          <p className="panel-empty-body">
+            Update counts come from the same hourly sweep the inventory reads. Press{' '}
+            <b>Check now</b>, and make sure background checking is on in Settings.
+          </p>
+          <div className="panel-empty-actions">
+            <button className="btn ghost sm" onClick={() => openSettings('monitoring')}>
+              Open Monitoring settings
+            </button>
+          </div>
         </div>
       ) : (
         <>
           <div
-            className={clsx('s-desc', !summary.allClear && 'warn')}
+            // `allClear` false covers both "something needs installing" and
+            // "a host could not answer", so the generic attention role rather
+            // than the unknown one — the unanswerable count gets its own
+            // `is-unknown` note directly below, where it can be precise.
+            className={clsx('panel-note', summary.allClear ? 'is-ok' : 'is-watch')}
             data-testid="patch-summary"
           >
             {/* `allClear` is FALSE whenever a single host could not answer, and
@@ -393,7 +413,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
           </div>
 
           {summary.securityUnanswerable > 0 && (
-            <div className="s-desc warn" data-testid="patch-unanswerable">
+            <div className="panel-note is-unknown" data-testid="patch-unanswerable">
               <ShieldQuestion size={12} /> {summary.securityUnanswerable} host
               {summary.securityUnanswerable === 1 ? '' : 's'} can never report a security update
               count, so {summary.securityUnanswerable === 1 ? 'it is' : 'they are'} not in the{' '}
@@ -443,7 +463,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
                       {r.rebootGap !== null ? (
                         <span className="faint">{PATCH_GAP_LABEL[r.rebootGap]}</span>
                       ) : r.rebootRequired ? (
-                        <span className="warn" title={r.rebootReason ?? undefined}>
+                        <span className="state-watch" title={r.rebootReason ?? undefined}>
                           owed
                         </span>
                       ) : (
@@ -510,14 +530,14 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
               run halted. A disabled control with no explanation is indistinguishable
               from a broken one. */}
           {!gateUsable && (
-            <div className="s-desc warn" data-testid="patch-gate-unavailable">
+            <div className="panel-note is-unknown" data-testid="patch-gate-unavailable">
               <AlertTriangle size={12} /> The wave gate is unavailable. {GATE_SAMPLER_NOTE} Until it
               is on, the waves below roll on one after another with nothing checking the estate in
               between — run them in small waves and watch, or turn the sampler on first.
             </div>
           )}
 
-          <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+          <div className="panel-stats">
             {waves.length} wave{waves.length === 1 ? '' : 's'}:{' '}
             {waves.map((w) => `${w.name} (${w.hosts.map((h) => h.serverName).join(', ')})`).join(' → ')}
           </div>
@@ -527,13 +547,13 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
               servers can share a bastion the checks below cannot see. Printed
               next to the refusals, where it qualifies them. */}
           {plan.unmatchedNote !== null && (
-            <div className="s-desc warn" data-testid="patch-unmatched-hops">
+            <div className="panel-note is-unknown" data-testid="patch-unmatched-hops">
               <AlertTriangle size={12} /> {plan.unmatchedNote}
             </div>
           )}
 
           {plan.excluded.map((x) => (
-            <div key={x.serverId} className="s-desc" data-testid="patch-excluded">
+            <div key={x.serverId} className="panel-note" data-testid="patch-excluded">
               <b>{x.serverName}</b> is not in this run: {x.reason}
             </div>
           ))}
@@ -542,13 +562,13 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
               ticked past. The run button is disabled while any of these stands,
               and main refuses the same run independently. */}
           {plan.blocks.map((b) => (
-            <div key={`${b.kind}:${b.serverId}`} className="s-desc danger" data-testid="patch-block">
+            <div key={`${b.kind}:${b.serverId}`} className="panel-note is-alarm" data-testid="patch-block">
               <Ban size={12} /> {b.reason}
             </div>
           ))}
 
           {jobPlans.map((j) => (
-            <div key={j.packageManager} className="s-desc" data-testid="patch-command">
+            <div key={j.packageManager} className="panel-note" data-testid="patch-command">
               <b>{j.packageManager}</b> · {j.detail}
               <div className="mono" style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
                 {j.spec.steps.map((st) => st.command).join('\n')}
@@ -557,7 +577,7 @@ export function PatchPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
           ))}
 
           {error !== null && (
-            <div className="s-desc danger" data-testid="patch-error">
+            <div className="panel-note is-alarm" data-testid="patch-error">
               {error}
             </div>
           )}

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Search, X, Server as ServerIcon, Boxes, Network } from 'lucide-react'
 import { useFleet } from '../../store/fleet'
+import { openSettings } from '../../store/nav'
 import { searchFleet, coverageSentence, matchKey, type FleetMatch } from '../../lib/fleetSearch'
 import { duration } from '../../lib/format'
 import type { Server } from '../../types'
@@ -100,17 +101,37 @@ export function FleetSearch({
           {/* Always above the results, never below. Someone reading three hits
               needs to know they came from four hosts out of fifteen before they
               conclude anything from the number. */}
-          {coverage && <div className="s-desc warn">{coverage}</div>}
+          {coverage && <div className="panel-note is-unknown">{coverage}</div>}
 
           {result.matches.length === 0 && (
-            <div className="faint" style={{ padding: '10px 0' }}>
+            <div className="panel-empty">
               {/* "Nothing was sampled" and "nothing matched" are different
                   answers, and so is "the hosts were sampled but neither probe
                   ran on them" — that last one has a sample and would otherwise
                   be told to turn on background checking it already has on. */}
-              {nothingSampled
-                ? 'No host has been sampled yet, so there is nothing to search. Turn on background checking, or open a server.'
-                : 'Nothing matched on the hosts that could be searched.'}
+              {nothingSampled ? (
+                <>
+                  <p className="panel-empty-title">Nothing has been sampled yet.</p>
+                  <p className="panel-empty-body">
+                    There is nothing to search. Turn on background checking, or open a server.
+                  </p>
+                  <div className="panel-empty-actions">
+                    <button className="btn ghost sm" onClick={() => openSettings('monitoring')}>
+                      Open Monitoring settings
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="panel-empty-title">
+                    Nothing matched on the hosts that could be searched.
+                  </p>
+                  <p className="panel-empty-body">
+                    Try a shorter term — this searches unit names, listening ports, distributions
+                    and host names.
+                  </p>
+                </>
+              )}
             </div>
           )}
 

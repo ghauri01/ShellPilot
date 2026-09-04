@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { ArrowDown, ArrowUp, Boxes, RefreshCw, ShieldQuestion } from 'lucide-react'
 import { useFleet } from '../../store/fleet'
+import { openSettings } from '../../store/nav'
 import { bridgeHas } from '../../lib/bridge'
 import { clsx } from '../../lib/format'
 import {
@@ -190,40 +191,65 @@ export function InventoryPanel({
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <Boxes size={14} className="faint" />
-        <b className="grow">Inventory</b>
-        {summary.withFacts > 0 && (
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <Boxes size={14} />
+        </span>
+        <h2 className="ui-section-title">Inventory</h2>
+        <p className="ui-note panel-head-purpose">
+          What each host is running and what it is owed — distribution, kernel, pending and
+          security updates. Read from package caches as they are; nothing is installed or
+          refreshed.
+        </p>
+        <div className="panel-head-actions">
+          {summary.withFacts > 0 && (
+            <button
+              className="btn ghost sm"
+              onClick={() => setHardware((h) => !h)}
+              title="Kernel, architecture, CPU model, RAM and virtualisation — what the host IS, as opposed to what it needs."
+            >
+              {hardware ? 'Hide hardware' : 'Show hardware'}
+            </button>
+          )}
           <button
-            className="btn ghost sm"
-            onClick={() => setHardware((h) => !h)}
-            title="Kernel, architecture, CPU model, RAM and virtualisation — what the host IS, as opposed to what it needs."
+            className="btn primary"
+            disabled={busy || servers.length === 0}
+            onClick={() => void check()}
+            title="Sweeps the estate now and re-reads what has already been collected. Facts are re-collected at most once an hour per host, so a host checked recently keeps the figures it has."
           >
-            {hardware ? 'Hide hardware' : 'Show hardware'}
+            <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
           </button>
-        )}
-        <button
-          className="btn"
-          disabled={busy || servers.length === 0}
-          onClick={() => void check()}
-          title="Sweeps the estate now and re-reads what has already been collected. Facts are re-collected at most once an hour per host, so a host checked recently keeps the figures it has."
-        >
-          <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
-        </button>
+        </div>
       </div>
 
       {summary.withFacts === 0 ? (
-        <div className="s-desc">
-          <b>No host facts have been collected yet.</b> ShellPilot collects them about once an
-          hour, on the same background sweep as metrics — so a server added in the last hour, or
-          an estate whose background checking has just been switched on, will not have any yet.
-          Press <b>Check now</b> to sweep immediately, and make sure background checking is on in
-          Settings. Nothing is installed, refreshed or changed by this: package caches are read as
-          they are, and their age is reported next to the counts.
+        // The paragraph is unchanged. What changed is that it is now framed as
+        // an empty state rather than set in the same size and colour as the
+        // table it stands in for, and that the button it names — "Press Check
+        // now" — is now the one primary control on the panel instead of being
+        // styled identically to Show hardware. The second half of its advice
+        // ("make sure background checking is on in Settings") gets the button
+        // it never had: the primary stays in the header, where it is in the
+        // same place on every panel, so it is deliberately NOT repeated here.
+        <div className="panel-empty">
+          <p className="panel-empty-title">No host facts have been collected yet.</p>
+          <p className="panel-empty-body">
+            ShellPilot collects them about once an hour, on the same background sweep as metrics —
+            so a server added in the last hour, or an estate whose background checking has just
+            been switched on, will not have any yet. Press <b>Check now</b> to sweep immediately,
+            and make sure background checking is on in Settings. Nothing is installed, refreshed or
+            changed by this: package caches are read as they are, and their age is reported next to
+            the counts.
+          </p>
+          <div className="panel-empty-actions">
+            <button className="btn ghost sm" onClick={() => openSettings('monitoring')}>
+              Open Monitoring settings
+            </button>
+          </div>
         </div>
       ) : (
         <>
-          <div className="row wrap muted" style={{ fontSize: 11, marginTop: 8, gap: 12 }}>
+          <div className="panel-stats">
             <span>
               {summary.hosts} host{summary.hosts === 1 ? '' : 's'} · facts for {summary.withFacts}
             </span>
@@ -232,7 +258,7 @@ export function InventoryPanel({
               {/* Counted, not skipped. A total drawn from nine hosts out of
                   twelve is a different number from a total drawn from twelve. */}
               {summary.pendingUnknown > 0 && (
-                <span className="warn"> · {summary.pendingUnknown} host
+                <span className="state-unknown"> · {summary.pendingUnknown} host
                   {summary.pendingUnknown === 1 ? '' : 's'} could not be counted</span>
               )}
             </span>
@@ -245,7 +271,7 @@ export function InventoryPanel({
                   not one word more, which is the exact sentence a non-root
                   account must never be shown during the week a CVE lands. */}
               {summary.securityUnknown > 0 && (
-                <span className="warn"> · {summary.securityUnknown} host
+                <span className="state-unknown"> · {summary.securityUnknown} host
                   {summary.securityUnknown === 1 ? '' : 's'} could not answer</span>
               )}
             </span>
@@ -255,7 +281,7 @@ export function InventoryPanel({
                 estate-level roll-up of how much of the totals rests on one. */}
             {summary.staleMetadata > 0 && (
               <span
-                className="warn"
+                className="state-watch"
                 title="ShellPilot never refreshes a package cache — refreshing is a network operation and on some package managers it can break the host — so a count read out of an old cache is reported with the cache's age beside it rather than silently presented as current."
               >
                 {summary.staleMetadata} host{summary.staleMetadata === 1 ? '' : 's'} counted from a
@@ -263,7 +289,7 @@ export function InventoryPanel({
               </span>
             )}
             {summary.rebootsOwed > 0 && (
-              <span className="warn">
+              <span className="state-watch">
                 {summary.rebootsOwed} host{summary.rebootsOwed === 1 ? '' : 's'} awaiting a reboot
               </span>
             )}
@@ -274,7 +300,7 @@ export function InventoryPanel({
               drawn from a third of the estate — and the hosts it excludes are
               excluded permanently, not until the next sweep. */}
           {summary.securityUnanswerable > 0 && (
-            <div className="s-desc warn">
+            <div className="panel-note is-unknown">
               <ShieldQuestion size={12} />{' '}
               {summary.securityUnanswerable} host
               {summary.securityUnanswerable === 1 ? '' : 's'} can never report a security update
@@ -294,7 +320,7 @@ export function InventoryPanel({
               tell an operator that a fixable permission problem is a permanent
               fact about their estate, and the reverse. */}
           {summary.securityUnknown > 0 && (
-            <div className="s-desc warn">
+            <div className="panel-note is-unknown">
               <ShieldQuestion size={12} /> {summary.securityUnknown} host
               {summary.securityUnknown === 1 ? '' : 's'} did not answer the security question, so{' '}
               {summary.securityUnknown === 1 ? 'it is' : 'they are'} not in the{' '}
@@ -306,7 +332,7 @@ export function InventoryPanel({
           )}
 
           {failed.map((f) => (
-            <div key={f.name} className="s-desc danger">
+            <div key={f.name} className="panel-note is-alarm">
               {f.name}: the facts probe failed — {f.error}
             </div>
           ))}

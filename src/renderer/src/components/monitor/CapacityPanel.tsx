@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, RefreshCw, TrendingUp } from 'lucide-react'
+import { openSettings } from '../../store/nav'
 import { clsx } from '../../lib/format'
 import {
   CAPACITY_THRESHOLDS,
@@ -162,7 +163,7 @@ function TrendRow({
       </div>
 
       {gaps.map((s, i) => (
-        <div key={i} className="warn" style={{ fontSize: 11 }}>
+        <div key={i} className="state-unknown" style={{ fontSize: 11 }}>
           <AlertTriangle size={11} /> No samples for {span(s.gapBefore)}. The line is broken there
           rather than joined — nothing was measured across it.
         </div>
@@ -170,7 +171,7 @@ function TrendRow({
 
       {trend.forecast !== null && threshold !== null && (
         <div
-          className={clsx('s-desc', trend.forecast.ok ? '' : 'faint')}
+          className={clsx('panel-note', trend.forecast.ok ? '' : 'faint')}
           style={{ marginTop: 2 }}
         >
           {forecastText(trend.forecast, trend.metric, threshold)}
@@ -233,9 +234,16 @@ export function CapacityPanel({ servers }: { servers: Server[] }): React.JSX.Ele
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <TrendingUp size={14} className="faint" />
-        <b className="grow">Capacity trends</b>
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <TrendingUp size={14} />
+        </span>
+        <h2 className="ui-section-title">Capacity trends</h2>
+        <p className="ui-note panel-head-purpose">
+          How one host&rsquo;s CPU, memory and disk have moved over time, drawn from samples the
+          fleet sampler already writes. Nothing extra is measured for this panel.
+        </p>
+        <div className="panel-head-actions">
         <select
           className="input"
           style={{ maxWidth: 200 }}
@@ -263,31 +271,48 @@ export function CapacityPanel({ servers }: { servers: Server[] }): React.JSX.Ele
           ))}
         </select>
         <button
-          className="btn"
+          className="btn primary"
           disabled={loading || typeof trends !== 'function' || serverId === ''}
           onClick={refresh}
         >
           <RefreshCw size={13} className={clsx(loading && 'spin')} /> Refresh
         </button>
+        </div>
       </div>
 
       {typeof trends !== 'function' ? (
-        <div className="s-desc">
+        <div className="panel-note is-alarm">
           This build’s preload does not expose capacity trends yet. Restart the app to rebuild it.
         </div>
       ) : servers.length === 0 ? (
-        <div className="s-desc">No servers to chart.</div>
-      ) : failed ? (
-        <div className="s-desc danger">Could not read the history store.</div>
-      ) : report === null ? (
-        <div className="s-desc">
-          {loading
-            ? 'Reading…'
-            : 'No stored history. Trends come from the fleet sampler’s own samples, so this fills in once sampling has been running.'}
+        <div className="panel-empty">
+          <p className="panel-empty-title">No servers to chart.</p>
+          <p className="panel-empty-body">
+            Add a server to this workspace and its samples start accumulating here.
+          </p>
         </div>
+      ) : failed ? (
+        <div className="panel-note is-alarm">Could not read the history store.</div>
+      ) : report === null ? (
+        loading ? (
+          <div className="panel-note">Reading…</div>
+        ) : (
+          <div className="panel-empty">
+            <p className="panel-empty-title">No stored history.</p>
+            <p className="panel-empty-body">
+              Trends come from the fleet sampler’s own samples, so this fills in once sampling has
+              been running. Turn background checking on and leave it for an hour.
+            </p>
+            <div className="panel-empty-actions">
+              <button className="btn ghost sm" onClick={() => openSettings('monitoring')}>
+                Open Monitoring settings
+              </button>
+            </div>
+          </div>
+        )
       ) : (
         <>
-          <div className="s-desc">
+          <div className="panel-note">
             {selected?.name ?? serverId} over the last {span(report.to - report.from)}, from the
             samples the fleet sampler already writes. Nothing is measured for this panel.
           </div>

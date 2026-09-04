@@ -128,23 +128,33 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <History size={14} className="faint" />
-        <b className="grow">Change log</b>
-        <button className="btn ghost sm" onClick={() => void read()} disabled={reading}>
-          <RefreshCw size={12} /> Refresh
-        </button>
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <History size={14} />
+        </span>
+        <h2 className="ui-section-title">Change log</h2>
+        <p className="ui-note panel-head-purpose">
+          What ShellPilot itself changed on the estate, and when — with the coverage of each
+          source stated, so a quiet window is not read as a quiet week.
+        </p>
+        <div className="panel-head-actions">
+          {/* The panel's only action, and it was styled `ghost sm` — its least
+              prominent variant. It is the whole point of opening this tab. */}
+          <button className="btn primary" onClick={() => void read()} disabled={reading}>
+            <RefreshCw size={12} /> Refresh
+          </button>
+        </div>
       </div>
 
       {unavailable && (
-        <div className="s-desc warn" data-testid="changelog-unavailable">
+        <div className="panel-note is-alarm" data-testid="changelog-unavailable">
           The change log could not be read: this window is newer than the preload script it booted
           with. Restart the app to rebuild it. Nothing below is a statement about what happened.
         </div>
       )}
 
       {page !== null && !page.enabled && (
-        <div className="s-desc warn" data-testid="changelog-off">
+        <div className="panel-note is-unknown" data-testid="changelog-off">
           {CHANGELOG_SWITCH_OFF}{' '}
           <button className="btn ghost sm" onClick={() => openSettings('modules')}>
             Modules
@@ -154,7 +164,7 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
 
       {page?.enabled === true && (
         <>
-          <div className="s-desc" data-testid="changelog-on">
+          <div className="panel-note" data-testid="changelog-on">
             {CHANGELOG_SWITCH_ON}
           </div>
 
@@ -219,8 +229,11 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
             <div
               key={row.source}
               className={clsx(
-                's-desc',
-                (row.state === 'unreadable' || row.state === 'truncated') && 'warn'
+                'panel-note',
+                // Unreadable and truncated are both "we do not know", not "we
+                // found something bad" — the role that used to be amber
+                // alongside genuine degradations, and did not render at all.
+                (row.state === 'unreadable' || row.state === 'truncated') && 'is-unknown'
               )}
               data-testid={`changelog-coverage-${row.source}`}
             >
@@ -232,7 +245,7 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
           ))}
 
           {page.hostFilterHidUnattributed !== undefined && (
-            <div className="s-desc warn" data-testid="changelog-host-filter-note">
+            <div className="panel-note is-unknown" data-testid="changelog-host-filter-note">
               {page.hostFilterHidUnattributed} entries in this window name no host at all — a local
               shell, or a job that had not reached one — so filtering by host hides them. They are
               not absent; they are unattributed.
@@ -240,7 +253,7 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
           )}
 
           {page.more && (
-            <div className="s-desc" data-testid="changelog-more">
+            <div className="panel-note" data-testid="changelog-more">
               More entries matched than fit on one page. The oldest shown is{' '}
               {page.oldest === null ? 'unknown' : when(page.oldest)}; narrow the window to see
               further back.
@@ -248,9 +261,18 @@ export function ChangeLogPanel({ servers }: { servers: Server[] }): React.JSX.El
           )}
 
           {page.entries.length === 0 ? (
-            <div className="s-desc" data-testid="changelog-empty">
-              Nothing matched this window — read the coverage above before reading that as a quiet
-              period.
+            // The sentence is kept word for word — a test guards it, and it
+            // is the one claim this panel exists to make. What is added is the
+            // next step, which it never had.
+            <div className="panel-empty" data-testid="changelog-empty">
+              <p className="panel-empty-title">Nothing matched this window.</p>
+              <p className="panel-empty-body">
+                Nothing matched this window — read the coverage above before reading that as a
+                quiet period.
+              </p>
+              <p className="panel-empty-body">
+                Widening the time range, or clearing the host filter, is the next thing to try.
+              </p>
             </div>
           ) : (
             <div className="col" style={{ gap: 6, marginTop: 10 }} data-testid="changelog-entries">

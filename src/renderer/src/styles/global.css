@@ -2945,6 +2945,370 @@ details[open] > .disclosure-head .chev {
   cursor: help;
 }
 
+/* ═══════════════════ Panel design system ═══════════════════════════════════
+   Added in one block, at the end, and touching nothing above it.
+
+   The twenty fleet panels were built by four separate passes and never shared a
+   visual language. The complaint that prompted this was precise: a panel opens
+   with a paragraph of prose in the same size and colour as the controls, and
+   the one button you are meant to press looks exactly like the two you are not.
+   Both were true, and both were caused by absence rather than by a bad choice —
+   `.s-desc`, which the panels use sixty times for explanatory text, is defined
+   in this file ONLY as `.setting-row .s-desc`. Outside a settings row it has no
+   font-size, no colour, and its `.warn` / `.danger` modifiers do nothing at all.
+   Panel prose therefore rendered at full-strength body text and panel errors
+   rendered in no colour.
+
+   Nothing here overrides an existing rule. The new roles are new class names,
+   and the new custom properties are new names on `:root`, so the theme swap
+   below is the same mechanism tokens.css already uses.
+   ========================================================================== */
+
+/* ---- Type scale -----------------------------------------------------------
+   Four sizes, five roles. The label role separates itself by weight, tracking
+   and caps rather than by a fifth size — a scale with a step every 1px is not
+   a scale, and the panels already had 10/11/12/13 doing exactly that.
+
+   The rule that matters: `--type-note`, the explanatory role, is BOTH a step
+   down in size and a step down in colour. Prose a user is meant to skim past
+   must lose to the row they are meant to act on. */
+:root {
+  --type-page-size: 18px;
+  --type-page-weight: 650;
+  --type-section-size: 15px;
+  --type-section-weight: 600;
+  --type-body-size: 13px;
+  --type-body-weight: 400;
+  --type-note-size: 12px;
+  --type-label-size: 12px;
+  --type-label-weight: 600;
+  --type-label-tracking: 0.06em;
+  /* The measure an explanatory line wraps at. Prose that runs the full width of
+     a 1600px window is prose nobody finishes. */
+  --type-note-measure: 78ch;
+}
+
+.ui-page-title {
+  font-size: var(--type-page-size);
+  font-weight: var(--type-page-weight);
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.ui-section-title {
+  font-size: var(--type-section-size);
+  font-weight: var(--type-section-weight);
+  letter-spacing: -0.005em;
+  color: var(--text);
+}
+.ui-body {
+  font-size: var(--type-body-size);
+  font-weight: var(--type-body-weight);
+  color: var(--text);
+}
+/* The quiet role. Two steps down from body — smaller AND muted — because one
+   step is not enough to stop the eye. */
+.ui-note {
+  font-size: var(--type-note-size);
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-width: var(--type-note-measure);
+}
+.ui-label {
+  font-size: var(--type-label-size);
+  font-weight: var(--type-label-weight);
+  letter-spacing: var(--type-label-tracking);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* ---- Colour roles ---------------------------------------------------------
+   Action roles first. `--accent` in this app already carries five jobs — fill,
+   focus ring, selection, active segment, drag target — so the action roles are
+   named separately even where they resolve to the same value. A future change
+   to "what a pressed button looks like" then does not also move the focus ring.
+
+   Then the four status meanings this app actually uses. It had three colours
+   for them. `watch` and `unknown` both rendered amber, in a feature area whose
+   entire thesis is that a measurement that failed is not a measurement that
+   came back bad — PosturePanel's own comment calls the alternative "reassuring
+   fiction". `unknown` gets its own neutral role, deliberately NOT another hue
+   competing with watch and alarm: an unknown is an absence, and it should read
+   as an absence rather than as a third kind of problem. */
+:root {
+  --role-primary: var(--accent);
+  --role-primary-hover: var(--accent-hover);
+  --role-primary-press: var(--accent-press);
+  --role-primary-text: var(--accent-text);
+
+  --role-secondary-bg: var(--bg-input);
+  --role-secondary-border: var(--border);
+  --role-secondary-text: var(--text);
+
+  --role-destructive: var(--danger);
+  --role-destructive-soft: var(--danger-soft);
+
+  --state-ok: var(--ok);
+  --state-ok-soft: var(--ok-soft);
+  --state-watch: var(--warn);
+  --state-watch-soft: var(--warn-soft);
+  --state-alarm: var(--danger);
+  --state-alarm-soft: var(--danger-soft);
+  /* Slate, not a hue. Distinct from watch amber and alarm red at a glance, and
+     — the part that matters — distinct from them for a viewer who cannot tell
+     amber from red, because it is the only one of the four that is achromatic. */
+  --state-unknown: #8b93a5;
+  --state-unknown-soft: rgba(139, 147, 165, 0.16);
+}
+:root[data-theme='light'] {
+  /* Darkened for contrast on the light panel ground. Same mechanism tokens.css
+     uses for every other token, so a theme switch carries this with it. */
+  --state-unknown: #5c6579;
+  --state-unknown-soft: rgba(92, 101, 121, 0.12);
+}
+
+/* ---- Status markers -------------------------------------------------------
+   Colour is never the only signal. Each state carries a distinct SHAPE as well
+   as a distinct colour: filled disc, filled triangle, filled square, hollow
+   ring. The ring is the one doing real work — "not measured" reads as hollow
+   whether or not the viewer sees the colour at all. */
+.state-dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  vertical-align: baseline;
+  background: currentColor;
+}
+.state-dot.is-ok {
+  color: var(--state-ok);
+  border-radius: 50%;
+}
+.state-dot.is-watch {
+  color: var(--state-watch);
+  width: 0;
+  height: 0;
+  background: none;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 9px solid currentColor;
+}
+.state-dot.is-alarm {
+  color: var(--state-alarm);
+  border-radius: 1px;
+}
+.state-dot.is-unknown {
+  color: var(--state-unknown);
+  background: none;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+/* Status text. The four roles as a colour a span can wear, with the shape
+   marker available beside it. `.is-unknown` exists so a panel can stop calling
+   an unread measurement a warning. */
+.state-ok {
+  color: var(--state-ok);
+}
+.state-watch {
+  color: var(--state-watch);
+}
+.state-alarm {
+  color: var(--state-alarm);
+}
+.state-unknown {
+  color: var(--state-unknown);
+}
+
+/* ---- Panel header ---------------------------------------------------------
+   Title, one line of purpose, primary action right-aligned. A grid rather than
+   a flex row so the purpose line sits UNDER the title and does not push the
+   actions around when it wraps — the previous `.row` header put the title and
+   every control on one line and had nowhere for a sentence to go, which is why
+   the sentence ended up as a full-width paragraph below instead. */
+.panel-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 2px var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.panel-head-icon {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  height: calc(var(--type-section-size) * 1.4);
+  color: var(--text-faint);
+}
+.panel-head > .ui-section-title,
+.panel-head .panel-head-title {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
+  min-height: calc(var(--type-section-size) * 1.4);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+/* Spans both title columns so it starts under the icon, not indented past it,
+   and stops before the action cluster. */
+.panel-head-purpose {
+  grid-column: 1 / 3;
+  grid-row: 2;
+}
+.panel-head-actions {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: start;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+/* A panel with no purpose line: the actions still align to the title row
+   rather than floating against a row that is not there. */
+.panel-head.no-purpose {
+  align-items: center;
+}
+.panel-head.no-purpose .panel-head-actions {
+  grid-row: 1;
+  align-self: center;
+}
+
+/* ---- Panel notes ----------------------------------------------------------
+   The replacement for the panels' `.s-desc`, which — see the block at the top —
+   is inert outside a settings row. `.setting-row .s-desc` is left exactly as it
+   was; this is a separate name, so Settings, the backup banner, the vault offer
+   and the tour card all keep the styling they have.
+
+   The status variants here DO apply, which is the whole difference: a panel
+   that says `panel-note is-alarm` gets a red line, where `s-desc danger` got
+   ordinary body text. */
+.panel-note {
+  font-size: var(--type-note-size);
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-width: var(--type-note-measure);
+  margin-top: var(--sp-2);
+}
+.panel-note:first-child {
+  margin-top: 0;
+}
+.panel-note .mono {
+  font-size: 0.95em;
+}
+.panel-note.is-ok {
+  color: var(--state-ok);
+}
+.panel-note.is-watch {
+  color: var(--state-watch);
+}
+.panel-note.is-alarm {
+  color: var(--state-alarm);
+}
+.panel-note.is-unknown {
+  color: var(--state-unknown);
+}
+/* A note that is a genuine finding rather than help text earns a rule down its
+   left edge, so it is separable from the surrounding prose without relying on
+   its colour. */
+.panel-note.is-ok,
+.panel-note.is-watch,
+.panel-note.is-alarm,
+.panel-note.is-unknown {
+  padding-left: var(--sp-2);
+  border-left: 2px solid currentColor;
+}
+
+/* ---- Panel empty state ----------------------------------------------------
+   Not `.empty` — that one centres itself in a full-height flex column and is
+   built for a whole screen with nothing in it. This is a block inside a panel
+   that already has a header above it.
+
+   The rule the panels were missing: an empty state must end in the thing to
+   press. Eight of them said "Press Check now" in prose while the actual Check
+   now button was styled identically to every other button in the header. */
+.panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--bg-card);
+}
+.panel-empty-title {
+  font-size: var(--type-body-size);
+  font-weight: 600;
+  color: var(--text);
+}
+.panel-empty-body {
+  font-size: var(--type-note-size);
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-width: var(--type-note-measure);
+}
+.panel-empty-body + .panel-empty-body {
+  margin-top: calc(var(--sp-1) * -1);
+}
+.panel-empty-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+/* ---- Focus -----------------------------------------------------------------
+   The global `:focus-visible` ring is `--accent` on `--bg-app`. On a primary
+   button the ring is accent-on-accent and vanishes. An offset ring in the panel
+   background separates the two, in both themes. Additive: this raises the
+   contrast of a state that already existed, it does not replace it. */
+.btn.primary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--bg-panel);
+}
+
+/* ---- Reduced motion --------------------------------------------------------
+   The refresh icon on every "check the estate" button spins while a sweep runs.
+   It is the only indication the sweep started, so it is not removed — it is
+   slowed to a rate that does not trigger vestibular symptoms. */
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation-duration: 3s;
+  }
+}
+
+/* ---- Panel stat roll-up ----------------------------------------------------
+   The count line six panels carry under their header — "12 hosts · facts for 9
+   · 3 could not be counted". It was `row wrap muted` at an inline 11px, which
+   put it a step BELOW the explanatory prose it sits above; the numbers a user
+   scans first were the smallest text on the panel. One step up, and one shared
+   name instead of the same inline style copied six times. */
+.panel-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-4);
+  margin-top: var(--sp-2);
+  font-size: var(--type-note-size);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+/* The gaps in coverage that sit inside a stat. They keep their own colour
+   against the muted run of the line rather than inheriting it. */
+.panel-stats .state-watch,
+.panel-stats .state-unknown,
+.panel-stats .state-alarm,
+.panel-stats .state-ok {
+  font-weight: 550;
+}
+
 /* ============================= Alert inbox ============================= */
 /* The Alerts tab of the Fleet Monitor.
    
@@ -3198,4 +3562,37 @@ details[open] > .disclosure-head .chev {
   font-size: var(--type-body-size);
   font-weight: 600;
   color: var(--text);
+}
+
+/* ---- Bare status classes ---------------------------------------------------
+   `className="warn"` appears ~48 times across twelve components and, until
+   this rule, resolved to NOTHING. Every compound form exists — `.chip.warn`,
+   `.bar.warn`, `.log-line.warn .lvl`, `.backup-banner.warn`, `.setting-row
+   .s-desc.warn`, and `.alerts .warn` — and the bare one never did. So a
+   Kubernetes pod in CrashLoopBackOff, a docker probe that was refused, a
+   credential-proxy rule that will not match and a VPN card reporting a stale
+   tunnel were all marked as warnings by their authors and drawn in ordinary
+   body text.
+
+   Making the existing markup resolve is a smaller and safer change than
+   rewriting forty-eight call sites, and it lights up eleven components at once.
+   Purely additive: there is no `.warn`, `.ok` or `.danger` rule for it to
+   override.
+
+   Every compound selector above is specificity (0,2,0) or higher and therefore
+   still wins — including `.alerts .warn`, which owns its own scoped block, and
+   `.backup-banner.warn`, which deliberately paints its warning red.
+
+   Colour is not the only signal at any of these sites: each one wraps a
+   sentence that already says what is wrong ("could not be read", "3 differ",
+   "CrashLoopBackOff"). This restores the second signal, it does not become the
+   first. */
+.warn {
+  color: var(--state-watch);
+}
+.ok {
+  color: var(--state-ok);
+}
+.danger {
+  color: var(--state-alarm);
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { KeyRound, RefreshCw, ShieldAlert } from 'lucide-react'
+import { openSettings } from '../../store/nav'
 import { bridgeHas } from '../../lib/bridge'
 import { clsx, duration } from '../../lib/format'
 import { sshHopsFor } from '../../lib/ssh'
@@ -384,22 +385,30 @@ export function AccessPanel({
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <KeyRound size={14} className="faint" />
-        <b className="grow">Keys and access</b>
-        {collected.length > 0 && (
-          <button className="btn ghost sm" onClick={() => setView(view === 'keys' ? 'hosts' : 'keys')}>
-            {view === 'keys' ? 'By host' : 'By key'}
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <KeyRound size={14} />
+        </span>
+        <h2 className="ui-section-title">Keys and access</h2>
+        <p className="ui-note panel-head-purpose">
+          Which SSH keys can reach which hosts, and which accounts they land on. Files are read,
+          never edited, and no private key is touched.
+        </p>
+        <div className="panel-head-actions">
+          {collected.length > 0 && (
+            <button className="btn ghost sm" onClick={() => setView(view === 'keys' ? 'hosts' : 'keys')}>
+              {view === 'keys' ? 'By host' : 'By key'}
+            </button>
+          )}
+          <button
+            className="btn primary"
+            disabled={busy || servers.length === 0}
+            onClick={() => void refresh()}
+            title="Sweeps the estate now and re-reads what has already been collected. Keys are re-read at most once an hour per host."
+          >
+            <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
           </button>
-        )}
-        <button
-          className="btn"
-          disabled={busy || servers.length === 0}
-          onClick={() => void refresh()}
-          title="Sweeps the estate now and re-reads what has already been collected. Keys are re-read at most once an hour per host."
-        >
-          <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
-        </button>
+        </div>
       </div>
 
       {/* Said once, at the top, before a target is chosen — because the point
@@ -407,15 +416,17 @@ export function AccessPanel({
           have. Both halves matter: that the write half is off, and what it will
           and will not be able to do when it is back. */}
       {!ACCESS_WRITE_ENABLED && (
-        <div className="s-desc" data-testid="write-gated">
+        <div className="panel-note is-unknown" data-testid="write-gated">
           <ShieldAlert size={12} /> <b>{ACCESS_WRITE_DISABLED_REASON}</b>{' '}
           <span className="muted">{ACCESS_WRITE_SCOPE}</span>
         </div>
       )}
 
       {collected.length === 0 ? (
-        <div className="s-desc">
-          <b>No authorized_keys have been collected yet.</b> ShellPilot reads them about once an
+        <div className="panel-empty">
+          <p className="panel-empty-title">No authorized_keys have been collected yet.</p>
+          <p className="panel-empty-body">
+            ShellPilot reads them about once an
           hour, on the same background sweep as host facts — so a server added in the last hour, or
           an estate where this module has just been switched on, will not have any yet. Press{' '}
           <b>Check now</b> to sweep immediately, and make sure background checking is on in
@@ -428,6 +439,12 @@ export function AccessPanel({
               below.
             </>
           )}
+          </p>
+          <div className="panel-empty-actions">
+            <button className="btn ghost sm" onClick={() => openSettings('monitoring')}>
+              Open Monitoring settings
+            </button>
+          </div>
         </div>
       ) : (
         <>
@@ -435,19 +452,19 @@ export function AccessPanel({
               never optional. "37 keys across 12 hosts" on an estate where 3
               hosts could not be read is a count over 9 hosts wearing the label
               of a count over 12. */}
-          <div className="row wrap muted" style={{ fontSize: 11, marginTop: 8, gap: 12 }}>
+          <div className="panel-stats">
             <span>
               {keyRows.length} distinct key{keyRows.length === 1 ? '' : 's'} across{' '}
               {collected.length} host{collected.length === 1 ? '' : 's'}
             </span>
             {unchecked > 0 && (
-              <span className="warn" data-testid="unchecked-hosts">
+              <span className="state-unknown" data-testid="unchecked-hosts">
                 {unchecked} host{unchecked === 1 ? '' : 's'} could not be checked and{' '}
                 {unchecked === 1 ? 'is' : 'are'} not in that count
               </span>
             )}
             {incomplete.length > 0 && (
-              <span className="warn" data-testid="incomplete-hosts">
+              <span className="state-unknown" data-testid="incomplete-hosts">
                 {incomplete.length} host{incomplete.length === 1 ? '' : 's'} answered only partly
               </span>
             )}
@@ -458,7 +475,7 @@ export function AccessPanel({
               explicitly what may NOT be concluded — not merely that some data
               is missing. */}
           {(unchecked > 0 || incomplete.length > 0) && (
-            <div className="s-desc warn" data-testid="not-an-answer">
+            <div className="panel-note is-unknown" data-testid="not-an-answer">
               <ShieldAlert size={12} /> This is not a complete picture of the estate, so “this key
               is not on my fleet” cannot be concluded from it.{' '}
               {unchecked > 0 && (
@@ -820,7 +837,7 @@ export function AccessPanel({
               below the tables rather than in a tooltip: it is the list of
               machines somebody has to go and check by hand. */}
           {incomplete.map((h) => (
-            <div key={h.server.id} className="s-desc warn" data-testid={`incomplete-${h.server.name}`}>
+            <div key={h.server.id} className="panel-note is-unknown" data-testid={`incomplete-${h.server.name}`}>
               <b>{h.server.name}</b>: {h.summary!.uncertainty.join('; ')}.
             </div>
           ))}
@@ -832,7 +849,7 @@ export function AccessPanel({
           The age is the age of the READING — that is the number that decides
           whether to act on what is on the screen. */}
       {stale.map((h) => (
-        <div key={h.server.id} className="s-desc warn" data-testid={`stale-${h.server.name}`}>
+        <div key={h.server.id} className="panel-note is-unknown" data-testid={`stale-${h.server.name}`}>
           <ShieldAlert size={12} /> <b>{h.server.name}</b>: the keys shown above were read{' '}
           <b>{duration(h.entry!.at ?? null)} ago</b> and the probe has been failing since —{' '}
           {h.entry!.error}. They are what ShellPilot last saw, not what the host trusts now, and
@@ -841,13 +858,13 @@ export function AccessPanel({
       ))}
 
       {failed.map((h) => (
-        <div key={h.server.id} className="s-desc danger" data-testid={`failed-${h.server.name}`}>
+        <div key={h.server.id} className="panel-note is-alarm" data-testid={`failed-${h.server.name}`}>
           {h.server.name}: the access probe failed — {h.entry!.error}. This host is excluded from
           every count above; it is not a host with no keys.
         </div>
       ))}
       {collected.length > 0 && never.length > 0 && (
-        <div className="s-desc" data-testid="never-collected">
+        <div className="panel-note is-unknown" data-testid="never-collected">
           {never.length} host{never.length === 1 ? '' : 's'} ({never.map((h) => h.server.name).join(', ')}
           ) {never.length === 1 ? 'has' : 'have'} not been read yet. They are excluded from every
           count above.
@@ -859,7 +876,7 @@ export function AccessPanel({
       {collected.some((h) =>
         h.entry!.access!.accounts.some((a) => a.keys?.some((k) => k.problem !== null))
       ) && (
-        <div className="s-desc" data-testid="problem-help">
+        <div className="panel-note" data-testid="problem-help">
           Some lines in files that WERE read could not be fingerprinted.{' '}
           {KEY_PROBLEM_HELP['unknown-type']}
         </div>

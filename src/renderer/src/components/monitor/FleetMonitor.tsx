@@ -327,8 +327,8 @@ export function FleetMonitor(): React.JSX.Element {
     <div className="content">
       <div className="content-header">
         <div>
-          <h1>Fleet Monitor</h1>
-          <div className="sub">
+          <h1 className="ui-page-title">Fleet Monitor</h1>
+          <div className="sub ui-note">
             {online} of {servers.length} servers online · live metrics
           </div>
         </div>
@@ -343,12 +343,17 @@ export function FleetMonitor(): React.JSX.Element {
           shown only when they are ALL off, rather than a per-module nag that
           would teach people to ignore this row. */}
       {tabs.length === 0 && (
-        <div className="s-desc" style={{ marginBottom: 12 }}>
-          Search, estate inventory, running a command across servers, log tailing, scheduled
-          jobs, Docker and Kubernetes are available and switched off.{' '}
-          <button className="btn ghost sm" onClick={() => openSettings('modules')}>
-            Choose modules
-          </button>
+        <div className="panel-empty" style={{ marginBottom: 12 }}>
+          <p className="panel-empty-title">Every optional module is switched off.</p>
+          <p className="panel-empty-body">
+            Search, estate inventory, running a command across servers, log tailing, scheduled
+            jobs, Docker and Kubernetes are available and switched off.
+          </p>
+          <div className="panel-empty-actions">
+            <button className="btn primary" onClick={() => openSettings('modules')}>
+              Choose modules
+            </button>
+          </div>
         </div>
       )}
 

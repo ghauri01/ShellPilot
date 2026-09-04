@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { FileDiff, Info, Pin, RefreshCw } from 'lucide-react'
 import { bridgeHas } from '../../lib/bridge'
+import { openSettings } from '../../store/nav'
 import { clsx } from '../../lib/format'
 import type { Server } from '../../types'
 import {
@@ -65,7 +66,7 @@ function Rules({ watchId }: { watchId: string }): React.JSX.Element | null {
   // code does not use is worse than showing none.
   const rules = DRIFT_RULE_ORDER.filter((id) => watch.rules.includes(id)).map(driftRule)
   return (
-    <div className="s-desc" data-testid="drift-rules">
+    <div className="panel-note" data-testid="drift-rules">
       <b>{watch.path}</b> is compared after these rules are applied, in this order. Two files that
       differ only in what these remove are reported as differing in ignored ways — never as
       identical.
@@ -189,59 +190,74 @@ export function DriftPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <FileDiff size={14} className="faint" />
-        <b className="grow">Configuration drift</b>
-        <select
-          className="input sm"
-          aria-label="Watched file"
-          value={watchId}
-          onChange={(e) => setWatchId(e.target.value)}
-        >
-          {DRIFT_WATCHES.map((x) => (
-            <option key={x.id} value={x.id}>
-              {x.label}
-            </option>
-          ))}
-        </select>
-        <button
-          className="btn"
-          disabled={busy || servers.length === 0}
-          onClick={() => void refresh()}
-          title="Sweeps the estate now and re-reads what has already been collected. Watched files are re-read at most once an hour per host. Nothing is written to any host by this."
-        >
-          <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
-        </button>
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <FileDiff size={14} />
+        </span>
+        <h2 className="ui-section-title">Configuration drift</h2>
+        <p className="ui-note panel-head-purpose">
+          Pick a watched file and see which hosts still agree on it. Compared over hashes, and
+          read-only — ShellPilot never pushes a file back.
+        </p>
+        <div className="panel-head-actions">
+          <select
+            className="input sm"
+            aria-label="Watched file"
+            value={watchId}
+            onChange={(e) => setWatchId(e.target.value)}
+          >
+            {DRIFT_WATCHES.map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.label}
+              </option>
+            ))}
+          </select>
+          <button
+            className="btn primary"
+            disabled={busy || servers.length === 0}
+            onClick={() => void refresh()}
+            title="Sweeps the estate now and re-reads what has already been collected. Watched files are re-read at most once an hour per host. Nothing is written to any host by this."
+          >
+            <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
+          </button>
+        </div>
       </div>
 
       {/* The refusal, on screen rather than only in the source — the same shape
           docker.ts's refusal to ship `prune` takes. Someone looking at three
           diverging hosts will look for the button that fixes them, and the
           answer has to be here rather than in a code comment. */}
-      <div className="s-desc" data-testid="drift-no-push">
+      <div className="panel-note" data-testid="drift-no-push">
         {DRIFT_NO_PUSH}
       </div>
 
       {collected === 0 ? (
-        <div className="s-desc">
-          <b>No configuration files have been read yet.</b> ShellPilot reads them about once an
-          hour, on the same background sweep as the inventory — so a server added in the last hour,
-          or an estate where this has just been switched on, will not have any yet. Press{' '}
-          <b>Check now</b> to sweep immediately, and make sure background checking is on in
-          Settings.
+        <div className="panel-empty">
+          <p className="panel-empty-title">No configuration files have been read yet.</p>
+          <p className="panel-empty-body">
+            ShellPilot reads them about once an hour, on the same background sweep as the inventory
+            — so a server added in the last hour, or an estate where this has just been switched
+            on, will not have any yet. Press <b>Check now</b> to sweep immediately, and make sure
+            background checking is on in Settings.
+          </p>
+          <div className="panel-empty-actions">
+            <button className="btn ghost sm" onClick={() => openSettings('monitoring')}>
+              Open Monitoring settings
+            </button>
+          </div>
         </div>
       ) : (
         <>
-          <div className="row wrap muted" style={{ fontSize: 11, marginTop: 8, gap: 12 }}>
+          <div className="panel-stats">
             {/* Each count is one text node rather than a number beside a word.
                 A React fragment splits `{n} match{...}` into three nodes, which
                 reads identically and is not the same string — and a headline
                 nobody can find is a headline nobody reads. */}
             <span>
               <span>{`${comparison.matching} ${comparison.matching === 1 ? 'match' : 'matches'}`}</span>
-              {comparison.diverging > 0 && <span className="warn">{` · ${comparison.diverging} differ`}</span>}
+              {comparison.diverging > 0 && <span className="state-watch">{` · ${comparison.diverging} differ`}</span>}
               {comparison.coverage.absent.length > 0 && (
-                <span className="warn">
+                <span className="state-unknown">
                   {` · ${comparison.coverage.absent.length} do not have the file`}
                 </span>
               )}
@@ -254,14 +270,14 @@ export function DriftPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
           {showRules && <Rules watchId={watch.id} />}
 
           {comparison.baselineServerId === null ? (
-            <div className="s-desc warn" data-testid="drift-no-baseline">
+            <div className="panel-note is-unknown" data-testid="drift-no-baseline">
               Nothing to compare against. {pinned
                 ? 'The host you pinned could not be read, and another has NOT been substituted for it — a column of verdicts against a reference you did not choose would say less than nothing.'
                 : 'No host answered with a readable copy of this file.'}
             </div>
           ) : (
             comparison.baselineChosen && (
-              <div className="s-desc" data-testid="drift-chosen-baseline">
+              <div className="panel-note" data-testid="drift-chosen-baseline">
                 Nobody pinned a baseline, so the largest group of matching hosts was used and the
                 others are compared against it. That is a statement about the majority, not about
                 which side is correct: a host that was fixed first looks exactly like a host that
@@ -271,7 +287,7 @@ export function DriftPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
           )}
 
           {sentence && (
-            <div className="s-desc warn" data-testid="drift-coverage">
+            <div className="panel-note is-unknown" data-testid="drift-coverage">
               {sentence}
             </div>
           )}
@@ -298,7 +314,7 @@ export function DriftPanel({ servers }: { servers: Server[] }): React.JSX.Elemen
             </table>
           </div>
 
-          <div className="s-desc faint">
+          <div className="panel-note faint">
             Comparison is over hashes. ShellPilot keeps two hashes and a status per file per host —
             never the file — so a divergence survives a restart while the configuration itself is
             not copied into its store. The first {DRIFT_PREVIEW_CHARS} characters of each file are

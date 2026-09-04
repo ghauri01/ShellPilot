@@ -555,37 +555,58 @@ export function DockerPanel({ servers }: { servers: Server[] }): React.JSX.Eleme
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <Container size={14} className="faint" />
-        <b className="grow">Containers</b>
-        <select
-          className="input"
-          style={{ maxWidth: 200 }}
-          value={server?.id ?? ''}
-          onChange={(e) => {
-            setServerId(e.target.value)
-            setProbe(null)
-            clearReads()
-          }}
-        >
-          {eligible.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
-        <button className="btn" disabled={loading || !server} onClick={() => void load()}>
-          <RefreshCw size={13} className={clsx(loading && 'spin')} /> {probe ? 'Refresh' : 'Read containers'}
-        </button>
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <Container size={14} />
+        </span>
+        <h2 className="ui-section-title">Containers</h2>
+        <p className="ui-note panel-head-purpose">
+          What is running under Docker on one server — state, ports, disk and live stats.
+        </p>
+        <div className="panel-head-actions">
+          <select
+            className="input"
+            style={{ maxWidth: 200 }}
+            aria-label="Server"
+            value={server?.id ?? ''}
+            onChange={(e) => {
+              setServerId(e.target.value)
+              setProbe(null)
+              clearReads()
+            }}
+          >
+            {eligible.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          {/* The button this whole exercise started from. It is the one thing
+              to do on an unread panel and it was styled as an ordinary
+              secondary control, indistinguishable from the dropdown beside it. */}
+          <button className="btn primary" disabled={loading || !server} onClick={() => void load()}>
+            <RefreshCw size={13} className={clsx(loading && 'spin')} /> {probe ? 'Refresh' : 'Read containers'}
+          </button>
+        </div>
       </div>
 
-      {eligible.length === 0 && <div className="s-desc">No server in this workspace is online.</div>}
+      {eligible.length === 0 && (
+        <div className="panel-empty">
+          <p className="panel-empty-title">No server in this workspace is online.</p>
+          <p className="panel-empty-body">
+            Connect a server from the sidebar, then come back and press <b>Read containers</b>.
+          </p>
+        </div>
+      )}
 
       {!probe && !loading && eligible.length > 0 && (
-        <div className="s-desc">
-          Runs <span className="mono">docker ps</span> on the selected server using the docker binary
-          already installed there. Reading only — nothing is started, stopped or removed until you ask
-          for it.
+        <div className="panel-empty">
+          <p className="panel-empty-title">Nothing has been read yet.</p>
+          <p className="panel-empty-body">
+            Press <b>Read containers</b> to run <span className="mono">docker ps</span> on the
+            selected server, using the docker binary already installed there. Reading only —
+            nothing is started, stopped or removed until you ask for it.
+          </p>
         </div>
       )}
 

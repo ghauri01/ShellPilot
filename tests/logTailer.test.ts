@@ -455,7 +455,14 @@ describe('the panel that drives it', () => {
   it('does not dress a pane that may yet fill as a failure', () => {
     // A file tail -F is waiting for, or a unit that genuinely has not spoken,
     // is not the same kind of thing as a masked unit or a denied read.
-    expect(panel).toMatch(/clsx\('s-desc', !d\.waiting && 'danger'\)/)
+    //
+    // The two roles were renamed when the panels were given a shared visual
+    // language: `s-desc` had no rule outside a settings row, so neither branch
+    // of this was rendering in any colour at all, and `danger` as a bare class
+    // has never had a rule either. What this test guards is unchanged — that
+    // waiting and failing are drawn differently — so it now names the roles
+    // that actually paint.
+    expect(panel).toMatch(/clsx\('panel-note', d\.waiting \? 'is-unknown' : 'is-alarm'\)/)
   })
 
   it('offers root only when it would help and cannot prompt', () => {

@@ -256,7 +256,7 @@ function NotYetChecked({
   return (
     <section className="fleet-health">
       <div className="fh-head">
-        <b>Fleet health</b>
+        <h2 className="ui-section-title">Fleet health</h2>
         <span className="chip">
           <Clock size={11} /> Not checked yet
         </span>
@@ -267,19 +267,21 @@ function NotYetChecked({
         <span className="fh-meta">{coverageLine(health)}</span>
       </div>
       {sampling ? (
-        <div className="fh-note">
+        <div className="fh-note ui-note">
           No host has reported yet. Background checking is on, so this fills in as hosts answer —
           failed services and disks close to full will be listed here.
         </div>
       ) : (
         <>
-          <div className="fh-note">
+          <div className="fh-note ui-note">
             No host has reported yet. Background checking is off, so a host is only looked at while
             its card is on screen — nothing is watching for failed services or full disks in between.
             Turning it on in Settings → Monitoring sweeps the whole estate on a schedule and fills
             this panel in.
           </div>
-          <button className="btn sm ghost" onClick={() => openSettings('monitoring')}>
+          {/* The only thing to do on this screen, and it was the quietest
+              control on it. */}
+          <button className="btn sm primary" onClick={() => openSettings('monitoring')}>
             Open Monitoring settings
           </button>
         </>
@@ -322,7 +324,7 @@ export function FleetHealth({ servers }: { servers: Server[] }): React.JSX.Eleme
   return (
     <section className="fleet-health">
       <div className="fh-head">
-        <b>Fleet health</b>
+        <h2 className="ui-section-title">Fleet health</h2>
         {failures && (
           <span className="chip danger">
             <CircleAlert size={11} /> {failures}

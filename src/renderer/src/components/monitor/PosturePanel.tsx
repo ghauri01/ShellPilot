@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { RefreshCw, ShieldAlert, ShieldQuestion } from 'lucide-react'
+import { openSettings } from '../../store/nav'
 import { bridgeHas } from '../../lib/bridge'
 import { clsx, duration } from '../../lib/format'
 import {
@@ -456,7 +457,7 @@ function FirewallRules({ posture }: { posture: HostPosture }): React.JSX.Element
               // STATED, never silent. A prefix drawn as if it were the whole
               // list is the same failure as a refused read drawn as an empty
               // one, one step quieter.
-              <span className="warn">
+              <span className="state-unknown">
                 {' '}
                 · showing {listing.lines.length} of {listing.matched}, cut at{' '}
                 {listing.bound.maxLines} lines on the host
@@ -591,31 +592,47 @@ export function PosturePanel({
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <ShieldAlert size={14} className="faint" />
-        <b className="grow">Security posture</b>
-        <button
-          className="btn"
-          disabled={busy || servers.length === 0}
-          onClick={() => void refresh()}
-          title="Sweeps the estate now and re-reads what has already been collected. Posture is re-collected at most once an hour per host. Nothing is changed by this: no firewall is enabled, no SELinux mode is set and no configuration is written."
-        >
-          <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
-        </button>
+      <div className="panel-head">
+        <span className="panel-head-icon">
+          <ShieldAlert size={14} />
+        </span>
+        <h2 className="ui-section-title">Security posture</h2>
+        <p className="ui-note panel-head-purpose">
+          Firewalls, SELinux and AppArmor, sshd settings, OOM kills and certificate expiry, per
+          host. Everything is read; no firewall is enabled and no configuration is written.
+        </p>
+        <div className="panel-head-actions">
+          <button
+            className="btn primary"
+            disabled={busy || servers.length === 0}
+            onClick={() => void refresh()}
+            title="Sweeps the estate now and re-reads what has already been collected. Posture is re-collected at most once an hour per host. Nothing is changed by this: no firewall is enabled, no SELinux mode is set and no configuration is written."
+          >
+            <RefreshCw size={13} className={clsx(busy && 'spin')} /> Check now
+          </button>
+        </div>
       </div>
 
       {summary.collected === 0 ? (
-        <div className="s-desc">
-          <b>No security posture has been collected yet.</b> ShellPilot reads it about once an hour,
-          on the same background sweep as the inventory — so a server added in the last hour, or an
-          estate where this has just been switched on, will not have any yet. Press{' '}
-          <b>Check now</b> to sweep immediately, and make sure background checking is on in
-          Settings. Nothing is changed by the probe: firewalls are read, never enabled; SELinux
-          modes are read, never set; and no configuration file is written.
+        <div className="panel-empty">
+          <p className="panel-empty-title">No security posture has been collected yet.</p>
+          <p className="panel-empty-body">
+            ShellPilot reads it about once an hour, on the same background sweep as the inventory —
+            so a server added in the last hour, or an estate where this has just been switched on,
+            will not have any yet. Press <b>Check now</b> to sweep immediately, and make sure
+            background checking is on in Settings. Nothing is changed by the probe: firewalls are
+            read, never enabled; SELinux modes are read, never set; and no configuration file is
+            written.
+          </p>
+          <div className="panel-empty-actions">
+            <button className="btn ghost sm" onClick={() => openSettings('monitoring')}>
+              Open Monitoring settings
+            </button>
+          </div>
         </div>
       ) : (
         <>
-          <div className="row wrap muted" style={{ fontSize: 11, marginTop: 8, gap: 12 }}>
+          <div className="panel-stats">
             <span>
               {summary.hosts} host{summary.hosts === 1 ? '' : 's'} · posture for {summary.collected}
             </span>
@@ -624,21 +641,21 @@ export function PosturePanel({
                 reassuring fiction this panel exists to avoid. */}
             <span>
               {summary.firewallActive} filtering
-              {summary.firewallInactive > 0 && <span className="warn"> · {summary.firewallInactive} not</span>}
+              {summary.firewallInactive > 0 && <span className="state-watch"> · {summary.firewallInactive} not</span>}
               {summary.firewallUnknown > 0 && (
-                <span className="warn"> · {summary.firewallUnknown} could not be read</span>
+                <span className="state-unknown"> · {summary.firewallUnknown} could not be read</span>
               )}
             </span>
             <span>
               {summary.macEnforcing} enforcing
               {summary.macAbsent > 0 && <span> · {summary.macAbsent} with none installed</span>}
-              {summary.macUnknown > 0 && <span className="warn"> · {summary.macUnknown} unknown</span>}
+              {summary.macUnknown > 0 && <span className="state-unknown"> · {summary.macUnknown} unknown</span>}
             </span>
             <span>
-              {summary.sshdWeak > 0 && <span className="warn">{summary.sshdWeak} with a weak sshd setting</span>}
+              {summary.sshdWeak > 0 && <span className="state-watch">{summary.sshdWeak} with a weak sshd setting</span>}
               {summary.sshdWeak === 0 && <span>no weak sshd settings found</span>}
               {summary.sshdUnknown > 0 && (
-                <span className="warn"> · {summary.sshdUnknown} sshd config could not be read</span>
+                <span className="state-unknown"> · {summary.sshdUnknown} sshd config could not be read</span>
               )}
             </span>
             {/* Both of these carry their gap, for the reason every count above
@@ -648,35 +665,35 @@ export function PosturePanel({
                 host that refused, because neither can support a "none". */}
             <span>
               {summary.oomKilling > 0 ? (
-                <span className="warn">{summary.oomKilling} killing processes for memory</span>
+                <span className="state-watch">{summary.oomKilling} killing processes for memory</span>
               ) : (
                 <span>no OOM kills seen</span>
               )}
               {summary.oomUnknown > 0 && (
-                <span className="warn"> · {summary.oomUnknown} kernel log could not be read over a stated window</span>
+                <span className="state-unknown"> · {summary.oomUnknown} kernel log could not be read over a stated window</span>
               )}
             </span>
             <span>
               {summary.certExpired > 0 && (
-                <span className="warn">{summary.certExpired} with an EXPIRED certificate</span>
+                <span className="state-watch">{summary.certExpired} with an EXPIRED certificate</span>
               )}
               {summary.certExpired === 0 && summary.certExpiringSoon === 0 && (
                 <span>no certificate inside {CERT_EXPIRY_DAYS} days</span>
               )}
               {summary.certExpiringSoon > 0 && (
-                <span className="warn">
+                <span className="state-watch">
                   {summary.certExpired > 0 ? ' · ' : ''}
                   {summary.certExpiringSoon} expiring within {CERT_EXPIRY_DAYS} days
                 </span>
               )}
               {summary.certUnknown > 0 && (
-                <span className="warn"> · {summary.certUnknown} could not be fully read</span>
+                <span className="state-unknown"> · {summary.certUnknown} could not be fully read</span>
               )}
             </span>
           </div>
 
           {(summary.firewallUnknown > 0 || summary.sshdUnknown > 0) && (
-            <div className="s-desc warn">
+            <div className="panel-note is-unknown">
               <ShieldQuestion size={12} /> {summary.firewallUnknown + summary.sshdUnknown} check
               {summary.firewallUnknown + summary.sshdUnknown === 1 ? '' : 's'} across this estate could
               not run, and a check that could not run is not a check that passed. Those hosts are not
@@ -687,7 +704,7 @@ export function PosturePanel({
           )}
 
           {failed.map((f) => (
-            <div key={f.serverId} className="s-desc danger">
+            <div key={f.serverId} className="panel-note is-alarm">
               {f.serverName}: the posture probe failed — {f.error}
             </div>
           ))}
@@ -756,7 +773,7 @@ export function PosturePanel({
                     {openRules === r.serverId && r.posture && (
                       <tr>
                         <td colSpan={COLUMNS.length + 1}>
-                          <div className="s-desc" data-rules-detail={r.serverName}>
+                          <div className="panel-note" data-rules-detail={r.serverName}>
                             <FirewallRules posture={r.posture} />
                           </div>
                         </td>
@@ -765,7 +782,7 @@ export function PosturePanel({
                     {open === r.serverId && r.posture?.sshd && (
                       <tr>
                         <td colSpan={COLUMNS.length + 1}>
-                          <div className="s-desc" data-sshd-detail={r.serverName}>
+                          <div className="panel-note" data-sshd-detail={r.serverName}>
                             {r.posture.sshd.effective ? (
                               <b>Read from sshd&rsquo;s own effective configuration.</b>
                             ) : (
@@ -776,7 +793,7 @@ export function PosturePanel({
                               </b>
                             )}
                             {r.posture.sshd.matchBlocks !== null && r.posture.sshd.matchBlocks > 0 && (
-                              <div className="warn" style={{ marginTop: 4 }}>
+                              <div className="state-watch" style={{ marginTop: 4 }}>
                                 This configuration has {r.posture.sshd.matchBlocks} conditional{' '}
                                 <span className="mono">Match</span> block
                                 {r.posture.sshd.matchBlocks === 1 ? '' : 's'}. The values below are

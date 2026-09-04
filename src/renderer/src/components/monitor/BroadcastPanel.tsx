@@ -45,14 +45,19 @@ const outcomeOf = (r: BroadcastHostResult): BroadcastHostOutcome | null =>
 // docker"). Colouring it the same as an unreachable host would make the one
 // row that needs someone to go and look indistinguishable from four that do
 // not.
+// The four status roles rather than the three colour names. `cancelled` moves
+// off the amber the other four shared: a host that never ran is an outcome
+// nobody has, which is a different thing from a host that ran and refused, and
+// the two were the same colour. (They were in fact the same NO colour — bare
+// `.warn` and `.danger` have never had a rule in global.css.)
 const TONE: Record<BroadcastHostOutcome, string> = {
-  ok: '',
-  nonzero: 'warn',
-  'missing-command': 'warn',
-  'permission-denied': 'warn',
-  timeout: 'danger',
-  unreachable: 'danger',
-  cancelled: 'warn'
+  ok: 'state-ok',
+  nonzero: 'state-watch',
+  'missing-command': 'state-watch',
+  'permission-denied': 'state-watch',
+  timeout: 'state-alarm',
+  unreachable: 'state-alarm',
+  cancelled: 'state-unknown'
 }
 
 function resultTone(r: BroadcastHostResult): string {
@@ -244,8 +249,12 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
 
   return (
     <div className="bc-panel">
-      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <Terminal size={14} className="faint" />
+      <div className="panel-head no-purpose">
+        <span className="panel-head-icon">
+          <Terminal size={14} />
+        </span>
+        <h2 className="ui-section-title">Run a command</h2>
+        <div className="panel-head-actions" style={{ flexWrap: 'nowrap', minWidth: 0, flex: 1 }}>
         <input
           className="input grow mono"
           placeholder="Command to run on the selected servers…"
@@ -266,10 +275,21 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
             <Play size={13} /> Run
           </button>
         )}
+        </div>
       </div>
 
+      {/* The purpose line, under the composer rather than above it: the field
+          is what the eye should reach first here, unlike every read-only panel
+          where the title is. */}
+      <p className="ui-note">
+        Runs one command on every server you pick, one connection each. Nothing runs until you
+        confirm, and a command that changes or destroys state says so before the dialog opens.
+      </p>
+
       <div className="row wrap" style={{ gap: 6, marginTop: 8 }}>
-        {eligible.length === 0 && <span className="faint">No server in this workspace is online.</span>}
+        {eligible.length === 0 && (
+          <span className="state-unknown">No server in this workspace is online.</span>
+        )}
         {eligible.map((s) => (
           <button
             key={s.id}
@@ -296,10 +316,10 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
       {/* The reasons are shown before the run, not inside the dialog only:
           someone reading the command should see how it was read without
           having to press Run to find out. */}
-      {error && <div className="s-desc danger">{error}</div>}
+      {error && <div className="panel-note is-alarm">{error}</div>}
 
       {plan.risk !== 'ordinary' && command.trim() !== '' && (
-        <div className={clsx('s-desc', plan.risk === 'destructive' ? 'danger' : 'warn')}>
+        <div className={clsx('panel-note', plan.risk === 'destructive' ? 'is-alarm' : 'is-watch')}>
           <TriangleAlert size={12} /> This {plan.risk === 'destructive' ? 'destroys state' : 'changes state'} —{' '}
           {plan.reasons.join('; ')}.
         </div>
@@ -307,11 +327,11 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
 
       {confirming && (
         <div className="bc-confirm">
-          <div className="s-title">
+          <div className="panel-subtitle">
             Run on {targets.length} server{targets.length === 1 ? '' : 's'}?
           </div>
-          <div className="s-desc mono">{command}</div>
-          <div className="s-desc">{targets.map((t) => t.serverName).join(', ')}</div>
+          <div className="panel-note mono">{command}</div>
+          <div className="panel-note">{targets.map((t) => t.serverName).join(', ')}</div>
           {plan.confirmation.kind === 'type-to-confirm' && (
             <div className="input-group" style={{ marginTop: 6 }}>
               <input
@@ -364,7 +384,7 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
               this as root on their behalf would raise the blast radius after
               they had already approved it at a lower one. */}
           {refused.length > 0 && (
-            <div className="s-desc warn">
+            <div className="panel-note is-watch">
               {refused.length === 1
                 ? `${refused[0].serverName} refused this command for this account.`
                 : `${refused.length} hosts refused this command for this account.`}{' '}
@@ -377,6 +397,23 @@ export function BroadcastPanel({ servers }: { servers: Server[] }): React.JSX.El
           {rows.map((r) => (
             <HostResult key={r.serverId} r={r} />
           ))}
+        </div>
+      )}
+
+      {/* The state this panel never had. With servers online and nothing run
+          yet it rendered a command field, a row of chips and nothing else — no
+          statement of the order the two are meant to be used in, and no hint
+          that picking a host is a separate step from typing the command. */}
+      {rows.length === 0 && !confirming && eligible.length > 0 && (
+        <div className="panel-empty">
+          <p className="panel-empty-title">Nothing has been run yet.</p>
+          <p className="panel-empty-body">
+            {targets.length === 0
+              ? 'Pick the servers to run on from the row above, type a command, then press Run.'
+              : `${targets.length} server${targets.length === 1 ? '' : 's'} selected. Type a command above, then press Run.`}{' '}
+            Results appear here, one block per host, and a host that refuses is reported rather
+            than retried as root.
+          </p>
         </div>
       )}
     </div>
