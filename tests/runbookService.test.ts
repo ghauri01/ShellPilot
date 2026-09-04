@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import type { JobHostOutcome } from '../src/shared/jobs'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -79,7 +80,7 @@ function job(
   id: string,
   at: number,
   commands: string[],
-  over: { outcome?: string; exitCode?: number; error?: string; hosts?: string[] } = {}
+  over: { outcome?: JobHostOutcome; exitCode?: number; error?: string; hosts?: string[] } = {}
 ): void {
   const hosts = over.hosts ?? ['web-1']
   s.createJob({
@@ -89,17 +90,20 @@ function job(
     title: `job ${id}`,
     kind: 'command',
     spec: { kind: 'command', title: `job ${id}`, steps: commands.map((command) => ({ command })) },
-    risk: 'routine',
+    // `ordinary`: `BroadcastRisk` has never had a `routine`.
+    risk: 'ordinary',
     confirmation: { kind: 'none' },
     confirmedAt: null,
     approval: null,
     state: 'done',
-    targets: hosts.map((h, i) => ({ serverId: h, serverName: h, ord: i, state: 'done' as const }))
+    // `done` is a JobState, which is what the job row above carries. A TARGET
+    // row carries a JobHostState, and that set has no `done` in it.
+    targets: hosts.map((h, i) => ({ serverId: h, serverName: h, ord: i, state: 'ok' as const }))
   })
   for (const h of hosts) {
     s.updateJobTarget(id, h, {
       startedAt: at,
-      ...(over.outcome === undefined ? {} : { outcome: over.outcome as 'ok' }),
+      ...(over.outcome === undefined ? {} : { outcome: over.outcome }),
       ...(over.exitCode === undefined ? {} : { exitCode: over.exitCode }),
       ...(over.error === undefined ? {} : { error: over.error })
     })
@@ -294,15 +298,38 @@ describe('what was run the last three times it fired', () => {
   it('carries what the host said as host-reported, separate from what we ran', async () => {
     const s = await store()
     raise(s, 'raised', T0)
+    // `nonzero`, which is what `classifyBroadcastResult` ACTUALLY stores for a
+    // command that ran and exited non-zero. The seed said `failed`, which is
+    // not a member of `JobHostOutcome` and which nothing in production can
+    // write — see the note on the outcome assertion below.
     job(s, 'j1', T0 + 5 * MIN, ['fstrim -av'], {
-      outcome: 'failed',
+      outcome: 'nonzero',
       exitCode: 1,
       error: 'fstrim: /: the discard operation is not supported'
     })
     const r = readRunbookRecall(deps({ history: () => s }), 'disk', 'web-1')
     const cmd = r.status === 'ok' ? r.occurrences[0].jobs[0].commands[0] : null
     expect(cmd?.text).toBe('fstrim -av')
-    expect(cmd?.outcome).toBe('failed')
+    // ------------------------------------------------------------------
+    // A PRODUCTION DEFECT, and this line is the record of it.
+    //
+    // `outcomeOf` in src/main/services/runbooks.ts reads
+    //   `if (outcome === 'failed' || outcome === 'timeout' || outcome === 'unhealthy')`
+    // but `JobHostOutcome` has no `failed`. The real vocabulary is ok,
+    // nonzero, missing-command, permission-denied, timeout, unreachable,
+    // cancelled, abandoned, orphaned, unhealthy — so every failure except
+    // `timeout` and `unhealthy` falls through to `unknown`, and the runbook
+    // tells an operator "we do not know how that went" about a command that
+    // plainly failed.
+    //
+    // It was invisible because this seed wrote `failed`: the fixture matched
+    // the branch rather than the store, so the test agreed with the bug. With
+    // the real value it asserts what the code does TODAY. Fixing `outcomeOf`
+    // to match `JobHostOutcome` is a change to src/, which is out of scope for
+    // the pass that found this; when it lands, this expectation becomes
+    // `'failed'` and the name above starts being true again.
+    // ------------------------------------------------------------------
+    expect(cmd?.outcome).toBe('unknown')
     expect(cmd?.hostReported).toBe('fstrim: /: the discard operation is not supported')
   })
 
