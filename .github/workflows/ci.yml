@@ -20,7 +20,36 @@ jobs:
           go-version: '1.23'
           cache-dependency-path: sidecar/netd/go.sum
       - run: npm ci
-      - run: npm audit
+      # `npm audit`, with the registry's own flakiness separated from a finding.
+      #
+      # The audit endpoint returned 503 three times in one afternoon during the
+      # 0.13.x releases, each time marking main red for a reason that had
+      # nothing to do with this repository. Two obvious fixes are both wrong:
+      # `continue-on-error` would let a real vulnerability through silently, and
+      # leaving it bare means a third-party outage blocks unrelated work.
+      #
+      # So the two cases are told apart. A vulnerability fails the build, as it
+      # always did. An unreachable endpoint retries, and if it is still
+      # unreachable it says "not checked" loudly -- in the log and in the job
+      # summary -- rather than reporting a green nobody earned. "We could not
+      # look" is a third answer, and pretending it is either of the other two is
+      # the same mistake this codebase refuses everywhere else.
+      - name: npm audit
+        run: |
+          for attempt in 1 2 3; do
+            out=$(npm audit 2>&1) && { echo "$out"; exit 0; }
+            if echo "$out" | grep -qiE 'audit endpoint returned an error|Service Unavailable|ECONNRESET|ETIMEDOUT'; then
+              echo "::warning::npm audit could not reach the registry (attempt $attempt/3), retrying"
+              sleep $((attempt * 20))
+              continue
+            fi
+            # Reached the registry and it had something to say. That is a finding.
+            echo "$out"
+            exit 1
+          done
+          echo "::warning::npm audit NOT RUN -- the registry was unreachable for all 3 attempts. Dependencies are unverified for this run."
+          echo '### :warning: npm audit did not run' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The npm advisory endpoint was unreachable for all three attempts, so dependencies are **unverified for this run** -- this is not a clean audit.' >> "$GITHUB_STEP_SUMMARY"
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
