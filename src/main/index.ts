@@ -106,7 +106,7 @@ import { CRON_COLLECT_COMMAND, parseCronCollection, type CronEntry, type CronSou
 import { DockerReader } from './services/docker'
 import { ComposeReader } from './services/compose'
 import { buildDockerLogsCommand } from '../shared/docker'
-import type { DockerAction, DockerLogsOptions } from '../shared/docker'
+import type { DockerAction, DockerLogsOptions, DockerReclaimItem } from '../shared/docker'
 import type { ComposeImageWriteRequest, ComposeProjectRef } from '../shared/compose'
 
 // The one refusal worth retrying as root. Deliberately narrow: a container that
@@ -114,7 +114,7 @@ import type { ComposeImageWriteRequest, ComposeProjectRef } from '../shared/comp
 const DOCKER_SOCKET_REFUSED = /permission denied while trying to connect|got permission denied.*docker/i
 import { KubernetesReader } from './services/kubernetes'
 import { buildK8sLogsCommand } from '../shared/kubernetes'
-import type { K8sCordonTarget, K8sRolloutTarget } from '../shared/kubernetes'
+import type { K8sCordonTarget, K8sExecTarget, K8sRolloutTarget } from '../shared/kubernetes'
 import type { BroadcastProgress, BroadcastRequest } from '../shared/broadcast'
 import { planBroadcast, verifyApproval } from '../shared/broadcast'
 import type { FleetSamplerConfig } from '../shared/fleet'
@@ -1895,6 +1895,16 @@ ipcMain.handle(
   (_e, cfg: unknown, node: string, context: string | undefined, confirmed: unknown) =>
     k8sReader.drain(cfg, node, context, confirmed === true)
 )
+// Exec. The only channel in this module that takes an approval RECORD rather
+// than a boolean, because it is the only one whose command text is written by
+// the user — so "a dialog was answered" is not enough and "this exact command
+// was answered for" is what has to be checked. The record is minted in the
+// renderer at the moment the human types the phrase and verified here against
+// a fresh re-derivation; see KubernetesReader.exec.
+ipcMain.handle('k8s:exec-plan', (_e, target: K8sExecTarget) => k8sReader.execPlan(target))
+ipcMain.handle('k8s:exec', (_e, cfg: unknown, target: K8sExecTarget, approval: unknown) =>
+  k8sReader.exec(cfg, target, approval)
+)
 
 ipcMain.handle('docker:list', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
   dockerReader.list(cfg, opts ?? {})
@@ -1949,7 +1959,11 @@ ipcMain.handle('docker:disk', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSu
   dockerReader.disk(cfg, opts ?? {})
 )
 // The itemised form of the same read. Still read-only: it lists what is on the
-// disk, and nothing on this channel or below it can remove any of it.
+// disk and returns no handle on any of it. `docker:reclaim` below removes
+// things, and it is a SEPARATE channel taking a separate list of ids on
+// purpose — the gap between the two calls is where the re-preview goes, and a
+// channel that listed and removed in one round trip would be trusting a
+// listing it took itself.
 ipcMain.handle('docker:disk-detail', (_e, cfg: unknown, opts?: { sudo?: boolean; autoSudo?: boolean }) =>
   dockerReader.diskDetail(cfg, opts ?? {})
 )
@@ -1982,6 +1996,33 @@ ipcMain.handle(
     refs: string[],
     opts?: { sudo?: boolean; timeoutSec?: number }
   ) => dockerReader.act(cfg, action, refs, opts ?? {})
+)
+
+// The second state-changing docker channel, and the only one that removes
+// anything. `docker rm` / `rmi` / `volume rm` / `network rm` against exactly
+// the ids the caller names.
+//
+// There is no prune channel, in any spelling, and there is no force option.
+// `docker system prune -a` removes stopped containers first, so an image whose
+// only reference was a stopped container is deleted inside the same command —
+// which means a preview built by listing images beforehand cannot show it.
+// That is a structurally wrong preview rather than a race, so `-a` is refused
+// rather than deferred, and `buildDockerReclaimCommand` has no argument
+// grammar that could express either flag.
+//
+// `items` is a claim about shape and nothing more. The builder checks every
+// kind against an allow-list and every reference against a regex that admits
+// only hex or a docker name — so a tag cannot reach `rmi`, where it would
+// untag rather than remove — and it THROWS, so a refused build rejects the
+// invoke instead of running a narrower command.
+//
+// Like `act` and unlike every read, this never escalates on its own. A
+// passwordless sudoers entry is not consent to a state change, and it is least
+// of all consent to a `docker volume rm`.
+ipcMain.handle(
+  'docker:reclaim',
+  (_e, cfg: unknown, items: DockerReclaimItem[], opts?: { sudo?: boolean }) =>
+    dockerReader.reclaim(cfg, items, opts ?? {})
 )
 
 // ---- Compose ----

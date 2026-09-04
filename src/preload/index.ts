@@ -46,6 +46,8 @@ import type {
   DockerInspectProbe,
   DockerLogsOptions,
   DockerProbe,
+  DockerReclaimItem,
+  DockerReclaimResult,
   DockerStatsProbe
 } from '../shared/docker'
 import type {
@@ -63,6 +65,9 @@ import type {
   K8sDrainAssessment,
   K8sDrainPlan,
   K8sDrainResult,
+  K8sExecPlan,
+  K8sExecResult,
+  K8sExecTarget,
   K8sDiagnosis,
   K8sOverview,
   K8sProbe,
@@ -514,7 +519,15 @@ const api = {
       context: string | undefined,
       confirmed: boolean
     ): Promise<K8sDrainResult & { plan?: K8sDrainPlan }> =>
-      ipcRenderer.invoke('k8s:drain', cfg, node, context, confirmed)
+      ipcRenderer.invoke('k8s:drain', cfg, node, context, confirmed),
+    // Two calls on purpose. The plan call returns the exact command string the
+    // approval must be minted against, so the renderer cannot approve one
+    // thing and send another — `verifyApproval` in the main process compares
+    // them and refuses when they differ.
+    execPlan: (target: K8sExecTarget): Promise<{ plan: K8sExecPlan; command: string }> =>
+      ipcRenderer.invoke('k8s:exec-plan', target),
+    exec: (cfg: unknown, target: K8sExecTarget, approval: unknown): Promise<K8sExecResult> =>
+      ipcRenderer.invoke('k8s:exec', cfg, target, approval)
   },
   // `satisfies DockerBridge` so a channel added to the contract and forgotten
   // here is a compile error rather than a method the panel calls at runtime and
@@ -551,7 +564,16 @@ const api = {
       action: DockerAction,
       refs: string[],
       opts?: { sudo?: boolean; timeoutSec?: number }
-    ): Promise<DockerActionResult> => ipcRenderer.invoke('docker:act', cfg, action, refs, opts)
+    ): Promise<DockerActionResult> => ipcRenderer.invoke('docker:act', cfg, action, refs, opts),
+    // Removal by id, and the only method here that deletes anything. There is
+    // deliberately no `prune` sibling: the objection to prune was that its
+    // blast radius is not knowable from the UI offering it, and this takes the
+    // blast radius as a literal list.
+    reclaim: (
+      cfg: unknown,
+      items: DockerReclaimItem[],
+      opts?: { sudo?: boolean }
+    ): Promise<DockerReclaimResult> => ipcRenderer.invoke('docker:reclaim', cfg, items, opts)
   } satisfies DockerBridge,
   // The file half. `satisfies ComposeBridge` for the same reason as above: a
   // channel added to the contract and forgotten here becomes a compile error
