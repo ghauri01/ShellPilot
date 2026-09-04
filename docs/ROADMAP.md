@@ -1105,7 +1105,7 @@ false. Age alone is honest and free.
 
 ---
 
-### 22. Kubernetes lifecycle
+### 22. Kubernetes lifecycle — SHIPPED
 
 `kubernetes.ts` refused exec, delete and context switching, and gave reasons that were right at the
 time. Two of the three said what the precondition was, so this item is those preconditions.
@@ -1125,6 +1125,47 @@ without values, deprecated API scan against the cluster version, Helm release li
 desktop button is how a staging manifest reaches prod.
 
 **Size.** 3–5 weeks. After Compose, deliberately.
+
+**What shipped, and how the drain decides.** Cordon and uncordon are a plain confirm in both
+directions and the plan says out loud, with the pod count, that a cordon evicts nothing — the one
+thing everybody misreads about that button. Drain is offered only after a preflight round trip that
+reads the node, the pods on it, every PodDisruptionBudget and every EndpointSlice, and it is refused
+outright on any of seven things: a pod nothing owns, a budget with `disruptionsAllowed` at zero, a
+pod covered by MORE THAN ONE budget, a budget selector using `matchExpressions` that a list read
+cannot evaluate, the only Ready endpoint behind a Service, an `emptyDir` volume, and **any read that
+did not answer**. That last one is why `safe` is not "no blockers": a Forbidden budget list produces
+no blockers because it produces nothing. `--force` and `--delete-emptydir-data` are written
+explicitly as false; both turn a blocked drain into a successful one by destroying what blocked it.
+
+The overlapping-budget rule was found by running a drain against a real three-node cluster rather
+than reasoning about it: the eviction subresource answers `This pod has more than one
+PodDisruptionBudget, which the eviction subresource does not support.` regardless of what either
+budget allows, so a check that only read `disruptionsAllowed` would have cleared a drain that cannot
+make progress at all. The same recording showed a drain is **not atomic** — it evicted three pods,
+stalled on two, and gave up at the timeout with the node cordoned and half empty — which is why the
+result carries `partial` and why the check happens before the command is built.
+
+Exec ships behind `approvalFor`/`verifyApproval` from `shared/broadcast.ts`, reused unmodified: the
+record carries the command text, so an exec approved as `id` and sent as something else is a
+comparison rather than an act of faith. Always type-to-confirm, with no cheap case — `ls` and
+`rm -rf /` are the same request from here.
+
+The cheap reads all shipped. Secrets list names and key names and never a value, and that is a
+property of the query rather than a rule applied afterwards: a go-template ranging over `$k, $v` and
+emitting only `$k` is the only kubectl output form where the value is structurally unreachable.
+
+**Still refused, and unchanged.** Applying manifests, for the reason above. Context switching, which
+rewrites the user's kubeconfig for every process on the host. Single-pod deletion — a drain answers
+"can this node lose everything on it", which is a question about a node; "can this workload lose
+this one pod" is a question about a workload, and `rollout restart` already reaches that remediation
+through the controller. And the MCP bridge: none of this is agent-reachable, and
+`tests/jobsNotExposed.test.ts` holds the symbols.
+
+**What is untested.** A drain where the remaining nodes cannot fit the evicted pods. Every fixture
+came from a `kind` cluster whose nodes are containers on one host and which was never under real
+resource pressure; the replacements go Pending, the eviction still succeeds, and `kubectl drain`
+still reports the node drained. That path needs a real multi-node cluster with real requests and
+limits. See `tests/fixtures/k8s/README.md`.
 
 ---
 
