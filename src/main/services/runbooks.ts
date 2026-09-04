@@ -17,6 +17,7 @@ import {
   type RunbookView
 } from '../../shared/runbooks'
 import { ALERT_HISTORY_KIND, sanitiseStoredAlert, type StoreAlertKind } from '../../shared/webhook'
+import type { JobHostOutcome } from '../../shared/jobs'
 import { DISABLE_ENV, type HistoryStore } from './history'
 import { redactOutput } from './secretRedaction'
 
@@ -218,12 +219,45 @@ export function removeRunbookNotesForTests(deps: RunbookDeps): void {
  * and calling it a failure is the same invention as a zero for an unmeasured
  * reading.
  */
-function outcomeOf(outcome: string | undefined, exitCode: number | undefined): RunbookOutcome {
-  if (outcome === 'ok') return 'succeeded'
-  if (outcome === 'failed' || outcome === 'timeout' || outcome === 'unhealthy') return 'failed'
-  if (outcome === undefined && typeof exitCode === 'number') {
-    return exitCode === 0 ? 'succeeded' : 'failed'
-  }
+/**
+ * A job's per-host outcome, reduced to the three words a runbook needs.
+ *
+ * TAKEN AS `JobHostOutcome`, NOT AS `string`, AND THAT IS THE POINT. This
+ * branched on `'failed'` — which has never been a member of that union — so
+ * `nonzero`, `missing-command`, `permission-denied`, `unreachable`, `abandoned`
+ * and `orphaned` all fell through to `unknown`. A command that exited non-zero
+ * is the commonest failure there is, and the runbook reported it as "we cannot
+ * say". A test agreed, because its fixture seeded the same value that does not
+ * exist; both were wrong in the same direction, so the test passed.
+ *
+ * The map below is exhaustive over the union by type rather than by reading, so
+ * a new outcome added to the job engine fails to compile here instead of
+ * quietly joining `unknown`.
+ */
+const OUTCOME_MEANS: Record<JobHostOutcome, RunbookOutcome> = {
+  ok: 'succeeded',
+  nonzero: 'failed',
+  'missing-command': 'failed',
+  'permission-denied': 'failed',
+  timeout: 'failed',
+  unreachable: 'failed',
+  unhealthy: 'failed',
+  orphaned: 'failed',
+  abandoned: 'unknown',
+  cancelled: 'unknown'
+}
+
+function outcomeOf(
+  outcome: JobHostOutcome | undefined,
+  exitCode: number | undefined
+): RunbookOutcome {
+  // `abandoned` and `cancelled` are `unknown` rather than `failed` on purpose:
+  // neither says the command failed. One stopped because ShellPilot did, the
+  // other never ran. Calling either a failure would put a red mark against a
+  // host that did nothing wrong — the same reasoning that gave `abandoned` its
+  // own name in the job engine rather than reusing `unreachable`.
+  if (outcome !== undefined) return OUTCOME_MEANS[outcome] ?? 'unknown'
+  if (typeof exitCode === 'number') return exitCode === 0 ? 'succeeded' : 'failed'
   return 'unknown'
 }
 
