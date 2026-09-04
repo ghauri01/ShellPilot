@@ -204,6 +204,20 @@ export interface JobTargetPatch {
   detached?: JobDetachedHandle | null
 }
 
+/**
+ * One host's part in one job — roadmap item 28.
+ *
+ * Two rows rather than a flattened one, because `job` and `job_target` both
+ * have a `state`, a `started_at` and an `ended_at`, and every one of those
+ * pairs means something different. A flattened row would need six aliases and
+ * the first reader to get one wrong would be reading the JOB's outcome and
+ * calling it the host's.
+ */
+export interface JobHostRun {
+  job: JobRecord
+  host: JobHostResult
+}
+
 export interface JobRetentionResult {
   /** job_output rows dropped for being past the output horizon. */
   outputDropped: number
@@ -277,6 +291,23 @@ export interface HistoryStore {
   readJob(jobId: string): JobDetail | null
   /** Stored output for one host, in seq order. */
   readJobOutput(jobId: string, serverId: string): JobOutputLine[]
+  /**
+   * Every job that touched ONE host inside a time range, newest first, with
+   * that host's own row beside it — roadmap item 28.
+   *
+   * A NAMED statement, not a filter surface. It takes a host, two bounds and a
+   * cap, and there is deliberately no way to say which kind of job, which state
+   * or which order: the store's rule is that no SQL crosses this boundary, and
+   * "let the caller narrow it" is the first step of the query surface that rule
+   * exists to refuse.
+   *
+   * The bounds are on `job.created_at`, which is when the job was MINTED. A job
+   * created before the range and still running inside it is therefore not
+   * returned, and that is the honest reading for what item 28 asks: "what did
+   * we run in response to this alert" is about work that STARTED after the
+   * alert, and a job already running when it fired was not a response to it.
+   */
+  jobsForHost(serverId: string, from: number, to: number, limit?: number): JobHostRun[]
   /** Jobs whose rows still say they were running or queued. Read once at
    *  startup: on the attached path every one of them is over and does not know
    *  it. */
@@ -618,6 +649,13 @@ CREATE TABLE IF NOT EXISTS job_target (
   detached TEXT,
   PRIMARY KEY (job_id, server_id)
 ) WITHOUT ROWID;
+-- Item 28's read: which jobs touched ONE host. The primary key leads with
+-- job_id, so without this "every job that ran on web-2" is a full scan of a
+-- year of targets on every host — which is the read a runbook does on every
+-- open, once per alert kind. A WITHOUT ROWID table's index entries carry the
+-- primary key rather than a rowid, so this costs the two ids and buys the
+-- scan back.
+CREATE INDEX IF NOT EXISTS job_target_server ON job_target (server_id);
 
 -- The output itself, in arrival order per host. seq is the runner's own
 -- counter, so two chunks in the same millisecond keep their order — the same
@@ -644,7 +682,11 @@ CREATE TABLE IF NOT EXISTS job_output (
 // that CANNOT be expressed as an idempotent ALTER will need in order to know
 // which shape it is starting from, and a version that only moves when someone
 // remembers is a version nobody can trust.
-const SCHEMA_VERSION = '4'
+// 5 adds job_target_server, the index item 28's per-host job read needs. Like
+// every table above it, it is an idempotent CREATE ... IF NOT EXISTS, so an
+// existing store gains it at the next open and keeps every row it had. The
+// number is bumped anyway, for the reason 2, 3 and 4 were.
+const SCHEMA_VERSION = '5'
 
 /**
  * The first change that CANNOT be expressed as `CREATE TABLE IF NOT EXISTS`,
@@ -1247,6 +1289,16 @@ function buildStore(
     ),
     jobTargetRead: db.prepare('SELECT * FROM job_target WHERE job_id = ? ORDER BY ord'),
     jobTargetOne: db.prepare('SELECT * FROM job_target WHERE job_id = ? AND server_id = ?'),
+    // Item 28. Ids only: the job row and the host row are then read back
+    // through jobRead and jobTargetOne, which already map to JobRecord and
+    // JobHostResult. Selecting `j.*, t.*` in one go would collide on state,
+    // started_at and ended_at and need six aliases plus a second mapper, for a
+    // read bounded at fifty rows.
+    jobIdsForHost: db.prepare(
+      'SELECT t.job_id AS job_id FROM job_target t JOIN job j ON j.id = t.job_id ' +
+        'WHERE t.server_id = ?1 AND j.created_at >= ?2 AND j.created_at <= ?3 ' +
+        'ORDER BY j.created_at DESC, j.id DESC LIMIT ?4'
+    ),
     jobOutputInsert: db.prepare(
       'INSERT INTO job_output (job_id, server_id, seq, at, stream, text) VALUES (?, ?, ?, ?, ?, ?) ' +
         'ON CONFLICT(job_id, server_id, seq) DO UPDATE SET at = excluded.at, ' +
@@ -1802,6 +1854,23 @@ function buildStore(
         stream: String(r.stream) === 'err' ? ('err' as const) : ('out' as const),
         text: String(r.text)
       }))
+    },
+
+    jobsForHost(serverId, from, to, limit) {
+      if (closed) return []
+      if (typeof serverId !== 'string' || serverId === '') return []
+      const n = Math.max(1, Math.min(200, limit ?? 50))
+      const out: JobHostRun[] = []
+      for (const row of st.jobIdsForHost.all(serverId, from, to, n) as SqliteRow[]) {
+        const id = String(row.job_id)
+        const job = st.jobRead.get(id) as SqliteRow | undefined
+        const host = st.jobTargetOne.get(id, serverId) as SqliteRow | undefined
+        // Both or neither. A job row without its target row is a half-deleted
+        // retention pass caught mid-sweep, and half of a run is not a run.
+        if (job === undefined || host === undefined) continue
+        out.push({ job: toJobRecord(job), host: toJobTarget(host) })
+      }
+      return out
     },
 
     unfinishedJobs() {

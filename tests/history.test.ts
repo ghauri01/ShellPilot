@@ -1154,3 +1154,104 @@ describe('historyBytes', () => {
     expect(historyBytes(s.path)).toBeGreaterThanOrEqual(statSync(s.path).size + bak)
   })
 })
+
+// ===========================================================================
+// Which jobs touched one host — roadmap item 28
+// ===========================================================================
+//
+// A runbook's second half is "what was actually run the last three times this
+// fired", and the only way to answer it is to ask which jobs ran against one
+// host in a window. That is a NAMED read: a host, two bounds and a cap, with
+// no way for a caller to say which kind, which state or which order.
+
+describe('jobsForHost', () => {
+  const AT = new Date('2026-02-01T00:00:00Z').getTime()
+
+  function seed(s: HistoryStore, id: string, at: number, commands: string[], hosts: string[]): void {
+    s.createJob({
+      id,
+      createdAt: at,
+      workspaceId: null,
+      title: `job ${id}`,
+      kind: 'command',
+      spec: { kind: 'command', title: `job ${id}`, steps: commands.map((command) => ({ command })) },
+      risk: 'routine',
+      confirmation: { kind: 'none' },
+      confirmedAt: null,
+      approval: null,
+      state: 'done',
+      targets: hosts.map((h, i) => ({ serverId: h, serverName: h.toUpperCase(), ord: i, state: 'done' as const }))
+    })
+  }
+
+  it('returns the job together with this host own target row, not another host row', async () => {
+    const s = await open()
+    seed(s, 'j1', AT, ['journalctl --vacuum-time=2d'], ['a', 'b'])
+    s.updateJobTarget('j1', 'a', { outcome: 'ok', exitCode: 0 })
+    s.updateJobTarget('j1', 'b', { outcome: 'failed', exitCode: 1, error: 'no space left on device' })
+
+    const forA = s.jobsForHost('a', AT - 1000, AT + 1000)
+    expect(forA.length).toBe(1)
+    expect(forA[0].job.id).toBe('j1')
+    expect(forA[0].job.spec.steps[0].command).toBe('journalctl --vacuum-time=2d')
+    expect(forA[0].host.serverId).toBe('a')
+    expect(forA[0].host.outcome).toBe('ok')
+    expect(forA[0].host.exitCode).toBe(0)
+
+    const forB = s.jobsForHost('b', AT - 1000, AT + 1000)
+    expect(forB[0].host.outcome).toBe('failed')
+    expect(forB[0].host.error).toBe('no space left on device')
+  })
+
+  it('honours both bounds, inclusively', async () => {
+    const s = await open()
+    seed(s, 'before', AT - 1, ['a'], ['h'])
+    seed(s, 'lower', AT, ['b'], ['h'])
+    seed(s, 'upper', AT + 100, ['c'], ['h'])
+    seed(s, 'after', AT + 101, ['d'], ['h'])
+    expect(s.jobsForHost('h', AT, AT + 100).map((r) => r.job.id)).toEqual(['upper', 'lower'])
+  })
+
+  it('returns nothing for a host that ran nothing, and for no host at all', async () => {
+    const s = await open()
+    seed(s, 'j1', AT, ['a'], ['h'])
+    expect(s.jobsForHost('other', AT - 1000, AT + 1000)).toEqual([])
+    expect(s.jobsForHost('', AT - 1000, AT + 1000)).toEqual([])
+  })
+
+  it('is newest first and capped', async () => {
+    const s = await open()
+    for (let i = 0; i < 5; i++) seed(s, `j${i}`, AT + i * 1000, [`step-${i}`], ['h'])
+    expect(s.jobsForHost('h', AT - 1000, AT + 100_000).map((r) => r.job.id)).toEqual([
+      'j4',
+      'j3',
+      'j2',
+      'j1',
+      'j0'
+    ])
+    expect(s.jobsForHost('h', AT - 1000, AT + 100_000, 2).map((r) => r.job.id)).toEqual(['j4', 'j3'])
+  })
+
+  it('reads the host index rather than scanning a year of targets', async () => {
+    // The read a runbook does on every open. job_target's primary key leads
+    // with job_id, so without job_target_server this is a full scan of every
+    // target row on every host.
+    const s = await open()
+    seed(s, 'j1', AT, ['a'], ['h'])
+    const db = new (await import('node:sqlite')).DatabaseSync(s.path, { readOnly: true })
+    const plan = (
+      db
+        .prepare(
+          'EXPLAIN QUERY PLAN SELECT t.job_id AS job_id FROM job_target t JOIN job j ON j.id = t.job_id ' +
+            'WHERE t.server_id = ?1 AND j.created_at >= ?2 AND j.created_at <= ?3 ' +
+            'ORDER BY j.created_at DESC, j.id DESC LIMIT ?4'
+        )
+        .all() as { detail?: unknown }[]
+    )
+      .map((r) => String(r.detail))
+      .join(' | ')
+    db.close()
+    expect(plan).toContain('job_target_server')
+    expect(plan).not.toContain('SCAN t')
+  })
+})
