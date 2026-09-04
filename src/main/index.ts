@@ -72,6 +72,8 @@ import { AccessCommitter, AccessReader } from './services/access'
 import { PostureReader } from './services/posture'
 import { DriftReader } from './services/drift'
 import { readChangeLog } from './services/changelog'
+import { readRunbook, saveRunbookNote } from './services/runbooks'
+import { isRunbookKind, type RunbookNote, type RunbookView } from '../shared/runbooks'
 import type { ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
 import type {
   AccessChangePreview,
@@ -2355,6 +2357,45 @@ ipcMain.handle('changelog:read', (_e, filter: unknown): ChangeLogPage => {
     f
   )
 })
+
+// ---- Runbooks attached to alerts — roadmap item 28 ----
+//
+// Two handlers. `runbook:read` merges the note a person wrote with what was
+// actually run the last three times this alert fired on this host;
+// `runbook:save-note` writes the note.
+//
+// THERE IS NO THIRD HANDLER, and its absence is the feature. A
+// `runbook:run-remembered` would be a one-click repeat of what we did during a
+// different incident, with the approval reduced to a formality over command
+// text somebody else's outage produced. Showing the commands is the whole
+// item; running one is a job, planned and approved the ordinary way. The
+// refusal is written down in src/shared/runbooks.ts and asserted in
+// tests/runbooks.test.ts, in the shape docker.ts writes its refusal to ship
+// `prune`.
+//
+// The store is passed in rather than read inside, exactly as `changelog:read`
+// passes it: a runbook whose history half could not be read must come back
+// SAYING so, and a handler that returned an empty list for a closed store
+// would be indistinguishable from an incident nobody ran anything for.
+ipcMain.handle('runbook:read', (_e, kind: unknown, hostId: unknown): RunbookView | null => {
+  // Not one of the ten alert kinds is not a runbook. Narrowed here rather than
+  // trusted, for the reason sanitiseStoredAlert narrows a row on the way out:
+  // the renderer is the only caller today and that is not a guarantee.
+  if (!isRunbookKind(kind)) return null
+  const host = typeof hostId === 'string' && hostId !== '' ? hostId : null
+  return readRunbook({ history: () => historyStore }, kind, host)
+})
+
+ipcMain.handle(
+  'runbook:save-note',
+  (_e, kind: unknown, hostId: unknown, text: unknown): { ok: boolean; note: RunbookNote | null } => {
+    if (!isRunbookKind(kind)) return { ok: false, note: null }
+    const host = typeof hostId === 'string' && hostId !== '' ? hostId : null
+    // The text is sanitised and capped inside saveRunbookNote, which is also
+    // where an empty note is a REMOVAL rather than a stored blank.
+    return saveRunbookNote({ history: () => historyStore }, kind, host, text)
+  }
+)
 
 ipcMain.handle('fleet:sample-now', async () => {
   await fleetSampler.sampleNow()

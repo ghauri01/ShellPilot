@@ -1665,11 +1665,9 @@ export const RUNBOOK_BRIDGE_MISSING =
  * Reached through a cast, and this is the ONE place in the renderer that does
  * it. `ShellPilotApi` is `typeof api` in src/preload/index.ts, and that file is
  * not this change's to edit — the hunk that adds the `runbooks` namespace to it
- * is written out as a patch instead (main-index-runbooks.patch). The moment it
- * lands, `ShellPilotApi` carries the namespace, this body becomes
- * `window.shellpilot?.runbooks`, and the cast is deleted. A function rather
- * than an inline cast at each call site so that deletion is one line rather
- * than a search.
+ * was written out as a patch instead; that patch has landed, so `ShellPilotApi`
+ * carries the namespace and the cast is gone. Kept as a function rather than an
+ * inline access at each call site because the `Partial` below is the point.
  *
  * `Partial` because the two halves ship together in a packaged build but not
  * under `electron-vite dev`, where the renderer hot-reloads against the preload
@@ -1677,8 +1675,7 @@ export const RUNBOOK_BRIDGE_MISSING =
  * a missing METHOD is a real state and not a theoretical one.
  */
 function runbooksBridge(): Partial<RunbooksBridge> | undefined {
-  return (window.shellpilot as unknown as { runbooks?: Partial<RunbooksBridge> } | undefined)
-    ?.runbooks
+  return window.shellpilot?.runbooks
 }
 
 /** The runbook for one alert kind on one host, or `null` when the bridge could

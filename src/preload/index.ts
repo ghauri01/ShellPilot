@@ -35,6 +35,8 @@ import type { CapacityBridge, CapacityReport } from '../shared/capacity'
 import type { HostDrift } from '../shared/drift'
 import type { RuleDraftWire, RuleView, RulesBridge } from '../shared/rules'
 import type { ChangeLogBridge, ChangeLogFilter, ChangeLogPage } from '../shared/changelog'
+import type { RunbookNote, RunbookView, RunbooksBridge } from '../shared/runbooks'
+import type { StoreAlertKind } from '../shared/webhook'
 import type {
   DockerAction,
   DockerActionResult,
@@ -405,6 +407,26 @@ const api = {
     read: (filter?: ChangeLogFilter): Promise<ChangeLogPage> =>
       ipcRenderer.invoke('changelog:read', filter)
   } satisfies ChangeLogBridge,
+  // Roadmap item 28. Two channels, and the third one people ask for is the
+  // point of the item: there is no `run`, because a button that repeats what
+  // we did last time is how an outage gets repeated deliberately. The commands
+  // this returns were the right answer to a DIFFERENT incident; running one is
+  // a job, with a plan and an approval, started the ordinary way.
+  //
+  // `read` takes a kind and a host and nothing else — no filter, no range, no
+  // ordering — for the reason `alerts` and `capacity` above take none: the
+  // history store's rule is named statements only, and "let the caller narrow
+  // it" is the first step of the query surface that rule exists to refuse.
+  runbooks: {
+    read: (kind: StoreAlertKind, hostId: string | null): Promise<RunbookView> =>
+      ipcRenderer.invoke('runbook:read', kind, hostId),
+    saveNote: (
+      kind: StoreAlertKind,
+      hostId: string | null,
+      text: string
+    ): Promise<{ ok: boolean; note: RunbookNote | null }> =>
+      ipcRenderer.invoke('runbook:save-note', kind, hostId, text)
+  } satisfies RunbooksBridge,
   k8s: {
     read: (cfg: unknown, context?: string, namespace?: string): Promise<K8sProbe> =>
       ipcRenderer.invoke('k8s:read', cfg, context, namespace),
