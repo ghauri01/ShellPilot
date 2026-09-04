@@ -251,9 +251,11 @@ describe('writing a job rule', () => {
       'disk',
       'inode',
       'load',
+      'cert-expiry',
       'host-unreachable',
       'job-failed',
       'tunnel-down',
+      'oom-kill',
       'db-alarm',
       'db-watch'
     ])

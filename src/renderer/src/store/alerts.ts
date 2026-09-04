@@ -2,6 +2,11 @@ import { create } from 'zustand'
 import { useApp } from './app'
 import { onServerForgotten } from './serverCleanup'
 import { DISK_DANGER, isDiskCritical } from '../components/monitor/hostHealth'
+// The certificate line and its comparison, taken from the module that owns the
+// reading rather than restated here — the discipline `isDiskCritical` set. An
+// alert firing at a different number from the panel it sends you to is worse
+// than no alert.
+import { CERT_EXPIRY_DAYS, isCertificateExpiringSoon } from '../../../shared/posture'
 import { EVENT_ALERT_KINDS } from '../../../shared/webhook'
 import type { RunbookNote, RunbookView, RunbooksBridge } from '../../../shared/runbooks'
 import type {
@@ -67,8 +72,12 @@ const key = (serverId: string, kind: AlertKind): string => `${serverId}:${kind}`
  *  measurement — so they read as their label alone. */
 export function chipValue(a: ActiveAlert): string {
   if (a.value === null) return ''
-  const n = Number.isInteger(a.value) ? String(a.value) : a.value.toFixed(1)
-  return ` ${n}${UNIT[a.kind as NumericAlertKind] ?? ''}`
+  const phrase = VALUE_CHIP[a.kind as NumericAlertKind]
+  // The `?? ''` guard is kept for the same reason it was here before: `kind` is
+  // the whole union and a state kind reaching this with a value would otherwise
+  // read `undefined`. It cannot happen — a state chip carries a null value —
+  // and the chip is not the place to find out that it did.
+  return phrase === undefined ? '' : ` ${phrase(a.value)}`
 }
 
 export const useAlerts = create<AlertState>((set, get) => ({
@@ -98,7 +107,13 @@ const REPEAT: Record<NumericAlertKind, number> = {
   // grow its own inode table back, so the six-hour argument transfers whole.
   inode: 6 * 60 * 60 * 1000,
   // Load moves like CPU because it largely IS CPU, plus uninterruptible I/O.
-  load: 60_000
+  load: 60_000,
+  // A day. A certificate does not renew itself, so this is disk's argument
+  // taken further: six hours over a thirty-day window is 120 notifications
+  // about one certificate nobody can renew faster by being told again. Daily
+  // is "you will hear about this every morning until it is fixed", and
+  // escalation covers the fortnight where a day is too long to wait.
+  'cert-expiry': 24 * 60 * 60 * 1000
 }
 
 // How far below the threshold a value must fall before a later crossing counts
@@ -122,7 +137,13 @@ const RECOVER_MARGIN: Record<NumericAlertKind, number> = {
   ram: 5,
   disk: 5,
   inode: 5,
-  load: 0.5
+  load: 0.5,
+  // Five DAYS, and above the line rather than below it — see LOWER_IS_WORSE.
+  // A renewal takes a certificate from three days remaining to eighty-nine, so
+  // this can never be the thing that decides anything; it exists so a
+  // certificate cannot sit exactly on thirty and earn a fresh raise every
+  // sweep, which is the only way this kind could oscillate at all.
+  'cert-expiry': 5
 }
 
 // A rise of this much since the last thing we said re-opens the repeat window.
@@ -134,7 +155,11 @@ const ESCALATE_BY: Record<NumericAlertKind, number> = {
   inode: 5,
   // A whole extra runnable thread per core, which on a load average is the
   // same size of step five points is on a percentage.
-  load: 1
+  load: 1,
+  // A WEEK closer than the figure last announced. 30 → 21 → 14 → 7 → 0 is
+  // monotone movement towards an outage, and it is the one shape a flap never
+  // has, so each of those steps speaks even under a damp or a snooze.
+  'cert-expiry': 7
 }
 
 // The floor under every reason to speak, per kind. Nothing may notify faster
@@ -157,12 +182,60 @@ const MIN_GAP: Record<NumericAlertKind, number> = {
   // bypasses are the feature for a condition that does not fix itself, and an
   // inode table does not empty itself either.
   inode: 0,
-  load: 60_000
+  load: 60_000,
+  // Zero for the same reason disk and inodes are zero: the re-raise and
+  // escalation bypasses ARE the feature for a condition that does not fix
+  // itself, and a certificate cannot flap in a sample — the probe behind it
+  // runs hourly and the number moves by one a day.
+  'cert-expiry': 0
 }
 
-/** Below this, a value counts as recovered rather than merely lower. */
+// ---------------------------------------------------------------------------
+// Which way is worse.
+//
+// Every numeric kind until now measured something where a BIGGER number is a
+// worse one, and three pieces of arithmetic in evaluate() quietly assumed it:
+// the recovery line is below the threshold, escalation is a rise, and a value
+// under the clear line is a recovery. `cert-expiry` is days remaining, so all
+// three run the other way.
+//
+// A Record rather than a comparison passed in at each call site, so adding a
+// kind is a type error here instead of a certificate that alerts when it is
+// renewed. The three helpers below are the only places the direction is read:
+// having it in one table and three functions is what stops the recovery line
+// and the escalation step from disagreeing about which way is up.
+// ---------------------------------------------------------------------------
+const LOWER_IS_WORSE: Record<NumericAlertKind, boolean> = {
+  cpu: false,
+  ram: false,
+  disk: false,
+  inode: false,
+  load: false,
+  'cert-expiry': true
+}
+
+/** Whether `value` is at least as bad as `worse` allowing for the direction. */
+const escalated = (kind: NumericAlertKind, value: number, said: number): boolean =>
+  LOWER_IS_WORSE[kind] ? value <= said - ESCALATE_BY[kind] : value >= said + ESCALATE_BY[kind]
+
+/** Whether the value has come back far enough past the line to count as a real
+ *  recovery rather than merely stepping off it. */
+const isRecovered = (kind: NumericAlertKind, value: number, clearAt: number): boolean =>
+  LOWER_IS_WORSE[kind] ? value > clearAt : value < clearAt
+
+/**
+ * Past this, a value counts as recovered rather than merely off the line.
+ *
+ * On the far side of the threshold from the bad direction, which for every
+ * kind but `cert-expiry` means below it. The `Math.max(0, …)` guard belongs to
+ * the percentages: a threshold of 50 less a margin of 5 is 45, and no
+ * percentage is below zero. Days remaining go negative perfectly happily — an
+ * expired certificate is the whole point — so the inverted branch has no floor.
+ */
 const clearLine = (kind: NumericAlertKind, threshold: number): number =>
-  Math.max(0, threshold - RECOVER_MARGIN[kind])
+  LOWER_IS_WORSE[kind]
+    ? threshold + RECOVER_MARGIN[kind]
+    : Math.max(0, threshold - RECOVER_MARGIN[kind])
 
 // Last notification time per server+metric, so a sustained problem repeats on
 // its kind's window instead of on every 2s sample.
@@ -673,7 +746,9 @@ export const LABEL: Record<AlertKind, string> = {
   'job-failed': 'Job failed',
   'tunnel-down': 'Tunnel down',
   'db-alarm': 'Database alarm',
-  'db-watch': 'Database watch'
+  'db-watch': 'Database watch',
+  'oom-kill': 'OOM kill',
+  'cert-expiry': 'Certificate'
 }
 
 // What the number is measuring, for the sentences a person reads. Disk says
@@ -687,7 +762,11 @@ const SUBJECT: Record<NumericAlertKind, string> = {
   // Same probe, same caveat: `df -iP /` and nothing else, so a host that has
   // exhausted the inodes on /var and has room on / raises nothing here.
   inode: 'Root filesystem inodes',
-  load: 'Load average'
+  load: 'Load average',
+  // "on this host" and it means it: the probe reads a bounded set of named
+  // directories, so a certificate somewhere else on the box raises nothing
+  // here — the same caveat disk states about `df -kP /`.
+  'cert-expiry': 'The soonest certificate on this host'
 }
 
 // How each kind's line reads in a sentence, because the kinds do not compare
@@ -699,14 +778,20 @@ const OVER_WORD: Record<NumericAlertKind, string> = {
   ram: 'at or above',
   disk: 'above',
   inode: 'above',
-  load: 'at or above'
+  load: 'at or above',
+  // At or below, matching isCertificateExpiringSoon: a certificate ON thirty
+  // days is inside the window certbot would already have renewed in.
+  'cert-expiry': 'at or below'
 }
 const backBelow: Record<NumericAlertKind, (threshold: number) => string> = {
   cpu: (t) => `back below ${t}%`,
   ram: (t) => `back below ${t}%`,
   disk: (t) => `back to ${t}% or below`,
   inode: (t) => `back to ${t}% or below`,
-  load: (t) => `back below ${t} per core`
+  load: (t) => `back below ${t} per core`,
+  // Which is what a renewal looks like from here, and the only thing that
+  // produces it: nothing else moves this number upwards.
+  'cert-expiry': (t) => `renewed and back above ${t} days`
 }
 
 // The unit each kind's number is in. Not everything alerting measures is a
@@ -717,7 +802,8 @@ export const UNIT: Record<NumericAlertKind, string> = {
   ram: '%',
   disk: '%',
   inode: '%',
-  load: ' per core'
+  load: ' per core',
+  'cert-expiry': ' days'
 }
 
 // One decimal at most, trailing zero dropped. Rounding to whole points made a
@@ -725,6 +811,47 @@ export const UNIT: Record<NumericAlertKind, string> = {
 // at the endpoint from exactly 85, which does not fire at all. Whole numbers
 // still print as whole numbers, so nothing that was "91%" becomes "91.0%".
 const fmt = (v: number): number => Number(v.toFixed(1))
+
+// ---------------------------------------------------------------------------
+// How a value READS, which for one kind is not its number and its unit.
+//
+// Both tables exist for `cert-expiry` and neither changes a character of what
+// the other five kinds have always said. Days remaining goes NEGATIVE, and "at
+// -3 days" is not a sentence anybody should have to decode at three in the
+// morning: a certificate that has already expired is an outage in progress and
+// one expiring in three days is not, so the two have to READ differently
+// everywhere the number is spoken — the item asks for exactly that.
+//
+// They are two tables rather than one because the chip and the sentence want
+// different things, and folding them cost the five existing kinds the word
+// "at" in their webhook summary the first time this was written. The chip is a
+// status-bar button with no room for a preposition; the summary is prose.
+//
+// Records, so a kind added without an answer is a type error rather than a
+// chip reading `undefined`.
+// ---------------------------------------------------------------------------
+
+/** The value alone, for the status-bar chip. */
+const VALUE_CHIP: Record<NumericAlertKind, (v: number) => string> = {
+  cpu: (v) => `${fmt(v)}%`,
+  ram: (v) => `${fmt(v)}%`,
+  disk: (v) => `${fmt(v)}%`,
+  inode: (v) => `${fmt(v)}%`,
+  load: (v) => `${fmt(v)} per core`,
+  'cert-expiry': (v) => (v < 0 ? `${fmt(-v)}d overdue` : `${fmt(v)}d left`)
+}
+
+/** The value in a sentence, preposition and all. The five percentages and the
+ *  load average keep the "at" they have always had. */
+const VALUE_PHRASE: Record<NumericAlertKind, (v: number) => string> = {
+  cpu: (v) => `at ${fmt(v)}%`,
+  ram: (v) => `at ${fmt(v)}%`,
+  disk: (v) => `at ${fmt(v)}%`,
+  inode: (v) => `at ${fmt(v)}%`,
+  load: (v) => `at ${fmt(v)} per core`,
+  'cert-expiry': (v) =>
+    v < 0 ? `${fmt(-v)} days PAST expiry` : v === 0 ? 'expiring today' : `${fmt(v)} days from expiry`
+}
 
 // The wire name for each kind. A Record rather than a ternary, so adding a kind
 // is a type error here instead of a metric quietly posting as 'memory'.
@@ -738,7 +865,9 @@ const WEBHOOK_KIND: Record<StoreAlertKind, WebhookAlertKind> = {
   'job-failed': 'job-failed',
   'tunnel-down': 'tunnel-down',
   'db-alarm': 'db-alarm',
-  'db-watch': 'db-watch'
+  'db-watch': 'db-watch',
+  'oom-kill': 'oom-kill',
+  'cert-expiry': 'cert-expiry'
 }
 
 function evaluate(
@@ -832,7 +961,7 @@ function evaluate(
     // meaningfully below the line — not merely off it. That is the whole flap
     // defence for a disk oscillating 82/86: the chip follows each crossing,
     // the talking does not.
-    if (value < clearAt) lastNotifiedValue.delete(k)
+    if (isRecovered(kind, value, clearAt)) lastNotifiedValue.delete(k)
 
     // `lastNotified` is NOT cleared. Deleting it here let the next crossing
     // notify immediately, which is the other half of the flapping problem:
@@ -911,7 +1040,7 @@ function evaluate(
   const last = lastNotified.get(k) ?? 0
   const said = lastNotifiedValue.get(k)
   const reRaised = said === undefined
-  const worsened = said !== undefined && value >= said + ESCALATE_BY[kind]
+  const worsened = said !== undefined && escalated(kind, value, said)
   const due = now - last >= REPEAT[kind]
   if (!reRaised && !worsened && !due) return
   if (now - last < MIN_GAP[kind]) return
@@ -939,7 +1068,7 @@ function evaluate(
       `The Alerts tab still lists every crossing.`
     : ''
   void window.shellpilot?.notify.show(
-    `${serverName}: ${LABEL[kind]} at ${fmt(value)}${UNIT[kind]}`,
+    `${serverName}: ${LABEL[kind]} ${VALUE_PHRASE[kind](value)}`,
     `${SUBJECT[kind]} has been ${OVER_WORD[kind]} ${threshold}${UNIT[kind]}${forHow}.${quiet}`
   )
   // Same repeat window as the desktop notification, so the endpoint sees the
@@ -951,7 +1080,7 @@ function evaluate(
     kind: WEBHOOK_KIND[kind],
     server: serverName,
     summary:
-      `${serverName}: ${SUBJECT[kind]} at ${fmt(value)}${UNIT[kind]} ` +
+      `${serverName}: ${SUBJECT[kind]} ${VALUE_PHRASE[kind](value)} ` +
       `(threshold ${threshold}${UNIT[kind]})`,
     at: new Date(now).toISOString(),
     value: fmt(value),
@@ -997,6 +1126,16 @@ const STATE_WORDS: Record<
   'tunnel-down': {
     raised: (name) => `Tunnel ${name} is in error`,
     resolved: (name) => `Tunnel ${name} is carrying traffic again`
+  },
+  // The resolve is a REAL observation and not an assumption, which is what
+  // earns this a place among the states rather than among the events: the
+  // journal is asked for a fixed window, and a day after the last kill it
+  // answers zero. The wording says the window rather than "is fine", because
+  // the window is the whole of what was established.
+  'oom-kill': {
+    raised: (name, detail) =>
+      `${name} has killed a process for memory${detail ? ` (${detail})` : ''}`,
+    resolved: (name) => `${name} has recorded no further OOM kill for a day`
   }
 }
 
@@ -1610,6 +1749,51 @@ export function checkResourceAlerts(serverId: string, serverName: string, s: Res
   if (s.load !== null) {
     evaluate(serverId, serverName, 'load', s.load, LOAD_DANGER, now, s.load >= LOAD_DANGER)
   }
+}
+
+
+/**
+ * The certificate line for one host — roadmap item 19b's second deferred kind.
+ *
+ * `days` is the SOONEST expiry across every certificate on the host that
+ * parsed, and `null` is the whole reason this takes a separate entry point
+ * rather than a field on ResourceSample: it covers three different hosts, and
+ * all three must be silent rather than healthy.
+ *
+ *   * A certificate directory that refused to be entered. /etc/letsencrypt is
+ *     0700 root on Debian, so this is the common case and not an edge one.
+ *   * Certificates that were found and could not be parsed.
+ *   * A host that genuinely has none in the bounded set of roots the probe
+ *     looks in.
+ *
+ * A null neither raises nor resolves nor reads as healthy — 19a's rule, and
+ * here it protects against the worst version of getting it wrong: turning "no
+ * certificates" into a large number would report an entire estate as clean on
+ * this axis, forever, with nothing on any screen to say otherwise.
+ *
+ * `postureAlertReadings` in src/shared/posture.ts decides what this is given,
+ * so the panel and the alert can never disagree about which certificate is the
+ * worst one or about whether a refused directory counts.
+ */
+export function checkCertificateAlert(
+  serverId: string,
+  serverName: string,
+  days: number | null
+): void {
+  if (!useApp.getState().settings.resourceAlertsEnabled) return
+  if (days === null) return
+  // The threshold and the comparison both come from the module that owns the
+  // reading. An alert firing at a different number from the panel it sends you
+  // to is worse than no alert — the trap `isDiskCritical` was written to close.
+  evaluate(
+    serverId,
+    serverName,
+    'cert-expiry',
+    days,
+    CERT_EXPIRY_DAYS,
+    Date.now(),
+    isCertificateExpiringSoon(days)
+  )
 }
 
 /**

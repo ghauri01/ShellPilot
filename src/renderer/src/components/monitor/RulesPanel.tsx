@@ -55,7 +55,9 @@ const KIND_LABEL: Record<RuleAlertKind, string> = {
   'job-failed': 'Job failed',
   'tunnel-down': 'Tunnel down',
   'db-alarm': 'Database alarm',
-  'db-watch': 'Database watch'
+  'db-watch': 'Database watch',
+  'oom-kill': 'OOM kill',
+  'cert-expiry': 'Certificate expiry'
 }
 
 const WINDOWS: { ms: number; label: string }[] = [

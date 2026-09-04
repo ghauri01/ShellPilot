@@ -262,9 +262,11 @@ describe('the row is rebuilt from a whitelist', () => {
       'disk',
       'inode',
       'load',
+      'cert-expiry',
       'host-unreachable',
       'job-failed',
       'tunnel-down',
+      'oom-kill',
       'db-alarm',
       'db-watch'
     ])
