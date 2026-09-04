@@ -30,16 +30,42 @@
  *     not another (SHOW REPLICA STATUS, binlog_expire_logs_seconds,
  *     pg_stat_statements' column names) the fallback is tried and its success
  *     is normal. Only both spellings failing is a finding.
+ *
+ *  4. **A fallback that sees less says so.** Two of them here answer a
+ *     narrower question than the one that was asked — MySQL's
+ *     `information_schema.PROCESSLIST` without the PROCESS privilege, and
+ *     MongoDB's `$currentOp` with `allUsers: false`. Both are taken, because half
+ *     an answer beats none, and both mark the answer `partial`. Neither is
+ *     allowed to render as the whole truth.
+ *
+ * For MongoDB and Redis the same three rules hold with different mechanics.
+ * There is no session to configure, so rule 1b costs nothing and the transient
+ * connection is kept anyway: a MongoClient opened here is also an SSH forward
+ * opened here, and it has to be closed. The statement bound is `maxTimeMS` on
+ * every Mongo command; Redis has no server-side equivalent at all, and the
+ * comment on redisCall says so rather than implying one.
  */
 
 import type { DbConnectConfig } from '../../shared/db'
 import {
   DB_QUESTION_LABEL,
+  MONGO_COMMANDS,
   MYSQL_QUERIES,
   PG_MIN_VERSION_NUM,
   PG_QUERIES,
+  REDIS_COMMANDS,
+  classifyMongoFailure,
   classifyMysqlFailure,
   classifyPgFailure,
+  classifyRedisFailure,
+  infoBool,
+  judgeMongoAsserts,
+  judgeMongoConnections,
+  judgeMongoCurrentOp,
+  judgeMongoIndexes,
+  judgeMongoOplog,
+  judgeMongoReplication,
+  judgeMongoSizes,
   judgeMysqlBinlogs,
   judgeMysqlBufferPool,
   judgeMysqlConnections,
@@ -54,9 +80,29 @@ import {
   judgePgSizes,
   judgePgStatements,
   judgePgVacuum,
+  judgeRedisClients,
+  judgeRedisCluster,
+  judgeRedisKeyspace,
+  judgeRedisMemory,
+  judgeRedisPersistence,
+  judgeRedisReplication,
+  judgeRedisSlowlog,
+  judgeRedisStats,
   mariadbMaxStatementTime,
+  mergeRedisInfo,
+  mongoCollStatsCommand,
+  mongoCurrentOpCommand,
+  mongoIndexStatsCommand,
   mysqlMaxExecutionTime,
   num,
+  parseMongoAsserts,
+  parseMongoConnections,
+  parseMongoCurrentOp,
+  parseMongoIndexes,
+  parseMongoOplog,
+  parseMongoOverview,
+  parseMongoReplication,
+  parseMongoSizes,
   parseMysqlBinlogs,
   parseMysqlBufferPool,
   parseMysqlConnections,
@@ -74,7 +120,19 @@ import {
   parsePgStandby,
   parsePgStatements,
   parsePgVacuum,
+  parseRedisClients,
+  parseRedisCluster,
+  parseRedisConfig,
+  parseRedisInfo,
+  parseRedisKeyspace,
+  parseRedisMemory,
+  parseRedisOverview,
+  parseRedisPersistence,
+  parseRedisReplication,
+  parseRedisSlowlog,
+  parseRedisStats,
   pgStatementTimeout,
+  redisSlowlogGetCommand,
   statusMap,
   str,
   supportsDbOps,
@@ -83,10 +141,12 @@ import {
   type DbFailure,
   type DbOpsReport,
   type DbQuestionId,
+  type DbOpsEngine,
   type PgOverview,
-  type PgReplicationValue
+  type PgReplicationValue,
+  type RedisInfo
 } from '../../shared/dbOps'
-import { openTransient } from './db'
+import { mongoDbName, openTransient } from './db'
 
 type Row = Record<string, unknown>
 
@@ -506,6 +566,452 @@ async function collectMysql(client: any): Promise<DbAnswer<unknown>[]> {
 }
 
 // ---------------------------------------------------------------------------
+// MongoDB
+// ---------------------------------------------------------------------------
+
+interface MongoErr {
+  code?: number
+  codeName?: string
+  message?: string
+}
+
+function mongoFailure(err: unknown): DbFailure {
+  const e = err as MongoErr
+  return classifyMongoFailure(e?.code, e?.codeName, e?.message ?? String(err))
+}
+
+/**
+ * Send one command, bounded at both ends.
+ *
+ * `maxTimeMS` is the SERVER's bound and is the one that matters: without it a
+ * `$collStats` over a catalogue of ten thousand collections runs to completion
+ * on the server whatever the client does. It is the only field this collector
+ * adds to a command in MONGO_COMMANDS, and tests/dbOpsRegressions.test.ts
+ * asserts that.
+ *
+ * `timeoutMS` is the driver's client-side bound, so a server that has stopped
+ * answering does not hold the panel open either.
+ */
+async function mongoCommand(client: any, db: string, command: Record<string, unknown>): Promise<Row> {
+  return (await client.db(db).command({ ...command, maxTimeMS: STATEMENT_TIMEOUT_MS }, { timeoutMS: STATEMENT_TIMEOUT_MS })) as Row
+}
+
+/** The documents out of a cursor-shaped reply. */
+function firstBatch(reply: Row | undefined): Row[] {
+  const cursor = reply?.cursor as { firstBatch?: Row[] } | undefined
+  return cursor?.firstBatch ?? []
+}
+
+/**
+ * How many collections are asked about individually.
+ *
+ * Two round trips each — `$collStats` and `$indexStats` — so this is the number
+ * that decides whether the page opens in a second or in thirty. Collections
+ * beyond it are counted and named as skipped rather than silently dropped,
+ * because a `sizes` answer that quietly covers twelve of four hundred
+ * collections is the same species of lie as an unprivileged `listDatabases`.
+ */
+const COLLECTION_LIMIT = 12
+
+async function collectMongo(client: any, dbName: string): Promise<DbAnswer<unknown>[]> {
+  const answers: DbAnswer<unknown>[] = []
+  const now = Date.now()
+
+  // ---- overview. `hello` needs no privilege at all and is what tells a
+  // standalone from a replica-set member and both from a mongos, so it is the
+  // one command whose failure really does stop the page. `serverStatus` may
+  // well be denied on the same server — captured, in unauthorized.json — and
+  // that costs the version and the uptime, not the page.
+  let hello: Row | undefined
+  let serverStatus: Row | undefined
+  let serverStatusFailure: DbFailure | null = null
+  try {
+    hello = await mongoCommand(client, MONGO_COMMANDS.hello.db, MONGO_COMMANDS.hello.command)
+  } catch (err) {
+    answers.push(unanswered('overview', mongoFailure(err)))
+    return answers
+  }
+  let buildInfo: Row | undefined
+  try {
+    buildInfo = await mongoCommand(client, MONGO_COMMANDS.buildInfo.db, MONGO_COMMANDS.buildInfo.command)
+  } catch {
+    /* supplementary: serverStatus carries the version too */
+  }
+  try {
+    serverStatus = await mongoCommand(client, MONGO_COMMANDS.serverStatus.db, MONGO_COMMANDS.serverStatus.command)
+  } catch (err) {
+    serverStatusFailure = mongoFailure(err)
+  }
+
+  const overview = parseMongoOverview(hello, buildInfo, serverStatus)
+  answers.push({
+    id: 'overview',
+    status: serverStatusFailure ? serverStatusFailure.status : 'ok',
+    value: overview,
+    detail: serverStatusFailure?.detail,
+    verdict: {
+      level: overview?.isRouter ? 'unknown' : 'ok',
+      headline: overview?.isRouter
+        ? `This is a mongos router, not a mongod — MongoDB ${overview.version}.`
+        : `MongoDB ${overview?.version ?? '?'} — ${overview?.setName ? `${overview.role} of set ${overview.setName}` : (overview?.role ?? 'unknown role')}.`,
+      because: overview?.isRouter
+        ? 'Every question below is aimed at a single mongod. Against a router they answer for the router process or for whichever shard it forwarded to, which is not the same fact, so treat this page as out of scope here.'
+        : serverStatusFailure
+          ? `serverStatus was refused, so the uptime and the counters below are missing. ${serverStatusFailure.detail}`
+          : `Up ${Math.round((overview?.uptimeSeconds ?? 0) / 60)} minutes${overview?.memberCount ? `, ${overview.memberCount} members in the set` : ''}.`
+    }
+  })
+
+  // ---- replica-set health. A standalone raises code 76, which classifies as
+  // not-applicable rather than as a failure.
+  answers.push(
+    await answer('replication', async () => {
+      const status = await mongoCommand(client, MONGO_COMMANDS.replSetGetStatus.db, MONGO_COMMANDS.replSetGetStatus.command)
+      const value = parseMongoReplication(status)
+      return { value, verdict: judgeMongoReplication(value) }
+    }, mongoFailure)
+  )
+
+  // ---- the oplog window.
+  answers.push(
+    await answer('oplog', async () => {
+      // The find succeeds with an EMPTY BATCH on a server with no oplog, so
+      // the stats call is what distinguishes "no oplog" from "an oplog with
+      // nothing in it yet". Its failure is not fatal to the answer.
+      const first = firstBatch(await mongoCommand(client, MONGO_COMMANDS.oplogFirst.db, MONGO_COMMANDS.oplogFirst.command))
+      const last = firstBatch(await mongoCommand(client, MONGO_COMMANDS.oplogLast.db, MONGO_COMMANDS.oplogLast.command))
+      let stats: Row | undefined
+      try {
+        stats = firstBatch(await mongoCommand(client, MONGO_COMMANDS.oplogStats.db, MONGO_COMMANDS.oplogStats.command))[0]
+      } catch {
+        /* code 26 on a server with no oplog, which `first` already implies */
+      }
+      const value = parseMongoOplog(first, last, stats, overview?.uptimeSeconds ?? null)
+      return {
+        value,
+        verdict: judgeMongoOplog(value),
+        status: value.present ? undefined : ('not-applicable' as const)
+      }
+    }, mongoFailure)
+  )
+
+  // ---- index usage, for the database the operator is pointed at.
+  answers.push(
+    await answer('indexes', async () => {
+      const names = await collectionNames(client, dbName)
+      const per: { collection: string; rows: Row[] | null }[] = []
+      for (const name of names.used) {
+        try {
+          per.push({ collection: name, rows: firstBatch(await mongoCommand(client, dbName, mongoIndexStatsCommand(name))) })
+        } catch {
+          // A `read` role is granted $collStats and refused $indexStats on the
+          // same collection. Named as unreadable rather than reported as
+          // having no indexes.
+          per.push({ collection: name, rows: null })
+        }
+      }
+      const value = parseMongoIndexes(per, now)
+      const denied = value.unreadable.length > 0
+      return {
+        value,
+        verdict: judgeMongoIndexes(value),
+        status: denied ? (value.indexes.length === 0 ? ('denied' as const) : ('partial' as const)) : names.skipped > 0 ? ('partial' as const) : undefined
+      }
+    }, mongoFailure)
+  )
+
+  // ---- connections
+  answers.push(
+    await answer('connections', async () => {
+      if (serverStatusFailure) throw Object.assign(new Error(serverStatusFailure.detail), { code: 13, codeName: 'Unauthorized' })
+      const value = parseMongoConnections(serverStatus)
+      return { value, verdict: judgeMongoConnections(value) }
+    }, mongoFailure)
+  )
+
+  // ---- running operations
+  answers.push(
+    await answer('currentop', async () => {
+      let rows: Row[]
+      let ownOpsOnly = false
+      try {
+        rows = firstBatch(await mongoCommand(client, 'admin', mongoCurrentOpCommand(ROW_LIMIT, true)))
+      } catch (err) {
+        // Denied for other users' operations. Asking for our own is not a
+        // silent downgrade: it is labelled, because the fallback answers "1
+        // operation running" on a server running two hundred.
+        if (mongoFailure(err).status !== 'denied') throw err
+        rows = firstBatch(await mongoCommand(client, 'admin', mongoCurrentOpCommand(ROW_LIMIT, false)))
+        ownOpsOnly = true
+      }
+      const value = parseMongoCurrentOp(rows, ownOpsOnly)
+      return { value, verdict: judgeMongoCurrentOp(value), status: ownOpsOnly ? ('partial' as const) : undefined }
+    }, mongoFailure)
+  )
+
+  // ---- sizes
+  answers.push(
+    await answer('sizes', async () => {
+      const databases = await mongoCommand(client, MONGO_COMMANDS.listDatabases.db, MONGO_COMMANDS.listDatabases.command)
+      const names = await collectionNames(client, dbName)
+      const collections: { name: string; stats: Row | null }[] = []
+      for (const name of names.used) {
+        try {
+          collections.push({ name, stats: firstBatch(await mongoCommand(client, dbName, mongoCollStatsCommand(name)))[0] ?? null })
+        } catch {
+          collections.push({ name, stats: null })
+        }
+      }
+      const value = parseMongoSizes(databases, collections)
+      const verdict = judgeMongoSizes(value)
+      if (names.skipped > 0) {
+        return {
+          value,
+          status: 'partial' as const,
+          verdict: {
+            ...verdict,
+            because: `${verdict.because ?? ''} Only ${names.used.length} of ${names.used.length + names.skipped} collections in ${dbName} were measured — this page reads them one at a time and stops at ${COLLECTION_LIMIT}.`.trim()
+          }
+        }
+      }
+      return { value, verdict, status: value.databasesFiltered ? ('partial' as const) : undefined }
+    }, mongoFailure)
+  )
+
+  // ---- asserts and page faults
+  answers.push(
+    await answer('asserts', async () => {
+      if (serverStatusFailure) throw Object.assign(new Error(serverStatusFailure.detail), { code: 13, codeName: 'Unauthorized' })
+      const value = parseMongoAsserts(serverStatus)
+      return { value, verdict: judgeMongoAsserts(value) }
+    }, mongoFailure)
+  )
+
+  return answers
+}
+
+/**
+ * The collections of one database, capped.
+ *
+ * Sorted before the cap so the same twelve are read every time — an unsorted
+ * cap makes the panel report a different subset on each refresh, which reads as
+ * collections appearing and disappearing.
+ */
+async function collectionNames(client: any, dbName: string): Promise<{ used: string[]; skipped: number }> {
+  const rows = firstBatch(await mongoCommand(client, dbName, MONGO_COMMANDS.listCollections.command))
+  const names = rows
+    .map((r) => str(r.name))
+    .filter((n): n is string => n !== null && !n.startsWith('system.'))
+    .sort((a, b) => a.localeCompare(b, 'en'))
+  return { used: names.slice(0, COLLECTION_LIMIT), skipped: Math.max(0, names.length - COLLECTION_LIMIT) }
+}
+
+// ---------------------------------------------------------------------------
+// Redis
+// ---------------------------------------------------------------------------
+
+function redisFailure(err: unknown): DbFailure {
+  return classifyRedisFailure(err instanceof Error ? err.message : String(err))
+}
+
+/**
+ * Send one command, bounded on OUR side only.
+ *
+ * There is no server-side equivalent of `maxTimeMS` here, and saying so is the
+ * point: Redis runs commands one at a time and cannot be told to give up on
+ * one. What this bound buys is that the panel does not hang — the command it
+ * was waiting for carries on. That is acceptable because every command in
+ * REDIS_COMMANDS is O(1) or bounded by construction, which is the same reason
+ * `KEYS` and `SCAN` are refused up in src/shared/dbOps.ts.
+ */
+async function redisCall(client: any, argv: string[]): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      client.call(argv[0], ...argv.slice(1)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${argv.join(' ')} did not answer within ${STATEMENT_TIMEOUT_MS} ms.`)), STATEMENT_TIMEOUT_MS)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/** One INFO section, parsed, or the failure that stopped it. */
+async function redisSection(client: any, argv: string[]): Promise<{ info: RedisInfo } | { failure: DbFailure }> {
+  try {
+    const reply = await redisCall(client, argv)
+    return { info: parseRedisInfo(typeof reply === 'string' ? reply : '') }
+  } catch (err) {
+    return { failure: redisFailure(err) }
+  }
+}
+
+async function collectRedis(client: any): Promise<DbAnswer<unknown>[]> {
+  const answers: DbAnswer<unknown>[] = []
+  const now = Date.now()
+
+  // ioredis emits 'error' asynchronously as well as rejecting the call that
+  // caused it, and an 'error' event with no listener is an uncaught exception
+  // in the MAIN process. A monitoring page must not be able to take the app
+  // down because a password was rotated. Removed again below.
+  const swallow = (): void => {}
+  if (typeof client?.on === 'function') client.on('error', swallow)
+
+  try {
+    const server = await redisSection(client, REDIS_COMMANDS.infoServer)
+    if ('failure' in server) {
+      // Every section is one INFO command, so a refusal here is a refusal
+      // everywhere. Reported once as an overview that says which grant is
+      // missing, rather than as nine identical red boxes.
+      answers.push(unanswered('overview', server.failure, redisDeniedHeadline(server.failure)))
+      for (const id of ['memory', 'persistence', 'replication', 'slowlog', 'clients', 'keyspace', 'stats', 'cluster'] as const) {
+        answers.push(unanswered(id, server.failure))
+      }
+      return answers
+    }
+
+    const clusterSection = await redisSection(client, REDIS_COMMANDS.infoCluster)
+    const clusterInfo = 'info' in clusterSection ? clusterSection.info : null
+    const overview = parseRedisOverview(mergeRedisInfo(server.info, clusterInfo))
+    answers.push({
+      id: 'overview',
+      status: 'ok',
+      value: overview,
+      verdict: {
+        level: 'ok',
+        headline: `Redis ${overview.version} — ${overview.role ?? 'unknown role'}, mode ${overview.mode ?? 'unknown'}.`,
+        because: `Up ${Math.round((overview.uptimeSeconds ?? 0) / 60)} minutes on ${overview.os ?? 'an unreported platform'}.`
+      }
+    })
+
+    // ---- memory. The one question whose answer other questions need.
+    const memorySection = await redisSection(client, REDIS_COMMANDS.infoMemory)
+    let policy: string | null = null
+    answers.push(
+      await answer('memory', async () => {
+        if ('failure' in memorySection) throw new Error(memorySection.failure.detail)
+        const value = parseRedisMemory(memorySection.info)
+        policy = value.policy
+        return {
+          value,
+          verdict: judgeRedisMemory(value),
+          // A server that did not report maxmemory has answered LESS than the
+          // question asks, which is what `partial` is for.
+          status: value.maxmemoryReported ? undefined : ('unsupported' as const)
+        }
+      }, redisFailure)
+    )
+
+    answers.push(
+      await answer('persistence', async () => {
+        const section = await redisSection(client, REDIS_COMMANDS.infoPersistence)
+        if ('failure' in section) throw new Error(section.failure.detail)
+        const value = parseRedisPersistence(section.info, now)
+        return { value, verdict: judgeRedisPersistence(value) }
+      }, redisFailure)
+    )
+
+    answers.push(
+      await answer('replication', async () => {
+        const section = await redisSection(client, REDIS_COMMANDS.infoReplication)
+        if ('failure' in section) throw new Error(section.failure.detail)
+        const value = parseRedisReplication(section.info)
+        return { value, verdict: judgeRedisReplication(value) }
+      }, redisFailure)
+    )
+
+    // ---- the slow log. The threshold is fetched FIRST, because without it an
+    // empty log cannot be interpreted and the answer is `unknown` rather than
+    // a clean bill of health.
+    answers.push(
+      await answer('slowlog', async () => {
+        let config: Record<string, string> = {}
+        let configFailure: DbFailure | null = null
+        try {
+          config = parseRedisConfig(await redisCall(client, REDIS_COMMANDS.configSlowlog))
+        } catch (err) {
+          configFailure = redisFailure(err)
+        }
+        const length = num(await redisCall(client, REDIS_COMMANDS.slowlogLen))
+        const rows = await redisCall(client, redisSlowlogGetCommand(ROW_LIMIT))
+        const value = parseRedisSlowlog(rows, config, length)
+        return {
+          value,
+          verdict: judgeRedisSlowlog(value),
+          status: configFailure ? configFailure.status : undefined,
+          detail: configFailure?.detail
+        }
+      }, redisFailure)
+    )
+
+    answers.push(
+      await answer('clients', async () => {
+        const section = await redisSection(client, REDIS_COMMANDS.infoClients)
+        if ('failure' in section) throw new Error(section.failure.detail)
+        const value = parseRedisClients(section.info)
+        return {
+          value,
+          verdict: judgeRedisClients(value),
+          status: value.maxclientsReported ? undefined : ('unsupported' as const)
+        }
+      }, redisFailure)
+    )
+
+    answers.push(
+      await answer('keyspace', async () => {
+        const section = await redisSection(client, REDIS_COMMANDS.infoKeyspace)
+        if ('failure' in section) throw new Error(section.failure.detail)
+        let selected: number | null = null
+        try {
+          selected = num(await redisCall(client, REDIS_COMMANDS.dbsize))
+        } catch {
+          /* DBSIZE is the cross-check, not the answer */
+        }
+        const value = parseRedisKeyspace(section.info, selected)
+        return { value, verdict: judgeRedisKeyspace(value, policy) }
+      }, redisFailure)
+    )
+
+    answers.push(
+      await answer('stats', async () => {
+        const section = await redisSection(client, REDIS_COMMANDS.infoStats)
+        if ('failure' in section) throw new Error(section.failure.detail)
+        const value = parseRedisStats(section.info)
+        return { value, verdict: judgeRedisStats(value) }
+      }, redisFailure)
+    )
+
+    answers.push(
+      await answer('cluster', async () => {
+        if (clusterInfo === null) throw new Error('INFO cluster did not answer.')
+        // CLUSTER INFO is only sent when INFO cluster says there is one. On a
+        // standalone it raises "ERR This instance has cluster support
+        // disabled", which is a fact rather than a failure — but there is no
+        // reason to make the server say it.
+        let detail: RedisInfo | null = null
+        if (infoBool(clusterInfo, 'cluster_enabled') === true) {
+          const reply = await redisCall(client, REDIS_COMMANDS.clusterInfo)
+          detail = parseRedisInfo(typeof reply === 'string' ? reply : '')
+        }
+        const value = parseRedisCluster(clusterInfo, detail)
+        return { value, verdict: judgeRedisCluster(value), status: value.enabled === false ? ('not-applicable' as const) : undefined }
+      }, redisFailure)
+    )
+
+    return answers
+  } finally {
+    if (typeof client?.off === 'function') client.off('error', swallow)
+  }
+}
+
+function redisDeniedHeadline(failure: DbFailure): string | undefined {
+  if (failure.status !== 'denied') return undefined
+  return 'Redis refused INFO, so every question on this page is unanswered. Reading it needs an ACL with +info (and +slowlog, +config|get, +dbsize for the rest) — this is NOT "the server has nothing to report".'
+}
+
+// ---------------------------------------------------------------------------
 // Shared plumbing
 // ---------------------------------------------------------------------------
 
@@ -567,7 +1073,7 @@ function deniedHeadline(id: DbQuestionId, failure: DbFailure): string | undefine
 export async function dbOps(cfg: DbConnectConfig): Promise<DbOpsReport> {
   const started = Date.now()
   const base = {
-    engine: (cfg.kind === 'postgres' ? 'postgres' : 'mysql') as 'postgres' | 'mysql',
+    engine: cfg.kind as DbOpsEngine,
     connectionId: cfg.id,
     at: started,
     answers: [] as DbAnswer<unknown>[]
@@ -581,7 +1087,17 @@ export async function dbOps(cfg: DbConnectConfig): Promise<DbOpsReport> {
     // session timeout below never resets, and a denied question aborts whatever
     // transaction the operator has open in the query tab.
     conn = await openTransient(cfg)
-    const answers = cfg.kind === 'postgres' ? await collectPostgres(conn.client) : await collectMysql(conn.client)
+    const answers =
+      cfg.kind === 'postgres'
+        ? await collectPostgres(conn.client)
+        : cfg.kind === 'mysql'
+          ? await collectMysql(conn.client)
+          : cfg.kind === 'mongodb'
+            ? // The database the operator selected, not : index usage and
+              // collection sizes are questions about the data they are looking
+              // at. Everything else runs against admin or local.
+              await collectMongo(conn.client, mongoDbName(cfg) ?? 'admin')
+            : await collectRedis(conn.client)
     return { ...base, ok: true, answers, elapsedMs: Date.now() - started }
   } catch (err) {
     return {

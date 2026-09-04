@@ -97,6 +97,35 @@ describe('every statement the collector can send is a read or a bounded timeout'
     }
   })
 
+  it('the collector sends no MongoDB command and no Redis argv of its own', () => {
+    // The same hole the SET statements were, in the two engines that have no
+    // SQL text: a command document written at the call site would never be seen
+    // by the frozen-map assertions in tests/dbOpsMongoRedis.test.ts.
+    //
+    // Every `.command(` must be handed a variable or a builder call, and every
+    // `.call(` must be spread from an argv array — never an inline literal.
+    //
+    // The single permitted `{` is mongoCommand's own `{ ...command, maxTimeMS }`,
+    // which spreads a frozen entry and adds the bound asserted below.
+    const commandLiterals = collector.match(/\.command\(\s*\{(?!\s*\.\.\.command,)/g) ?? []
+    expect(commandLiterals).toEqual([])
+    const callLiterals = collector.match(/\.call\(\s*['"`]/g) ?? []
+    expect(callLiterals).toEqual([])
+  })
+
+  it('adds exactly one field to a MongoDB command, and it is a bound', () => {
+    const added = collector.match(/\.\.\.command,\s*([A-Za-z]+):/g) ?? []
+    expect(added).toEqual(['...command, maxTimeMS:'])
+  })
+
+  it('never reaches for the Redis and MongoDB commands that would change the server', () => {
+    for (const word of ['CONFIG', 'SET', 'FLUSHDB', 'FLUSHALL', 'killOp', 'SHUTDOWN', 'REPLICAOF', 'createIndexes', 'dropIndexes']) {
+      // CONFIG appears only as REDIS_COMMANDS.configSlowlog, which the frozen
+      // map holds; the collector must not spell any of these itself.
+      expect(collector, word).not.toMatch(new RegExp(`['"\`]${word}['"\`]`))
+    }
+  })
+
   it('the collector opens its own connection rather than borrowing the query editor’s', () => {
     expect(collector).toMatch(/openTransient\(cfg\)/)
     // ensure() is the module-cached client the query editor and the shell share.
