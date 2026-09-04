@@ -47,6 +47,9 @@ import { redactOutput } from './secretRedaction'
 // "was this authorised, by whom, for exactly what" and nothing finer.
 const FILE = join(app.getPath('userData'), 'shellpilot-job-approvals.jsonl')
 
+/** See the note on AUDIT_LOG_PATH. */
+export const APPROVAL_LOG_PATH = FILE
+
 const uid = (): string => `appr-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`
 
 /**

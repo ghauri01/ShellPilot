@@ -11,6 +11,10 @@ import { redactOutput } from './secretRedaction'
 // is redacted before it is written, not just before it is displayed.
 const FILE = join(app.getPath('userData'), 'shellpilot-ai-audit.jsonl')
 
+/** Exported so retention prunes THIS file rather than a second copy of the
+ *  name. Two places spelling a filename is how one of them gets it wrong. */
+export const AUDIT_LOG_PATH = FILE
+
 const uid = (): string => `audit-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`
 
 export function recordAudit(entry: Omit<AuditEntry, 'id' | 'timestamp'>): AuditEntry {

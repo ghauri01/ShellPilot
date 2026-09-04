@@ -19,6 +19,9 @@ import { randomBytes } from 'node:crypto'
 // attractive target than the thing it was meant to protect.
 const FILE = join(app.getPath('userData'), 'shellpilot-local-sessions.jsonl')
 
+/** See the note on AUDIT_LOG_PATH. */
+export const LOCAL_SESSION_LOG_PATH = FILE
+
 export type LocalSessionEvent = 'started' | 'exited' | 'failed'
 
 export interface LocalSessionEntry {

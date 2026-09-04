@@ -157,12 +157,24 @@ entry from the local terminal is still labelled as the local terminal, not as an
 separation is in what each file *means*, and that survives being read together. The change log is
 also read-only over them — nothing it does writes back, and it is not reachable from the bridge.
 
-**None of the three is pruned, and that is a real gap rather than a decision.** The history store
-has a retention horizon per event kind; these three files have none, so they grow for as long as the
-app is used. In practice that is slow — one line per approval or per agent call, not per output line
-— but "slow" is not "bounded", and an operator who wants a bound has to remove the file themselves
-today. Deleting one loses history and breaks nothing: each is opened append-only and recreated on
-next write.
+**All three are now pruned, on the same six-hourly pass that ages out the history store.** They had
+no horizon at all and grew for as long as the app was used; "slow" is not "bounded". A line is kept
+for a year — deliberately generous, because these answer *"who did what, and who approved it"*, a
+question asked long after the fact — with a second bound of 50,000 lines so a retry loop cannot
+outrun the age limit from inside the window.
+
+Two rules make the prune safe to leave running unattended. **A line whose timestamp cannot be read
+is kept**, never dropped: deleting a record precisely because it could not be understood is the
+worst available reason to destroy one, and a half-written line from a crash is still evidence. And
+**the newest hundred lines survive regardless of age**, so a vault used once and left alone for two
+years can still say what happened that once.
+
+The append-only property survives it. These files are documented as never rewritten in place so a
+crash costs at most the last line; a prune that truncated and rewrote would give that up during the
+one operation that touches every line. Survivors are written to a sibling and `rename`d over the
+original, which is atomic within a filesystem — at every instant a reader sees the whole old file or
+the whole new one. The mode stays `0600` across the rewrite, and the common case, nothing due,
+does not touch the file at all.
 
 ## Granting `vpnControl` is a bigger decision than it looks
 

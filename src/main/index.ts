@@ -53,6 +53,10 @@ import { metricsSample, metricsDisconnect, metricsDisposeAll } from './services/
 import { HostFactsReader } from './services/hostFacts'
 import { FleetSampler, fleetCached, setActiveFleetSampler } from './services/fleetSampler'
 import type { AutoStartSettings, AutoStartState } from '../shared/autostart'
+import { pruneJsonl } from './services/jsonlPrune'
+import { AUDIT_LOG_PATH } from './services/auditLog'
+import { LOCAL_SESSION_LOG_PATH } from './services/localSessionLog'
+import { APPROVAL_LOG_PATH } from './services/approvalLog'
 import {
   AUTOSTART_UNSUPPORTED_REASON,
   autoStartRequest,
@@ -876,6 +880,15 @@ function startHistory(): void {
         lastSkip = skipped
       } catch (err) {
         console.error('[history] retention pass failed:', err)
+      }
+      // The three append-only logs, on the same cadence and deliberately not on
+      // a second timer of their own. They are not in the store and so were not
+      // covered by the horizon above -- they simply grew, for as long as the
+      // app was used. Pruning here rather than on write keeps the append path
+      // O(1), which is what makes these files cheap enough to be honest in.
+      for (const f of [AUDIT_LOG_PATH, LOCAL_SESSION_LOG_PATH, APPROVAL_LOG_PATH]) {
+        const dropped = pruneJsonl(f)
+        if (dropped !== null) console.log(`[retention] ${f}: dropped ${dropped} lines`)
       }
     }
     pass()
