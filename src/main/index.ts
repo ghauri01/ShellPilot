@@ -173,9 +173,17 @@ import {
 import { vpnCommitImport, vpnDeleteSecrets, vpnImport } from './services/vpn/import'
 import { wireguardDriver } from './services/vpn/drivers/wireguard'
 import { mintKeypair, storeKeypair } from './services/vpn/keys'
+import { storeFrpToken } from './services/vpn/frpSetup'
 import { toVpnResult } from './services/vpn/errors'
 import { withVpnTransport, withVpnTransportDb } from './services/vpn/transport'
-import type { VpnKeygenResult, VpnKind, VpnMintResult, VpnPublicKeyResult, VpnSpec } from '../shared/vpn'
+import type {
+  FrpTokenResult,
+  VpnKeygenResult,
+  VpnKind,
+  VpnMintResult,
+  VpnPublicKeyResult,
+  VpnSpec
+} from '../shared/vpn'
 import { externalEditOpen, externalEditStop, externalEditDisposeAll } from './services/extedit'
 import {
   backupExport,
@@ -230,6 +238,13 @@ import {
   readCredProxyFile,
   writeCredProxyFile
 } from './services/credProxy'
+import {
+  ProcessService,
+  readProcessFile,
+  writeProcessFile
+} from './services/processes'
+import type { ProcessDraft, ProcessLogLine, ProcessStatus } from '../shared/processes'
+import { Supervisor } from './services/vpn/supervisor'
 import { DEFAULT_CRED_PROXY_PORT } from '../shared/credproxy'
 import type { CredProxyCall, CredProxyStatus } from '../shared/credproxy'
 import {
@@ -2364,6 +2379,71 @@ ipcMain.handle('credproxy:token', (): { ok: boolean; token?: string; error?: str
 })
 ipcMain.handle('credproxy:rotate-token', () => mintCredProxyToken())
 
+// ---- Supervised local processes ----
+//
+// Roadmap item 1, the LOCAL half. `ProcessService` is a list and a set of
+// refusals; the supervision itself is the same `Supervisor` the VPN drivers
+// use — backoff, crash-loop detection, readiness, a bounded log ring, pid
+// records and orphan reaping.
+//
+// ITS OWN `runRoot`, AND THAT IS LOAD-BEARING. `reapOrphans()` claims every
+// `*.pid` file under its root, and claiming means SIGTERM then SIGKILL once
+// the identity probe matches — so a supervisor pointed at `vpn-run` would kill
+// the user's live tunnel at launch, and the VPN supervisor would return the
+// favour. See rule 1 at the top of services/vpn/supervisor.ts, and the test
+// that fails with [[9101,'SIGTERM'],[9101,'SIGKILL']] when the roots are
+// shared.
+//
+// ITS OWN FILE, not `shellpilot-data.json`. That blob is renderer-owned and is
+// also the backup/export payload, and a command line that will be executed on
+// this machine does not belong in a file that gets mailed around. Written
+// temp-then-rename at 0600 like the vault and the rule file.
+//
+// DELIBERATELY NOT REACHABLE FROM THE MCP BRIDGE. An agent that could write a
+// row here would be writing a program to run on the machine the vault is on,
+// and an agent that could start one would be choosing the moment. Neither is
+// covered by `denyAllPending()`: a supervised process has nothing pending, is
+// not finished, and has a restart policy that will start it again when it
+// exits. tests/jobsNotExposed.test.ts fails on the import closure and on the
+// symbol names, which is what keeps that true without anyone remembering it.
+const processService = ((): ProcessService => {
+  const path = join(app.getPath('userData'), 'shellpilot-processes.json')
+  return new ProcessService({
+    now: () => Date.now(),
+    newId: () => randomUUID(),
+    read: () => readProcessFile(path),
+    write: (file) => writeProcessFile(path, file),
+    // Resolved through credentialResolver at START time, never cached, so
+    // nothing holds a copy of a value after the vault re-locks. The two
+    // failures are kept apart for the reason the credential proxy keeps them
+    // apart: a locked vault is a state the user can fix, and a missing entry
+    // is a process pointing at nothing.
+    resolveSecret: (ref) => {
+      try {
+        const value = resolveVaultField(ref)
+        return value === null ? { ok: false, reason: 'credential-missing' } : { ok: true, value }
+      } catch (err) {
+        if (isVaultLockedError(err)) return { ok: false, reason: 'vault-locked' }
+        return { ok: false, reason: 'credential-missing' }
+      }
+    },
+    supervisor: new Supervisor({ runRoot: join(app.getPath('userData'), 'process-run') })
+  })
+})()
+
+ipcMain.handle('processes:list', () => processService.list())
+ipcMain.handle('processes:status', (): ProcessStatus[] => processService.status())
+ipcMain.handle('processes:create', (_e, draft: ProcessDraft) => processService.create(draft))
+ipcMain.handle('processes:remove', (_e, id: string) => processService.remove(String(id)))
+ipcMain.handle('processes:start', (_e, id: string) => processService.start(String(id)))
+ipcMain.handle('processes:stop', (_e, id: string) => processService.stop(String(id)))
+ipcMain.handle('processes:restart', (_e, id: string) => processService.restart(String(id)))
+ipcMain.handle(
+  'processes:logs',
+  (_e, id: string, limit?: number): ProcessLogLine[] =>
+    processService.logs(String(id), typeof limit === 'number' ? limit : undefined)
+)
+
 function mintCredProxyToken(): { ok: boolean; token?: string; error?: string } {
   // 32 bytes of urandom. The token is the only thing standing between a rule
   // and every other process running as this user, so it is not derived from
@@ -2911,6 +2991,21 @@ ipcMain.handle(
     }
   }
 )
+// The guided tunnel setup's one credential. Same road as `wireguardKeygen`:
+// the renderer holds the token only while its form is open, this writes it to
+// the vault, and a ref goes back. It exists because a setup that ends by
+// telling the user to add the token somewhere else has not happened once.
+//
+// Nothing here publishes anything. Creating and starting an frp proxy is the
+// renderer's own `vpn:start`, which the MCP bridge is refused outright — see
+// AI_REFUSED_VPN_KINDS in policyEngine.ts.
+ipcMain.handle(
+  'vpn:frpToken',
+  (
+    _e,
+    req: { profileName: string; workspaceId: string; token: string; replaces?: string }
+  ): Promise<FrpTokenResult> => storeFrpToken(req)
+)
 ipcMain.handle('vpn:logs', (_e, id: string, limit?: number) => vpnLogs(id, limit))
 ipcMain.handle('vpn:dependents', (_e, id: string) => vpnDependentsOf(id))
 // Log lines stop at the ring buffer unless a drawer is open. Refcounted, so
@@ -3219,7 +3314,18 @@ app.on('before-quit', (e) => {
   // next launch, an app that will not quit is a support ticket.
   const cap = new Promise<void>((resolve) => setTimeout(resolve, 4000))
   void Promise.race([
-    Promise.all([vpnDisposeAll().catch(() => undefined), historyClosed]),
+    Promise.all([
+      vpnDisposeAll().catch(() => undefined),
+      // Supervised children are ours, so they go down with us rather than
+      // being left for the next launch's reaper to find. Here rather than in
+      // the synchronous block above, for the reason vpnDisposeAll is here: the
+      // stop ladder needs turns of the event loop, and a fire-and-forget call
+      // up there would be racing app.exit(0) — the SIGTERM would frequently
+      // not have been sent at all. The same 4s cap applies, so a wedged dev
+      // server still cannot hold the app open.
+      processService.stopAll().catch(() => undefined),
+      historyClosed
+    ]),
     cap
   ]).finally(() => app.exit(0))
 })
@@ -3320,6 +3426,17 @@ app.whenReady().then(() => {
   // cheaper than either.
   powerMonitor.on('resume', () => vpnHandleWake())
   powerMonitor.on('unlock-screen', () => vpnHandleWake())
+
+  // Children a previous run left behind. Identity — exe path AND start time —
+  // is verified before anything is signalled, because a pid on its own says
+  // nothing: the OS reuses them and the one recorded may now be the user's
+  // editor.
+  //
+  // This is the ONLY thing the process service does at launch. Nothing is
+  // started: what survives a restart is the list, and a stored command is
+  // arbitrary local code execution that should not run before a human has
+  // looked at the screen. See the auto-start refusal in shared/processes.ts.
+  void processService.reapOrphans().catch((e) => console.error('[processes] reap failed:', e))
 
   void vpnInit()
     .catch((e) => console.error('[vpn] init failed:', e))
