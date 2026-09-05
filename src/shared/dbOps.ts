@@ -259,6 +259,38 @@ export const MONGO_QUESTIONS = [
  * before Redis 6, and without knowing that, "no ceiling reported" is
  * indistinguishable from "no ceiling".
  */
+/**
+ * SQL Server. Eight, by the same rule, and two of them exist because a real
+ * server answered a question in a way that would have been read wrong.
+ *
+ * `alwayson` rather than reusing `replication`, because the shape of the wrong
+ * answer is different. `sys.dm_hadr_availability_replica_states` returns ZERO
+ * ROWS on a server with no availability group -- it does not error. Zero
+ * healthy replicas and no replication configured are the same query result and
+ * the opposite operational fact, and `SERVERPROPERTY('IsHadrEnabled')` is the
+ * only thing that separates them.
+ *
+ * `backups` has no equivalent on the other engines and is arguably the single
+ * most useful question here: a database in FULL recovery whose log has never
+ * been backed up grows that log until the disk fills, and SQL Server will not
+ * warn anybody. `msdb.dbo.backupset` reports NULL for never-backed-up, which is
+ * not "backed up a long time ago".
+ *
+ * `logspace` for the same failure one step later. Cut, by the rule the other
+ * lists use: wait statistics (tuning, not an alarm), index fragmentation (a
+ * maintenance report), plan cache internals (unactionable without the workload).
+ */
+export const MSSQL_QUESTIONS = [
+  'overview',
+  'alwayson',
+  'backups',
+  'logspace',
+  'connections',
+  'blocking',
+  'slowlog',
+  'sizes'
+] as const
+
 export const REDIS_QUESTIONS = [
   'overview',
   'memory',
@@ -275,9 +307,19 @@ export type PgQuestionId = (typeof PG_QUESTIONS)[number]
 export type MysqlQuestionId = (typeof MYSQL_QUESTIONS)[number]
 export type MongoQuestionId = (typeof MONGO_QUESTIONS)[number]
 export type RedisQuestionId = (typeof REDIS_QUESTIONS)[number]
-export type DbQuestionId = PgQuestionId | MysqlQuestionId | MongoQuestionId | RedisQuestionId
+export type MssqlQuestionId = (typeof MSSQL_QUESTIONS)[number]
+export type DbQuestionId =
+  | PgQuestionId
+  | MysqlQuestionId
+  | MongoQuestionId
+  | RedisQuestionId
+  | MssqlQuestionId
 
 export const DB_QUESTION_LABEL: Record<DbQuestionId, string> = {
+  alwayson: 'Availability groups',
+  backups: 'Backups',
+  logspace: 'Transaction log space',
+  blocking: 'Blocking',
   overview: 'Server',
   replication: 'Replication',
   archiver: 'WAL archiving',
@@ -305,6 +347,14 @@ export const DB_QUESTION_LABEL: Record<DbQuestionId, string> = {
 /** Why this one is on the page. Shown in the UI, so the editorial choice is
  *  visible to the operator rather than only to whoever wrote it. */
 export const DB_QUESTION_WHY: Record<DbQuestionId, string> = {
+  alwayson:
+    'Whether every replica is joined, synchronising and caught up. Zero replicas is not zero problems — a server with no availability group returns the same empty list as one whose replicas have all gone, so this reports whether AlwaysOn is configured at all before it reports health.',
+  backups:
+    'When each database was last backed up, full and log, and whether a database in FULL recovery has ever had its log backed up. That last one is the quiet killer: the log grows until the disk fills and SQL Server does not warn anybody. Never backed up reads as never, not as long ago.',
+  logspace:
+    'How full each transaction log is. The same failure one step later — a log nobody truncates does not slow down, it stops the database.',
+  blocking:
+    'Sessions waiting on another session, and the one at the head of the chain. A blocked session is not slow, it is stopped, and the answer is always the head blocker rather than the queue behind it.',
   overview: 'Which server this is, what role it is playing, and how long it has been up.',
   replication:
     'A replica that has stopped is a backup that is not being taken and a read pool serving stale rows. It fails silently.',
@@ -4340,7 +4390,7 @@ export interface DbOpsReport {
   answers: DbAnswer<unknown>[]
 }
 
-export type DbOpsEngine = 'postgres' | 'mysql' | 'mongodb' | 'redis'
+export type DbOpsEngine = 'postgres' | 'mysql' | 'mongodb' | 'redis' | 'mssql'
 
 /**
  * Which engines this feature covers.
@@ -4352,18 +4402,27 @@ export type DbOpsEngine = 'postgres' | 'mysql' | 'mongodb' | 'redis'
  * persistence and the link to a master. SQL Server is still out.
  */
 export function supportsDbOps(kind: string): kind is DbOpsEngine {
-  return kind === 'postgres' || kind === 'mysql' || kind === 'mongodb' || kind === 'redis'
+  return (
+    kind === 'postgres' ||
+    kind === 'mysql' ||
+    kind === 'mongodb' ||
+    kind === 'redis' ||
+    kind === 'mssql'
+  )
 }
 
 export const DB_OPS_UNSUPPORTED_NOTE =
-  'Operational reads are available for PostgreSQL, MySQL/MariaDB, MongoDB and Redis. SQL Server is not covered: nothing here has been run against one, and a page of questions written from documentation would agree with whatever its author assumed rather than with the server.'
+  'Operational reads are available for PostgreSQL, MySQL/MariaDB, MongoDB, Redis and SQL Server. ' +
+  'Every engine this app can connect to is now covered, so this note is kept for the next engine ' +
+  'rather than for a gap that exists today.'
 
 /** The questions asked of each engine, in the order they should be read. */
 export const DB_QUESTIONS_BY_ENGINE: Record<DbOpsEngine, readonly DbQuestionId[]> = {
   postgres: PG_QUESTIONS,
   mysql: MYSQL_QUESTIONS,
   mongodb: MONGO_QUESTIONS,
-  redis: REDIS_QUESTIONS
+  redis: REDIS_QUESTIONS,
+  mssql: MSSQL_QUESTIONS
 }
 
 /** The worst verdict on the page, which is the one the tab badge shows. */

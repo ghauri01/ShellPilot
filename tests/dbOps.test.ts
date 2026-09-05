@@ -10,6 +10,7 @@ import {
   DB_VERDICT_RANK,
   MYSQL_QUERIES,
   MYSQL_QUESTIONS,
+  MSSQL_QUESTIONS,
   PG_QUERIES,
   PG_QUESTIONS,
   PG_REDACTED_QUERY,
@@ -898,7 +899,10 @@ describe('the report', () => {
   it('covers eight questions per SQL engine', () => {
     expect(PG_QUESTIONS).toHaveLength(8)
     expect(MYSQL_QUESTIONS).toHaveLength(8)
-    for (const id of [...PG_QUESTIONS, ...MYSQL_QUESTIONS]) expect(DB_QUESTION_LABEL[id]).toBeTruthy()
+    expect(MSSQL_QUESTIONS).toHaveLength(8)
+    for (const id of [...PG_QUESTIONS, ...MYSQL_QUESTIONS, ...MSSQL_QUESTIONS]) {
+      expect(DB_QUESTION_LABEL[id], id).toBeTruthy()
+    }
   })
 
   it('covers only the engines it can actually answer for', () => {
@@ -909,9 +913,13 @@ describe('the report', () => {
     // than a thin imitation of the SQL page — see tests/dbOpsMongoRedis.test.ts.
     expect(supportsDbOps('mongodb')).toBe(true)
     expect(supportsDbOps('redis')).toBe(true)
-    // Still out, and the note says why rather than leaving it to be discovered.
-    expect(supportsDbOps('mssql')).toBe(false)
-    expect(DB_OPS_UNSUPPORTED_NOTE).toMatch(/SQL Server is not covered/)
+    // In now. Every query behind it was run against a real SQL Server 2022
+    // before it was written down, which is the bar the other four engines set
+    // and the reason this stayed false until it could be met — see
+    // tests/dbOpsMssql.test.ts and the live suite beside it.
+    expect(supportsDbOps('mssql')).toBe(true)
+    expect(DB_OPS_UNSUPPORTED_NOTE).toMatch(/SQL Server/)
+    expect(DB_OPS_UNSUPPORTED_NOTE).not.toMatch(/not covered/)
   })
 
   it('knows which questions each engine answers', () => {
