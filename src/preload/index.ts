@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, clipboard, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { AutoStartSettings, AutoStartState } from '../shared/autostart'
-import type { UserUnitsReading } from '../shared/userUnits'
+import type { UnitDraft, UserUnitsReading } from '../shared/userUnits'
 import type {
   SshConnectConfig,
   SshStatus,
@@ -678,7 +678,12 @@ const api = {
     collect: (
       targets: { serverId: string; serverName: string; cfg: unknown }[]
     ): Promise<{ serverId: string; serverName: string; reading: UserUnitsReading }[]> =>
-      ipcRenderer.invoke('services:collect', targets)
+      ipcRenderer.invoke('services:collect', targets),
+    write: (
+      target: { cfg: unknown },
+      draft: UnitDraft
+    ): Promise<{ ok: boolean; output?: string; error?: string }> =>
+      ipcRenderer.invoke('services:write', target, draft)
   },
   cron: {
     collect: (

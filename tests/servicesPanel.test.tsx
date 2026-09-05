@@ -76,3 +76,77 @@ describe('the services panel', () => {
     ).toBe(true)
   })
 })
+
+describe('installing a unit', () => {
+  const rows = async () => [
+    { serverId: 'a', serverName: 'web-1', reading: reading() }
+  ]
+
+  it('shows the exact file before it writes it', async () => {
+    // A file is about to appear on a machine nobody is looking at. "Trust me"
+    // is not a preview, so the rendered unit is on screen before Install is
+    // pressable.
+    stubBridge({ services: { collect: rows, write: vi.fn() } } as never)
+    render(<ServicesPanel servers={[server('a', 'web-1')]} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Read services/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /New service/ }))
+
+    await userEvent.type(screen.getByLabelText('Unit name'), 'worker.service')
+    await userEvent.type(screen.getByLabelText('Description'), 'Queue worker')
+    await userEvent.type(screen.getByLabelText('ExecStart'), '/usr/local/bin/worker')
+
+    expect(screen.getByText(/ExecStart=\/usr\/local\/bin\/worker/)).toBeTruthy()
+    expect(screen.getByText(/WantedBy=default.target/)).toBeTruthy()
+  })
+
+  it('will not offer Install for a draft the server would reject', async () => {
+    // The same refusal main enforces, said here so nobody types a unit name
+    // and learns it was wrong from a server round trip.
+    stubBridge({ services: { collect: rows, write: vi.fn() } } as never)
+    render(<ServicesPanel servers={[server('a', 'web-1')]} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Read services/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /New service/ }))
+
+    await userEvent.type(screen.getByLabelText('Unit name'), 'worker')
+    expect(((await screen.findByRole('button', { name: 'Install' })) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText(/has to end in .service/)).toBeTruthy()
+  })
+
+  it('asks before writing, and does not write when the answer is no', async () => {
+    const write = vi.fn(async () => ({ ok: true, output: 'WROTE: x' }))
+    stubBridge({ services: { collect: rows, write } } as never)
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    render(<ServicesPanel servers={[server('a', 'web-1')]} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Read services/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /New service/ }))
+    await userEvent.type(screen.getByLabelText('Unit name'), 'worker.service')
+    await userEvent.type(screen.getByLabelText('Description'), 'w')
+    await userEvent.type(screen.getByLabelText('ExecStart'), '/bin/true')
+    await userEvent.click(screen.getByRole('button', { name: 'Install' }))
+
+    expect(write).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  it('shows the server’s own refusal rather than the word failed', async () => {
+    // The useful sentence is the server's: "not lingering, run loginctl
+    // enable-linger" is the whole answer, and replacing it with "failed" throws
+    // away the fix.
+    const write = vi.fn(async () => ({
+      ok: false,
+      error: 'this account is not lingering... Run: loginctl enable-linger ops'
+    }))
+    stubBridge({ services: { collect: rows, write } } as never)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<ServicesPanel servers={[server('a', 'web-1')]} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Read services/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /New service/ }))
+    await userEvent.type(screen.getByLabelText('Unit name'), 'worker.service')
+    await userEvent.type(screen.getByLabelText('Description'), 'w')
+    await userEvent.type(screen.getByLabelText('ExecStart'), '/bin/true')
+    await userEvent.click(screen.getByRole('button', { name: 'Install' }))
+
+    expect(await screen.findByText(/loginctl enable-linger/)).toBeTruthy()
+    vi.restoreAllMocks()
+  })
+})

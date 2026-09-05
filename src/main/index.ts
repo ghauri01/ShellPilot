@@ -261,8 +261,13 @@ import {
   writeProcessFile
 } from './services/processes'
 import type { ProcessDraft, ProcessLogLine, ProcessStatus } from '../shared/processes'
-import { buildUserUnitsCommand, parseUserUnits } from '../shared/userUnits'
-import type { UserUnitsReading } from '../shared/userUnits'
+import {
+  buildUnitWriteCommand,
+  buildUserUnitsCommand,
+  checkUnitDraft,
+  parseUserUnits
+} from '../shared/userUnits'
+import type { UnitDraft, UserUnitsReading } from '../shared/userUnits'
 import { Supervisor } from './services/vpn/supervisor'
 import { DEFAULT_CRED_PROXY_PORT } from '../shared/credproxy'
 import type { CredProxyCall, CredProxyStatus, CredProxyToken } from '../shared/credproxy'
@@ -2243,6 +2248,43 @@ ipcMain.handle(
       }
     }
     return out
+  }
+)
+
+// Writing a unit is a change to somebody's server, so it is its own channel
+// and takes ONE target. The reader sweeps every server in a press; this
+// deliberately does not, because "install this on all of them" is not a thing
+// anybody should be able to do by pressing the same button harder.
+ipcMain.handle(
+  'services:write',
+  async (
+    _e,
+    target: { cfg: unknown },
+    draft: unknown
+  ): Promise<{ ok: boolean; output?: string; error?: string }> => {
+    const d = draft as UnitDraft
+    // Validated here as well as in the renderer: the renderer hiding a bad
+    // draft is a courtesy, and this is the boundary.
+    const check = checkUnitDraft(d)
+    if (!check.ok) return { ok: false, error: check.reason }
+    try {
+      const token = randomBytes(8).toString('hex').slice(0, 16)
+      const r = await sshExec(
+        resolveChainSecrets(target.cfg as SshConnectConfig),
+        buildUnitWriteCommand(d, token),
+        30_000,
+        false
+      )
+      const said = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim()
+      // The server's refusals arrive on stderr with a non-zero exit, and they
+      // are the useful part -- "not lingering, run loginctl enable-linger" is
+      // the whole answer. Passed through rather than replaced with "failed".
+      return r.ok && /WROTE:/.test(said)
+        ? { ok: true, output: said }
+        : { ok: false, error: said || r.error || 'The server said nothing.' }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
   }
 )
 
