@@ -1,0 +1,7 @@
+===SHELLPILOT-LINGER===
+Linger=yes
+===SHELLPILOT-USERUNITS===
+api.service                    loaded active   running Demo API
+dbus-broker.service            loaded inactive dead    D-Bus User Message Bus
+systemd-tmpfiles-clean.service loaded inactive dead    Cleanup of User's Temporary Files and Directories
+systemd-tmpfiles-setup.service loaded active   exited  Create User's Volatile Files and Directories

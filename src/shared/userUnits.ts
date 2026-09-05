@@ -31,6 +31,8 @@
 // shape as item 23's KillUserProcesses: the reading is true and the conclusion
 // is wrong, and only the second question separates them.
 
+import { resolveBinary } from './docker'
+
 export const USER_UNIT_MARKERS = {
   linger: '===SHELLPILOT-LINGER===',
   units: '===SHELLPILOT-USERUNITS==='
@@ -223,4 +225,32 @@ export function summariseUserUnits(r: UserUnitsReading): {
     level: 'ok',
     headline: `${running.length} user service(s) running, supervised by the server`
   }
+}
+
+/**
+ * One round trip: is this account lingering, and what does its manager run.
+ *
+ * `XDG_RUNTIME_DIR` is set explicitly. A non-login `ssh host cmd` frequently
+ * has none, and without it `systemctl --user` cannot find the bus even when a
+ * manager is running — which is a failure of the ENVIRONMENT we handed it, not
+ * a fact about the server, and reporting it as one would be our bug shown as
+ * theirs. `id -u` rather than a literal, because the account is whoever
+ * ShellPilot connected as.
+ *
+ * `|| true` after each read: a missing loginctl must not take the units with
+ * it, and the marker layout is what tells the two halves apart afterwards.
+ * Read-only throughout — no `start`, no `enable`, no `daemon-reload`.
+ */
+export function buildUserUnitsCommand(): string {
+  return [
+    resolveBinary('systemctl'),
+    '[ -z "$SP_BIN" ] && echo "no systemctl" >&2',
+    `SP_LOGINCTL=""; for c in loginctl /usr/bin/loginctl /bin/loginctl; do ` +
+      `command -v "$c" >/dev/null 2>&1 && SP_LOGINCTL="$c" && break; done`,
+    `echo "${USER_UNIT_MARKERS.linger}"`,
+    '[ -n "$SP_LOGINCTL" ] && "$SP_LOGINCTL" show-user "$(id -un)" -p Linger 2>&1 || true',
+    `echo "${USER_UNIT_MARKERS.units}"`,
+    'XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" ' +
+      '"$SP_BIN" --user list-units --type=service --all --no-legend --plain --no-pager 2>&1 || true'
+  ].join('; ')
 }

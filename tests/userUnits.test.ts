@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   USER_UNIT_MARKERS,
+  buildUserUnitsCommand,
   parseLinger,
   parseUserUnitRow,
   parseUserUnits,
@@ -117,5 +118,41 @@ describe('a server that cannot answer, told apart from one with nothing to say',
 
     const noTool = parseUserUnits(output('', 'systemctl: command not found'), 127)
     expect(noTool.status).toBe('no-tool')
+  })
+})
+
+describe('the command this module actually ships, run on a real RHEL 9 server', () => {
+  // Not the parser fed a hand-built string: the built command was copied to a
+  // RHEL 9.8 container running systemd 252 and executed as an unprivileged
+  // account, and this is what came back. It is the difference between "the
+  // regexes match what I typed" and "the shell fragment works over ssh".
+  const REAL = readFileSync(
+    join(__dirname, 'fixtures/userunits/rhel9-roundtrip.txt'),
+    'utf8'
+  )
+
+  it('produces output this parser reads, end to end', () => {
+    const r = parseUserUnits(REAL, 0)
+    expect(r.status).toBe('ok')
+    expect(r.linger).toBe('lingering')
+    expect(r.units.find((u) => u.name === 'api.service')?.sub).toBe('running')
+  })
+
+  it('reads nothing and writes nothing', () => {
+    // A supervisor reader that could start or stop a unit would be a supervisor,
+    // which is the thing processes.ts refused to build remotely.
+    const cmd = buildUserUnitsCommand()
+    for (const verb of [' start ', ' stop ', ' restart ', ' enable ', ' disable ', 'daemon-reload']) {
+      expect(cmd, verb).not.toContain(verb)
+    }
+    expect(cmd).toContain('list-units')
+  })
+
+  it('sets XDG_RUNTIME_DIR itself, because a non-login ssh shell has none', () => {
+    // Without it `systemctl --user` cannot find the bus even where a manager is
+    // running — a failure of the environment we handed it, which would
+    // otherwise be reported as a fact about the server.
+    expect(buildUserUnitsCommand()).toContain('XDG_RUNTIME_DIR')
+    expect(buildUserUnitsCommand()).toContain('id -u')
   })
 })
