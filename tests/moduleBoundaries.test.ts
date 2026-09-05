@@ -26,6 +26,14 @@ const ROOT = resolve(__dirname, '..')
 // The files each module owns. Adding a module means adding its entry points
 // here, deliberately, in a diff a reviewer sees.
 const MODULE_FILES: Record<string, string[]> = {
+  // Item 1's successor: reads what a server's own systemd supervises for this
+  // account. It must not reach the vault or the local terminal — it is a
+  // read-only view of somebody else's supervisor, and the boundary is the
+  // point of building it this way rather than as a remote supervisor.
+  services: [
+    'src/shared/userUnits.ts',
+    'src/renderer/src/components/monitor/ServicesPanel.tsx'
+  ],
   fleetSearch: ['src/renderer/src/lib/fleetSearch.ts', 'src/renderer/src/components/monitor/FleetSearch.tsx'],
   // The main-process half (src/shared/hostFacts.ts, src/main/services/hostFacts.ts)
   // is not listed: it is collected by the fleet sampler on every install

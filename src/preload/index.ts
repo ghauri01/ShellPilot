@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, clipboard, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { AutoStartSettings, AutoStartState } from '../shared/autostart'
+import type { UserUnitsReading } from '../shared/userUnits'
 import type {
   SshConnectConfig,
   SshStatus,
@@ -673,6 +674,12 @@ const api = {
     ): Promise<ComposeImageWriteResult> =>
       ipcRenderer.invoke('compose:write-image-tag', cfg, req, opts)
   } satisfies ComposeBridge,
+  services: {
+    collect: (
+      targets: { serverId: string; serverName: string; cfg: unknown }[]
+    ): Promise<{ serverId: string; serverName: string; reading: UserUnitsReading }[]> =>
+      ipcRenderer.invoke('services:collect', targets)
+  },
   cron: {
     collect: (
       targets: { serverId: string; serverName: string; cfg: unknown }[]

@@ -261,6 +261,8 @@ import {
   writeProcessFile
 } from './services/processes'
 import type { ProcessDraft, ProcessLogLine, ProcessStatus } from '../shared/processes'
+import { buildUserUnitsCommand, parseUserUnits } from '../shared/userUnits'
+import type { UserUnitsReading } from '../shared/userUnits'
 import { Supervisor } from './services/vpn/supervisor'
 import { DEFAULT_CRED_PROXY_PORT } from '../shared/credproxy'
 import type { CredProxyCall, CredProxyStatus, CredProxyToken } from '../shared/credproxy'
@@ -2200,6 +2202,50 @@ ipcMain.handle(
 // rather than failing the collection.
 //
 // Sequential across hosts, like the fleet sweep, for the same bastion reason.
+// Item 1's successor: what the SERVER supervises for this account. Read-only,
+// sequential across servers like the cron sweep and for the same bastion
+// reason, and the command is built once rather than per server because it takes
+// no arguments — the account is whoever we connected as.
+ipcMain.handle(
+  'services:collect',
+  async (_e, targets: { serverId: string; serverName: string; cfg: unknown }[]) => {
+    const out: { serverId: string; serverName: string; reading: UserUnitsReading }[] = []
+    const command = buildUserUnitsCommand()
+    for (const t of targets) {
+      try {
+        const r = await sshExec(
+          resolveChainSecrets(t.cfg as SshConnectConfig),
+          command,
+          20_000,
+          false
+        )
+        out.push({
+          serverId: t.serverId,
+          serverName: t.serverName,
+          // A refused connection is not an empty unit list, so the transport's
+          // own failure is carried through as the detail rather than being
+          // flattened into "no services".
+          reading: r.ok
+            ? parseUserUnits(r.stdout ?? '', 0)
+            : { status: 'unknown', linger: 'unknown', units: [], detail: r.error }
+        })
+      } catch (err) {
+        out.push({
+          serverId: t.serverId,
+          serverName: t.serverName,
+          reading: {
+            status: 'unknown',
+            linger: 'unknown',
+            units: [],
+            detail: (err as Error).message
+          }
+        })
+      }
+    }
+    return out
+  }
+)
+
 ipcMain.handle(
   'cron:collect',
   async (_e, targets: { serverId: string; serverName: string; cfg: unknown }[]) => {

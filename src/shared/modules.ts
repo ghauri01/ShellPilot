@@ -18,6 +18,7 @@
 // `backfillModules`, which mirrors `backfillCapabilities`.
 
 export type ModuleId =
+  | 'services'
   | 'docker'
   | 'kubernetes'
   | 'cron'
@@ -222,6 +223,16 @@ export const MODULES: ModuleDef[] = [
     label: 'Scheduled jobs',
     detail: 'Read crontabs, /etc/cron.d and systemd timers across the estate. Read-only.',
     defaultEnabled: true
+  },
+  {
+    id: 'services',
+    label: 'Server services',
+    detail:
+      'Read what each server supervises for your account with `systemd --user` \u2014 what is running, what has failed, and whether it survives you logging out. Read-only: nothing is started, stopped or written.',
+    // OFF by default like the rest. It reads only, but it reads something most
+    // operators have never looked at, and a module that switches itself on is a
+    // module that decides for them.
+    defaultEnabled: false
   },
   {
     id: 'processes',
