@@ -55,9 +55,13 @@ test, which is why it is now a switch.
 
 *Item 1*'s remote half is a refusal with an argument, not a gap: supervising
 over a held-open SSH channel is a reliability promise the transport does not
-make. The successor worth building is named in `src/shared/processes.ts` — a
-`systemd --user` unit editor and a `systemctl --user` reader, letting the
-server's own supervisor own the restart policy.
+make. **Its named successor now ships in part** — the `systemctl --user` READER,
+as the `services` module. Built and verified against a real RHEL 9.8 running
+systemd 252, which is where the fact worth having came from: a `--user` service
+stops when the account's last session ends unless that account is lingering, so
+units that read `active running` over SSH can be units that are about to stop.
+The panel says that before it shows the list. The unit-file EDITOR is the
+remaining half and is not built.
 
 *Item 21b* has now been run against a real podman 5.8.4, and the caveat was
 pointing at the wrong thing. Every template renders identically and `system df`
