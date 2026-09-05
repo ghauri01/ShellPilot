@@ -63,7 +63,11 @@ units that read `active running` over SSH can be units that are about to stop.
 The panel says that before it shows the list. The unit-file EDITOR is the
 remaining half and is not built.
 
-*Item 21b* has now been run against a real podman 5.8.4, and the caveat was
+*Item 21b*'s port mappings are STILL unverified, and the blocker is the harness
+rather than the code: podman nested in Docker on Apple Silicon cannot keep a
+container running (`exec container process /bin/sleep: Invalid argument`), so
+there is nothing to publish a port from. Everything else about podman has been
+run against a real podman 5.8.4, and the caveat was
 pointing at the wrong thing. Every template renders identically and `system df`
 matches, so no parsing changed — but `resolveBinary('docker')` was hard-coded at
 nine call sites and a stock podman install has no `docker` binary at all, so the
@@ -2091,7 +2095,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 17 | ~~**Patch management**~~ | 100% | weekly | 5 | strong | **10** | **SHIPPED** | — | Done |
 | 5 | ~~**Backups to real targets**~~ | 90% | weekly | 5 | strong | **8** | **SHIPPED** | — | Done |
 | 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | — | Done |
-| 23 | ~~**Fleet key management**~~ | 100% | quarterly | 5 | very strong | **7** | **SHIPPED** | write is opt-in, unobserved on RHEL 9 | Done |
+| 23 | ~~**Fleet key management**~~ | 100% | quarterly | 5 | very strong | **7** | **SHIPPED** | write opt-in, rollback verified on RHEL 9 | Done |
 | 20 | ~~**Compose**~~ | 60% | daily | 3 | some | **6** | **SHIPPED** | — | Done |
 | 6e | ~~**Cron editing**~~ | 80% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 24 | ~~**Security posture**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
@@ -2102,7 +2106,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 25 | ~~**Configuration drift**~~ | 50% | rare | 4 | strong | **4** | **SHIPPED** | — | Done |
 | 28 | ~~**Runbooks on alerts**~~ | 40% | per-incident | 3 | some | **4** | **SHIPPED** | — | Done |
 | 14 | ~~**Change log**~~ | 30% solo | per-incident | 3 | strong | **4** / **8** team | **SHIPPED** | — | Done |
-| 1 | ~~**pm2 supervision**~~ | 25% | daily | 3 | some | **4** | **SHIPPED** (local) | remote refused, successor named | Done |
+| 1 | ~~**pm2 supervision**~~ | 25% | daily | 3 | some | **4** | **SHIPPED** | successor shipped: read + write user units | Done |
 | 2 | ~~**frp ngrok UX**~~ | 20% | rare | 2 | some | **3** | **SHIPPED** | — | Done |
 | 8 | ~~**Ghostty snapshot**~~ | — | — | — | — | — | **CUT** | — | Not building |
 | 10 | ~~**Tauri**~~ | — | — | — | — | — | **CUT** | — | Not building |
