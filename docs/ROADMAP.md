@@ -34,7 +34,36 @@ This is a statement of direction, not a schedule. Sizes are rough and relative �
 focused person, not a calendar quarter. Where something is a real unknown it says so rather than
 guessing, because the cost of a wrong estimate here is a commitment nobody can keep.
 
-## Where this stands, as of 0.13.1
+## Where this stands, as of 0.16.x
+
+**The three items that were "part done" are closed.**
+
+*Item 18* now covers SQL Server, the fifth and last engine, verified against a
+real server rather than from the documentation — which changed three readings:
+`user connections = 0` means unlimited, an empty availability-replica list means
+"no AG configured" rather than "no replicas healthy", and a NULL in the backup
+history means never rather than long ago.
+
+*Item 23*'s write half is opt-in rather than unreachable. Every blocker the
+adversarial review raised has been built — the independent re-authentication,
+the judgement that refuses a pooled or too-early session, the `systemd-run
+--user --scope` watchdog ladder — and the gate comment that still said otherwise
+was three of those behind. What remains unobserved is one thing, named where the
+operator turns it on: nobody has watched the rollback fire on a real RHEL 9
+server with `KillUserProcesses=yes`. A gate nobody can open is a gate nobody can
+test, which is why it is now a switch.
+
+*Item 1*'s remote half is a refusal with an argument, not a gap: supervising
+over a held-open SSH channel is a reliability promise the transport does not
+make. The successor worth building is named in `src/shared/processes.ts` — a
+`systemd --user` unit editor and a `systemctl --user` reader, letting the
+server's own supervisor own the restart policy.
+
+*Item 21b*'s podman caveat stands, deliberately. The Docker module is already
+podman-aware, but nobody has run it against podman, and this repository does not
+accept fabricated fixtures — see `tests/fixtures/docker/README.md`.
+
+## Where this stood, as of 0.13.1
 
 **Every item in the matrix below is shipped, cut, or gated on something only a real host can
 answer.** Four releases did it: 0.10.0, 0.11.0, 0.12.0 and 0.13.0, with 0.13.1 as a fix.
@@ -2048,11 +2077,11 @@ a cheap item, and treating it as one is how a quarter disappears.
 | C | ~~**Host facts**~~ | 100% | continuous | 4 | strong | **3 / 21** | **SHIPPED** | — | Done |
 | A | ~~**Durable store**~~ | — | — | — | — | **0 / 30** | **SHIPPED** | — | Done |
 | B | ~~**Job engine B1–B4**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | — | Done |
-| 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** | mssql not covered, stated | Done |
+| 18 | ~~**Database operations**~~ | 70% | weekly | 4 | strong | **8** | **SHIPPED** | all five engines | Done |
 | 17 | ~~**Patch management**~~ | 100% | weekly | 5 | strong | **10** | **SHIPPED** | — | Done |
 | 5 | ~~**Backups to real targets**~~ | 90% | weekly | 5 | strong | **8** | **SHIPPED** | — | Done |
 | 19b | ~~**Alerting, the rest**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | — | Done |
-| 23 | ~~**Fleet key management**~~ | 100% | quarterly | 5 | very strong | **7** | **READ SHIPPED** | write gated, needs a real host | Part done |
+| 23 | ~~**Fleet key management**~~ | 100% | quarterly | 5 | very strong | **7** | **SHIPPED** | write is opt-in, unobserved on RHEL 9 | Done |
 | 20 | ~~**Compose**~~ | 60% | daily | 3 | some | **6** | **SHIPPED** | — | Done |
 | 6e | ~~**Cron editing**~~ | 80% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
 | 24 | ~~**Security posture**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
@@ -2063,7 +2092,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 | 25 | ~~**Configuration drift**~~ | 50% | rare | 4 | strong | **4** | **SHIPPED** | — | Done |
 | 28 | ~~**Runbooks on alerts**~~ | 40% | per-incident | 3 | some | **4** | **SHIPPED** | — | Done |
 | 14 | ~~**Change log**~~ | 30% solo | per-incident | 3 | strong | **4** / **8** team | **SHIPPED** | — | Done |
-| 1 | ~~**pm2 supervision**~~ | 25% | daily | 3 | some | **4** | **SHIPPED** (local) | remote refused | Done |
+| 1 | ~~**pm2 supervision**~~ | 25% | daily | 3 | some | **4** | **SHIPPED** (local) | remote refused, successor named | Done |
 | 2 | ~~**frp ngrok UX**~~ | 20% | rare | 2 | some | **3** | **SHIPPED** | — | Done |
 | 8 | ~~**Ghostty snapshot**~~ | — | — | — | — | — | **CUT** | — | Not building |
 | 10 | ~~**Tauri**~~ | — | — | — | — | — | **CUT** | — | Not building |
