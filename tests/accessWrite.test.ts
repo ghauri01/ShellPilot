@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from 'vitest'
+import { describe, it, expect, afterAll, afterEach, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
@@ -20,6 +20,7 @@ import { join, resolve } from 'node:path'
 import {
   ACCESS_ROLLBACK_SECONDS,
   ACCESS_WRITE_DISABLED_REASON,
+  ACCESS_WRITE_OPT_IN_NOTE,
   ACCESS_WRITE_ENABLED,
   ACCESS_STATUS_MARKER,
   accessCommitMarker,
@@ -46,14 +47,14 @@ describe('the gate that keeps the write half out of this build', () => {
   // are being fixed next, and these tests are the record of what is wrong with
   // them. Deleting them along with the button would delete the evidence.
 
-  it('is off, and turning it on is a decision somebody makes here', () => {
+  it('ships off, so nothing turns it on by upgrading', () => {
     expect(
       ACCESS_WRITE_ENABLED,
-      'ACCESS_WRITE_ENABLED is true. Flipping it re-exposes access:plan and ' +
-        'access:run to the UI. The five blockers adversarial review found in ' +
-        'the plan path have to be fixed and this test deliberately rewritten ' +
-        'first — the point of the constant is that the change cannot happen ' +
-        'as a side effect of something else.'
+      'ACCESS_WRITE_ENABLED is true, which would expose adding and revoking ' +
+        'keys to every install on upgrade rather than to the operator who ' +
+        'chose it. It is the DEFAULT now, not the whole gate — the opt-in is ' +
+        'settings.accessWriteEnabled and main enforces that, so this staying ' +
+        'false is what keeps the decision an operator’s rather than a release’s.'
     ).toBe(false)
     // A reason an operator can read, not a boolean on its own. "The buttons
     // vanished" is not an explanation, and an operator who is told nothing
@@ -76,7 +77,10 @@ describe('the gate that keeps the write half out of this build', () => {
       expect(at, channel).toBeGreaterThan(-1)
       // Within the first few lines of the handler, before any plan is derived.
       const head = main.slice(at, at + 900)
-      expect(head, channel).toContain('ACCESS_WRITE_ENABLED')
+      // The symbol changed from the build constant to the main-side gate that
+      // also reads the operator's setting. What is asserted is unchanged: the
+      // check is IN main, in both handlers, before anything is derived.
+      expect(head, channel).toContain('isAccessWriteEnabled()')
       const body = main.slice(at)
       const gate = body.indexOf('ACCESS_WRITE_ENABLED')
       const derive = body.indexOf('deriveAccessPlan')
@@ -1136,5 +1140,72 @@ describe.skipIf(process.platform === 'win32')('the staged write, run for real', 
     h.run(buildRevokeKeyCommand({ path: h.file, blob: A, token: 't8', rollbackSeconds: 60 }))
     const mode = execFileSync('/bin/sh', ['-c', `ls -l "${h.file}" | cut -c1-10`], { encoding: 'utf8' }).trim()
     expect(mode).toBe('-rw-------')
+  })
+})
+
+// ---------------------------------------------------------------------------
+
+import {
+  isAccessWriteEnabled,
+  setAccessWriteEnabledForTests,
+  syncAccessWriteEnabled
+} from '../src/main/services/accessWriteGate'
+
+describe('the operator opt-in, which main enforces rather than the renderer', () => {
+  afterEach(() => setAccessWriteEnabledForTests(false))
+
+  it('is off when nobody has said anything', () => {
+    syncAccessWriteEnabled(null)
+    expect(isAccessWriteEnabled()).toBe(false)
+  })
+
+  it('is off on a FRESH import, before any settings have arrived', async () => {
+    // The window between the process starting and the first data:save. Every
+    // other test in this block calls sync() first, which overwrites whatever
+    // the module started as -- so none of them can see the initial value, and a
+    // mutation setting it to `true` passed all of them. Loaded fresh here so
+    // the pristine default is actually observed.
+    vi.resetModules()
+    const fresh = await import('../src/main/services/accessWriteGate')
+    expect(fresh.isAccessWriteEnabled()).toBe(false)
+  })
+
+  it('is off for a settings blob written before this key existed', () => {
+    // The upgrade path, and the one that must not open the gate. Every install
+    // that has ever run this app has a data file with no such key in it.
+    syncAccessWriteEnabled({ settings: {} })
+    expect(isAccessWriteEnabled()).toBe(false)
+    syncAccessWriteEnabled({ settings: { localTerminalEnabled: true } })
+    expect(isAccessWriteEnabled()).toBe(false)
+  })
+
+  it('needs the exact boolean, not merely something truthy', () => {
+    // `=== true`, not `!== false`. This is the INVERSE of localTerminalEnabled
+    // next door, and the inversion is the point: that one is a convenience
+    // whose safe state is available, this is a gate whose safe state is shut.
+    // A corrupt blob must not be able to open it.
+    for (const v of ['true', 1, {}, [], 'yes']) {
+      syncAccessWriteEnabled({ settings: { accessWriteEnabled: v } })
+      expect(isAccessWriteEnabled(), String(v)).toBe(false)
+    }
+  })
+
+  it('turns on only for a real, explicit true', () => {
+    syncAccessWriteEnabled({ settings: { accessWriteEnabled: true } })
+    expect(isAccessWriteEnabled()).toBe(true)
+  })
+
+  it('goes off again when the operator turns it off', () => {
+    syncAccessWriteEnabled({ settings: { accessWriteEnabled: true } })
+    syncAccessWriteEnabled({ settings: { accessWriteEnabled: false } })
+    expect(isAccessWriteEnabled()).toBe(false)
+  })
+
+  it('names the one thing that is unproven, rather than warning in general', () => {
+    // "This may be unsafe" is advice nobody can act on. The operator is told
+    // which sentence has never been observed, so they can decide whether they
+    // are the person who can observe it.
+    expect(ACCESS_WRITE_OPT_IN_NOTE).toMatch(/KillUserProcesses/)
+    expect(ACCESS_WRITE_OPT_IN_NOTE).toMatch(/second session/i)
   })
 })

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { AutoStartSettings, AutoStartState } from '../../../../shared/autostart'
+import { ACCESS_WRITE_OPT_IN_NOTE } from '../../../../shared/access'
 import {
   Sliders,
   Palette,
@@ -426,6 +427,12 @@ export function Settings(): React.JSX.Element {
                 </div>
               </div>
               <AutoStartSetting />
+              <SettingSwitch
+                label="Allow adding and revoking keys on servers"
+                desc={ACCESS_WRITE_OPT_IN_NOTE}
+                checked={settings.accessWriteEnabled}
+                onChange={(v) => setSettings({ accessWriteEnabled: v })}
+              />
               <SettingSwitch
                 label="Ask for Touch ID when the vault is locked"
                 desc="When you open the Vault and it is locked, raise the fingerprint prompt without waiting for a click. Cancel it and the master password field is right there. Does nothing unless you have already set up biometric unlock."

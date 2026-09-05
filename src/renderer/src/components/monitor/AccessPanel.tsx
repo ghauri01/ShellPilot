@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { KeyRound, RefreshCw, ShieldAlert } from 'lucide-react'
 import { openSettings } from '../../store/nav'
+import { useApp } from '../../store/app'
 import { bridgeHas } from '../../lib/bridge'
 import { clsx, duration } from '../../lib/format'
 import { sshHopsFor } from '../../lib/ssh'
@@ -379,8 +380,14 @@ export function AccessPanel({
   // The button is not merely hidden. Main refuses `access:plan` and
   // `access:run` outright, and the notice below says the buttons were withdrawn
   // rather than leaving an operator to conclude they have not arrived.
+  // Three things, and they fail for different reasons. The BUILD ceiling is a
+  // decision about this release; the SETTING is the operator's, off unless they
+  // turned it on; the bridge is a fact about this install. Main enforces the
+  // setting again in both handlers, so this is the honest UI and not the
+  // boundary.
+  const writeOptIn = useApp((st) => st.settings.accessWriteEnabled)
   const canWrite =
-    ACCESS_WRITE_ENABLED &&
+    (ACCESS_WRITE_ENABLED || writeOptIn) &&
     bridgeHas(window.shellpilot?.fleet as Record<string, unknown> | undefined, 'accessPlan')
 
   return (
@@ -415,7 +422,7 @@ export function AccessPanel({
           of saying it is that nobody plans around a capability this does not
           have. Both halves matter: that the write half is off, and what it will
           and will not be able to do when it is back. */}
-      {!ACCESS_WRITE_ENABLED && (
+      {!canWrite && (
         <div className="panel-note is-unknown" data-testid="write-gated">
           <ShieldAlert size={12} /> <b>{ACCESS_WRITE_DISABLED_REASON}</b>{' '}
           <span className="muted">{ACCESS_WRITE_SCOPE}</span>

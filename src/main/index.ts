@@ -98,9 +98,9 @@ import type {
 import {
   ACCESS_ROLLBACK_SECONDS,
   ACCESS_WRITE_DISABLED_REASON,
-  ACCESS_WRITE_ENABLED,
   planAccessChange
 } from '../shared/access'
+import { isAccessWriteEnabled, syncAccessWriteEnabled } from './services/accessWriteGate'
 import type { JobHostCapabilityReport, JobRunRequest } from '../shared/jobs'
 import { JOB_DETACHED_STALL_GRACE_MS, jobCohorts, restartsTheMachine } from '../shared/jobs'
 import type { GateHost } from '../shared/patch'
@@ -1294,7 +1294,7 @@ ipcMain.handle('access:plan', (_e, req: Omit<AccessRunRequest, 'token' | 'confir
   // Here rather than only in the renderer because the renderer hiding a button
   // is a courtesy and this is the boundary: it covers a renderer that lies
   // about what it can do, a resumed job, and whatever calls this next.
-  if (!ACCESS_WRITE_ENABLED) throw new Error(ACCESS_WRITE_DISABLED_REASON)
+  if (!isAccessWriteEnabled()) throw new Error(ACCESS_WRITE_DISABLED_REASON)
   if (!accessModuleOn) throw new Error('Key and access management is switched off in Settings.')
   const now = Date.now()
   const { plan, refusals } = deriveAccessPlan(req, now)
@@ -1316,7 +1316,7 @@ ipcMain.handle('access:run', async (_e, req: AccessRunRequest): Promise<AccessRu
   // The same gate, first, and not merely because `access:plan` already has one:
   // a caller that never asked for a plan can reach this channel directly, and
   // this is the one that writes.
-  if (!ACCESS_WRITE_ENABLED) throw new Error(ACCESS_WRITE_DISABLED_REASON)
+  if (!isAccessWriteEnabled()) throw new Error(ACCESS_WRITE_DISABLED_REASON)
   if (!accessModuleOn) throw new Error('Key and access management is switched off in Settings.')
 
   const at = Number(req.token)
@@ -3261,6 +3261,7 @@ ipcMain.handle('data:save', (_e, data: unknown) => {
   // local.connect() directly and never read it. So main keeps its own copy,
   // refreshed from the same blob, and every local:* handler consults that.
   syncLocalTerminalEnabled(data)
+  syncAccessWriteEnabled(data)
   // Same pattern, same reason: a module that gates a background probe has to be
   // read by the process that runs the probe. See syncAccessModule.
   syncAccessModule(data)
@@ -3550,6 +3551,7 @@ app.whenReady().then(() => {
   // shell before its first data:save, so main reads the persisted setting itself
   // rather than starting from a default it would later have to correct.
   syncLocalTerminalEnabled(loadData())
+syncAccessWriteEnabled(loadData())
   // Before the MCP server: the bridge asks the manager what is running, and a
   // bridge that answered "nothing" because the manager had not booted would be
   // lying about the state of the user's network. This also reaps any engine a

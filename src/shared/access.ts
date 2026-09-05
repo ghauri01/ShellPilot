@@ -2349,7 +2349,46 @@ export function accessToFacts(access: HostAccess): Record<string, string> {
 // where the button would have been, because a control that quietly vanished
 // reads as a feature that has not arrived rather than one that was withdrawn.
 // tests/accessWrite.test.ts fails if either half of that stops being true.
+/**
+ * The build-time ceiling, kept as the DEFAULT rather than as the whole gate.
+ *
+ * WHAT CHANGED SINCE THE ARGUMENT ABOVE WAS WRITTEN, because most of it is now
+ * out of date and a stale safety comment is worse than none — the next person
+ * reads it and believes it.
+ *
+ * The blocker the paragraph above calls out by name — "ANYTHING THAT ISSUES THE
+ * DISARM. accessDisarmCommand() exists and nothing in this repository calls it"
+ * — was BUILT. `sshOpenFresh` opens a connection outside the pool, presents a
+ * key to sshd again and reports when that handshake completed and what the pool
+ * was holding at the time; `judgeAccessVerification` refuses unless the session
+ * authenticated AFTER the write, was not a pooled connection, and found the
+ * change where it landed; and `AccessCommitter` is the one caller of the
+ * disarm, behind that judgement. The watchdog's survival ladder was built too:
+ * `systemd-run --user --scope` first, probed on the server rather than assumed,
+ * because that is what escapes the logind scope KillUserProcesses kills.
+ *
+ * WHAT IS STILL UNPROVEN, and it is one thing: nobody has WATCHED the rollback
+ * fire on a real RHEL 9 server with KillUserProcesses=yes. The staged write is
+ * exercised for real against a local tree — it removes the key, leaves the
+ * backup, restores itself when nobody confirms and stays put when somebody does
+ * — but a local /bin/sh has no logind to be killed by.
+ *
+ * So this is off by default and now OPT-IN rather than unreachable, because a
+ * gate nobody can open is also a gate nobody can test, and the observation that
+ * would finish this item cannot be made while the code cannot run at all. The
+ * operator turning it on is told exactly which sentence is unverified.
+ */
 export const ACCESS_WRITE_ENABLED = false
+
+/** What the panel says beside the switch. It names the ONE unproven thing
+ *  rather than gesturing at risk in general, because "this may be unsafe" is
+ *  advice nobody can act on and "nobody has watched this work on RHEL 9" is. */
+export const ACCESS_WRITE_OPT_IN_NOTE =
+  'Adding and revoking keys is off by default. Every refusal and both rollbacks are built and ' +
+  'tested, and the change is staged behind a dead-man\u2019s switch on the server itself \u2014 but ' +
+  'nobody has yet watched that switch fire on a real RHEL 9 server with KillUserProcesses=yes, ' +
+  'which is the case it exists for. Turn this on only if you can afford to be locked out of the ' +
+  'server you point it at, and keep a second session open while you try it.'
 
 /**
  * What the panel says where the button would be. One source of words, so the

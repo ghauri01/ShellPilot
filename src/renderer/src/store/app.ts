@@ -149,6 +149,18 @@ export interface AppSettings {
    * merged saved-over-default, so a `false` shipped as a default would be
    * written into every install and outrank a later change.
    */
+  /**
+   * Whether the access WRITE half — adding and revoking keys on servers — is
+   * offered at all.
+   *
+   * Defaults to false and ABSENCE READS AS FALSE, which is the opposite of
+   * `localTerminalEnabled` below and deliberately so: that one is a convenience
+   * whose safe state is available, this is a gate whose safe state is shut.
+   * Main keeps its own copy (services/accessWriteGate.ts) and every access
+   * write handler consults that, because a renderer-side flag only constrains
+   * an honest renderer.
+   */
+  accessWriteEnabled: boolean
   vaultAutoBiometricPrompt: boolean
   // Tightens row heights and paddings across the app.
   compactDensity: boolean
@@ -199,6 +211,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   modules: defaultModuleState(),
   webhookAlertsEnabled: false,
   webhookNotifyOnResolved: true,
+  accessWriteEnabled: false,
   vaultAutoBiometricPrompt: true,
   compactDensity: false,
   externalEditorCommand: 'code',
