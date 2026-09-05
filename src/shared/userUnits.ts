@@ -254,3 +254,150 @@ export function buildUserUnitsCommand(): string {
       '"$SP_BIN" --user list-units --type=service --all --no-legend --plain --no-pager 2>&1 || true'
   ].join('; ')
 }
+
+// ---------------------------------------------------------------------------
+// The editor
+// ---------------------------------------------------------------------------
+//
+// Writing a `systemd --user` unit is item 1's other half, and it inherits the
+// finding that came out of item 23 on the same afternoon: a `--user` unit on a
+// server with `KillUserProcesses=yes` and no linger is a unit that stops the
+// moment you disconnect. Measured, not assumed. So this refuses to install one
+// rather than writing a service that will not be there.
+
+/** Unit names systemd will accept and a shell will not reinterpret. */
+const UNIT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.@-]{0,62}\.service$/
+
+/**
+ * An ExecStart this is willing to write.
+ *
+ * ABSOLUTE PATH, and no shell metacharacters. systemd does not run ExecStart
+ * through a shell — `ExecStart=/bin/sh -c "..."` is how people get one — so a
+ * `;` in here does not become a second command the way it would in a job step.
+ * It is refused anyway, because the difference between "systemd will not
+ * interpret this" and "nothing downstream will ever interpret this" is one
+ * refactor, and this string is written to a file on somebody's server.
+ */
+const EXEC_START_RE = /^\/[^\s;|&`$()<>\n]*(?: [^\s;|&`$()<>\n]+)*$/
+
+export type UnitRestart = 'no' | 'on-failure' | 'always'
+
+export interface UnitDraft {
+  name: string
+  description: string
+  execStart: string
+  restart: UnitRestart
+  workingDirectory?: string
+}
+
+export type UnitDraftRefusal =
+  | { ok: true }
+  | { ok: false; reason: string }
+
+/**
+ * Whether this draft may be written at all.
+ *
+ * Every refusal names the field and what would happen, because "invalid unit"
+ * sends somebody to read systemd's manual about a rule this app invented.
+ */
+export function checkUnitDraft(d: UnitDraft): UnitDraftRefusal {
+  if (!UNIT_NAME_RE.test(d.name)) {
+    return {
+      ok: false,
+      reason:
+        'The unit name must look like `worker.service` — letters, digits, dot, dash, underscore or @, and it has to end in .service.'
+    }
+  }
+  if (!EXEC_START_RE.test(d.execStart)) {
+    return {
+      ok: false,
+      reason:
+        'ExecStart has to be an absolute path with plain arguments. systemd does not run it through a shell, so a pipe or a semicolon here would not do what it looks like it does.'
+    }
+  }
+  if (d.description.includes('\n')) {
+    return { ok: false, reason: 'The description has to be one line.' }
+  }
+  if (d.workingDirectory !== undefined && !d.workingDirectory.startsWith('/')) {
+    return { ok: false, reason: 'The working directory has to be an absolute path.' }
+  }
+  return { ok: true }
+}
+
+/** The unit file itself. Deterministic, so a diff of two of these is readable. */
+export function renderUnitFile(d: UnitDraft): string {
+  const lines = [
+    '# Written by ShellPilot. Edit here or on the server; ShellPilot reads it back either way.',
+    '[Unit]',
+    `Description=${d.description}`,
+    '',
+    '[Service]',
+    `ExecStart=${d.execStart}`,
+    `Restart=${d.restart}`
+  ]
+  if (d.workingDirectory !== undefined) lines.push(`WorkingDirectory=${d.workingDirectory}`)
+  lines.push('', '[Install]', 'WantedBy=default.target', '')
+  return lines.join('\n')
+}
+
+/**
+ * Install a unit, or refuse.
+ *
+ * THE PRECONDITION IS THE SAME ONE ITEM 23 LEARNED THE HARD WAY, and it is
+ * checked here for the same reason. On a server whose logind has
+ * `KillUserProcesses=yes`, a `--user` service belonging to an account that is
+ * not lingering stops the moment the last session ends. Installing one there
+ * and reporting success would hand somebody a service that is not running by
+ * the time they close the terminal — measured on RHEL 9.8, systemd 252, over a
+ * real session that was then closed.
+ *
+ * The existing file is backed up first, with `cp -p`, into a name carrying the
+ * token. Same rule as the key write: a backup the operator can find in a shell
+ * is worth more than any rollback this app can offer.
+ *
+ * No `--now`. The unit is written and enabled; STARTING it is a separate act,
+ * because writing a file and executing a command are different decisions and
+ * this returns the command that does the second one.
+ */
+export function buildUnitWriteCommand(d: UnitDraft, token: string): string {
+  const check = checkUnitDraft(d)
+  if (!check.ok) throw new Error(`refusing to write a unit: ${check.reason}`)
+  if (!/^[A-Za-z0-9]{4,32}$/.test(token)) {
+    throw new Error('refusing to write a unit with an unvalidated token')
+  }
+  const body = renderUnitFile(d)
+  return [
+    resolveBinary('systemctl'),
+    '[ -z "$SP_BIN" ] && { echo "this server has no systemctl" >&2; exit 2; }',
+    'SP_LINGER=no',
+    'command -v loginctl >/dev/null 2>&1 && loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q "^Linger=yes$" && SP_LINGER=yes',
+    'SP_KILL=no',
+    'command -v busctl >/dev/null 2>&1 && busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillUserProcesses 2>/dev/null | grep -q "true" && SP_KILL=yes',
+    // Refuse, rather than install a service that stops when the session does.
+    '[ "$SP_KILL" = yes ] && [ "$SP_LINGER" = no ] && { echo "this server stops a user’s processes when their last session ends (logind KillUserProcesses=yes) and this account is not lingering, so this service would stop the moment you disconnect; nothing was written. Run: loginctl enable-linger $(id -un)" >&2; exit 6; }',
+    'SP_DIR="$HOME/.config/systemd/user"',
+    'mkdir -p "$SP_DIR" || { echo "could not create $SP_DIR" >&2; exit 3; }',
+    `SP_UNIT="$SP_DIR/${d.name}"`,
+    `SP_BAK="$SP_UNIT.shellpilot-${token}.bak"`,
+    // Only when one is already there: a backup of nothing is a confusing file
+    // to find later.
+    '[ -f "$SP_UNIT" ] && { cp -p "$SP_UNIT" "$SP_BAK" || { echo "the existing unit could not be backed up, so nothing was written" >&2; exit 4; }; }',
+    `SP_TMP="$SP_UNIT.shellpilot-${token}.tmp"`,
+    // BASE64, NOT A HEREDOC, and the difference was found by running it.
+    //
+    // Every fragment here is joined with '; ', which puts the next command on
+    // the same logical line as the heredoc's terminator — so `<<'EOF'` never
+    // finds its EOF, bash warns "here-document delimited by end-of-file", and
+    // the unit file is never written. The command still exits 0. A test
+    // asserting "the command contains a heredoc" passes on that.
+    //
+    // Encoded content has no terminator to lose and no quoting to get wrong,
+    // and `base64 -d` is in coreutils and busybox alike.
+    `printf %s ${Buffer.from(body, 'utf8').toString('base64')} | base64 -d > "$SP_TMP" || { echo "the unit body could not be written" >&2; exit 5; }`,
+    // Renamed into place, so a reader never sees half a unit file.
+    'mv "$SP_TMP" "$SP_UNIT" || { rm -f "$SP_TMP"; echo "the unit could not be written" >&2; exit 5; }',
+    'XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" "$SP_BIN" --user daemon-reload 2>&1',
+    `XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" "$SP_BIN" --user enable ${d.name} 2>&1`,
+    `echo "WROTE: $SP_UNIT"`
+  ].join('; ')
+}

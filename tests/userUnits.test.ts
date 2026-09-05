@@ -4,6 +4,9 @@ import { join } from 'node:path'
 import {
   USER_UNIT_MARKERS,
   buildUserUnitsCommand,
+  buildUnitWriteCommand,
+  checkUnitDraft,
+  renderUnitFile,
   parseLinger,
   parseUserUnitRow,
   parseUserUnits,
@@ -154,5 +157,95 @@ describe('the command this module actually ships, run on a real RHEL 9 server', 
     // otherwise be reported as a fact about the server.
     expect(buildUserUnitsCommand()).toContain('XDG_RUNTIME_DIR')
     expect(buildUserUnitsCommand()).toContain('id -u')
+  })
+})
+
+describe('writing a unit, which inherits item 23’s lesson', () => {
+  const draft = (over: Partial<Parameters<typeof renderUnitFile>[0]> = {}) => ({
+    name: 'worker.service',
+    description: 'Queue worker',
+    execStart: '/usr/local/bin/worker --queue main',
+    restart: 'always' as const,
+    ...over
+  })
+
+  it('refuses a name a shell could reinterpret', () => {
+    for (const bad of ['worker', 'wo rker.service', 'a;b.service', '../evil.service', '$(x).service']) {
+      expect(checkUnitDraft(draft({ name: bad })).ok, bad).toBe(false)
+    }
+    expect(checkUnitDraft(draft()).ok).toBe(true)
+  })
+
+  it('refuses an ExecStart that is not an absolute path with plain arguments', () => {
+    // systemd does not run ExecStart through a shell, so a `;` here does not
+    // become a second command. It is refused anyway: the gap between "systemd
+    // will not interpret this" and "nothing downstream ever will" is one
+    // refactor, and this string is written to a file on somebody's server.
+    for (const bad of ['worker', 'sh -c "x"', '/bin/x; rm -rf /', '/bin/x | tee', '/bin/x `id`']) {
+      expect(checkUnitDraft(draft({ execStart: bad })).ok, bad).toBe(false)
+    }
+  })
+
+  it('names the field and the consequence rather than saying invalid', () => {
+    const r = checkUnitDraft(draft({ execStart: 'worker' }))
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/absolute path/)
+  })
+
+  it('refuses to install a service that would stop when the session ends', () => {
+    // The finding from item 23, applied before it can bite anybody: on a server
+    // with KillUserProcesses=yes and no linger, a --user service is gone the
+    // moment you disconnect. Writing one and reporting success would hand
+    // somebody a service that is not running by the time they close the window.
+    const cmd = buildUnitWriteCommand(draft(), 'tok1')
+    expect(cmd).toContain('KillUserProcesses')
+    expect(cmd).toContain('Linger=yes')
+    expect(cmd).toContain('loginctl enable-linger')
+    expect(cmd).toMatch(/nothing was written/)
+  })
+
+  it('backs up an existing unit before replacing it, and only then', () => {
+    const cmd = buildUnitWriteCommand(draft(), 'tok1')
+    expect(cmd).toContain('cp -p "$SP_UNIT" "$SP_BAK"')
+    expect(cmd).toContain('[ -f "$SP_UNIT" ]')
+  })
+
+  it('does not use a heredoc, which this command shape silently breaks', () => {
+    // Found by running it on a real server, not by reading it. Every fragment
+    // is joined with '; ', which puts the NEXT command on the same logical line
+    // as a heredoc's terminator — so `<<'EOF'` never finds its EOF, bash warns
+    // "here-document delimited by end-of-file", the unit file is never written,
+    // and the command still exits 0. A test asserting "the command contains a
+    // heredoc" passes on all of that.
+    const cmd = buildUnitWriteCommand(draft(), 'tok1')
+    expect(cmd).not.toContain('<<')
+    expect(cmd).toContain('base64 -d')
+    // And the body really is in there, so the encoding is not empty.
+    const m = /printf %s ([A-Za-z0-9+/=]+) \| base64 -d/.exec(cmd)
+    expect(m).toBeTruthy()
+    expect(Buffer.from(m![1], 'base64').toString('utf8')).toContain('ExecStart=/usr/local/bin/worker')
+  })
+
+  it('writes through a temp file and renames, so no reader sees half a unit', () => {
+    expect(buildUnitWriteCommand(draft(), 'tok1')).toContain('mv "$SP_TMP" "$SP_UNIT"')
+  })
+
+  it('enables without starting, because those are different decisions', () => {
+    const cmd = buildUnitWriteCommand(draft(), 'tok1')
+    expect(cmd).toContain('--user enable worker.service')
+    expect(cmd).not.toContain('--now')
+    expect(cmd).not.toContain('--user start')
+  })
+
+  it('refuses an unvalidated token rather than interpolating it', () => {
+    expect(() => buildUnitWriteCommand(draft(), 'a;b')).toThrow(/unvalidated token/)
+  })
+
+  it('renders a unit systemd can read', () => {
+    const f = renderUnitFile(draft())
+    expect(f).toMatch(/^\[Unit\]$/m)
+    expect(f).toMatch(/^ExecStart=\/usr\/local\/bin\/worker --queue main$/m)
+    expect(f).toMatch(/^Restart=always$/m)
+    expect(f).toMatch(/^WantedBy=default\.target$/m)
   })
 })
