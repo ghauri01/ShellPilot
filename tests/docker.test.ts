@@ -429,9 +429,21 @@ describe('the --tail count, which arrives over IPC', () => {
 
   it('leaves nothing injectable in the command it does build', () => {
     const cmd = buildDockerLogsCommand('web', 500)
-    expect(cmd).toBe('docker logs --tail 500 web 2>&1')
-    // Nothing but the deliberate `2>&1` carries shell meaning.
-    expect(cmd.replace(/ 2>&1$/, '')).not.toMatch(/[;|&`$()<>]/)
+    // The binary is resolved rather than assumed now, because a podman host
+    // has no `docker` on PATH. What this test is about -- the flags, the
+    // reference and the 2>&1 -- is unchanged.
+    expect(cmd).toContain('"$SP_BIN" logs --tail 500 web 2>&1')
+    expect(cmd).toContain('podman')
+    // The guard is about the part carrying the REFERENCE, which is the only
+    // place a caller's string reaches. It used to be able to test the whole
+    // string because logs was the one command that did not resolve its binary;
+    // now it does, like every other command here, and the probe fragment is our
+    // own deliberate shell -- `SP_BIN=""; for c in ...` -- not something a
+    // container name could ever become.
+    const invocation = cmd.slice(cmd.lastIndexOf('"$SP_BIN"'))
+    expect(invocation.replace(/ 2>&1$/, '').replace('"$SP_BIN"', '')).not.toMatch(
+      /[;|&`$()<>]/
+    )
   })
 })
 

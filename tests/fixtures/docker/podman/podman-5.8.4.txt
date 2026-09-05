@@ -1,0 +1,13 @@
+===VERSION===
+podman version 5.8.4
+===PS===
+a61a9ec4331df47caa9ae68e46ca7894fa26f794bf3aadd8b4478367a197a22b|web|docker.io/library/alpine:latest|exited|Exited (1) 2 minutes ago||2026-09-05 10:45:55.703089375 +0000 UTC
+cc2fb0ec5e96e6a2eaf2b3db7c90e3ea9ae7776a46cffbb490ed418e408b2384|dead|docker.io/library/alpine:latest|exited|Exited (1) 2 minutes ago||2026-09-05 10:45:55.786264833 +0000 UTC
+===LABELS===
+a61a9ec4331df47caa9ae68e46ca7894fa26f794bf3aadd8b4478367a197a22b|shop|web
+cc2fb0ec5e96e6a2eaf2b3db7c90e3ea9ae7776a46cffbb490ed418e408b2384||
+===DF===
+TYPE           TOTAL       ACTIVE      SIZE        RECLAIMABLE
+Images         1           1           8.951MB     0B (0%)
+Containers     2           0           22.59kB     22.59kB (100%)
+Local Volumes  0           0           0B          0B (0%)

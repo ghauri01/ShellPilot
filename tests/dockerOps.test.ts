@@ -1254,12 +1254,12 @@ describe('what cannot be built at all', () => {
 
 describe('the log window, which also arrives over IPC', () => {
   it('is unchanged when nothing is asked for', () => {
-    expect(buildDockerLogsCommand('web', 500)).toBe('docker logs --tail 500 web 2>&1')
+    expect(buildDockerLogsCommand('web', 500)).toContain('"$SP_BIN" logs --tail 500 web 2>&1')
   })
 
   it('adds timestamps and a relative window when asked', () => {
-    expect(buildDockerLogsCommand('web', 200, false, { timestamps: true, since: '10m' })).toBe(
-      'docker logs --tail 200 --timestamps --since 10m web 2>&1'
+    expect(buildDockerLogsCommand('web', 200, false, { timestamps: true, since: '10m' })).toContain(
+      '"$SP_BIN" logs --tail 200 --timestamps --since 10m web 2>&1'
     )
   })
 

@@ -199,16 +199,34 @@ export const DOCKER_SUB_SEP = '\u0003'
  * so the caller can run `"$SP_BIN" ...` and get the same answer a login shell
  * would.
  */
-export function resolveBinary(name: string, extraPaths: string[] = []): string {
-  const candidates = [
-    name,
-    `/usr/bin/${name}`,
-    `/usr/local/bin/${name}`,
-    `/snap/bin/${name}`,
-    `/opt/homebrew/bin/${name}`,
-    `/usr/sbin/${name}`,
-    ...extraPaths
+export function resolveBinary(
+  name: string,
+  extraPaths: string[] = [],
+  /**
+   * Other binaries that answer the same questions, tried in order after the
+   * first. `docker` then `podman`, so a machine with both keeps using docker
+   * and a machine with only podman stops reporting "not installed".
+   *
+   * Verified against a real podman 5.8.4: a stock install has NO `docker`
+   * binary at all -- `command -v docker` finds nothing -- so every call site
+   * that resolved only `docker` reported the runtime absent on a server that
+   * was running containers. The `podman-docker` shim package exists and plenty
+   * of hosts have it, which is exactly why this went unnoticed.
+   */
+  alsoTry: string[] = []
+): string {
+  const pathsFor = (n: string): string[] => [
+    n,
+    `/usr/bin/${n}`,
+    `/usr/local/bin/${n}`,
+    `/snap/bin/${n}`,
+    `/opt/homebrew/bin/${n}`,
+    `/usr/sbin/${n}`
   ]
+  // Every path for the FIRST name before any path for the second: a host with
+  // docker in /usr/local/bin and podman in /usr/bin must still choose docker,
+  // which interleaving by directory would get wrong.
+  const candidates = [...pathsFor(name), ...alsoTry.flatMap(pathsFor), ...extraPaths]
   // `command -v` rather than `which`: built in, and it is the POSIX spelling.
   return (
     `SP_BIN=""; for c in ${candidates.join(' ')}; do ` +
@@ -238,7 +256,7 @@ export const SUDO_PROBE = 'sudo -n true >/dev/null 2>&1 && echo SP_SUDO_OK || tr
 export function buildDockerListCommand(opts: { sudo?: boolean } = {}): string {
   const run = opts.sudo ? 'sudo -n "$SP_BIN"' : '"$SP_BIN"'
   return [
-    resolveBinary('docker'),
+    resolveBinary('docker', [], ['podman']),
     `${run} version --format "{{.Server.Version}}" 2>/dev/null || ${run} --version 2>&1`,
     // Compose labels, asked for SEPARATELY and allowed to fail.
     //
@@ -512,12 +530,15 @@ export function buildDockerLogsCommand(
   ]
     .filter((f) => f !== '')
     .join(' ')
-  if (opts.sudo !== true) {
-    // The unchanged shape. Anything else here would make the common path
-    // depend on a shell fragment it does not need.
-    return `docker logs ${flags} ${ref} 2>&1`
-  }
-  return [resolveBinary('docker'), `sudo -n "$SP_BIN" logs ${flags} ${ref} 2>&1`].join('; ')
+  // BOTH branches resolve the binary, and the comment that used to sit here
+  // said the common path "does not need the fragment". That was true while
+  // docker was the only runtime it could be. It is not true now: on a podman
+  // host with no docker shim this returned a literal `docker logs`, so logs
+  // were the one thing that failed WITHOUT sudo and worked with it -- which
+  // reads as a permissions problem and is not one.
+  const probe = resolveBinary('docker', [], ['podman'])
+  const run = opts.sudo === true ? 'sudo -n "$SP_BIN"' : '"$SP_BIN"'
+  return [probe, `${run} logs ${flags} ${ref} 2>&1`].join('; ')
 }
 
 /**
@@ -534,7 +555,7 @@ export function buildDockerShellCommand(ref: string, opts: { sudo?: boolean } = 
   // then opens a shell as nobody is not one feature, it is two that disagree.
   const run = opts.sudo ? 'sudo -n "$SP_BIN"' : '"$SP_BIN"'
   return [
-    resolveBinary('docker'),
+    resolveBinary('docker', [], ['podman']),
     `${run} exec -it ${ref} /bin/bash 2>/dev/null || ${run} exec -it ${ref} /bin/sh`
   ].join('; ')
 }
@@ -799,7 +820,7 @@ export type DockerDiskProbe =
 export function buildDockerDiskCommand(opts: { sudo?: boolean } = {}): string {
   const run = runner(opts.sudo)
   return [
-    resolveBinary('docker'),
+    resolveBinary('docker', [], ['podman']),
     `echo "${DOCKER_MARKERS.df}"`,
     `${run} system df 2>&1`
   ].join('; ')
@@ -1033,7 +1054,7 @@ export type DockerDiskDetailProbe =
 export function buildDockerDiskDetailCommand(opts: { sudo?: boolean } = {}): string {
   const run = runner(opts.sudo)
   return [
-    resolveBinary('docker'),
+    resolveBinary('docker', [], ['podman']),
     `echo "${DOCKER_MARKERS.engine}"`,
     `${run} version --format "{{.Server.BuildTime}}" 2>/dev/null || true`,
     `echo "${DOCKER_MARKERS.dfDetail}"`,
@@ -1457,7 +1478,7 @@ export function buildDockerInspectCommand(ref: string, opts: { sudo?: boolean } 
   if (!validateContainerRef(ref)) throw new Error('refusing to build a command from an invalid container reference')
   const run = runner(opts.sudo)
   return [
-    resolveBinary('docker'),
+    resolveBinary('docker', [], ['podman']),
     `echo "${DOCKER_MARKERS.health}"`,
     `${run} inspect --format '{{.State.Health.Status}}' ${ref} 2>/dev/null || true`,
     `echo "${DOCKER_MARKERS.inspect}"`,
@@ -1598,7 +1619,7 @@ export function buildDockerStatsCommand(refs: string[], opts: { sudo?: boolean }
     '{{.BlockIO}}'
   ].join(DOCKER_SEP)
   return [
-    resolveBinary('docker'),
+    resolveBinary('docker', [], ['podman']),
     `echo "${DOCKER_MARKERS.stats}"`,
     `${run} stats --no-stream --format "${fmt}" ${refs.join(' ')} 2>&1`
   ].join('; ')
@@ -1774,7 +1795,7 @@ export function buildDockerActionCommand(
     flags = ` -t ${validTimeoutSeconds(opts.timeoutSec)}`
   }
   return [
-    resolveBinary('docker'),
+    resolveBinary('docker', [], ['podman']),
     `echo "${DOCKER_MARKERS.act}"`,
     `${run} ${action}${flags} ${refs.join(' ')} 2>&1`
   ].join('; ')
@@ -2391,7 +2412,7 @@ export function buildDockerReclaimCommand(
     blocks.push(`${run} ${RECLAIM_VERB[kind]} ${refs.join(' ')} 2>&1`)
   }
   return [
-    resolveBinary('docker'),
+    resolveBinary('docker', [], ['podman']),
     ...blocks,
     // The last block's own status, held over the echo and handed back — the
     // same shape `buildDockerDiskDetailCommand` uses, and for the same reason.
