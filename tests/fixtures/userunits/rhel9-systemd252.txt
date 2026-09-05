@@ -1,0 +1,20 @@
+===VERSION===
+systemd 252 (252-67.el9_8.4)
+===UNITS===
+api.service                    loaded active   running Demo API
+broken.service                 loaded failed   failed  Broken worker
+dbus-broker.service            loaded inactive dead    D-Bus User Message Bus
+systemd-tmpfiles-clean.service loaded inactive dead    Cleanup of User's Temporary Files and Directories
+systemd-tmpfiles-setup.service loaded active   exited  Create User's Volatile Files and Directories
+===LINGER===
+Linger=yes
+===NOBUS-NO-XDG===
+  dev-vda1.device                loaded activating tentative /dev/vda1
+===NOBUS-STALE-XDG===
+  dev-vda1.device                loaded activating tentative /dev/vda1
+===LINGER-ON===
+Linger=yes
+===LINGER-OFF===
+Failed to get user: User ID 1001 is not logged in or lingering
+===LINGER-LIST===
+1000 ops yes lingering
