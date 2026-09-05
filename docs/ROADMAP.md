@@ -59,9 +59,15 @@ make. The successor worth building is named in `src/shared/processes.ts` — a
 `systemd --user` unit editor and a `systemctl --user` reader, letting the
 server's own supervisor own the restart policy.
 
-*Item 21b*'s podman caveat stands, deliberately. The Docker module is already
-podman-aware, but nobody has run it against podman, and this repository does not
-accept fabricated fixtures — see `tests/fixtures/docker/README.md`.
+*Item 21b* has now been run against a real podman 5.8.4, and the caveat was
+pointing at the wrong thing. Every template renders identically and `system df`
+matches, so no parsing changed — but `resolveBinary('docker')` was hard-coded at
+nine call sites and a stock podman install has no `docker` binary at all, so the
+panel reported the runtime absent on a server full of containers. Writing the
+test found a second bug: `logs` was the one command that did not resolve its
+binary, making it the only thing that failed without sudo and worked with it.
+Port mappings remain unverified — podman nested in Docker cannot publish a port
+— and nothing was changed on the strength of that reading.
 
 ## Where this stood, as of 0.13.1
 
@@ -2073,7 +2079,7 @@ a cheap item, and treating it as one is how a quarter disappears.
 |---|---|---|---|---|---|---|---|---|---|
 | 19a | ~~**Disk alert**~~ | 100% | continuous | 4 | none | **8** | **SHIPPED** | — | Done |
 | 21a | ~~**Docker itemised disk view**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | — | Done |
-| 21b | ~~**Docker reclaim by id**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | podman untested | Done |
+| 21b | ~~**Docker reclaim by id**~~ | 60% | monthly | 3 | some | **5** | **SHIPPED** | podman tested, ports unverified | Done |
 | C | ~~**Host facts**~~ | 100% | continuous | 4 | strong | **3 / 21** | **SHIPPED** | — | Done |
 | A | ~~**Durable store**~~ | — | — | — | — | **0 / 30** | **SHIPPED** | — | Done |
 | B | ~~**Job engine B1–B4**~~ | — | — | — | — | **0 / 38** | **SHIPPED** | — | Done |
