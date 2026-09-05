@@ -1209,3 +1209,55 @@ describe('the operator opt-in, which main enforces rather than the renderer', ()
     expect(ACCESS_WRITE_OPT_IN_NOTE).toMatch(/second session/i)
   })
 })
+
+describe('the precondition the probe used to miss, measured on a real RHEL 9', () => {
+  // Run against RHEL 9.8, systemd 252, logind KillUserProcesses=yes, over a
+  // real sshd session that was then closed. Survival was checked with marker
+  // FILES, not pgrep -- `pgrep -f "sleep 300"` matches its own command line and
+  // reported every rung as surviving when none of them had.
+  //
+  //             no linger        lingering
+  //   scope     never fired      FIRED
+  //   setsid    never fired      never fired
+  //   nohup     never fired      never fired
+  //
+  // The old probe -- `systemd-run --user --scope --quiet --collect true` --
+  // returns success on a non-lingering account. It is a fair test of "can I
+  // make a scope" and no test of "will that scope outlive my session", because
+  // logind stops user@UID.service when the last session ends and takes every
+  // transient scope with it. So the write armed a rollback that was already
+  // dead, and told the operator they were covered.
+
+  const cmd = (): string =>
+    buildRevokeKeyCommand({ path: '/home/u/.ssh/authorized_keys', blob: A, token: 't', rollbackSeconds: 60 })
+
+  it('asks whether the account lingers, not just whether a scope can be made', () => {
+    expect(cmd()).toContain('loginctl show-user')
+    expect(cmd()).toContain('Linger=yes')
+  })
+
+  it('asks logind itself whether it kills user processes', () => {
+    // The bus, not a config file: KillUserProcesses can be set in any of four
+    // places and logind is the one that knows the answer.
+    expect(cmd()).toContain('KillUserProcesses')
+    expect(cmd()).toContain('busctl')
+  })
+
+  it('refuses to stage when those two are true together', () => {
+    // Both conditions, not either: KillUserProcesses with linger is fine, and
+    // no linger without KillUserProcesses leaves setsid a chance.
+    expect(cmd()).toContain('[ "$SP_KILL" = yes ] && [ "$SP_LINGER" = no ]')
+    expect(cmd()).toMatch(/nothing was changed/)
+  })
+
+  it('tells the operator the command that fixes it', () => {
+    // "Not lingering" is a true sentence nobody can act on. The fix is one
+    // command and it is in the refusal.
+    expect(cmd()).toContain('loginctl enable-linger')
+  })
+
+  it('still refuses when the server has no way to detach at all', () => {
+    // The older guard, unchanged: no systemd-run, no setsid, no nohup.
+    expect(cmd()).toContain('no way to leave a process running after the session ends')
+  })
+})

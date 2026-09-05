@@ -2367,11 +2367,36 @@ export function accessToFacts(access: HostAccess): Record<string, string> {
  * `systemd-run --user --scope` first, probed on the server rather than assumed,
  * because that is what escapes the logind scope KillUserProcesses kills.
  *
- * WHAT IS STILL UNPROVEN, and it is one thing: nobody has WATCHED the rollback
- * fire on a real RHEL 9 server with KillUserProcesses=yes. The staged write is
- * exercised for real against a local tree — it removes the key, leaves the
- * backup, restores itself when nobody confirms and stays put when somebody does
- * — but a local /bin/sh has no logind to be killed by.
+ * WHAT WAS UNPROVEN HAS NOW BEEN WATCHED, and it did not pass first time.
+ *
+ * Run on RHEL 9.8 with systemd 252 and logind KillUserProcesses=yes, over a
+ * real sshd session that was then closed: the staged write revoked the key, the
+ * session ended, the watchdog was killed with it, and the file was NEVER PUT
+ * BACK. The account was locked out of its own server — the exact outcome this
+ * design exists to prevent, produced by the design.
+ *
+ * The mechanism was right and the precondition was missing. Measured with
+ * marker files, because pgrep lies here: `pgrep -f "sleep 300"` matches its own
+ * command line and reported every rung as surviving when none had.
+ *
+ *             no linger        lingering
+ *   scope     never fired      FIRED
+ *   setsid    never fired      never fired
+ *   nohup     never fired      never fired
+ *
+ * The scope is the only rung that survives this configuration at all, and only
+ * when the account lingers — without it logind stops `user@UID.service` when
+ * the last session ends and takes every transient scope with it. The old probe,
+ * `systemd-run --user --scope --quiet --collect true`, SUCCEEDS on a
+ * non-lingering account: a fair test of "can I make a scope" and none of "will
+ * it outlive me".
+ *
+ * So the write now asks logind whether it kills user processes and asks
+ * loginctl whether this account lingers, and REFUSES to stage when both are
+ * true, naming `loginctl enable-linger` in the refusal. Verified afterwards on
+ * the same server: refused without linger, and with linger enabled it staged,
+ * survived the session closing, restored the file at the deadline and removed
+ * its own markers.
  *
  * So this is off by default and now OPT-IN rather than unreachable, because a
  * gate nobody can open is also a gate nobody can test, and the observation that
@@ -3036,8 +3061,37 @@ function buildStagedWrite(o: {
     'SP_L=',
     // `--quiet` so the scope name does not land in the job output; `--collect`
     // so a scope whose process died is not left behind as a failed unit.
+    // THE PRECONDITION THE PROBE USED TO MISS, found by running this on a real
+    // RHEL 9.8 with KillUserProcesses=yes and watching all three rungs die.
+    //
+    // `systemd-run --user --scope --quiet --collect true` SUCCEEDS on an
+    // account that is not lingering. It is a fair test of "can I make a
+    // scope" and no test at all of "will that scope outlive my session",
+    // because without linger logind stops `user@UID.service` when the last
+    // session ends and takes every transient scope in it along. Measured, with
+    // marker files rather than pgrep:
+    //
+    //             no linger        lingering
+    //   scope     never fired      FIRED
+    //   setsid    never fired      never fired
+    //   nohup     never fired      never fired
+    //
+    // So the scope is the only rung that ever survives this configuration, and
+    // it survives only when the account lingers. Probing the scope alone armed
+    // a rollback that was already dead, which is the precise thing the gate
+    // comment calls worse than no rollback: the operator is told they are safe.
+    'SP_LINGER=no',
+    'command -v loginctl >/dev/null 2>&1 && loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q "^Linger=yes$" && SP_LINGER=yes',
+    // KillUserProcesses is asked of logind itself rather than read out of a
+    // config file, because the file is one of four that can set it and the bus
+    // knows the answer.
+    'SP_KILL=no',
+    'command -v busctl >/dev/null 2>&1 && busctl get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager KillUserProcesses 2>/dev/null | grep -q "true" && SP_KILL=yes',
     'if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope --quiet --collect true >/dev/null 2>&1; then SP_L="systemd-run --user --scope --quiet --collect"; elif command -v setsid >/dev/null 2>&1; then SP_L=setsid; elif command -v nohup >/dev/null 2>&1; then SP_L=nohup; fi',
     '[ -n "$SP_L" ] || { rm -f "$SP_T" "$SP_B"; echo "this server has no way to leave a process running after the session ends, so the rollback could not be armed and nothing was changed" >&2; exit 5; }',
+    // Refuse rather than arm something that cannot fire. A staged write whose
+    // rollback is already dead is the one shape this feature must not take.
+    '[ "$SP_KILL" = yes ] && [ "$SP_LINGER" = no ] && { rm -f "$SP_T" "$SP_B"; echo "this server kills a user\'s processes when their last session ends (logind KillUserProcesses=yes) and this account is not lingering, so the rollback would be killed before it could restore anything; nothing was changed. Run: loginctl enable-linger $(id -un)" >&2; exit 6; }',
     // Unquoted on purpose: `$SP_L` is one of three literals this file wrote,
     // and the systemd one is four words.
     `$SP_L sh -c ': > "$3"; sleep ${wait}; [ -f "$0" ] || cp -p "$1" "$2"; rm -f "$0" "$1" "$3"' "$SP_M" "$SP_B" "$SP_F" "$SP_ARM" </dev/null >/dev/null 2>&1 &`,
